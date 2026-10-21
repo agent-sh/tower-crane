@@ -42,6 +42,20 @@ function shardFiles(files, index, total, durations = fileDurations()) {
   }
   return (shards[index - 1] || []).sort();
 }
+// A fresh 0700 directory for a run's sockets: in the runtime directory, or,
+// in a sandbox that grants only its own socket leaf there, in that leaf. Its
+// name is none the broker sweep takes. Null when neither can hold one.
+function privateRuntime(env) {
+  for (const base of [env.XDG_RUNTIME_DIR, env.TOWER_CRANE_SOCKET_DIR]) {
+    if (!base || !path.isAbsolute(base)) continue;
+    try {
+      return fs.mkdtempSync(path.join(base, 'tct-'));
+    } catch {
+      // A base this run cannot write: the next one.
+    }
+  }
+  return null;
+}
 // A healthy Windows shard runs its tests in about 28 minutes; this leaves its dump
 // and stop time inside the 40-minute test step limit in .github/workflows/ci.yml.
 const SHARD_DEADLINE_MIN = 36;
@@ -135,6 +149,15 @@ delete env.NODE_TEST_CONTEXT;
 
 // With every file skipped there is nothing to run; node --test with no file would search the directory.
 if (!run.length) return;
+// A broker a test starts sweeps its socket roots for directories that killed
+// brokers left (sweep in lib/broker.js). The real runtime directory holds the
+// live sockets of agents, a worker's own included, so the run gets a private
+// one there, removed when the run ends.
+const runtime = privateRuntime(process.env);
+if (runtime) {
+  env.XDG_RUNTIME_DIR = runtime;
+  process.on('exit', () => fs.rmSync(runtime, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+}
 const started = Date.now();
 const child = cp.spawn(process.execPath, args, { stdio: 'inherit', env });
 // A job its time limit cancels keeps no log, so a shard stops a few minutes under

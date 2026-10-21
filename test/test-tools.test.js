@@ -8,6 +8,7 @@ const cp = require('node:child_process');
 const { makeRepo, ROOT, detachedAlive, pinLiveRung } = require('./helpers');
 const { tempRoot, liveRoot } = require('./tmp-root');
 const { killGroup } = require('./signals');
+const { socketDir } = require('./socket-dir');
 
 test('test temp roots prefer explicit overrides and otherwise use the user cache on each platform', () => {
   const home = path.join(ROOT, 'fixture-home');
@@ -195,6 +196,47 @@ test('the test runner emits one capped concurrency value, including repeated and
     assert.ok(args.includes(`--require=${path.join(ROOT, 'test', 'fixtures', 'report-guard.js')}`), 'every test file loads the report guard');
     assert.deepEqual(args.filter((arg) => !arg.startsWith('--')), ['test/claim.test.js']);
   }
+});
+
+test('each test run gets a private runtime directory for its sockets and removes it, so no test broker sweeps the real one', { skip: process.platform === 'win32' && 'Windows brokers use named pipes' }, (t) => {
+  const h = makeRepo(t);
+  const runner = path.join(ROOT, 'test/run.js');
+  const real = fs.realpathSync(socketDir(t));
+  const leaf = fs.realpathSync(socketDir(t));
+  // What a live agent's broker keeps in the real runtime directory.
+  const live = path.join(real, 'tower-crane-abcdef');
+  fs.mkdirSync(live, { mode: 0o700 });
+  fs.writeFileSync(path.join(live, 'owner.json'), '{}');
+  const probe = path.join(h.base, 'runtime-probe.js');
+  fs.writeFileSync(probe, `
+    require('node:child_process').spawn = (command, args, options) => {
+      const dir = options.env.XDG_RUNTIME_DIR;
+      console.log(JSON.stringify({ dir, mode: require('node:fs').statSync(dir).mode & 0o777 }));
+      const child = new (require('node:events').EventEmitter)();
+      process.nextTick(() => child.emit('exit', 0, null));
+      return child;
+    };
+  `);
+  const env = { ...h.env };
+  delete env.TOWER_CRANE_SOCKET_DIR;
+  for (const [label, vars, base] of [
+    ['a runtime directory', { XDG_RUNTIME_DIR: real }, real],
+    ['a sandbox that grants only its socket leaf', { XDG_RUNTIME_DIR: path.join(real, 'missing'), TOWER_CRANE_SOCKET_DIR: leaf }, leaf],
+  ]) {
+    const seen = [];
+    for (let run = 0; run < 2; run++) {
+      const r = cp.spawnSync(process.execPath, ['--require', probe, runner, 'test/claim.test.js'], { env: { ...env, ...vars }, encoding: 'utf8' });
+      assert.equal(r.status, 0, r.stderr);
+      const { dir, mode } = JSON.parse(r.stdout);
+      assert.equal(path.dirname(dir), base, label);
+      assert.equal(mode, 0o700, label);
+      assert.doesNotMatch(path.basename(dir), /^(?:tower-crane-[A-Za-z0-9]{6}|tc-[0-9a-f]{12})$/, `${label}: a name the broker sweep never takes`);
+      assert.equal(fs.existsSync(dir), false, `${label}: the run removes it`);
+      seen.push(dir);
+    }
+    assert.notEqual(seen[0], seen[1], `${label}: each run has its own`);
+  }
+  assert.deepEqual(fs.readdirSync(live), ['owner.json'], 'the real runtime directory\'s entries are untouched');
 });
 
 test('mutation fallback requires a green baseline in a copy containing all test inputs', (t) => {
