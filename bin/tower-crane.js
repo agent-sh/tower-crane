@@ -550,6 +550,7 @@ async function main(argv) {
     let res;
     let releaseController;
     try {
+      await require('../lib/authority').awaitSpawnRecord(ctx);
       require('../lib/orchestrator').command(ctx, cmd.name);
       releaseController = await require('../lib/containment').registerController(ctx, cmd.name);
       res = await cmd.run(ctx);
