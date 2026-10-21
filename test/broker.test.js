@@ -358,7 +358,7 @@ test('a sandboxed worker withdraws its own question through the broker; a review
   assert.match(h.readState('tasks.json').tasks[0].notes.at(-1).text, /decision D1 withdrawn: the question went away/);
 });
 
-test('a sandboxed reviewer asks through the broker: a technical question reaches the orchestrator, an escalation stays with the owner', async (t) => {
+test('a sandboxed reviewer asks through the broker: technical and escalated questions reach the orchestrator', async (t) => {
   const h = makeRepo(t);
   h.init();
   h.ok(['task', 'add', '--title', 'Review a store choice', '--acceptance', 'ask is authorized']);
@@ -381,9 +381,8 @@ test('a sandboxed reviewer asks through the broker: a technical question reaches
   const escalated = await h.runAsync(['ask', '--kind', 'technical', '--question', 'Raise the budget?', '--option', 'yes', '--option', 'no', '--setting', 'budget.raise', '--blocks', 'T1'], { env });
   assert.equal(escalated.code, 0, escalated.stderr);
   assert.deepEqual(h.readState('decisions.json').decisions[1].escalation, { settings: ['budget.raise'], change: null });
-  const refused = h.run(['answer', 'D2', '--choice', 'yes', '--agent', 'orchestrator']);
-  assert.equal(refused.code, 1, refused.stderr);
-  assert.match(refused.stderr, /D2 escalates budget\.raise to the owner/);
+  h.ok(['answer', 'D2', '--choice', 'yes', '--agent', 'orchestrator']);
+  assert.equal(h.readState('decisions.json').decisions[1].answer_rule, 'orchestrator-escalated-question');
 
   const asks = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse).filter((event) => event.cmd === 'ask');
   assert.deepEqual(asks.map((event) => [event.agent, event.via]), [[job.agent, 'broker'], [job.agent, 'broker']]);
