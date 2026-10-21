@@ -186,6 +186,11 @@
   },
   {
     "path": "tools/tests-map.json",
+    "text": "claude-sandbox-placeholders.js",
+    "reason": "Module filename in the generated test coverage map"
+  },
+  {
+    "path": "tools/tests-map.json",
     "text": "claude-print-result.json",
     "reason": "Module or fixture filename in the test coverage map"
   },

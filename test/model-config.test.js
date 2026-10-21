@@ -254,6 +254,35 @@ test('release manifest model-literal exemption stays within its file and token',
   }
 });
 
+test('generated coverage filename allowance stays within its map and exact token', (t) => {
+  const h = makeRepo(t);
+  fs.mkdirSync(path.join(h.repo, 'tools'), { recursive: true });
+  const token = ['claude', 'sandbox', 'placeholders.js'].join('-');
+  const file = 'tools/tests-map.json';
+  const entries = JSON.parse(fs.readFileSync(path.join(ROOT, 'tools', 'model-literals.json'), 'utf8'))
+    .filter(entry => entry.path === file && entry.text === token);
+  const allowfile = path.join(h.repo, 'tools/model-literals.json');
+  fs.writeFileSync(allowfile, JSON.stringify(entries));
+  const model = ['claude', 'fixture-2099'].join('-');
+  for (const [where, value, rejected] of [
+    [file, { [`lib/${token}`]: ['test/example.test.js'] }, []],
+    [file, { 'lib/example.js': [`test/${token}`] }, []],
+    [file, { [`lib/${token}-other`]: [] }, [token + '-other']],
+    [file, { [`lib/${token.replace('.js', '.mjs')}`]: [] }, [token.replace('.js', '.mjs')]],
+    ['tools/another-map.json', { [`lib/${token}`]: [] }, [token]],
+    [file, { [`lib/${token}`]: [model] }, [model]],
+  ]) {
+    const target = path.join(h.repo, where);
+    fs.writeFileSync(target, JSON.stringify(value));
+    assert.deepEqual(modelSelections(h.repo, h.env), rejected.map(text => `${where}:1: ${text}`),
+      JSON.stringify(value));
+    fs.rmSync(target);
+  }
+  assert.equal(entries.length, 1);
+  fs.writeFileSync(allowfile, JSON.stringify([{ ...entries[0], reason: '' }]));
+  assert.throws(() => modelSelections(h.repo, h.env), /reason/);
+});
+
 test('model lint rejects every shipped alias and model pattern in code and JSON', (t) => {
   const h = makeRepo(t);
   fs.mkdirSync(path.join(h.repo, 'lib'));
