@@ -48,6 +48,8 @@ async function main() {
     } catch (e) {
       run(['task', 'note', task, `Review passed; evidence refused: ${String(e.stderr).trim()}`]);
     }
+  } else if (process.env.AUTOMATION_REVIEW_FAIL) {
+    run(['evidence', task, '--type', 'review', '--sha', pr.headRefOid, '--fail', '--summary', process.env.AUTOMATION_REVIEW_FAIL]);
   } else {
     run(['evidence', task, '--type', 'review', '--sha', pr.headRefOid, '--ok']);
   }

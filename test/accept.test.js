@@ -58,7 +58,8 @@ function acceptAfterReview(h, ...args) {
 
 test('accept refuses a code task without gates, and a review by the submitter does not count', async (t) => {
   const h = submitted(t);
-  h.ok(['project', 'set', '--tests-cmd', 'null']);
+  // Tests first, so accept stops at the missing tests gate and lists every missing gate.
+  h.ok(['project', 'set', '--tests-cmd', 'null', '--review-policy', '{"tests_first":true}']);
   const none = h.run(['accept', 'T1']);
   assert.equal(none.code, 1);
   assert.match(none.stderr, /tests: no tests evidence/);
@@ -79,6 +80,20 @@ test('accept refuses a code task without gates, and a review by the submitter do
 
   ev(h, 'review', 'r-1');
   acceptAfterReview(h);
+});
+
+test('accept dispatches review before the tests gate and runs tests once review passes', async (t) => {
+  const h = submitted(t);
+  silentReviewer(h);
+  const pending = h.run(['accept', 'T1']);
+  assert.equal(pending.code, 0, pending.stderr);
+  assert.match(pending.stdout, /review pending with \S+; tests run after the review passes/);
+  const types = () => h.readState('tasks.json').tasks[0].evidence.map((e) => e.type);
+  assert.deepEqual(types(), ['clean'], 'no suite runs before the review');
+  await reviewerExited(h);
+  ev(h, 'review', 'r-1');
+  acceptAfterReview(h);
+  assert.deepEqual(types().filter((type) => type !== 'review'), ['clean', 'tests']);
 });
 
 test('the latest evidence at the submitted sha decides, and other shas do not count', (t) => {
@@ -118,7 +133,7 @@ test('a revision bump invalidates earlier evidence', (t) => {
   ev(h, 'clean', 'w-1');
   ev(h, 'review', 'r-1');
   h.ok(['task', 'update', 'T1', '--acceptance', 'it works', '--acceptance', 'and logs it']);
-  h.ok(['project', 'set', '--tests-cmd', 'null']);
+  h.ok(['project', 'set', '--tests-cmd', 'null', '--review-policy', '{"tests_first":true}']);
   const r = h.run(['accept', 'T1']);
   assert.equal(r.code, 1);
   assert.ok(r.stderr.includes(`no tests evidence at ${h.sha.slice(0, 7)} for revision 2`));

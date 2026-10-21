@@ -178,7 +178,8 @@ test('the claimant resubmits a newer head and its gates need evidence at that he
   const shown = h.json(['task', 'show', 'T1']);
   assert.equal(shown.gates.ok, false);
   assert.deepEqual(shown.gates.gates.map((gate) => [gate.type, gate.ok]), gates.map(([type]) => [type, false]));
-  h.ok(['project', 'set', '--tests-cmd', 'null']);
+  // Tests first, so accept stops at the missing tests gate and lists every missing gate.
+  h.ok(['project', 'set', '--tests-cmd', 'null', '--review-policy', '{"tests_first":true}']);
   const stale = h.run(['accept', 'T1']);
   assert.equal(stale.code, 1);
   for (const [type] of gates) assert.match(stale.stderr, new RegExp(`no ${type} evidence at ${newSha.slice(0, 7)}`));

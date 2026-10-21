@@ -12,7 +12,9 @@ const ghStub = path.join(__dirname, 'fixtures', 'automation-gh.js');
 const harness = path.join(__dirname, 'fixtures', 'automation-harness.js');
 const MERGEABILITY_PAUSE = path.join(__dirname, 'fixtures', 'mergeability-pause.js');
 
-function setup(t, { kind = 'code', ci = 'success', repo } = {}) {
+// These suites test the gates themselves, so they run tests before review
+// unless a test asks for the default order.
+function setup(t, { kind = 'code', ci = 'success', repo, testsFirst = true } = {}) {
   const h = repo || makeRepo(t);
   // Sandboxed command harnesses create synthetic mount targets under their inherited TMPDIR.
   const tmp = path.join(h.base, 'tmp');
@@ -22,7 +24,7 @@ function setup(t, { kind = 'code', ci = 'success', repo } = {}) {
   // A rework refills workers and a submission starts reviewers; a test that
   // checks one pins its own harness.
   stubRungs(h);
-  h.init(['--repo', 'acme/demo', '--base', 'main']);
+  h.init(['--repo', 'acme/demo', '--base', 'main', ...(testsFirst ? ['--review-policy', '{"tests_first":true}'] : [])]);
   const tools = path.join(h.base, 'tools');
   fs.writeFileSync(path.join(tools, 'gh'), `#!/usr/bin/env node\nrequire(${JSON.stringify(ghStub)});\n`);
   fs.chmodSync(path.join(tools, 'gh'), 0o755);
