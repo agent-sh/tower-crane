@@ -33,6 +33,10 @@ function verbs(sha) {
     },
     private: { argv: [NODE, 'tools/verb.js', 'private', '1', '{out}'], source: commit, timeout_sec: 60 },
     sleepy: { argv: [NODE, 'tools/sleep.js'], source: commit, timeout_sec: 1, delegate: true },
+    pathy: {
+      argv: [NODE, '{source}/{param.script}', '{param.target}', '1', '{out}'], source: commit, timeout_sec: 60, delegate: true,
+      params: { script: { type: 'string', pattern: '.+' }, target: { type: 'string', pattern: '.+' } },
+    },
     storm: {
       argv: [NODE, 'containment-harness.js', 'storm', 'unused'], source: { path: FIXTURES }, timeout_sec: 60, delegate: true,
       resources: { tasks_max: systemd ? 32 : 4, memory_max_bytes: 512 * 1024 * 1024 },
@@ -143,6 +147,52 @@ test('a worker that edits or commits the verb script in its checkout still runs 
   assert.equal(evidence(h).length, before);
 });
 
+test('pinning the same approved verbs again repairs a damaged copy', (t) => {
+  const h = fixture(t);
+  h.ok(['task', 'update', 'T1', '--broker-verbs', 'rehearse', '--agent', 'orchestrator']);
+  const V = require('../lib/verbs');
+  const { digest } = h.readState('project.json').broker.verbs.rehearse.source;
+  const dir = path.join(V.sourcesDir(h.state), digest);
+  const rows = [
+    { name: 'a changed file', damage: () => fs.writeFileSync(path.join(dir, 'tree', 'tools', 'verb.js'), "console.log('edited');\n") },
+    { name: 'a removed file', damage: () => fs.rmSync(path.join(dir, 'tree', 'tools', 'sleep.js')) },
+    { name: 'a changed manifest', damage: () => fs.appendFileSync(path.join(dir, 'manifest.json'), ' ') },
+    { name: 'a removed manifest', damage: () => fs.rmSync(path.join(dir, 'manifest.json')) },
+    { name: 'a removed copy', damage: () => fs.rmSync(dir, { recursive: true }) },
+  ];
+  for (const row of rows) {
+    row.damage();
+    let r = verb(h, 'rehearse', REHEARSE);
+    assert.equal(r.code, 1, `${row.name}: ${r.stdout}`);
+    assert.match(r.stderr, /the owner pins it again with project set --broker-verbs/, row.name);
+    h.ok(['project', 'set', '--broker-verbs', JSON.stringify(verbs(h.sha))]);
+    assert.equal(h.readState('project.json').broker.verbs.rehearse.source.digest, digest, row.name);
+    r = verb(h, 'rehearse', REHEARSE);
+    assert.equal(r.code, 0, `${row.name}: ${r.stderr}`);
+    assert.match(r.stdout, /^pinned c1 3 rehearse$/m, row.name);
+    assert.deepEqual(fs.readdirSync(V.sourcesDir(h.state)), [digest], `${row.name}: no staging or damaged copy is left`);
+  }
+});
+
+test('a pin that loses the race for the same copy keeps the copy placed first', (t) => {
+  const h = fixture(t);
+  const V = require('../lib/verbs');
+  const { digest } = h.readState('project.json').broker.verbs.rehearse.source;
+  const dir = path.join(V.sourcesDir(h.state), digest);
+  const first = path.join(h.base, 'first');
+  fs.cpSync(dir, first, { recursive: true });
+  fs.rmSync(dir, { recursive: true });
+  const rename = fs.renameSync;
+  // The other project set lands its copy just before this one renames.
+  t.mock.method(fs, 'renameSync', (from, to) => {
+    if (to === dir && !fs.existsSync(dir)) rename(first, dir);
+    return rename(from, to);
+  });
+  assert.equal(V.pinCommit(h.state, h.repo, h.sha, ['tools']), digest);
+  V.verifyPinned(h.state, digest);
+  assert.deepEqual(fs.readdirSync(V.sourcesDir(h.state)), [digest]);
+});
+
 test('pinning refuses git objects that do not hash to their names', (t) => {
   const h = fixture(t);
   fs.writeFileSync(path.join(h.repo, 'tools', 'verb.js'), "console.log('approved v2');\n");
@@ -163,7 +213,10 @@ test('pinning refuses git objects that do not hash to their names', (t) => {
 
 test('ungranted, unclaimed and out-of-pattern requests are refused and run nothing', (t) => {
   const h = fixture(t);
-  h.ok(['task', 'update', 'T1', '--broker-verbs', 'rehearse', '--agent', 'orchestrator']);
+  h.ok(['task', 'update', 'T1', '--broker-verbs', 'rehearse,pathy', '--agent', 'orchestrator']);
+  const V = require('../lib/verbs');
+  const { tree } = V.verifyPinned(h.state, h.readState('project.json').broker.verbs.pathy.source.digest);
+  const script = path.join(h.repo, 'tools', 'verb.js');
   const rows = [
     { name: 'a verb the task has no grant for', verb: 'private', params: [], stderr: /T1 has no grant for broker verb private; the owner grants it/ },
     { name: 'an undeclared verb', verb: 'missing', params: [], stderr: /no broker verb missing/ },
@@ -173,16 +226,23 @@ test('ungranted, unclaimed and out-of-pattern requests are refused and run nothi
     { name: 'a missing parameter', verb: 'rehearse', params: ['campaign=c1'], stderr: /needs --param rounds=VALUE/ },
     { name: 'a repeated parameter', verb: 'rehearse', params: [...REHEARSE, 'rounds=4'], stderr: /--param rounds is given twice/ },
     { name: 'an agent without the claim', verb: 'rehearse', params: REHEARSE, env: { TOWER_CRANE_AGENT: 'worker-T1-2', TOWER_CRANE_TASK: 'T1' }, stderr: /worker-T1-2 does not hold T1's claim/ },
+    { name: 'a value naming a path an agent writes', verb: 'pathy', params: ['script=tools/verb.js', `target=${script}`], stderr: /argv .*verb\.js is inside/ },
+    { name: 'an option value naming a path an agent writes', verb: 'pathy', params: ['script=tools/verb.js', `target=--config=${script}`], stderr: /argv .*verb\.js is inside/ },
+    { name: 'a value walking out of {source}', verb: 'pathy', params: [`script=${path.relative(tree, script).split(path.sep).join('/')}`, 'target=c1'], stderr: /argv .*verb\.js is inside/ },
   ];
-  const sources = fs.readdirSync(require('../lib/verbs').sourcesDir(h.state));
+  const sources = fs.readdirSync(V.sourcesDir(h.state));
   for (const row of rows) {
     const r = verb(h, row.verb, row.params, row.env);
     assert.notEqual(r.code, 0, row.name);
     assert.match(r.stderr, row.stderr, row.name);
     assert.equal(fs.readdirSync(h.scratch).length, 0, row.name);
+    assert.deepEqual(fs.readdirSync(path.join(h.state, 'verbs')), ['sources'], `${row.name}: no run directory is made`);
   }
   assert.deepEqual(evidence(h), []);
-  assert.deepEqual(fs.readdirSync(require('../lib/verbs').sourcesDir(h.state)), sources);
+  assert.deepEqual(fs.readdirSync(V.sourcesDir(h.state)), sources);
+  const ran = verb(h, 'pathy', ['script=tools/verb.js', 'target=c1']);
+  assert.equal(ran.code, 0, ran.stderr);
+  assert.match(ran.stdout, /^pinned c1 1 pathy$/m, 'paths under {source} and {out} run');
   const r = h.run(['evidence', 'T1', '--type', 'verb', '--ok', '--sha', 'a'.repeat(40)], { env: WORKER });
   assert.equal(r.code, 1);
   assert.match(r.stderr, /only tower-crane verb records verb evidence/);
@@ -229,6 +289,9 @@ test('project set refuses verbs that a worker could steer', (t) => {
     { name: 'a source inside the repository', verb: { ...base, source: { path: path.join(h.repo, 'tools') } }, stderr: /source\.path .* is inside .*an agent writes/ },
     { name: 'a mount inside the repository', verb: { ...base, mounts: { store: h.repo } }, stderr: /mounts\.store .* is inside/ },
     { name: 'a literal path into the repository', verb: { ...base, argv: [NODE, path.join(h.repo, 'tools', 'verb.js'), '{param.campaign}', '{param.rounds}', '{out}'] }, stderr: /argv .* is inside/ },
+    { name: 'a literal path before a parameter', verb: { ...base, argv: [NODE, `${path.join(h.repo, 'tools')}/{param.campaign}.js`, '{param.rounds}', '{out}'] }, stderr: /argv .*tools is inside/ },
+    { name: 'an option value into the repository', verb: { ...base, argv: [NODE, 'tools/verb.js', `--config=${path.join(h.repo, 'tools', 'verb.js')}`, '{param.campaign}', '{param.rounds}', '{out}'] }, stderr: /argv .*verb\.js is inside/ },
+    { name: 'a search path into the repository', verb: { ...base, argv: [NODE, 'tools/verb.js', `--path=${path.dirname(NODE)}${path.delimiter}${h.repo}`, '{param.campaign}', '{param.rounds}', '{out}'] }, stderr: /argv .* is inside/ },
     { name: 'a commit off the base branch', verb: { ...base, source: { commit: other } }, stderr: /is not on refs\/heads\/main/ },
     { name: 'a parameter in the program', verb: { ...base, argv: ['{param.campaign}', '{param.rounds}'] }, code: 2, stderr: /argv\[0\] names the program/ },
     { name: 'an undeclared parameter', verb: { ...base, argv: [...base.argv, '{param.store}'] }, code: 2, stderr: /\{param\.store\}, which params does not declare/ },
