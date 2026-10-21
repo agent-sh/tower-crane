@@ -267,6 +267,14 @@ test('a budget stop ends the harness when taskkill outlasts its timeout, as on a
   await until(t, h, () => recordedSpend(h).entries?.length && recordedSpend(h).entries.every((e) => !e.live), 'exit usage was not finalized');
 });
 
+test('a supervisor collects usage at the exit it saw though another process took the harness pid, as Windows reuses pids', async (t) => {
+  const h = setup(t, 'claude');
+  const spawned = h.json(['spawn', '--task', 'T1'], { env: h.liveEnv({ LIVE_STEPS: '1', LIVE_PID_REUSED: '1' }) });
+  await until(t, h, () => exited(h, spawned.agent), 'the harness did not exit');
+  await until(t, h, () => recordedSpend(h).entries?.length && recordedSpend(h).entries.every((e) => !e.live), 'exit usage was not finalized');
+  assert.equal(h.json(['task', 'show', 'T1']).spend.tokens, 1000);
+});
+
 for (const partialLog of [false, true]) {
   test(`Claude exit without a result includes final session usage with ${partialLog ? 'a partial log' : 'no log usage'}`, async (t) => {
     const h = setup(t, 'claude');
