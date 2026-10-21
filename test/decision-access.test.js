@@ -25,6 +25,10 @@ test('escalated question delegation covers policy, approval markers and verified
     { name: 'approval request', decision: { approval_request: true } },
     { name: 'approval without escalation', decision: { approval_request: true, escalation: null, technical: true } },
     { name: 'legacy question', decision: { kind: undefined }, allowed: true },
+    { name: 'tagged crisis', decision: { kind: 'crisis' }, allowed: true },
+    { name: 'tagged explicit owner reason', decision: { owner_required: 'spend needs the owner' }, allowed: true },
+    { name: 'tagged crisis with policy off', decision: { kind: 'crisis' }, policy: { orchestrator_escalated_questions: false } },
+    { name: 'tagged explicit owner reason with policy off', decision: { owner_required: 'spend needs the owner' }, policy: { orchestrator_escalated_questions: false } },
     { name: 'named worker', agent: 'worker-1' },
     { name: 'spawned orchestrator', agent: 'manager-1', events: spawned('orchestrator'), allowed: true },
     { name: 'spawned worker', agent: 'manager-1', events: spawned('worker') },
@@ -38,6 +42,31 @@ test('escalated question delegation covers policy, approval markers and verified
     else assert.throws(() => D.answerRule(st, decision, ctx), /only .*owner/, row.name);
     if (!row.agent && !row.env) assert.equal(D.orchestratorAnswers(st, decision), !!row.allowed, row.name);
   }
+});
+
+test('tagged crises and explicit owner reasons follow question delegation without removing the crisis notification', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['ask', '--kind', 'crisis', '--crisis', 'security', '--setting', 'sandbox',
+    '--question', 'How should we investigate?', '--option', 'host receipt', '--option', 'widen', '--agent', 'worker-ask']);
+  h.ok(['ask', '--kind', 'technical', '--owner-required', 'spend needs the owner', '--setting', 'budget.raise',
+    '--question', 'How should we proceed?', '--option', 'host receipt', '--option', 'widen', '--agent', 'worker-ask']);
+  const before = h.readState('project.json');
+  const ownerNotification = events(h).find((e) => e.cmd === 'msg' && e.detail.to === 'owner');
+  assert.match(ownerNotification.detail.text, /crisis.*D1/);
+  for (const id of ['D1', 'D2']) {
+    h.ok(['answer', id, '--choice', 'host receipt', '--agent', 'orchestrator']);
+    const d = h.readState('decisions.json').decisions.find((d) => d.id === id);
+    assert.equal(d.answer_rule, 'orchestrator-escalated-question');
+    assert.equal(d.applied, undefined);
+    assert.deepEqual(h.readState('project.json'), before);
+  }
+  assert.deepEqual(events(h).find((e) => e.cmd === 'msg' && e.detail.to === 'owner'), ownerNotification);
+  h.ok(['ask', '--kind', 'crisis', '--crisis', 'security', '--question', 'Contain the incident?',
+    '--option', 'yes', '--option', 'no', '--agent', 'worker-ask']);
+  const refused = h.run(['answer', 'D3', '--choice', 'yes', '--agent', 'orchestrator']);
+  assert.equal(refused.code, 1, refused.stderr);
+  assert.match(refused.stderr, /is a crisis decision; only the owner answers it/);
 });
 
 test('an escalated question records the orchestrator rule without granting a sandbox change', (t) => {
