@@ -313,6 +313,8 @@ A write parses the event log and the three snapshot files before it waits for th
 
 `TOWER_CRANE_LOCK_TRACE=FILE` appends one JSON line per lock holding to FILE: `pid`, the first command words in `argv`, `label` (the mutation's command, `orchestrator lease`, `render`, `validate`, `state read` or `dispatch`, the [dispatch lock](#dispatch-lock)), `wait_ms`, `hold_ms` and `event_bytes`, the event log bytes read while holding. It is off by default and never fails the write it measures.
 
+`TOWER_CRANE_INTERVALS` is a JSON object of interval name to positive milliseconds that replaces production waits, so tests drive a timeout path in short real time: `lock_wait` (60000, a write's wait for this lock), `lock_refresh` (10000, how often a marked lock kept fresh while held, the [dispatch lock](#dispatch-lock) and a base rerun's result lock, touches its marker), `startup` (10000, the window a dispatch gives its supervisor to report ready and a supervisor gives its spawn and, without the lease gate, its lease to be recorded) and `governor_lock_wait` and `governor_bind_wait` (5000 and 10000, the [host governor](#host-resource-governor)'s registry lock wait and a bind's further retries). It is read on every wait, so it applies to the process that sets it and to every CLI, supervisor and hook that inherits it. An unknown name or a value that is not a positive number fails the command. Production leaves it unset.
+
 A writer prepares a private `lock.<pid>.<random nonce>.new` directory for each attempt and takes the lock with one atomic rename to `lock`. That directory holds one file named after the writer's random nonce, with its pid, host, pid namespace (`pidns`, the target of `/proc/self/ns/pid`, or null where there is none), process identity and time. Linux markers record `start_ticks` from `/proc/<pid>/stat` and `boot_id` from `/proc/sys/kernel/random/boot_id`; unreadable start ticks are omitted, and an unreadable boot id is null. The rename fails while `lock` holds such a file, so one writer holds it at a time. CLI commands, harness hooks and brokered writes use the same acquisition bound of 60 s, matching the stale-marker window and allowing startup bursts to drain. While a live holder has the lock, a waiter checks every 2 ms whether `lock` is gone and retries at once when it is. The check for a stale holder runs on a backoff that starts at 10-19 ms, doubles to 100-199 ms and includes random jitter; each wait is capped by the remaining time. After a reclaim, an empty lock or a staging cleanup race, the waiter sleeps the whole backoff. The deadline uses a monotonic clock, so wall-clock changes do not shorten or extend it. A holder still alive at the deadline causes exit 3. An `ENOENT` or `EEXIST` from concurrent cleanup retries within the same deadline with a fresh private directory. A missing state directory is still refused with the initialization instructions.
 
 After acquisition, a writer sweeps abandoned staging directories older than 60 s. A staging name whose pid is visible and alive is left alone, even if its marker is not written yet or its timestamps look old. Cleanup only unlinks that directory's marker and removes the directory if empty. A writer whose staging is removed by a sweeper in another pid namespace retries; a rename that arrives without its marker does not grant the lock.
@@ -915,7 +917,38 @@ The governor signals only processes the registry recorded when Tower Crane start
 
 ### Deferral and resumption
 
-A deferred dispatch or gate refuses with code 3: `TASK: UNIT deferred by the host governor: REASON`. `spawn` asks before any stack read, fetch or worktree; `spawn --ready` and automatic refill stop at the first deferral, since the reason holds for every task behind it, and a wait's refill reports it once each time it starts and retries on every pass. A deferred reaction stays owed in the persistent automation queue, whichever process deferred it; any trusted `wait` retries it in its original turn once five seconds have passed and the governor would admit its unit, as described under [events.jsonl](#eventsjsonl). The registry keeps each deferral's reason, first time and latest time, and drops it when the unit is admitted or after ten minutes without a retry; a stop is kept for an hour. An owed reaction remains in the gate queue and keeps its `governor_deferred` inbox item after that registry hint expires, until its receipt settles or its source no longer matches an active submitted or accepted head.
+`review dispatch deferred` events persist a governor-deferred reviewer dispatch
+with `sha`, `revision`, `reason`, `since` and the original `body_recheck` context
+when it is an automatic light check. Refill restores that context on the reviewer
+spawn, preserving the automatic marker in its evidence and the two-failure stop.
+If an automatic check replaces an outstanding explicit request, a
+`review dispatch context` event records its `sha`, `revision` and `body_recheck`
+without adding another debt. An unchanged context emits nothing, and a context
+event cannot revive debt a matching spawn has already settled.
+The trusted wait host retries these
+on every refill pass alongside ready workers, in urgent-first order followed by
+descending unblock count and task id. Reviewer retries do not use worker slots.
+A governor deferral holds only its unit kind: workers and reviewers have
+independent memory reservations, and an admitted kind continues in priority
+order while the deferred kind waits for the next pass. This applies to the
+per-kind prechecks and to a refusal during dispatch. A dispatch lock still
+stops the whole batch.
+A live task reaction postpones its retry. Dispatch debt clears when a matching
+reviewer spawn is recorded, the submitted head or revision changes, the task
+leaves submitted status, or a current eligible review verdict arrives. A failed
+PR-body verdict keeps a deferred light review eligible. An outstanding debt is
+written once per task, head and revision, even when load, pressure or memory
+readings change its reason. A matching spawn settles that debt; a later review
+attempt can record its own debt and context. `status` lists the task, first
+deferral time and reason in `deferred reviewers`, with the persisted entries in
+JSON `deferred_reviewers`. It reads the latest matching reviewer reason from the
+governor registry without writing state, and falls back to the saved reason after
+the registry hint expires.
+Paused projects and missing or stale software gates add a `waiting` explanation
+to the deferred reviewer in text and JSON. Its governor `reason` is retained,
+so the original resource deferral and the current retry blocker remain visible.
+
+A deferred dispatch or gate refuses with code 3: `TASK: UNIT deferred by the host governor: REASON`. `spawn` asks before any stack read, fetch or worktree; `spawn --ready` stops at the first worker deferral, and automatic refill skips the remaining tasks of the deferred kind. A wait's refill rechecks each kind on every pass and reports a precheck deferral once when it starts. A deferred reaction stays owed in the persistent automation queue, whichever process deferred it; any trusted `wait` retries it in its original turn once five seconds have passed and the governor would admit its unit, as described under [events.jsonl](#eventsjsonl). The registry keeps each deferral's reason, first time and latest time, and drops it when the unit is admitted or after ten minutes without a retry; a stop is kept for an hour. An owed reaction remains in the gate queue and keeps its `governor_deferred` inbox item after that registry hint expires, until its receipt settles or its source no longer matches an active submitted or accepted head.
 
 Where it shows:
 
@@ -938,7 +971,7 @@ Where it shows:
 | `growth_window_min` | 60 | how long a growth window follows its units, and how long a crossed window's raise lasts: a tests gate, the unit most often deferred, ran a median 55 minutes (p90 78) from `gate run` `running` to `done` over the 65 runs that started in the day to 2026-10-20 07:30 UTC, so a set's growth is measured over about as long as the unit admitted beside it runs |
 | `growth_samples_min` | 20 | windows before measured growth replaces the sum: the count unit sizes learn from (the largest of a kind's last 20 peaks). Below 100 windows the ratio is the largest seen, so it is the worst of at least 20 minutes of running work |
 | `others_window_min` | 30 | other sessions' test runs and builds repeat within minutes; on 2026-10-17 two of them peaked near 11 GiB and came back |
-| `expected_mb` | `worker` 1536, `reviewer` 1024, `small` 1024, `orchestrator` 1024, `tests` 2048, `clean` 1024, `ci` 2048, `suite` 2048 | starting sizes, replaced by measured peaks once three exist: on 2026-10-17 the scope holding an orchestrator, two workers and their tools used 3.0 GiB (peak 3.5 GiB); a full suite at test concurrency 3 runs about six Node processes and their git commands |
+| `expected_mb` | `worker` 1536, `reviewer` 1024, `small` 1024, `orchestrator` 1024, `tests` 2560, `clean` 1024, `ci` 2048, `suite` 2560 | starting sizes, replaced by measured peaks once three exist: on 2026-10-17 the scope holding an orchestrator, two workers and their tools used 3.0 GiB (peak 3.5 GiB); on 2026-10-20 Tower Crane's own full suite at 12 file workers, the tests gate's planned setting on its 24-core host, peaked at 2.5 GiB (2458 MiB anonymous) over its scope's idle use |
 
 ### Registry
 
@@ -1980,7 +2013,7 @@ Exit and stall observations are rechecked and deduplicated under the lock, using
 
 The trusted `wait` host releases verified dead claims and fills available worker slots through `spawn --ready`, including todo and rework tasks, on a path of its own beside the event reactions: a gate reaction that runs the full suite does not delay it. This also recovers capacity freed before its cursor. Startup, notifications, the fallback tick and the end of each reaction pass trigger the capacity check, as does a timer set to the earliest `gates.rework_hold_min` hold end, so an ending hold dispatches with no other event; a default zero-timeout cursor snapshot does not. One refill runs at a time in a host, and it skips a task whose own gate reaction is still live. A wait ends, by event, timeout or signal, only once neither its reaction pass nor its refill is running; the refill after a pass's reactions runs even when the deadline or a wake came during the pass, so a slot its rework or merge freed fills before the wait returns. `status` names why automatic refill leaves each ready task undispatched (`not dispatched`; JSON `not_dispatched`): no brief, its gate reaction running, a rework hold until a time, the worker limit with its holders, higher-ranked tasks taking the free slots, the dispatch lock's holder, read without clearing a stale lock, or the host governor's latest worker deferral. Spawn retains its worker limit, urgent-first order followed by unblock count and task id, routing, fallback and locked reservation checks. A failed independent review at the submitted head and revision calls `rework --from-review` before inspecting mergeability or running software gates; a failure whose findings are all in the PR body instead dispatches a body-only worker repair while keeping the task submitted. Findings and their comment link are copied into the reason and brief after the existing locked recheck. Rework increments the revision, so a replayed or stale review cannot send that submission back twice. Slot refill runs only in the trusted `wait` host; `wait --observe` and worker waiters skip it.
 
-Each wait remembers its latest refused dispatch inputs in memory for one minute. It retries sooner when ready task data, brief or task-update receipts, project settings, personal ladder-set receipts or worker holders change. Task notes and fallback ticks during that minute do not repeat expensive preparation or its stderr diagnostic. The next timer tick after the minute retries unchanged inputs, including external branch or harness repairs with no event. A successful batch or a check with no available work clears that refusal. This adds no persisted retry fields.
+Each wait remembers ordinary refusals per task in memory for one minute. It retries sooner when that task's dispatch inputs, its kind's ready ordering, brief or task-update receipts, project settings, personal ladder-set receipts or worker holders change. Automatic light-review context is also a dispatch input. Task notes and fallback ticks during that minute do not repeat expensive preparation or its stderr diagnostic. The next timer tick after the minute retries unchanged inputs, including external branch or harness repairs with no event. A successful dispatch clears that task's refusal. Governor deferrals and dispatch locks are never ordinary refusal-cache entries: deferred tasks remain eligible each pass while other tasks keep their own minute cache, even within one kind. This adds no persisted retry fields.
 
 The capacity check clears verified dead worker reservations through the same locked path as `spawn --ready` before counting holders. Cancelling the originating task does not hide its dead reservation from this cleanup.
 
