@@ -793,6 +793,100 @@ Each closed window is appended to `HOST.windows.jsonl` beside the registry, whic
 
 Pressure defers as well: memory `some` avg10 at or over `psi_memory_defer`, CPU `some` avg10 at or over `psi_cpu_defer`, or load at or over `load_defer` times the cores. Admission and the registry write that records the unit are one locked step, so two projects cannot both take the last room.
 
+#### Live-window replay, 2026-10-21 (T451)
+
+The first day's log does not call for tightening the p99 rule or its largest-unit floor. Of 1338 closed windows, 25 grew past their reservation (1.87%). The highest `actual` among those crossings was 20.712 GiB, 57.53% of the limit; their highest `slice_peak`, including later admissions and other sessions, was 21.702 GiB, 60.28%. These leave 13.488 and 12.498 GiB to the 95% stop line. No crossing reached 90% of the limit, the threshold five percentage points below that line. None reached 95% of the stop line either (90.25% of the limit).
+
+The orchestrator supplied a snapshot of `avifenesh.windows.jsonl` from the live host cache, SHA-256 `f6017f7cb6cb3418081250c9024f74d67150150b0d735f9f13c5c59eb6545290`. Its windows cover 2026-10-20 13:57:26.523 through 2026-10-21 14:07:02.286 Jerusalem time (UTC+03:00), 24 h 9 min 35.763 s from first opening to last close. The last closed window opened at 13:07:01.684 on October 21; windows still open at snapshot time are absent. All rows followed `agents.slice` with a 36 GiB limit, a 30.6 GiB default defer line and a 34.2 GiB default stop line. The replay used the shipped defaults: 60-minute windows, 20 samples before measured growth, nearest-rank p99 over the last 200 closed ratios, a largest-unit floor, and a 60-minute raise after a crossing.
+
+Replaying closes before openings at the same timestamp through `observe` and `reserve` in `lib/governor.js` reproduced every logged reservation, ratio, rule and sample count, with zero mismatches. There were 76 sum-rule, 1048 measured-rule and 214 raised-rule openings. All 1338 windows had room and a non-null ratio. Their nearest-rank p50 was **0.06144242** and p99 **0.26344686** (`grew / sum`, ranks 669 and 1325). These are full-log descriptive percentiles; the live reservation uses only ratios already closed at an opening. Overlapping windows are correlated observations.
+
+The admission comparison below asks whether one hypothetical candidate fits at each logged opening: `used + reserved + need <= 0.85 * limit`, versus `used + sum + need <= 0.85 * limit`. It sets `others_room` to zero and checks only the logged binding level, with no PSI or load deferral. The log has no dispatch attempts, learned candidate sizes, other-session peak history, pressure or other levels, so these are memory-only opportunities on the recorded workload, not counts of actual dispatches or a simulation of the workload after extra admissions. Candidate sizes 1, 1.5 and 2 GiB are the configured defaults for reviewers, workers and tests; 4 and 8 GiB show sensitivity to larger learned sizes.
+
+| Candidate `need` (GiB) | Ratio rule admits / 1338 | Plain sum admits / 1338 |
+| --- | --- | --- |
+| 0 (running-work budget only) | 1290 | 229 |
+| 1 | 1271 | 166 |
+| 1.5 | 1270 | 151 |
+| 2 | 1267 | 135 |
+| 4 | 1241 | 80 |
+| 8 | 968 | 2 |
+
+The worst logged `predicted` (`used + reserved`, before candidate and other-session room) was **33.753 GiB**, 93.76% of the limit, leaving **0.447 GiB** to the stop line. It opened on October 20 at 14:40:39.184 Jerusalem time under the startup sum rule, exceeded the defer line, and did not cross its reservation. With the hypothetical 2 GiB candidate, the worst projection was 35.753 GiB, 1.553 GiB above the stop line, and was rejected by the defer check. The highest projection that admitted that candidate was 30.599 GiB, leaving 3.601 GiB to the stop line. Across all windows, the highest `actual` was 23.777 GiB (66.05%) and highest `slice_peak` 23.514 GiB (65.32%). `actual` holds other use at its opening value and adds the original set's peak growth; `slice_peak` measures the level over time, so either can be larger.
+
+Every reservation crossing is listed below by opening time in Jerusalem (UTC+03:00). Reservation and growth are GiB; `actual` and `slice_peak` are percentages of the 36 GiB limit. Adjacent rows can follow much of the same set.
+
+| Opened | Reserved | Grew | Actual / limit | Slice peak / limit |
+| --- | --- | --- | --- | --- |
+| 2026-10-20 20:35:45.460 | 5.756 | 6.101 | 45.67% | 50.60% |
+| 2026-10-20 20:37:07.441 | 5.811 | 5.936 | 45.77% | 50.60% |
+| 2026-10-20 20:38:12.325 | 5.759 | 6.026 | 46.13% | 50.60% |
+| 2026-10-20 20:39:12.846 | 5.622 | 6.016 | 46.03% | 50.60% |
+| 2026-10-20 20:41:15.875 | 5.708 | 5.753 | 46.02% | 50.60% |
+| 2026-10-20 20:42:16.705 | 5.786 | 5.900 | 46.31% | 50.60% |
+| 2026-10-20 20:59:45.127 | 4.928 | 5.566 | 52.41% | 50.60% |
+| 2026-10-21 01:30:10.318 | 5.713 | 6.202 | 43.80% | 49.15% |
+| 2026-10-21 01:31:10.331 | 5.770 | 6.306 | 44.51% | 49.15% |
+| 2026-10-21 01:33:10.363 | 5.673 | 6.550 | 43.20% | 49.15% |
+| 2026-10-21 01:34:11.381 | 5.653 | 6.622 | 43.17% | 49.15% |
+| 2026-10-21 01:35:13.266 | 5.650 | 6.174 | 42.99% | 49.15% |
+| 2026-10-21 01:36:15.171 | 5.723 | 5.837 | 43.19% | 49.15% |
+| 2026-10-21 01:37:15.193 | 5.810 | 6.328 | 44.53% | 49.15% |
+| 2026-10-21 01:38:17.064 | 5.796 | 5.851 | 43.26% | 49.15% |
+| 2026-10-21 04:15:26.330 | 7.778 | 9.542 | 57.40% | 60.28% |
+| 2026-10-21 04:17:27.629 | 7.768 | 7.816 | 57.23% | 60.28% |
+| 2026-10-21 04:19:30.682 | 6.808 | 7.827 | 57.39% | 60.28% |
+| 2026-10-21 04:20:30.827 | 6.805 | 7.816 | 57.53% | 60.28% |
+| 2026-10-21 04:23:34.261 | 7.448 | 7.807 | 53.23% | 60.28% |
+| 2026-10-21 12:39:33.797 | 2.937 | 3.925 | 44.06% | 57.23% |
+| 2026-10-21 12:40:33.812 | 2.987 | 3.239 | 45.34% | 57.23% |
+| 2026-10-21 12:41:35.206 | 3.005 | 4.132 | 44.54% | 57.23% |
+| 2026-10-21 12:42:36.661 | 2.975 | 4.296 | 48.67% | 57.23% |
+| 2026-10-21 12:45:38.741 | 2.986 | 3.267 | 51.47% | 57.23% |
+
+To reproduce from this snapshot, run the following from the repository root, replacing `SNAPSHOT` with its path. Synthetic units partition each logged `sum` into rooms no larger than `largest`; `reserve` needs only their sum and maximum. Closed windows feed their recorded totals through `observe`. This snapshot starts with zero samples and lasts less than the seven-day sample expiry.
+
+```sh
+node - SNAPSHOT <<'NODE'
+const fs = require('node:fs'), assert = require('node:assert/strict');
+const crypto = require('node:crypto'), G = require('./lib/governor');
+const text = fs.readFileSync(process.argv[2], 'utf8');
+const rows = text.trim().split('\n').map(JSON.parse), s = G.settings({});
+const reg = { units: [], windows: [], growth: [], raised: null };
+const events = rows.flatMap((w, i) => [[Date.parse(w.at), 1, i, w], [Date.parse(w.end), 0, i, w]])
+  .sort((a, b) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2]);
+for (const [now, opening, , w] of events) {
+  reg.units = [];
+  if (!opening) {
+    reg.windows = [{ ...w }];
+    G.observe(reg, { binding: w.level, levels: [{ name: w.level, limit: w.limit, used: w.used }] }, s, now);
+    continue;
+  }
+  for (let left = w.sum; left > 0;) {
+    assert(w.largest > 0);
+    const room = Math.min(left, w.largest);
+    reg.units.push({ expected: room, measured: 0 });
+    left -= room;
+  }
+  const r = G.reserve(reg, s, now);
+  assert.deepEqual([r.bytes, r.ratio, r.samples, r.rule],
+    [w.reserved, w.reserved_ratio, w.samples, w.rule]);
+}
+const ratios = rows.map(w => w.ratio).filter(r => r !== null).sort((a, b) => a - b);
+const percentile = p => ratios[Math.ceil(p * ratios.length) - 1];
+console.log({ sha256: crypto.createHash('sha256').update(text).digest('hex'), windows: rows.length,
+  hours: (Math.max(...rows.map(w => Date.parse(w.end))) - Math.min(...rows.map(w => Date.parse(w.at)))) / 3600000,
+  p50: percentile(.5), p99: percentile(.99) });
+console.table([0, 1, 1.5, 2, 4, 8].map(need => ({ need,
+  ratio: rows.filter(w => w.used + w.reserved + need * 2 ** 30 <= s.defer_at * w.limit).length,
+  sum: rows.filter(w => w.used + w.sum + need * 2 ** 30 <= s.defer_at * w.limit).length })));
+console.table(rows.filter(w => w.crossed).map(w => ({ at: w.at, reserved: w.reserved / 2 ** 30,
+  grew: w.grew / 2 ** 30, actual_pct: 100 * w.actual / w.limit, peak_pct: 100 * w.slice_peak / w.limit })));
+console.log(Object.fromEntries(['predicted', 'actual', 'slice_peak'].map(key =>
+  [key, Math.max(...rows.map(w => w[key])) / 2 ** 30])));
+NODE
+```
+
 ### Stopping
 
 Past the stop line, Tower Crane stops its own work: any level's use at or over `stop_at * limit`, or memory `full` avg10 at or over `psi_memory_stop`. It stops one unit at a time: the next only once no stopped unit is left in the registry (its holder exited and released it), or five seconds after the stop, while the line is still crossed. The order is gates and suites first, then reviewers and small agents, then workers, the newest started first within each: a gate reruns from its inputs, a reviewer or small agent starts its job again, and a worker loses its session's context, so the newest of a class loses the least. Orchestrators are never stopped: they run the loop that resumes the rest.
