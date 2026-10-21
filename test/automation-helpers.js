@@ -118,8 +118,11 @@ function configureHarness(h, { rules = false } = {}) {
   fs.mkdirSync(h.env.AUTOMATION_CONTEXT_DIR);
   if (rules) fs.writeFileSync(path.join(h.base, 'AGENTS.md'), 'Read the acceptance before changing code.\n');
   h.ok(['task', 'update', 'T1', '--tier', 'easy']);
+  // Dispatch strips Node preloads, and on Windows the agents' own CLI calls
+  // reach the offline GitHub only through the preload setup() wrote.
+  const env = process.platform === 'win32' ? ['--env', JSON.stringify({ NODE_OPTIONS: h.env.NODE_OPTIONS })] : [];
   for (const rung of ['easy', 'review']) h.ok(['ladder', 'set', rung, '--harness', 'command', '--command',
-    JSON.stringify([process.execPath, harness, BIN, 'auto', '{prompt}']),
+    JSON.stringify([process.execPath, harness, BIN, 'auto', '{prompt}']), ...env,
     ...['model', 'profile', 'provider', 'effort', 'args'].flatMap((f) => ['--clear', f])]);
 }
 

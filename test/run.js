@@ -42,8 +42,11 @@ function shardFiles(files, index, total, durations = fileDurations()) {
   }
   return (shards[index - 1] || []).sort();
 }
+// A healthy Windows shard runs its tests in about 28 minutes; this leaves its dump
+// and stop time inside the 40-minute test step limit in .github/workflows/ci.yml.
+const SHARD_DEADLINE_MIN = 36;
 if (require.main !== module) {
-  module.exports = { testFiles, shardFiles, fileDurations };
+  module.exports = { testFiles, shardFiles, fileDurations, SHARD_DEADLINE_MIN };
   return;
 }
 
@@ -108,19 +111,55 @@ if (refused.length) {
   process.exit(1);
 }
 if (skipped.length) console.error(`tower-crane: skipped host-only tests in this sandbox, the tests gate runs them on the host: ${skipped.join(' ')}`);
+// A CI shard's log says which files started and ended, so a log the job's time
+// limit cut off shows which files were still running.
+// TC_TEST_SHARD_LOG_DIR also keeps those lines in progress.log, beside the watchdog's
+// watchdog.log, for CI to upload when the job log is lost.
+const logDir = process.env.TC_TEST_SHARD_LOG_DIR ? path.resolve(process.env.TC_TEST_SHARD_LOG_DIR) : null;
+if (logDir) fs.mkdirSync(logDir, { recursive: true });
+if (shard && !flags.some((flag) => flag.startsWith('--test-reporter'))) {
+  // A file URL: Windows reads an absolute path here as a URL with its drive as the scheme.
+  const progress = `--test-reporter=${require('node:url').pathToFileURL(path.join(__dirname, 'file-progress.js')).href}`;
+  args.unshift('--test-reporter=spec', '--test-reporter-destination=stdout', progress, '--test-reporter-destination=stdout');
+  if (logDir) args.unshift(progress, `--test-reporter-destination=${path.join(logDir, 'progress.log')}`);
+}
 args.push(...run);
 
 const env = { ...process.env };
 delete env.TC_TEST_SHARD;
+delete env.TC_TEST_SHARD_DEADLINE_MIN;
+delete env.TC_TEST_SHARD_LOG_DIR;
+delete env.TC_TEST_SHARD_HANG;
 // A runner invoked from a test must launch a new run, not Node's recursive no-op.
 delete env.NODE_TEST_CONTEXT;
+
 // With every file skipped there is nothing to run; node --test with no file would search the directory.
-const result = run.length ? cp.spawnSync(process.execPath, args, { stdio: 'inherit', env }) : { status: 0 };
-if (result.error) {
-  console.error(result.error.message);
-  process.exitCode = 1;
-} else if (result.signal) {
-  process.exitCode = 128 + (os.constants.signals[result.signal] || 0);
-} else {
-  process.exitCode = result.status ?? 1;
+if (!run.length) return;
+const started = Date.now();
+const child = cp.spawn(process.execPath, args, { stdio: 'inherit', env });
+// A job its time limit cancels keeps no log, so a shard stops a few minutes under
+// the test step's limit: test/shard-watchdog.js prints the processes the run still
+// holds, stops them and fails. It runs in a process of its own, since a timer here
+// cannot fire while this event loop is blocked. test/ci-required.test.js holds the
+// default under that limit.
+const deadlineMin = Number(process.env.TC_TEST_SHARD_DEADLINE_MIN || (shard ? SHARD_DEADLINE_MIN : 0));
+if (deadlineMin > 0) {
+  const watchdog = cp.spawn(process.execPath, [path.join(__dirname, 'shard-watchdog.js'), JSON.stringify({
+    root: process.pid, started, deadlineMin, logDir, shard, files: run,
+  })], { stdio: ['pipe', 'ignore', 'inherit'], detached: true, windowsHide: true });
+  // Its stdin closes when this process exits, however it exits, and the watchdog ends with it.
+  watchdog.on('error', (error) => console.error(`tower-crane: shard watchdog: ${error.message}`));
+  watchdog.stdin.on('error', () => {});
+  watchdog.unref();
+  watchdog.stdin.unref();
 }
+child.on('error', (error) => {
+  console.error(error.message);
+  process.exitCode = 1;
+});
+child.on('exit', (status, signal) => {
+  if (signal) process.exitCode = 128 + (os.constants.signals[signal] || 0);
+  else process.exitCode = status ?? 1;
+});
+// Test only: a runner whose event loop never returns, the hang the watchdog must outlive.
+if (process.env.TC_TEST_SHARD_HANG === '1') Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0); // wait-allow: blocks this runner until its shard watchdog stops it

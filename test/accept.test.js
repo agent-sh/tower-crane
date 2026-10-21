@@ -222,6 +222,58 @@ test('accept runs missing CI for a non-code task with a PR', (t) => {
   assert.equal(h.readState('tasks.json').tasks[0].evidence.at(-1).type, 'ci');
 });
 
+for (const [review, pass] of [[true, true], [false, true], [true, false]]) {
+  test(`accept reruns stale local CI with review ${review ? 'present' : 'missing'} and CI ${pass ? 'passing' : 'failing'}`, async (t) => {
+    const h = submitted(t, ['--pr', '7']);
+    ev(h, 'tests', 'w-1');
+    ev(h, 'clean', 'w-1');
+    if (review) ev(h, 'review', 'r-1');
+    else silentReviewer(h);
+    const reviewsBefore = reviewerSpawns(h).length;
+    const runs = path.join(h.base, 'ci-runs');
+    const command = [process.execPath, '-e',
+      "require('node:fs').appendFileSync(process.argv[1], 'run\\n'); process.exit(process.env.FIXTURE_GATE_OK === '0' ? 1 : 0);", runs];
+    h.ok(['project', 'set', '--ci-local', JSON.stringify({ command, timeout: 30 })]);
+    h.ok(['check', 'ci', 'T1']);
+    const before = h.readState('tasks.json').tasks[0].evidence;
+    const old = before.at(-1);
+    h.git(['switch', '-q', 'main']);
+    fs.writeFileSync(path.join(h.repo, 'base-advance.txt'), 'new base\n');
+    h.git(['add', '.']);
+    h.git(['commit', '-qm', 'advance the CI merged tree']);
+    h.git(['switch', '-q', 'fixture-change']);
+    assert.match(h.json(['task', 'show', 'T1']).gates.missing.join('; '), /current merged tree/);
+
+    const result = h.run(['accept', 'T1'], { env: { FIXTURE_GATE_OK: pass ? '1' : '0' } });
+    assert.equal(result.code, pass ? 0 : 1, result.stderr);
+    assert.match(result.stderr, /running stale ci software gate/);
+    assert.equal(fs.readFileSync(runs, 'utf8'), 'run\nrun\n');
+    const task = h.readState('tasks.json').tasks[0];
+    const ci = task.evidence.at(-1);
+    assert.equal(ci.type, 'ci');
+    assert.equal(ci.ok, pass);
+    assert.notEqual(ci.receipt.tree_hash, old.receipt.tree_hash);
+    assert.deepEqual(task.evidence.filter((e) => ['tests', 'clean'].includes(e.type)),
+      before.filter((e) => ['tests', 'clean'].includes(e.type)), 'fresh software receipts are reused');
+    if (!pass) {
+      assert.match(result.stderr, /ci: latest ci .* failed/);
+      assert.equal(task.status, 'submitted');
+      assert.equal(reviewerSpawns(h).length, reviewsBefore);
+      h.run(['accept', 'T1']);
+      assert.equal(fs.readFileSync(runs, 'utf8'), 'run\nrun\n', 'current failures need an explicit rerun');
+    } else if (review) {
+      assert.equal(task.status, 'accepted');
+    } else {
+      assert.match(result.stdout, /software gates passed; review pending/);
+      assert.deepEqual(h.json(['task', 'show', 'T1']).gates.missing,
+        [`review: no review evidence at ${h.sha.slice(0, 7)} for revision 1`]);
+      assert.equal(task.status, 'submitted');
+      assert.equal(reviewerSpawns(h).length, 1);
+      await reviewerExited(h);
+    }
+  });
+}
+
 test('only the owner can waive tests or clean, the orchestrator escalates, and a refused accept records no waiver', (t) => {
   const h = submitted(t);
   ev(h, 'review', 'r-1');

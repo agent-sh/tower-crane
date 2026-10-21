@@ -2,9 +2,10 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
-const { ROOT } = require('./helpers');
+const { ROOT, makeRepo } = require('./helpers');
 const { HUNG_TEST_MS } = require('./signals');
 const { testFiles, shardFiles, fileDurations } = require('./run');
 const { declarations, fileTimes, mergeTable } = require('../scripts/test-durations');
@@ -45,15 +46,15 @@ test('every shard count covers the real suite with each file in exactly one shar
   }
 });
 
-test('the checked-in durations split each CI platform into three shards within a tenth of each other', () => {
+test('the checked-in durations split Linux into three CI shards and Windows into four within a tenth of each other', () => {
   const files = testFiles();
-  for (const platform of ['linux', 'win32']) {
+  for (const [platform, total] of [['linux', 3], ['win32', 4]]) {
     const durations = fileDurations(platform);
     assert.ok(Object.keys(durations).length > files.length / 2, `${platform} has measured times`);
     const known = Object.values(durations).sort((a, b) => a - b);
     const cost = (file) => durations[file] ?? known[Math.floor(known.length / 2)];
-    const loads = [1, 2, 3].map((i) => shardFiles(files, i, 3, durations).reduce((sum, file) => sum + cost(file), 0));
-    const mean = loads.reduce((a, b) => a + b, 0) / 3;
+    const loads = Array.from({ length: total }, (_, i) => shardFiles(files, i + 1, total, durations).reduce((sum, file) => sum + cost(file), 0));
+    const mean = loads.reduce((a, b) => a + b, 0) / total;
     assert.ok(Math.max(...loads) <= mean * 1.1, `${platform} shard seconds ${loads.map(Math.round).join(', ')}`);
   }
 });
@@ -106,6 +107,42 @@ test('TC_TEST_SHARD makes the runner run only the files of the shard it names', 
   const invalid = run('4/3');
   assert.equal(invalid.status, 1);
   assert.match(invalid.stderr, /TC_TEST_SHARD requires INDEX\/TOTAL/);
+});
+
+test('a shard logs each file as it starts and ends, and past its deadline its watchdog prints what still runs, stops it and fails', (t) => {
+  // The deadline stops the nested run before its global teardown, so its seed lives in this test's fixture.
+  const h = makeRepo(t);
+  const run = (files, extra) => cp.spawnSync(process.execPath, [path.join(ROOT, 'test', 'run.js'), ...files], {
+    cwd: ROOT, encoding: 'utf8', timeout: HUNG_TEST_MS,
+    env: { ...process.env, TOWER_CRANE_TEST_TMP: h.base, TC_TEST_SHARD: '1/1', ...extra },
+  });
+  const done = run([FIXTURES[0]], {});
+  assert.equal(done.status, 0, done.stderr);
+  assert.match(done.stdout, /^file started: .*a\.test\.js$/m);
+  assert.match(done.stdout, /^file ended: .*a\.test\.js$/m);
+  assert.match(done.stdout, /✔ shard a/, 'the spec reporter still prints each test');
+
+  const hang = path.join('test', 'fixtures', 'shard', 'hang.test.js');
+  // TC_TEST_SHARD_HANG blocks the runner's own event loop, so only a process of its own can stop the shard.
+  for (const blocked of [false, true]) {
+    const logDir = path.join(h.base, `shard-log-${blocked}`);
+    const late = run([FIXTURES[0], hang], { TC_TEST_SHARD_DEADLINE_MIN: '0.1', TC_TEST_SHARD_LOG_DIR: logDir, TC_TEST_SHARD_HANG: blocked ? '1' : '' });
+    const what = `blocked runner ${blocked}`;
+    assert.equal(late.error, undefined, `${what}: the watchdog, not this test's timeout, stops the run`);
+    assert.ok(late.status !== 0, `${what}: the shard fails\n${late.stdout}${late.stderr}`);
+    assert.match(late.stdout, /^file started: .*hang\.test\.js$/m, what);
+    assert.doesNotMatch(late.stdout, /^file ended: .*hang\.test\.js$/m, what);
+    assert.match(late.stderr, /shard deadline of 0\.1 min reached; free memory/, what);
+    // The files CI uploads keep the same record when the job log is lost.
+    const progress = fs.readFileSync(path.join(logDir, 'progress.log'), 'utf8');
+    assert.match(progress, /^file started: .*hang\.test\.js$/m, what);
+    assert.match(progress, /^file ended: .*a\.test\.js$/m, what);
+    assert.doesNotMatch(progress, /^file ended: .*hang\.test\.js$/m, what);
+    const watchdog = fs.readFileSync(path.join(logDir, 'watchdog.log'), 'utf8');
+    assert.match(watchdog, /shard deadline of 0\.1 min reached[\s\S]*processes still running/, what);
+    assert.match(watchdog, /^\S+ {3}\d+ \d+ .*hang\.test\.js/m, `${what}: the dump names the hung file's process`);
+    assert.match(watchdog, /stopped the shard$/m, what);
+  }
 });
 
 test('a durations refresh from a run with a failed shard keeps the old times of the files it did not measure', () => {
