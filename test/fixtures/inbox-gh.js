@@ -9,6 +9,13 @@ if (/^repos\/[^/]+\/[^/]+\/branches\//.test(args[1] || '')) {
   console.log(JSON.stringify({ sha: data.main_head || data.main_runs?.[0]?.head_sha || data.prs?.[7]?.headRefOid }));
   return;
 }
+// A release compares its full run's head with the base head: data.compare names BASE...HEAD pairs.
+const compare = /^repos\/[^/]+\/[^/]+\/compare\/([^.]+)\.\.\.(.+)$/.exec(args[1] || '');
+if (compare) {
+  const data = JSON.parse(readPublished(file, 'utf8'));
+  console.log(JSON.stringify(data.compare?.[`${compare[1]}...${compare[2]}`] || (compare[1] === compare[2] ? 'identical' : 'diverged')));
+  return;
+}
 // Base CI reads run alongside the PR reads, so they only append to their own call log
 // and never rewrite the shared file a concurrent PR read updates.
 if (/^repos\/[^/]+\/[^/]+\/actions\//.test(args[1] || '')) {
