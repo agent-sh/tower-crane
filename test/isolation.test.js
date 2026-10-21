@@ -2375,13 +2375,16 @@ process.exit(r.status ?? 1);
       env: { ...u.env, STUB_RUN: JSON.stringify([
         [process.execPath, '-e', `require('node:fs').renameSync(${JSON.stringify(checkout)}, ${JSON.stringify(`${checkout}-retired`)})`],
         [process.execPath, '-e', show],
+        ['tower-crane', 'task', 'note', 'T1', 'through-the-broker'],
       ]) },
     });
     assert.equal(result.status, 0, result.stderr);
     const seen = u.report();
-    assert.deepEqual(seen.ran.map((r) => [r.code, r.stderr]), [[0, ''], [0, '']]);
+    assert.deepEqual(seen.ran.map((r) => [r.code, r.stderr]), [[0, ''], [0, ''], [0, '']]);
     assert.equal(JSON.parse(fs.readFileSync(shown, 'utf8')).id, 'T1', 'tower-crane answers after the checkout is gone');
     const started = JSON.parse(result.stdout);
+    const note = h.readState('tasks.json').tasks[0].notes.find((n) => n.text === 'through-the-broker');
+    assert.equal(note?.agent, started.agent, 'the broker writes the note after the checkout is gone');
     const home = fs.realpathSync(path.join(h.state, 'homes', started.agent));
     // The policy names no path of the checkout: not the sandbox, the hooks or
     // the credential helper.

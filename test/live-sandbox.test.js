@@ -221,8 +221,11 @@ test('in a real codex sandbox forged state edits fail and the CLI writes through
 // checkout, and retiring that checkout while the worker ran emptied its view
 // of it. The engine here is a copy under the user's home, as ~/.cache holds
 // the orchestrator's, and the user's tower-crane on PATH runs it, as an npm
-// link would. The probe asks tower-crane for the task after the copy is gone.
-function engineCheckout(h) {
+// link would. spawn dispatches from the copy and returns, as the
+// orchestrator's does; the copy is retired once the agent's command runs in
+// its sandbox, which then asks tower-crane for the task and writes a note
+// through the broker.
+function engineCheckout(h, dir) {
   const checkout = path.join(h.env.HOME, '.cache', 'tower-crane-tool');
   for (const name of ['bin', 'lib', 'agents', 'skills', 'standards', 'package.json']) {
     fs.cpSync(path.join(ROOT, name), path.join(checkout, name), { recursive: true });
@@ -230,30 +233,46 @@ function engineCheckout(h) {
   const bin = path.join(h.base, 'user-bin');
   fs.mkdirSync(bin);
   fs.writeFileSync(path.join(bin, 'tower-crane'), `#!/bin/sh\nexec ${node} ${JSON.stringify(path.join(checkout, 'bin', 'tower-crane.js'))} "$@"\n`, { mode: 0o755 });
-  const retire = () => fs.renameSync(checkout, `${checkout}-retired`);
-  // spawn from the copy, with the hooks h.runAsync adds.
-  const spawn = (env) => new Promise((resolve) => {
-    const child = cp.spawn(process.execPath, ['--require', HOOKS, path.join(checkout, 'bin', 'tower-crane.js'), 'spawn', '--role', 'small', '--task', 'T1', '--wait'], {
-      cwd: h.repo, env: { ...h.env, HOOK_STATE: h.state, HOOK_PROCESSES_DIR: path.join(h.base, 'detached'), ...env, PATH: [env.PATH, bin, h.env.PATH].filter(Boolean).join(path.delimiter) },
+  const [out, ready, retired] = ['seen.json', 'ready', 'retired'].map((n) => path.join(dir, n));
+  // The command marks itself started and waits for the test to retire the copy.
+  const script = `const fs=require("fs"),cp=require("child_process");fs.writeFileSync(${JSON.stringify(ready)},"");`
+    + `const until=Date.now()+100000;while(!fs.existsSync(${JSON.stringify(retired)})&&Date.now()<until)cp.spawnSync("sleep",["1"]);` // wait-allow: runs in the sandbox, where test/signals.js is hidden; the test writes the file within a second of ready
+    + `const run=(a)=>{const r=cp.spawnSync("tower-crane",a,{encoding:"utf8"});return{code:r.status,stdout:r.stdout,stderr:r.stderr,error:r.error&&r.error.code}};`
+    + `fs.writeFileSync(${JSON.stringify(out)},JSON.stringify({show:run(["task","show","T1","--json"]),note:run(["task","note","T1","after-retirement"])}))`;
+  // spawn from the copy, with the hooks h.runAsync adds, and without --wait:
+  // its own process runs the copy, which is gone once it is retired.
+  const spawn = (env) => {
+    const r = cp.spawnSync(process.execPath, ['--require', HOOKS, path.join(checkout, 'bin', 'tower-crane.js'), 'spawn', '--role', 'small', '--task', 'T1', '--json'], {
+      cwd: h.repo, encoding: 'utf8', env: { ...h.env, HOOK_STATE: h.state, HOOK_PROCESSES_DIR: path.join(h.base, 'detached'), ...env, PATH: [env.PATH, bin, h.env.PATH].filter(Boolean).join(path.delimiter) },
     });
-    let stdout = '';
-    let stderr = '';
-    child.stdout.on('data', (d) => (stdout += d));
-    child.stderr.on('data', (d) => (stderr += d));
-    child.on('close', (code) => resolve({ code, stdout, stderr }));
-  });
-  return { checkout, retire, spawn };
+    assert.equal(r.status, 0, r.stderr);
+    return JSON.parse(r.stdout);
+  };
+  // A line still being written has no newline yet; the next check reads it.
+  const exited = (agent) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').split('\n').slice(0, -1)
+    .map((l) => JSON.parse(l)).find((e) => e.cmd === 'spawn exit' && e.detail.agent === agent);
+  // Retires the copy once the command started, then waits for the agent to exit.
+  const retireWhileRunning = async (agent) => {
+    await waitUntil(() => fs.existsSync(ready) || exited(agent), { paths: [dir, h.state], what: 'the probe command started' });
+    const running = fs.existsSync(ready) && !exited(agent);
+    if (running) {
+      fs.renameSync(checkout, `${checkout}-retired`);
+      fs.writeFileSync(retired, '');
+    }
+    const exit = await waitUntil(() => exited(agent), { paths: [h.state], what: `${agent} exited` });
+    return { running, code: exit.detail.code };
+  };
+  return { script, spawn, retireWhileRunning, out };
 }
 
-// A block, so a script that already declares cp or fs can end with it.
-const showProbe = (out) => `{const cp=require("child_process"),fs=require("fs");const r=cp.spawnSync("tower-crane",["task","show","T1","--json"],{encoding:"utf8"});`
-  + `fs.writeFileSync(${JSON.stringify(out)},JSON.stringify({code:r.status,stdout:r.stdout,stderr:r.stderr,error:r.error&&r.error.code}))}`;
-
-function assertShown(h, out) {
+function assertAnswered(h, agent, out) {
   assert.ok(fs.existsSync(out), `the probe ran\n${agentLog(h)}`);
   const seen = JSON.parse(fs.readFileSync(out, 'utf8'));
-  assert.equal(seen.code, 0, `tower-crane answers after the checkout is gone: ${seen.error || seen.stderr}`);
-  assert.equal(JSON.parse(seen.stdout).id, 'T1');
+  assert.equal(seen.show.code, 0, `tower-crane answers after the checkout is gone: ${seen.show.error || seen.show.stderr}`);
+  assert.equal(JSON.parse(seen.show.stdout).id, 'T1');
+  assert.equal(seen.note.code, 0, `tower-crane writes through the broker after the checkout is gone: ${seen.note.error || seen.note.stderr}`);
+  const note = h.readState('tasks.json').tasks[0].notes.find((n) => n.text === 'after-retirement');
+  assert.equal(note?.agent, agent, 'the broker wrote the note as the agent');
 }
 
 test('in a real codex sandbox the agent\'s tower-crane still answers after the dispatching checkout is retired', { skip: realCodexSandbox(), timeout: 300000 }, async (t) => {
@@ -261,43 +280,32 @@ test('in a real codex sandbox the agent\'s tower-crane still answers after the d
   h.init();
   h.ok(['task', 'add', '--title', 'Retired engine probe', '--acceptance', 'the CLI answers']);
   h.ok(['brief', 'set', 'T1', '-'], { input: 'retired engine probe\n' });
-  const engine = engineCheckout(h);
-  const out = path.join(results(h), 'shown.json');
-  // The stand-in retires the copy on the host once spawn wrote the profile,
-  // then starts the sandbox.
-  const bin = standInCodex(h, showProbe(out), 'small', `require('node:fs').renameSync(${JSON.stringify(engine.checkout)}, ${JSON.stringify(`${engine.checkout}-retired`)}); run()`);
-  const r = await engine.spawn({ PATH: bin });
-  assert.equal(r.code, 0, `${r.stderr}\n${agentLog(h)}`);
-  assertShown(h, out);
+  const engine = engineCheckout(h, results(h));
+  const bin = standInCodex(h, engine.script);
+  const started = engine.spawn({ PATH: bin });
+  const r = await engine.retireWhileRunning(started.agent);
+  assert.ok(r.running, `the copy was retired while the agent ran\n${agentLog(h)}`);
+  assert.equal(r.code, 0, agentLog(h));
+  assertAnswered(h, started.agent, engine.out);
 });
 
 test('in a real claude sandbox the agent\'s tower-crane still answers after the dispatching checkout is retired', { skip, timeout: 600000 }, async (t) => {
   const h = login(makeRepo(t));
   h.init();
   h.ok(['task', 'add', '--title', 'Retired engine probe', '--acceptance', 'the CLI answers']);
-  const engine = engineCheckout(h);
   const dir = results(h);
-  const [out, ready, retired, probe] = ['shown.json', 'ready', 'retired', 'probe.js'].map((n) => path.join(dir, n));
-  // The command marks itself started and waits for the test to retire the copy.
-  fs.writeFileSync(probe, `const fs=require("fs"),cp=require("child_process");fs.writeFileSync(${JSON.stringify(ready)},"");`
-    + `const until=Date.now()+60000;while(!fs.existsSync(${JSON.stringify(retired)})&&Date.now()<until)cp.spawnSync("sleep",["1"]);${showProbe(out)}\n`); // wait-allow: runs in the sandbox, where test/signals.js is hidden; the test writes the file within a second
+  const engine = engineCheckout(h, dir);
+  const probe = path.join(dir, 'probe.js');
+  fs.writeFileSync(probe, `${engine.script}\n`);
   h.ok(['brief', 'set', 'T1', '-'], {
     input: `Sandbox probe set up by the owner. Run exactly this one command with the Bash tool, then reply with its exit code and stop. Do not run tower-crane yourself.\n\n${node} ${JSON.stringify(probe)}\n`,
   });
   pinLiveRung(h, 'claude');
-  const spawned = engine.spawn({});
-  let done = false;
-  const timer = setInterval(() => {
-    if (done || !fs.existsSync(ready)) return;
-    done = true;
-    engine.retire();
-    fs.writeFileSync(retired, '');
-  }, 500);
-  let r;
-  try { r = await spawned; } finally { clearInterval(timer); }
-  assert.equal(r.code, 0, `${r.stderr}\n${agentLog(h)}`);
-  assert.ok(done, `the copy was retired while the agent ran\n${agentLog(h)}`);
-  assertShown(h, out);
+  const started = engine.spawn({});
+  const r = await engine.retireWhileRunning(started.agent);
+  assert.ok(r.running, `the copy was retired while the agent ran\n${agentLog(h)}`);
+  assert.equal(r.code, 0, agentLog(h));
+  assertAnswered(h, started.agent, engine.out);
 });
 
 // A project at a deep path: brokers/<agent>/broker.sock is too long for a
@@ -318,14 +326,22 @@ for (const harness of ['claude', 'codex']) {
     const cache = shortCache(t);
     const caller = path.join(cache, 'caller-tmp');
     fs.mkdirSync(caller);
+    // A script runs the command and keeps what the CLI printed, so a failure
+    // shows the CLI's own words rather than the model's account of them.
+    const out = path.join(results(h), 'note.json');
+    const script = `const r=require("child_process").spawnSync("tower-crane",["task","note","T1","through-the-broker"],{encoding:"utf8"});`
+      + `require("fs").writeFileSync(${JSON.stringify(out)},JSON.stringify({code:r.status,stdout:r.stdout,stderr:r.stderr,error:r.error&&r.error.code}))`;
     h.ok(['brief', 'set', 'T1', '-'], {
-      input: `Sandbox probe set up by the owner. Run exactly this one command with your command tool, then reply with its exit code and stop.\n\ntower-crane task note T1 through-the-broker\n`,
+      input: `Sandbox probe set up by the owner. Run exactly this one command with your command tool, then reply with its exit code and stop. Do not run tower-crane yourself.\n\n${node} -e '${script}'\n`,
     });
     pinLiveRung(h, harness);
     const home = os.homedir();
     const env = { ...h.env, HOME: home, USERPROFILE: home, CLAUDE_CONFIG_DIR: '', CODEX_HOME: '', XDG_CACHE_HOME: cache, TMPDIR: caller, TMP: caller, TEMP: caller };
     const r = await h.runAsync(['spawn', '--role', 'small', '--task', 'T1', '--wait'], { env });
     assert.equal(r.code, 0, `${r.stderr}\n${agentLog(h)}`);
+    assert.ok(fs.existsSync(out), `the command ran\n${agentLog(h)}`);
+    const seen = JSON.parse(fs.readFileSync(out, 'utf8'));
+    assert.equal(seen.code, 0, `tower-crane task note: ${seen.error || seen.stderr}`);
     const note = h.readState('tasks.json').tasks[0].notes.find((n) => n.text === 'through-the-broker');
     assert.equal(note?.agent, 'small-T1-1', `the broker wrote it as the spawned agent\n${agentLog(h)}`);
     const event = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l)).find((e) => e.cmd === 'task note');
