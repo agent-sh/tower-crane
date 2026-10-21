@@ -817,7 +817,7 @@ or `not applied (REASON)`, for each of this project's running gates (JSON
 `governor.units[].cpu`).
 
 `node scripts/measure-cpu-weight.js fairness` and
-`node scripts/measure-cpu-weight.js gate WEIGHT [--summary]` measure both on a
+`node scripts/measure-cpu-weight.js gate WEIGHT [--run N] [--summary]` measure both on a
 host with a user manager. They start the scopes with `scopeArguments` in the
 slices `projectSlice` names and pin every busy process to the same four CPUs.
 `fairness` runs a Tower Crane project's gate and agent, another project's agent

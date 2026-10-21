@@ -11,7 +11,7 @@
 //     Four groups contend: a Tower Crane project's gate and agent, another
 //     project's agent and a session scope outside Tower Crane. Each layout
 //     prints every group's CPU-seconds and share.
-//   node scripts/measure-cpu-weight.js gate WEIGHT [--summary]
+//   node scripts/measure-cpu-weight.js gate WEIGHT [--run N] [--summary]
 //     One run of the same tests gate command in a project's slice at WEIGHT,
 //     next to three agent scopes of the same project. Appends wall time and
 //     CPU-seconds to a results file in TMPDIR, which every probe of one gate
@@ -138,7 +138,7 @@ async function fairness() {
 
 const pct = (x) => `${(x * 100).toFixed(1)}%`;
 
-async function gate(weight, summary) {
+async function gate(weight, run, summary) {
   const caller = C.callerSlice();
   const list = cpus();
   const slice = C.projectSlice(caller, path.join(os.tmpdir(), 'measure-project-a'));
@@ -148,14 +148,14 @@ async function gate(weight, summary) {
     for (let i = 1; i <= AGENTS; i++) agents.push(await burner(`agent-${i}`, slice, 100, list, AGENT_THREADS));
     await pause(WARMUP_MS);
     const before = agents.map((a) => usage(a.group));
-    const run = await scope(`gate-${weight}`, slice, weight, { tasks_max: 8192, memory_max_bytes: 6 * 1024 ** 3 },
+    const gated = await scope(`gate-${weight}`, slice, weight, { tasks_max: 8192, memory_max_bytes: 6 * 1024 ** 3 },
       [process.execPath, __filename, 'gate-child', list], 'pipe');
     let text = '';
-    run.child.stdout.on('data', (d) => { text += d; });
-    const code = await run.exited;
+    gated.child.stdout.on('data', (d) => { text += d; });
+    const code = await gated.exited;
     const agentCpu = agents.reduce((sum, a, i) => sum + usage(a.group) - before[i], 0);
     const result = JSON.parse(text.trim().split('\n').pop());
-    row = { weight, cpus: list, slice, ...result, exit: code, agents: AGENTS, agent_threads: AGENT_THREADS, agent_cpu_s: +agentCpu.toFixed(1), at: new Date().toISOString() };
+    row = { weight, ...(run ? { run } : {}), cpus: list, slice, ...result, exit: code, agents: AGENTS, agent_threads: AGENT_THREADS, agent_cpu_s: +agentCpu.toFixed(1), at: new Date().toISOString() };
   } finally { stop(); }
   fs.appendFileSync(RESULTS, JSON.stringify(row) + '\n');
   console.log(JSON.stringify(row));
@@ -193,9 +193,10 @@ async function main() {
   const [mode, ...args] = process.argv.slice(2);
   for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => { stop(); process.exit(1); });
   if (mode === 'fairness') return fairness();
-  if (mode === 'gate' && C.validWeight(Number(args[0]))) return gate(Number(args[0]), args.includes('--summary'));
+  const run = args.includes('--run') ? args[args.indexOf('--run') + 1] : null;
+  if (mode === 'gate' && C.validWeight(Number(args[0]))) return gate(Number(args[0]), run, args.includes('--summary'));
   if (mode === 'gate-child') return gateChild(args[0]);
-  throw new Error('usage: measure-cpu-weight.js fairness | gate WEIGHT [--summary]');
+  throw new Error('usage: measure-cpu-weight.js fairness | gate WEIGHT [--run N] [--summary]');
 }
 
 main().catch((error) => { stop(); console.error(error.stack || error.message); process.exitCode = 1; });
