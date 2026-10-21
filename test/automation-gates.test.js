@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { HUNG_TEST_MS, waitOnRepo, waitUntil, fileWritten, killPid } = require('./signals');
-const { cachedFixture, assertNoProcessesIn } = require('./helpers');
+const { cachedFixture, assertNoProcessesIn, ROOT } = require('./helpers');
 const { gateEvidence } = require('./gate-helpers');
 const { waitFor } = require('./canary');
 const { shellQuote } = require('../lib/gates/common');
@@ -569,6 +569,34 @@ test('a local CI command that times out retries once and reworks when the retry 
   assert.match(h.logs().findLast((e) => e.cmd === 'rework').detail.reason, /^ci failed at [0-9a-f]+: local CI timed out/);
 });
 
+// ginza's T26: main moved during each 2 h local CI run, every run was voided as "merged tree
+// moved", and each void reworked the task and cleared its other gates.
+test('main moving during local CI leaves a pinned pass, the revision and the other gates as they were', (t) => {
+  const h = setup(t, { ci: 'pending' });
+  h.git(['switch', '-q', 'main']);
+  fs.appendFileSync(path.join(h.repo, 'README.md'), 'Base moves during the check.\n');
+  h.git(['commit', '-qam', 'base advances while local CI runs']);
+  const later = h.git(['rev-parse', 'HEAD']);
+  h.git(['reset', '-q', '--hard', 'HEAD~1']);
+  const base = h.git(['rev-parse', 'HEAD']);
+  h.git(['switch', '-q', 'fixture-change']);
+  const script = path.join(h.base, 'local-moves-base.js');
+  fs.writeFileSync(script, `require('node:child_process').execFileSync('git', ['update-ref', 'refs/heads/main', ${JSON.stringify(later)}]);\n`);
+  h.ok(['project', 'set', '--ci-local', JSON.stringify({ command: [process.execPath, script], timeout: 30 })]);
+  h.submit();
+  const revision = h.readState('tasks.json').tasks[0].revision;
+  h.consume();
+  assert.equal(h.git(['rev-parse', 'main']), later, 'main moved during the run');
+  const task = h.readState('tasks.json').tasks[0];
+  assert.equal(task.status, 'submitted');
+  assert.equal(task.revision, revision);
+  assert.ok(!h.logs().some((e) => e.cmd === 'rework'), 'no rework');
+  const ci = task.evidence.filter((e) => e.type === 'ci');
+  assert.deepEqual(ci.map((e) => [e.ok, e.receipt.base_sha]), [[true, base]], 'one run, on the base it read at the start');
+  const report = h.json(['task', 'show', 'T1', '--agent', 'orchestrator']).gates.gates;
+  assert.deepEqual(report.filter((g) => g.type !== 'review').map((g) => [g.type, g.ok]), [['tests', true], ['clean', true], ['ci', true]]);
+});
+
 test('a test that also fails on main retries once, then reworks with the main failure to link', (t) => {
   const h = setup(t, { ci: 'pending' });
   const script = path.join(h.base, 'known-failure.js');
@@ -907,6 +935,47 @@ test('gates retry --from-rework sends a gate that still fails back to rework at 
   const claimed = h.run(['gates', 'retry', 'T1', '--from-rework', '--agent', 'orchestrator']);
   assert.notEqual(claimed.code, 0);
   assert.match(claimed.stderr, new RegExp(`claimed by ${worker.detail.agent}|taken by`));
+});
+
+// A copy of the engine without the local CI gate module, so its CI rerun stops on missing
+// engine code before it records a verdict, as a governor stop does.
+function engineWithoutLocalCI(h) {
+  const root = path.join(h.base, 'engine');
+  for (const name of ['bin', 'lib', 'agents', 'skills', 'standards', 'package.json']) {
+    fs.cpSync(path.join(ROOT, name), path.join(root, name), { recursive: true });
+  }
+  fs.rmSync(path.join(root, 'lib', 'gates', 'local-ci.js'));
+  const preload = path.join(h.base, 'engine-cli.js');
+  fs.writeFileSync(preload, `const M = require('node:module'), resolve = M._resolveFilename;
+M._resolveFilename = function(request, parent, main, options) {
+  if (main) request = ${JSON.stringify(path.join(root, 'bin', 'tower-crane.js'))};
+  return resolve.call(this, request, parent, main, options);
+};`);
+  return ['--require', preload];
+}
+
+test('a restore whose rerun stops before a verdict keeps the restored gates, and the next reaction reruns only the failed one', (t) => {
+  const h = brokenEnvironment(t);
+  const submitted = h.logs().findLast((e) => e.cmd === 'rework').detail.previous_revision;
+  const runs = (type) => h.logs().filter((e) => e.cmd === `check ${type}`).length;
+  const before = { tests: runs('tests'), clean: runs('clean'), ci: runs('ci') };
+  const gates = () => h.json(['task', 'show', 'T1', '--agent', 'orchestrator']).gates.gates
+    .filter((g) => g.type !== 'review').map((g) => [g.type, g.ok]);
+  fs.rmSync(h.broken);
+  const stopped = h.run(['gates', 'retry', 'T1', '--from-rework', '--agent', 'orchestrator'], { pre: engineWithoutLocalCI(h) });
+  assert.notEqual(stopped.code, 0, stopped.stdout);
+  assert.match(stopped.stderr, /Cannot find module/);
+  let task = h.readState('tasks.json').tasks[0];
+  assert.deepEqual([task.status, task.revision], ['submitted', submitted], 'the restore holds');
+  assert.deepEqual(gates(), [['tests', true], ['clean', true], ['ci', false]]);
+  assert.deepEqual(h.logs().findLast((e) => e.cmd === 'restore').detail.rerun.map((r) => r.type), ['ci']);
+
+  h.consume();
+  task = h.readState('tasks.json').tasks[0];
+  assert.deepEqual([task.status, task.revision], ['submitted', submitted], 'the failure the restore ruled out does not rework');
+  assert.equal(h.logs().filter((e) => e.cmd === 'rework').length, 1);
+  assert.deepEqual({ tests: runs('tests'), clean: runs('clean'), ci: runs('ci') }, { ...before, ci: before.ci + 1 });
+  assert.deepEqual(gates(), [['tests', true], ['clean', true], ['ci', true]]);
 });
 
 test('gates retry --from-rework refuses a moved head, a changed acceptance and a rework a person sent', (t) => {
@@ -1502,6 +1571,22 @@ require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'public-http'))}).fet
         assert.equal(require('../lib/processes').processState({ pid: gatePid }), 'exited', 'the gate process was stopped');
         if (!sources) assert.ok(tasks[0].evidence[0].commands.some((c) => c.signal === 'SIGKILL'), 'the command tree was killed');
         assert.equal(tasks[0].evidence[0].confirmed_failure, undefined, 'interruption is not a confirmed test failure');
+      }
+      if (forced && !stage) {
+        // The interrupted run checked nothing: the next reaction runs it again, and its one retry
+        // is still there for a crash of that run.
+        assert.equal(tasks[0].evidence[0].voided, true);
+        for (const id of ['T2', 'T3']) h.ok(['task', 'update', id, '--status', 'cancelled']);
+        const once = path.join(h.base, 'crashed-once');
+        fs.writeFileSync(path.join(h.base, 'tools', 'slow-suite.js'), `const fs = require('node:fs');
+if (!fs.existsSync(${JSON.stringify(once)})) { fs.writeFileSync(${JSON.stringify(once)}, ''); process.kill(process.pid, 'SIGKILL'); }
+`);
+        h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
+        const after = h.readState('tasks.json').tasks[0];
+        assert.deepEqual([after.status, after.revision], ['submitted', tasks[0].revision]);
+        assert.ok(!h.logs().some((e) => e.cmd === 'rework'), 'a void never reworks');
+        assert.deepEqual(after.evidence.filter((e) => e.type === 'tests').map((e) => [e.ok, !!e.voided, !!e.runner_crash]),
+          [[false, true, true], [false, false, true], [true, false, false]]);
       }
     });
   }
