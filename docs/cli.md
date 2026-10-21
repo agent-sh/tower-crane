@@ -565,7 +565,7 @@ deferral skips the remaining tasks of that kind while the other kind can still
 dispatch. Both kinds are checked again on the next pass. A dispatch lock still
 stops the whole batch. Reviewers do not take worker slots, so full worker capacity
 does not prevent their retry. A running reaction for the same task postpones the
-retry. A successful reviewer dispatch, a verdict, or a changed head, revision or
+retry. A tests gate that waits for the review does not hold it. A successful reviewer dispatch, a verdict, or a changed head, revision or
 submission status clears that dispatch debt. A failed PR-body verdict still
 allows a deferred light review to retry. `status` lists `deferred reviewers:
 TASK since AT: REASON`; JSON `deferred_reviewers` carries `id`, `sha`, `revision`,

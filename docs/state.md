@@ -927,6 +927,8 @@ the registry hint expires.
 Paused projects and missing or stale software gates add a `waiting` explanation
 to the deferred reviewer in text and JSON. Its governor `reason` is retained,
 so the original resource deferral and the current retry blocker remain visible.
+A tests gate that waits for the review ([Gate order](#gate-order)) is not a
+blocker: the retry needs only the gates review dispatch needs.
 
 A deferred dispatch or gate refuses with code 3: `TASK: UNIT deferred by the host governor: REASON`. `spawn` asks before any stack read, fetch or worktree; `spawn --ready` stops at the first worker deferral, and automatic refill skips the remaining tasks of the deferred kind. A wait's refill rechecks each kind on every pass and reports a precheck deferral once when it starts. A deferred reaction stays owed in the persistent automation queue, whichever process deferred it; any trusted `wait` retries it in its original turn once five seconds have passed and the governor would admit its unit, as described under [events.jsonl](#eventsjsonl). The registry keeps each deferral's reason, first time and latest time, and drops it when the unit is admitted or after ten minutes without a retry; a stop is kept for an hour. An owed reaction remains in the gate queue and keeps its `governor_deferred` inbox item after that registry hint expires, until its receipt settles or its source no longer matches an active submitted or accepted head.
 
