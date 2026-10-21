@@ -335,6 +335,34 @@ test('incremental head can select no suites without invoking a default full runn
   assert.equal(h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'tests').ok, true);
 });
 
+test('incremental head native reruns preserve accepted receipts in prove and run-only modes', {
+  skip: process.platform === 'win32' && 'POSIX native-crash fixture',
+}, (t) => {
+  const { nativeCrashTest } = require('./gates/helpers');
+  for (const mode of ['prove', 'run-only']) {
+    const h = fixture(t, null);
+    const marker = path.join(h.base, 'native-once');
+    fs.writeFileSync(marker, 'x');
+    h.git(['switch', 'main']);
+    fs.writeFileSync(path.join(h.repo, 'test/crash.test.js'), nativeCrashTest({ marker }));
+    h.git(['add', '.']);
+    h.git(['commit', '-qm', 'native recovery suite']);
+    h.git(['switch', 'fixture-change']);
+    h.git(['merge', '--no-edit', 'main']);
+    repositoryMap(h, { 'docs/**': ['test/crash.test.js', 'test/mapped.test.js'], '**/*.md': [] });
+    h.ok(['project', 'set', '--ci-required', '[]', '--tests-mode', mode]);
+    h.ok(['submit', 'T1', '--sha', h.git(['rev-parse', 'HEAD']), '--agent', 'worker']);
+    assert.equal(check(h).receipt.head_mode, 'full');
+    resubmit(h, 'docs/state.md');
+    fs.rmSync(marker);
+    const result = check(h);
+    assert.equal(result.receipt.head_mode, 'incremental', mode);
+    assert.deepEqual(result.receipt.native_rerun, { step: 'head', files: ['test/crash.test.js'], ok: true }, mode);
+    assert.equal(result.native_crash.length, 1, mode);
+    assert.equal(h.json(['task', 'show', 'T1']).gates.gates.find(g => g.type === 'tests').ok, true, mode);
+  }
+});
+
 test('incremental proof scope preserves acceptable receipts across policy variants', (t) => {
   for (const [name, flags, kept, expected] of [
     ['non-expensive prove', ['--tests-expensive', 'false'], false, 'full'],
