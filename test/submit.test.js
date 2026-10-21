@@ -150,7 +150,7 @@ test('the claimant resubmits a newer head and its gates need evidence at that he
   h.ok(['submit', 'T1', '--sha', oldSha, '--branch', 'fixture-change', '--pr', '7', '--agent', 'w-1']);
   assert.deepEqual(
     events(h).find((event) => event.cmd === 'submit').detail,
-    { previous_sha: null, sha: oldSha, branch: 'fixture-change', pr: 7, host_probes: [], summary: null, scope: { basis: 'repo', named: [], outside: [] } },
+    { previous_sha: null, sha: oldSha, branch: 'fixture-change', pr: 7, host_probes: [], summary: null, pushes_since_last_submit: 1, scope: { basis: 'repo', named: [], outside: [] } },
   );
   const gates = [['tests', 'w-1'], ['clean', 'w-1'], ['review', 'r-1'], ['ci', 'ci']];
   for (const [type, agent] of gates) pass(h, type, agent, oldSha);
@@ -161,6 +161,7 @@ test('the claimant resubmits a newer head and its gates need evidence at that he
   h.git(['add', 'README.md']);
   h.git(['commit', '-q', '-m', 'newer change']);
   const newSha = h.git(['rev-parse', 'HEAD']);
+  h.env.FIXTURE_SHA = newSha;
   const submitted = h.json(['submit', 'T1', '--sha', newSha.toUpperCase(), '--branch', 'fixture-change', '--pr', '7',
     '--summary', 'fixed review feedback', '--agent', 'w-1']);
   assert.deepEqual(
@@ -168,7 +169,7 @@ test('the claimant resubmits a newer head and its gates need evidence at that he
     ['submitted', newSha, 'fixture-change', 7, 'w-1', null, before.revision],
   );
   assert.deepEqual(submitted.evidence, before.evidence);
-  assert.equal(submitted.notes.at(-1).text, 'submitted: fixed review feedback');
+  assert.ok(submitted.notes.some((n) => n.text === 'submitted: fixed review feedback'));
   const resubmit = events(h).filter((event) => event.cmd === 'submit').at(-1);
   assert.deepEqual(
     [resubmit.task, resubmit.agent, resubmit.detail.previous_sha, resubmit.detail.sha],

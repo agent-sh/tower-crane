@@ -108,6 +108,8 @@ if (args[0] === 'pr' && args[1] === 'merge') {
   console.log(JSON.stringify({id: 1, status: 'completed'}));
 } else if (args[0] === 'api' && /\\/merge-async\\/\\d+$/.test(args[1])) {
   console.log(JSON.stringify({id: 1, status: 'completed'}));
+} else if (args[0] === 'api' && args[1].includes('/actions/runs?branch=fixture-change')) {
+  // The current head is published before its first workflow starts.
 } else if (args[0] === 'pr') {
   const pr = args[2];
   console.log(JSON.stringify({
