@@ -254,3 +254,29 @@ if(process.argv[1]===${JSON.stringify(BIN)}&&process.argv[2]==='wait'){
   assert.deepEqual(before, [], 'the controller registered before its spawn was recorded');
   assert.equal(records().length, 1, `controller ${controller.pid} started its wait without registering`);
 });
+
+test('only a spawned identity inside its startup window waits for its own spawn record', async (t) => {
+  const { awaitSpawnRecord } = require('../lib/authority');
+  const h = controllerHome(t);
+  const agent = 'orchestrator-T1-1';
+  const soon = () => String(Date.now() + 200);
+  const env = (extra = {}) => ({ TOWER_CRANE_AGENT: agent, TOWER_CRANE_STATE: h.state, TOWER_CRANE_STARTUP_DEADLINE: soon(), ...extra });
+  const rows = [
+    ['spawn not recorded yet', () => ({ agent, env: env() }), true],
+    ['no startup deadline', () => ({ agent, env: env({ TOWER_CRANE_STARTUP_DEADLINE: undefined }) }), false],
+    ['deadline passed', () => ({ agent, env: env({ TOWER_CRANE_STARTUP_DEADLINE: String(Date.now() - 1) }) }), false],
+    ['another identity than the spawned one', () => ({ agent: 'worker-T1-1', env: env() }), false],
+    ['another state directory', () => ({ agent, env: env(), stateDir: path.join(h.base, 'other') }), false],
+    ['plain orchestrator name', () => ({ agent: 'orchestrator', env: env({ TOWER_CRANE_AGENT: 'orchestrator' }) }), false],
+    ['owner', () => ({ agent: 'owner', env: env({ TOWER_CRANE_AGENT: 'owner' }) }), false],
+  ];
+  // Each row reads the clock when it runs: a waiting row uses up the deadline of the next.
+  for (const [name, ctx, waits] of rows) {
+    let done = false;
+    const pending = awaitSpawnRecord({ stateDir: h.state, ...ctx() }).then(() => { done = true; });
+    // A command that does not wait resolves before any timer runs.
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(!done, waits, name);
+    await pending;
+  }
+});
