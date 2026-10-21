@@ -10,7 +10,7 @@ let skew = 0;
 Date.now = () => now() + skew;
 const BIN = path.join(__dirname, '..', '..', 'bin', 'tower-crane.js');
 const { ownerKeyFile, ownerProject } = require('../../lib/authority');
-const { updateJson, readPublished } = require('../atomic-file');
+const { updateJson, readPublished, writeAtomic } = require('../atomic-file');
 
 if (process.env.TEST_STACK_DEFER_OBSERVE) {
   require('../../lib/stack').observe = () => {};
@@ -22,7 +22,7 @@ if (process.env.TEST_STACK_DIRTY_AFTER_MERGE) {
   C.git = async (ctx, cwd, args, opts) => {
     const result = await git(ctx, cwd, args, opts);
     if (result.ok && args[0] === 'merge' && args.includes('--no-ff')) {
-      fs.writeFileSync(process.env.TEST_STACK_DIRTY_AFTER_MERGE, 'pending edits\n');
+      writeAtomic(process.env.TEST_STACK_DIRTY_AFTER_MERGE, 'pending edits\n');
     }
     return result;
   };
