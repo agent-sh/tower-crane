@@ -441,6 +441,48 @@ test('base CI observations expire into one pending summary without active PRs or
     'an expired failed base read also needs a refresh');
 });
 
+test('pending GitHub actions reread recent refreshes or perform one bounded observation without dispatch', (t) => {
+  for (const row of [
+    { name: 'cold', at: null, observe: true },
+    { name: 'recent refresh', age: 10000, observe: false },
+    { name: 'between healthy passes', age: 59000, observe: false },
+    { name: 'overdue refresh', age: 61000, observe: true },
+    { name: 'stopped follower', age: 180000, observe: true },
+    { name: 'invalid timestamp', at: 'invalid', observe: true },
+    { name: 'future timestamp', at: '2999-01-01T00:00:00.000Z', observe: true },
+  ]) {
+    const h = setup(t);
+    h.add(`Ready during ${row.name}`);
+    h.refresh();
+    const now = Date.now();
+    const clock = path.join(h.base, 'pending-clock');
+    fs.writeFileSync(clock, String(now));
+    h.env.HOOK_CLOCK_FILE = clock;
+    const inboxFile = path.join(h.state, 'inbox-github-cache.json');
+    const baseFile = path.join(h.state, 'main-ci-cache.json');
+    if (row.name === 'cold') fs.rmSync(inboxFile, { force: true });
+    else {
+      const cache = JSON.parse(fs.readFileSync(inboxFile, 'utf8'));
+      cache.read_at = row.at || new Date(now - row.age).toISOString();
+      fs.writeFileSync(inboxFile, JSON.stringify(cache));
+    }
+    const base = JSON.parse(fs.readFileSync(baseFile, 'utf8'));
+    base.read_at = '2000-01-01T00:00:00.000Z';
+    fs.writeFileSync(baseFile, JSON.stringify(base));
+    const pending = h.inbox(false).items.find((i) => i.kind === 'github_pending');
+    assert.ok(pending, row.name);
+    assert.deepEqual(pending.action.argv, row.observe
+      ? ['wait', '--inbox', '--observe', '--timeout', '1'] : ['inbox'], row.name);
+    const before = h.logs().length;
+    const tasks = h.readState('tasks.json').tasks;
+    const action = h.run([...pending.action.argv, '--agent', 'orchestrator']);
+    assert.ok([0, 2].includes(action.code), `${row.name}: ${action.stderr}`);
+    assert.deepEqual(h.readState('tasks.json').tasks, tasks, `${row.name}: ready work stays untouched`);
+    assert.ok(h.logs().slice(before).every((e) => !['spawn', 'automation', 'automation reconcile'].includes(e.cmd)),
+      `${row.name}: resolving unread data must not start work or software reactions`);
+  }
+});
+
 test('ack-before includes the cutoff, filters kinds and leaves newer items and findings', (t) => {
   const h = setup(t);
   const task = h.add('Cutoff input');
