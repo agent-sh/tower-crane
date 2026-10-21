@@ -39,15 +39,21 @@ if (role === 'caller') {
   const extra = kind === 'supervisor' ? ['spawn-monitor.js']
     : kind === 'wait' ? ['tower-crane.js', 'wait'] : ['tower-crane.js', 'check'];
   const dispatched = launch('managed', env, extra);
-  if (!process.env.TC_UNRECORDED_FIXTURE) {
-    dispatched.once('spawn', async () => {
+  // A dispatch returns only once its supervisor's identity is on record. On Windows
+  // that identity is a CIM query of a second or more, longer than this owner's 400 ms.
+  const recorded = process.env.TC_UNRECORDED_FIXTURE ? Promise.resolve()
+    : new Promise(resolve => dispatched.once('spawn', resolve)).then(async () => {
+      // Stands in for a slow CIM query where the identity is a fast /proc read.
+      await new Promise(resolve => setTimeout(resolve, Number(process.env.TC_IDENTITY_DELAY_MS || 0))); // wait-allow: emulate a slow identity query
       const identity = await C.processIdentity(dispatched.pid);
       updateJson(path.join(dir, 'identities.json'), () => identity ? [identity] : [], []);
     });
-  }
-  launch('ordinary', process.env);
-  setTimeout(() => ending === 'signal' ? process.kill(process.pid, 'SIGTERM') // wait-allow: end the owner before dispatched work completes
-    : process.exit(ending === 'nonzero' ? 7 : 0), 400);
+  const end = () => {
+    launch('ordinary', process.env);
+    setTimeout(() => ending === 'signal' ? process.kill(process.pid, 'SIGTERM') // wait-allow: end the owner before dispatched work completes
+      : process.exit(ending === 'nonzero' ? 7 : 0), 400);
+  };
+  recorded.then(end, end);
 } else if (role === 'managed') {
   const env = { ...process.env };
   delete env.TOWERCRANE_SUPERVISOR;
