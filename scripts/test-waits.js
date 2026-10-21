@@ -1250,7 +1250,7 @@ function killFindings(text, { interposer = false } = {}) {
 // These replace process.kill to fake what a pid probe observes or when a signal
 // lands, and forward every other call to the original. Only their interposer
 // declarations may alias it; see INTERPOSER.
-const KILL_INTERPOSERS = new Set(['test/fixtures/hooks.js', 'test/fixtures/monitor-clock.js', 'test/fixtures/slow-group-kill.js', 'test/spawn-resume.test.js']);
+const KILL_INTERPOSERS = new Set(['test/fixtures/hooks.js', 'test/fixtures/late-kill-probe.js', 'test/fixtures/monitor-clock.js', 'test/fixtures/slow-group-kill.js', 'test/spawn-resume.test.js']);
 
 function checkTestWaits(root) {
   const dir = path.join(root, 'test');
