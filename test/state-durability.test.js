@@ -107,7 +107,7 @@ test('a commit whose log sync fails after its lines are written keeps its change
   assertConsistent(h);
 });
 
-function tornMultiEvent(t, { fileIds } = {}) {
+function checkTornCut(t, { fileIds } = {}) {
   const h = setup(t);
   const cli = fileIds ? windowsIds(t, fileIds) : {};
   const log = path.join(h.state, 'events.jsonl');
@@ -133,15 +133,15 @@ function tornMultiEvent(t, { fileIds } = {}) {
   assertConsistent(h);
 }
 
-test('recovery cuts a torn multi-event append off the log, including a final line missing only its newline', (t) => tornMultiEvent(t));
+test('recovery cuts a torn multi-event append off the log, including a final line missing only its newline', (t) => checkTornCut(t));
 
 // A tool through 0.1.2 wrote the inode as a Number only, rounded past 2^53.
-test('recovery cuts a torn append that a 0.1.2 manifest describes when file ids pass 2^53, as on Windows', (t) => tornMultiEvent(t, { fileIds: 'rounds' }));
+test('recovery cuts a torn append that a 0.1.2 manifest describes when file ids pass 2^53, as on Windows', (t) => checkTornCut(t, { fileIds: 'rounds' }));
 
 // What a tool through 0.1.2 checks before it cuts: the manifest's dev and ino
 // equal the log's Number stat. A manifest without them would leave the torn
 // lines to such a tool.
-function manifestFor012(t, { ids } = {}) {
+function checkManifestFor012(t, { ids } = {}) {
   const h = setup(t);
   const cli = ids ? windowsIds(t, ids) : {};
   const r = h.run(['task', 'note', 'T1', 'torn note'], { ...cli, hooks: { HOOK_DIE_COMMIT: 'staged' } });
@@ -171,10 +171,10 @@ test('simulated Windows ids round a Number ino once, from the exact id, when the
   finally { fs.closeSync(fd); }
 });
 
-test('a commit manifest keeps the Number inode a 0.1.2 tool compares before it cuts', (t) => manifestFor012(t));
+test('a commit manifest keeps the Number inode a 0.1.2 tool compares before it cuts', (t) => checkManifestFor012(t));
 
 for (const ids of ['rounds', 'exact']) {
-  test(`a commit manifest keeps the Number inode a 0.1.2 tool compares for a file id past 2^53 that ${ids === 'rounds' ? 'a Number rounds' : 'a Number keeps'}, as on Windows`, (t) => manifestFor012(t, { ids }));
+  test(`a commit manifest keeps the Number inode a 0.1.2 tool compares for a file id past 2^53 that ${ids === 'rounds' ? 'a Number rounds' : 'a Number keeps'}, as on Windows`, (t) => checkManifestFor012(t, { ids }));
 }
 
 test('an add that failed after its commit point keeps its brief, and only then', (t) => {
