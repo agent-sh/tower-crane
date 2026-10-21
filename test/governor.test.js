@@ -674,7 +674,7 @@ global.Date = class extends NativeDate {
     const blocked = row.completion
       ? h.run(['ci', 'completed', 'T2', '--sha', h.sha, '--agent', 'orchestrator'], { env })
       : h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator'], { env });
-    assert.equal(blocked.code, row.completion ? 0 : 2, blocked.stderr);
+    assert.equal(blocked.code, row.completion ? 0 : 2, `signal ${blocked.signal}: ${blocked.stderr}`);
     assert.ok(logs().some((e) => e.cmd === 'automation' && e.task === 'T2' && e.detail.phase === 'running'), 'T2 reaction started while T1 was held');
     assert.equal(logs().filter((e) => e.cmd === 'automation' && e.detail.source === original && e.detail.phase === 'running').length, 1, 'held work took no new executor');
     if (row.failed) assert.equal(h.readState('tasks.json').tasks.find((task) => task.id === 'T2').status, 'rework');
@@ -688,7 +688,7 @@ global.Date = class extends NativeDate {
     const retryAt = Math.max(...logs().filter((e) => e.cmd === 'automation' && e.detail.governor).map((e) => e.detail.governor.until)) + 1;
     writeClock(retryAt);
     const resumed = h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator'], { env });
-    assert.equal(resumed.code, 2, resumed.stderr);
+    assert.equal(resumed.code, 2, `signal ${resumed.signal}: ${resumed.stderr}`);
     const starts = logs().filter((e) => e.cmd === 'automation' && e.detail.phase === 'running');
     const retried = starts.findIndex((e, i) => i > 0 && e.detail.source === original);
     assert.ok(retried > 0, 'the original source resumed');
