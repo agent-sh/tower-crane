@@ -210,12 +210,15 @@ test('probes use gate resource caps in all tests modes and run before proof reve
 test('workers and orchestrators leave host checks and cleanup to the gates', () => {
   const work = fs.readFileSync(path.join(ROOT, 'skills/tower-crane-work/SKILL.md'), 'utf8');
   const orchestrator = fs.readFileSync(path.join(ROOT, 'agents/tower-crane-orchestrator.md'), 'utf8');
-  for (const text of [work, orchestrator]) {
-    assert.match(text, /--host-probe/);
-    assert.match(text, /leave cleanup to the clean gate/i);
-    assert.match(text, /do not open a decision/);
-    assert.match(text, /PR body.*pending/);
+  for (const [role, text] of [['worker', work], ['orchestrator', orchestrator]]) {
+    const fallback = text.split('\n').find(line => line.includes('--host-probe') && line.includes('do not open a decision'));
+    assert.ok(fallback, `${role}: host fallback instructions exist`);
+    assert.match(fallback, /when .*cannot run.*sandbox.*cleanup/i, role);
+    assert.match(fallback, /leave cleanup to the clean gate/i, role);
+    assert.match(fallback, /PR body.*pending/, role);
   }
+  assert.match(work, /run the pinned `gates\.clean_cmd` when your sandbox can reach it/i,
+    'worker: reachable cleanup runs locally before submission');
   assert.doesNotMatch(work, /run the configured cleanup tool if enabled/);
 });
 
