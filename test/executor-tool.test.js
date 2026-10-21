@@ -110,6 +110,8 @@ test('a supervisor whose agent exits runs only its own task\'s reactions; the wa
   // Both supervisors, the worker's and the reviewer's it dispatched, exit.
   const monitors = h.logs().filter((e) => e.cmd === 'spawn' && e.task === 'T1').map((e) => e.detail);
   assert.deepEqual(monitors.map((d) => d.role), ['worker', 'reviewer']);
+  // Each agent's snapshot is a copy of the dispatching tool, and its spawn records it.
+  for (const d of monitors) assert.deepEqual({ ...d.tool, path: undefined }, { ...Tool.current(), path: undefined }, d.agent);
   for (const d of monitors) {
     await waitUntil(() => P.processState({ pid: d.monitor_pid, host: d.host, start_ticks: d.monitor_start_ticks }) === 'exited',
       { what: `${d.agent}'s supervisor did not exit` });

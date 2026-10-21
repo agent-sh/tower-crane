@@ -519,9 +519,10 @@ only when that task heads the merge line; the wait host runs the rest, woken
 by the accept or merge the supervisor records. An executor whose tool is
 behind the project's engine tool ([state.md](state.md#executor-tool)) runs
 no reaction: it queues the notifications it read for a current executor and
-says so once on stderr. Its `check`, `accept`, `merge`, `merge --accepted`,
-`spawn` and refill refuse with `refused: this tool (VERSION SHA) is behind
-the project's engine (VERSION SHA)`. Restart a wait host after upgrading.
+says so once on stderr. Its `check`, `accept`, `merge`, `merge --accepted`
+and `spawn` refuse with `refused: this tool (VERSION SHA) is behind the
+project's engine (VERSION SHA)`, and its refill dispatches nothing and says
+so once. Restart a wait host after upgrading.
 `accept` and a real `spawn --role review` also send a current independent FAIL
 to full-findings rework and exit 1, rather than repeating review at that head.
 PR-body-only failures are excepted.
