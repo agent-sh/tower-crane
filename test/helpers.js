@@ -517,7 +517,7 @@ function context(t, base, options = {}) {
               let socket;
               try { ({ socket } = JSON.parse(readPublished(file, 'utf8'))); }
               catch (error) { if (error.code === 'ENOENT' || error instanceof SyntaxError) continue; throw error; }
-              if (typeof socket === 'string' && path.basename(socket) === 's' && /^tower-crane-[A-Za-z0-9]{6}$/.test(path.basename(path.dirname(socket)))) {
+              if (typeof socket === 'string' && path.basename(socket) === 's' && /^(?:tower-crane-[A-Za-z0-9]{6}|tc-[0-9a-f]{12})$/.test(path.basename(path.dirname(socket)))) {
                 fs.rmSync(path.dirname(socket), { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
               }
             }
