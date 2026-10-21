@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { cachedFixture } = require('./helpers');
+const { readPublished } = require('./atomic-file');
 const { gateFixture, gateEvidence } = require('./gate-helpers');
 const FinalReview = require('../lib/final-review');
 
@@ -47,7 +48,7 @@ function gatesPass(h, env) {
   h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--ok', '--sha', h.sha, '--agent', 'r-1']);
 }
 
-const runs = (h) => (fs.existsSync(h.log) ? fs.readFileSync(h.log, 'utf8').trim().split('\n').map(JSON.parse) : []);
+const runs = (h) => (fs.existsSync(h.log) ? readPublished(h.log, 'utf8').trim().split('\n').map(JSON.parse) : []);
 const task = (h) => h.readState('tasks.json').tasks[0];
 const finals = (h) => task(h).evidence.filter((e) => e.type === 'final-review');
 const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
