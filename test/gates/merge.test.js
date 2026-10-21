@@ -93,8 +93,9 @@ test('a release merge requires a green full run at or after the base head, whate
         title: 'Release 0.2.0', files: [{ path: 'CHANGELOG.md' }], mergeCommit: merged ? { oid: MERGED } : null }));
       if (args[0] === 'api' && args[1].includes('/actions/workflows?')) return result(JSON.stringify({ id: 11, state: 'active', path: '.github/workflows/ci.yml' }));
       if (args[0] === 'api' && args[1].endsWith('/branches/main')) return result(JSON.stringify({ sha: HEAD }));
-      if (args[0] === 'api' && args[1].endsWith(`/compare/${HEAD}...${AHEAD}`)) return result(JSON.stringify('ahead'));
-      if (args[0] === 'api' && args[1].endsWith(`/compare/${HEAD}...${BEHIND}`)) return result(JSON.stringify('behind'));
+      // gh prints a string --jq result raw.
+      if (args[0] === 'api' && args[1].endsWith(`/compare/${HEAD}...${AHEAD}?per_page=1`)) return result('ahead\n');
+      if (args[0] === 'api' && args[1].endsWith(`/compare/${HEAD}...${BEHIND}?per_page=1`)) return result('behind\n');
       if (args[0] === 'api' && args[1].includes('/actions/runs?')) {
         const event = new URL(`https://x/${args[1]}`).searchParams.get('event');
         return result([push, ...runs].filter((r) => r.event === event).map(JSON.stringify).join('\n'));

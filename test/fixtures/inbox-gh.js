@@ -10,10 +10,11 @@ if (/^repos\/[^/]+\/[^/]+\/branches\//.test(args[1] || '')) {
   return;
 }
 // A release compares its full run's head with the base head: data.compare names BASE...HEAD pairs.
-const compare = /^repos\/[^/]+\/[^/]+\/compare\/([^.]+)\.\.\.(.+)$/.exec(args[1] || '');
+// gh prints a string --jq result raw, not as JSON.
+const compare = /^repos\/[^/]+\/[^/]+\/compare\/([^.]+)\.\.\.([^?]+)/.exec(args[1] || '');
 if (compare) {
   const data = JSON.parse(readPublished(file, 'utf8'));
-  console.log(JSON.stringify(data.compare?.[`${compare[1]}...${compare[2]}`] || (compare[1] === compare[2] ? 'identical' : 'diverged')));
+  console.log(data.compare?.[`${compare[1]}...${compare[2]}`] || (compare[1] === compare[2] ? 'identical' : 'diverged'));
   return;
 }
 // Base CI reads run alongside the PR reads, so they only append to their own call log
