@@ -32,6 +32,18 @@ const SANDBOX_MOUNTS = [
 // The repository tracks this file, so the sandbox never leaves a placeholder in its place.
 const TRACKED_SETTINGS = '.claude/settings.json';
 
+test('cache roots nested under a worker scratch remain explicit roots', { skip: process.platform === 'win32' && 'Windows uses LOCALAPPDATA' }, () => {
+  const home = path.join(ROOT, 'fixture-home');
+  for (const kind of ['tasks', 'agents']) {
+    const inherited = path.join(home, '.cache', 'tower-crane', kind, '012345abcdef', 'T1');
+    for (const [cache, expected] of [
+      [inherited, path.join(home, '.cache')],
+      [path.join(inherited, 'test-cache'), path.join(inherited, 'test-cache')],
+      [path.join(inherited, 'fixtures', 'home', '.cache'), path.join(inherited, 'fixtures', 'home', '.cache')],
+    ]) assert.equal(A.cacheDir({ XDG_CACHE_HOME: cache }, home), expected, `${kind}: ${cache}`);
+  }
+});
+
 // A user home holding what must never reach a tower-crane agent: memory and
 // instruction files, hooks, an MCP server, approved-command rules, and
 // credentials that must reach it only through a link.
@@ -439,7 +451,9 @@ test('research Claude gets native or explicit web MCP tools with worker file and
     const ownHome = path.dirname(report.home);
     // Outside the user's home it reopens only the agent's own home and broker directory.
     // And under /run, which it hides, the resolver (runReads).
-    assert.deepEqual(allowRead.filter((p) => !p.startsWith(fs.realpathSync(u.home) + path.sep)), [ownHome, path.join(h.state, 'brokers', path.basename(ownHome)), ...A.runReads(u.env)]);
+    assert.ok(shared.allowWrite.includes(report.socketDir));
+    shared.allowWrite = shared.allowWrite.filter((p) => p !== report.socketDir);
+    assert.deepEqual(allowRead.filter((p) => p !== report.socketDir && !p.startsWith(fs.realpathSync(u.home) + path.sep)), [ownHome, path.join(h.state, 'brokers', path.basename(ownHome)), ...A.runReads(u.env)]);
     assert.ok(shared.denyWrite.includes(h.state));
     // A mask on a path the host lacks leaves a placeholder there, so only existing paths are masked.
     for (const p of [...shared.denyRead, ...shared.denyWrite]) assert.ok(fs.existsSync(p), `${p} is masked but missing`);
@@ -504,6 +518,8 @@ test('research Codex explicitly enables live search with worker file and git con
     assert.equal(rules[path.join(h.state, 'brokers')], 'none');
     assert.equal(rules[path.join(h.state, 'ci-artifacts')], 'none', 'no agent reads unredacted local CI artifacts');
     assert.equal(rules[broker], 'write');
+    assert.equal(rules[report.socketDir], 'write');
+    delete rules[report.socketDir];
     assert.equal(rules[path.join(path.dirname(h.userConfig), 'owner')], 'none', 'no agent reads the owner key');
     for (const [p, mode] of Object.entries(rules)) if (mode === 'none') assert.ok(fs.existsSync(p), `${p} is masked but missing`);
     const cache = Object.keys(rules).filter((k) => path.dirname(path.dirname(k)) === path.join(u.home, '.cache', 'tower-crane', 'tasks'));
@@ -563,8 +579,8 @@ test('a spawned claude agent imports the user\'s global rules by path, loads non
   const box = seen.settings.sandbox;
   assert.equal(seen.args[seen.args.indexOf('--allowedTools') + 1], 'Bash,Read,Grep,Glob');
   assert.deepEqual([box.enabled, box.failIfUnavailable, box.allowUnsandboxedCommands, box.network.allowAllUnixSockets], [true, true, false, true]);
-  // Nothing but its own temp directory, where claude puts its proxy sockets (claudeTmp).
-  assert.deepEqual(box.filesystem.allowWrite.filter((w) => w !== seen.tmpdir), []);
+  // Its own temp and socket directories are the only writable leaves.
+  assert.deepEqual(box.filesystem.allowWrite.filter((w) => w !== seen.tmpdir), [seen.socketDir]);
   assert.equal(box.filesystem.denyWrite[0], h.state, 'the state is read-only');
   assert.ok(box.filesystem.denyWrite.includes(wt), 'the worktree is read-only');
   // claude writes a linked worktree's git directory itself; what runs code stays read-only.
@@ -574,13 +590,16 @@ test('a spawned claude agent imports the user\'s global rules by path, loads non
   assert.ok(box.filesystem.denyRead.includes(path.join(h.state, 'brokers')), 'no agent reads another agent\'s broker token');
   assert.ok(box.filesystem.denyRead.includes(path.join(h.state, 'ci-artifacts')), 'no agent reads unredacted local CI artifacts');
   assert.ok(box.filesystem.denyRead.includes(path.join(path.dirname(h.userConfig), 'owner')), 'no agent reads the owner key');
-  assert.deepEqual(box.filesystem.allowRead.filter((p) => p !== seen.tmpdir), [path.join(u.home, '.claude', 'CLAUDE.md'), home, path.join(h.state, 'brokers', started.agent), ...A.runReads(u.env)],
+  assert.deepEqual(box.filesystem.allowRead.filter((p) => p !== seen.tmpdir && p !== seen.socketDir), [path.join(u.home, '.claude', 'CLAUDE.md'), home, path.join(h.state, 'brokers', started.agent), ...A.runReads(u.env)],
     'only the user\'s global rules under the home, this dispatch home, its own broker directory, the resolver under /run and its own temp directory are readable');
   // /run is hidden whole, with docker's, the buses' and every other host socket in it.
   for (const p of A.runDirs()) assert.ok(box.filesystem.denyRead.includes(p), p);
   // /var/run links to /run on most hosts; the sandbox follows the link into the hidden /run.
   for (const p of ['/var/run/docker.sock', '/run/docker.sock', '/run/dbus/system_bus_socket', '/run/snapd.socket']) {
-    assert.equal(commandsRead(seen, fs.existsSync(p) ? fs.realpathSync(p) : p), false, p);
+    const parent = path.dirname(p);
+    const target = fs.existsSync(p) ? fs.realpathSync(p)
+      : fs.existsSync(parent) ? path.join(fs.realpathSync(parent), path.basename(p)) : p;
+    assert.equal(commandsRead(seen, target), false, p);
   }
   assert.ok(box.filesystem.denyRead.includes(u.home), 'the user\'s home is hidden whole');
   for (const p of [path.join(u.home, '.ssh'), path.join(u.home, '.aws')]) assert.equal(commandsRead(seen, p), false, p);
@@ -1389,6 +1408,25 @@ test('a project sandbox path inside a hidden credential store, or a writable one
   }
 });
 
+test('worker sandboxes grant their short socket leaf without granting writes to siblings', { skip: NO_STUBS }, (t) => {
+  const { h, u, wt } = setup(t);
+  const common = h.git(['rev-parse', '--path-format=absolute', '--git-common-dir'], wt);
+  for (const harness of ['claude', 'codex']) {
+    isolated(h, 'hard', harness);
+    spawn(h, u, 'hard');
+    const seen = u.report();
+    const dir = seen.socketDir;
+    assert.ok(dir, `${harness}: the environment names the granted directory`);
+    assert.ok(Buffer.byteLength(path.join(dir, 'tc-XXXXXX', 's')) <= 103, dir);
+    if (harness === 'claude') assert.ok(seen.settings.sandbox.filesystem.allowRead.includes(dir), 'Claude reopens the socket leaf inside its hidden runtime root');
+    assert.equal(commandsRead(seen, path.join(dir, 's')), true, `${harness}: the socket leaf is readable`);
+    assert.equal(commandsWrite(seen, wt, common, path.join(dir, 's')), true, `${harness}: the socket leaf is writable`);
+    const sibling = path.join(path.dirname(dir), 'tower-crane-another-worker', 's');
+    assert.equal(commandsWrite(seen, wt, common, sibling), false, `${harness}: sibling sockets stay unwritable`);
+    assert.equal(fs.existsSync(dir), false, `${harness}: an exited broker removes its leaf`);
+  }
+});
+
 test('a codex agent\'s temp directory is its own, never the caller\'s TMPDIR or /tmp', { skip: NO_STUBS }, t => {
   // Found in review 2026-10-13: codex resolves :tmpdir from the TMPDIR it
   // starts with, so with the caller's TMPDIR under the home (~/.cache/tct
@@ -1503,11 +1541,17 @@ test('the project\'s env and env_file cannot move a codex agent\'s temp director
   assert.equal(commandsRead(seen, path.join(elsewhere, 'x')), false, 'the directory the project names stays hidden');
 });
 
-test('a codex agent cannot read a caller TMPDIR outside the home that an entry of / exposes', { skip: (NO_STUBS || !fs.existsSync('/var/tmp')) && 'needs /var/tmp' }, t => {
+test('a codex agent cannot read a caller TMPDIR outside the home that an entry of / exposes', { skip: NO_STUBS }, t => {
   // Found in review 2026-10-14: /var/tmp on Linux, or /var/folders through
   // /private on macOS, stayed readable through the entry of / that holds it.
   const { h, u } = setup(t);
-  const caller = fs.mkdtempSync('/var/tmp/tower-crane-caller-');
+  let caller;
+  try {
+    caller = fs.mkdtempSync('/var/tmp/tower-crane-caller-');
+  } catch (error) {
+    if (['ENOENT', 'EACCES', 'EROFS'].includes(error.code)) return t.skip('needs writable /var/tmp');
+    throw error;
+  }
   t.after(() => fs.rmSync(caller, { recursive: true, force: true }));
   const planted = path.join(caller, 'other-task', 'fixture.txt');
   fs.mkdirSync(path.dirname(planted), { recursive: true });
@@ -2229,7 +2273,7 @@ if (args[2] === 'push') {
   process.exit(0);
 }
 if (args[2] === 'fetch') process.exit(0);
-const r = cp.spawnSync('git', args, { env: { ...process.env, PATH: ${JSON.stringify(process.env.PATH)} }, stdio: 'inherit' });
+const r = cp.spawnSync('git', args, { env: { ...process.env, PATH: ${JSON.stringify(h.env.PATH)} }, stdio: 'inherit' });
 process.exit(r.status ?? 1);
 `, { mode: 0o755 });
   const upgrade = `
