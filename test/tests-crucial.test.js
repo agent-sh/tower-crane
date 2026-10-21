@@ -145,12 +145,12 @@ test('the coverage map links a file only a spawned CLI loads, by name, to the te
   };
   write('lib/merge.js', "module.exports = () => 'merged';\n");
   write('lib/unused.js', 'module.exports = 0;\n');
-  write('bin/cli.js', "console.log(require(require('node:path').join(__dirname, '..', 'lib', process.argv[2]))());\n");
+  write('tool/runner.js', "console.log(require(require('node:path').join(__dirname, '..', 'lib', process.argv[2]))());\n");
   write('test/cli.test.js', `const test = require('node:test');
 const assert = require('node:assert/strict');
 const cp = require('node:child_process');
 test('merges', () => {
-  assert.equal(cp.execFileSync(process.execPath, ['bin/cli.js', 'merge'], { encoding: 'utf8' }).trim(), 'merged');
+  assert.equal(cp.execFileSync(process.execPath, ['tool/runner.js', 'merge'], { encoding: 'utf8' }).trim(), 'merged');
 });
 `);
   write('test/other.test.js', "require('node:test')('other', () => {});\n");
@@ -166,7 +166,7 @@ test('merges', () => {
   assert.equal(artifact.sha, head);
   assert.deepEqual(artifact.tests, ['test/cli.test.js', 'test/other.test.js']);
   assert.deepEqual(artifact.map['lib/merge.js'], ['test/cli.test.js'], 'the spawned CLI loaded it');
-  assert.deepEqual(artifact.map['bin/cli.js'], ['test/cli.test.js']);
+  assert.deepEqual(artifact.map['tool/runner.js'], ['test/cli.test.js']);
   assert.equal(artifact.map['lib/unused.js'], undefined, 'no test ran it');
   assert.equal(artifact.map['test/cli.test.js'], undefined, 'a test file is not a source of the map');
   assert.deepEqual(fs.readdirSync(path.join(dir, 'raw')).flatMap((slug) => fs.readdirSync(path.join(dir, 'raw', slug))), [],
@@ -202,7 +202,7 @@ fs.copyFileSync(${JSON.stringify(file)}, path.join(args[args.indexOf('-D') + 1],
   assert.deepEqual({ run: pinned.run, sha: pinned.sha, declared: pinned.declared }, { run: 4242, sha: head, declared: 2 });
   // Measured entries replace the pinned ones; the globs and files coverage cannot see stay as declared.
   assert.deepEqual(p.readState('project.json').tests.map, {
-    '**/*.md': [], 'bin/cli.js': ['test/cli.test.js'], 'docs/cli.md': ['test/other.test.js'], 'lib/merge.js': ['test/cli.test.js'],
+    '**/*.md': [], 'docs/cli.md': ['test/other.test.js'], 'lib/merge.js': ['test/cli.test.js'], 'tool/runner.js': ['test/cli.test.js'],
   });
   const events = fs.readFileSync(path.join(p.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   assert.equal(events.filter((e) => e.cmd === 'tests map refresh').at(-1).detail.authority, 'orchestrator');

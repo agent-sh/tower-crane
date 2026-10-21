@@ -28,15 +28,14 @@ function readWorkflow(root) {
   return fs.readFileSync(path.join(root, '.github', 'workflows', 'ci.yml'), 'utf8').replace(/\r\n/g, '\n');
 }
 
-function workflowMatrix(workflow, event) {
+// Every event that runs the test job runs the whole matrix.
+function workflowMatrix(workflow) {
   // Inclusions apply after exclusions; each one here names a whole job.
   const included = [...workflow.matchAll(/^[ \t]+- \{ os: ([^,}\n]+), node: (\d+), shard: '(\d+\/\d+)' \}$/gm)]
     .map(([, os, node, shard]) => ({ os, node: Number(node), shard }));
 
-  // Read the workflow's event expression and axes, rather than a second matrix in the test.
-  const expression = workflow.match(/os: \$\{\{ fromJSON\(github\.event_name == 'pull_request' && '([^']+)' \|\| '([^']+)'\) \}\}/);
-  assert.ok(expression, 'the OS axis selects its JSON list from the event');
-  const systems = JSON.parse(expression[event === 'pull_request' ? 1 : 2]);
+  // Read the workflow's axes, rather than a second matrix in the test.
+  const systems = JSON.parse(workflow.match(/^\s+os: (\[[^\n]+\])/m)[1].replace(/'/g, '"'));
   const nodes = JSON.parse(workflow.match(/^\s+node: (\[[^\n]+\])/m)[1]);
   const shards = JSON.parse(workflow.match(/^\s+shard: (\[[^\n]+\])/m)[1].replace(/'/g, '"'));
   // An exclusion matches every job that agrees with the keys it names.
@@ -56,7 +55,7 @@ test('package support, CI matrix, and required jobs target Node 24 and 26', () =
   assert.equal(metadata.engines.node, '>=24');
 
   const workflow = readWorkflow(root);
-  const matrix = workflowMatrix(workflow, 'push');
+  const matrix = workflowMatrix(workflow);
   // Each OS and Node pair must run every shard of its split once, and no other shard.
   const jobs = new Map();
   for (const entry of matrix) {
@@ -106,7 +105,7 @@ const EVENTS = {
   'manual run': { event_name: 'workflow_dispatch', ref: 'refs/heads/main', repository: REPO },
 };
 
-test('main pushes and same-repo PRs run only the shared check; fork PRs, tags, daily and manual runs the matrix', () => {
+test('main pushes and same-repo PRs run only the shared check; fork PRs, tags, daily and manual runs the full matrix', () => {
   const workflow = readWorkflow(path.resolve(__dirname, '..'));
   const jobs = [...workflow.split('\njobs:\n')[1].matchAll(/^ {2}([\w-]+):\n/gm)].map((m) => m[1]);
   assert.deepEqual(jobs, ['checks', 'test', 'coverage-map', 'repeats', 'gate-scratch', 'model-swap']);
@@ -114,7 +113,7 @@ test('main pushes and same-repo PRs run only the shared check; fork PRs, tags, d
   for (const [event, expected] of [
     ['main push', ['checks']],
     ['same-repository PR', ['checks']],
-    ['fork PR', ['test']],
+    ['fork PR', full],
     ['release tag', full],
     ['schedule', [...full, 'coverage-map']],
     ['manual run', [...full, 'coverage-map']],
@@ -125,19 +124,16 @@ test('main pushes and same-repo PRs run only the shared check; fork PRs, tags, d
   const coverage = /TC_TEST_COVERAGE_DIR: \$\{\{ (.+) && format\('\{0\}\/coverage', runner\.temp\) \|\| '' \}\}/.exec(jobBlock(workflow, 'test'))?.[1];
   assert.ok(coverage, 'the shard step sets TC_TEST_COVERAGE_DIR from the event and matrix');
   for (const [event, github] of Object.entries(EVENTS)) {
-    const shards = workflowMatrix(workflow, github.event_name).filter((m) => Function('github', 'matrix', `return (${coverage});`)(github, m));
+    const shards = workflowMatrix(workflow).filter((m) => Function('github', 'matrix', `return (${coverage});`)(github, m));
     assert.deepEqual(jobNames(shards), ['schedule', 'manual run'].includes(event) ? REQUIRED.slice(0, 3) : [], event);
   }
   assert.match(jobBlock(workflow, 'coverage-map'), /node scripts\/tests-coverage-map\.js merge --expect 3 /);
   assert.match(jobBlock(workflow, 'coverage-map'), /name: tests-coverage-map\n/);
 });
 
-test('the matrix is the Windows shards on a fork PR and all ten shards otherwise, beside the proofs and the repeat job', () => {
+test('the matrix is all ten shards, beside the proofs and the repeat job', () => {
   const workflow = readWorkflow(path.resolve(__dirname, '..'));
-  assert.deepEqual(jobNames(workflowMatrix(workflow, 'pull_request')), REQUIRED.filter((name) => name.includes('windows-latest')));
-  for (const event of ['push', 'schedule', 'workflow_dispatch']) {
-    assert.deepEqual(jobNames(workflowMatrix(workflow, event)), REQUIRED, event);
-  }
+  assert.deepEqual(jobNames(workflowMatrix(workflow)), REQUIRED);
   assert.equal([...workflow.matchAll(/^ {2}test:\n/gm)].length, 1, 'one test job owns the matrix');
   assert.match(workflow, /^ {4}name: test \(\$\{\{ matrix\.os \}\}, node \$\{\{ matrix\.node \}\}, shard \$\{\{ matrix\.shard \}\}\)$/m);
   const testJob = workflow.split('\n  test:\n')[1].split(/\n {2}[\w-]+:\n/)[0];
@@ -267,9 +263,9 @@ test('CI evidence records an empty-output gh startup failure', (t) => {
   assert.match(r.summary, /no output/);
 });
 
-test('documented fork PR job lists pass CI with Windows-only check runs', (t) => {
+test('documented fork PR job lists pass CI with the full matrix check runs', (t) => {
   const root = path.resolve(__dirname, '..');
-  const names = jobNames(workflowMatrix(readWorkflow(root), 'pull_request'));
+  const names = jobNames(workflowMatrix(readWorkflow(root)));
   const h = fixture(t);
   for (const file of ['docs/state.md', 'docs/cli.md']) {
     const text = fs.readFileSync(path.join(root, file), 'utf8');
