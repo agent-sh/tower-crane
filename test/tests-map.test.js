@@ -438,8 +438,11 @@ test('incremental seed covers every packed markdown path without lexical readers
   ]) {
     const result = select(seed, [{ path: file, status: 'M' }], isTest, available,
       globToRegExp, 'node --test {tests}');
-    assert.equal(result.mode, 'incremental', file);
-    assert.ok(result.tests.includes('test/package.test.js'), `${file} must run the package link check`);
+    if (/^(bin|lib|hooks)\//.test(file)) assert.equal(result.mode, 'full', file);
+    else {
+      assert.equal(result.mode, 'incremental', file);
+      assert.ok(result.tests.includes('test/package.test.js'), `${file} must run the package link check`);
+    }
   }
 });
 
@@ -581,7 +584,7 @@ test('incremental mapping handles changed tests, support files, runners and empt
     ['test/fixtures/input.json', { 'test/fixtures/**': ['test/b.test.js'] }, 'M', 'incremental', ['test/b.test.js']],
     ['test/runner.js', {}, 'M', 'full'],
     ['package.json', {}, 'M', 'full'],
-    ['package.json', { 'package.json': ['test/a.test.js', 'test/b.test.js'] }, 'M', 'incremental', ['test/a.test.js', 'test/b.test.js']],
+    ['package.json', { 'package.json': ['test/a.test.js', 'test/b.test.js'] }, 'M', 'full'],
     ['tools/tests-map.json', { '**': [] }, 'M', 'full'],
     ['value.js', { 'value.js': ['test/missing.test.js'] }, 'M', 'full'],
     ['value.js', { 'value.js': ['value.js'] }, 'M', 'full'],
@@ -597,6 +600,52 @@ test('incremental mapping handles changed tests, support files, runners and empt
       available, globToRegExp, 'node --test {tests}', 'node test/execute.js');
     assert.equal(result.mode, 'full', `broad tests.paths must not hide ${file}`);
   }
+});
+
+test('runtime modules loaded by name or through the CLI always retain full incremental coverage', () => {
+  const { select } = require('../lib/tests-incremental');
+  const { globToRegExp } = require('../lib/gates/tests');
+  const seed = require('../tools/tests-map.json');
+  const suites = ['test', 'test/gates'].flatMap(dir => fs.readdirSync(path.join(ROOT, dir))
+    .filter(name => name.endsWith('.test.js')).map(name => `${dir}/${name}`)).sort();
+  const isTest = p => p.endsWith('.test.js');
+  for (const file of [
+    'lib/gates/merge.js', 'lib/gates/clean.js', 'lib/gates/sources.js',
+    'lib/spawn-monitor.js', 'lib/settings.js', 'lib/hook-stream.js', 'lib/read-guard.js',
+    'lib/new-by-name-handler.js', 'bin/tower-crane.js', 'hooks/tower-crane.mjs',
+    'test/run.js', 'test/global-setup.js', 'test/custom-runner.js',
+  ]) {
+    const command = file === 'test/custom-runner.js' ? `node ${file}` : 'npm test';
+    const result = select(seed, [{ path: file, status: 'M' }], isTest, new Set(suites),
+      globToRegExp, 'node test/run.js {tests}', command);
+    assert.equal(result.mode, 'full', `${file}: an import map cannot prove indirect CLI coverage`);
+    if (file in seed && /^(lib|bin|hooks)\//.test(file)) {
+      assert.deepEqual(seed[file], suites, `${file}: generated coverage must include every CLI suite`);
+    }
+  }
+  assert.ok(seed['lib/gates/merge.js'].includes('test/merge-options.test.js'),
+    'the reported merge.admin plant must reach its regression suite');
+});
+
+test('a resubmission touching a by-name gate runs the pinned full command', (t) => {
+  const h = incrementalFixture(t, { 'lib/gates/merge.js': ['test/mapped.test.js'] });
+  resubmit(h, 'lib/gates/merge.js', 'module.exports = 1;\n');
+  const result = check(h);
+  assert.equal(result.receipt.head_mode, 'full');
+  assert.equal(result.commands.find(c => c.command !== 'git').command, fullCommand);
+  assert.equal(h.json(['task', 'show', 'T1']).gates.gates.find(g => g.type === 'tests').ok, true);
+});
+
+test('incremental CLI contract covers anchors, seed trust and empty head receipts', () => {
+  const cli = fs.readFileSync(path.join(ROOT, 'docs/cli.md'), 'utf8');
+  const state = fs.readFileSync(path.join(ROOT, 'docs/state.md'), 'utf8');
+  for (const text of [cli, state]) {
+    assert.ok(text.includes('incremental_from'));
+    assert.match(text, /empty incremental selections/);
+    assert.match(text, /merge base/);
+  }
+  assert.match(cli, /incremental.*earlier.*full pass/);
+  assert.match(cli, /shared.*runtime.*full/i);
 });
 
 test('repository seed maps docs contract checks from docs paths', () => {
@@ -617,11 +666,29 @@ test('incremental revision lineage stops at scope changes and skips retired revi
     [1, [], [1]],
     [2, [event('rework', { revision: 2, previous_revision: 1 })], [2, 1]],
     [3, [event('rework', { revision: 3, previous_revision: 2 })], [3, 2]],
-    [4, [event('rework', { revision: 4, previous_revision: 1 })], [4, 3]],
+    [4, [event('rework', { revision: 4, previous_revision: 1 })], [4, 1]],
+    [6, [event('rework', { revision: 6, previous_revision: 2 }),
+      event('rework', { revision: 2, previous_revision: 1 })], [6, 2, 1]],
+    [3, [event('rework', { revision: 3, previous_revision: 3 })], [3]],
+    [3, [event('rework', { revision: 3, previous_revision: null })], [3]],
+    [3, [event('rework', { revision: 3, previous_revision: 4 })], [3]],
     [3, [event('rework', { revision: 2 }), event('restore', { from_revision: 2, revision: 1 }),
       event('rework', { revision: 3, previous_revision: 1 })], [3, 1]],
   ]) {
     assert.deepEqual([...revisions({ id: 'T1', revision }, events)], expected);
+  }
+});
+
+test('same-head full receipts use SHA prefix matching in the fallback reason', (t) => {
+  const h = incrementalFixture(t);
+  const initial = h.readState('tasks.json');
+  for (const sha of [h.fullSha, h.fullSha.slice(0, 12), h.fullSha.slice(0, 8)]) {
+    const state = structuredClone(initial);
+    state.tasks[0].evidence.at(-1).sha = sha;
+    h.writeState('tasks.json', state);
+    const result = check(h);
+    assert.equal(result.receipt.head_mode, 'full');
+    assert.doesNotMatch(result.receipt.head_reason, /no longer matches/, sha);
   }
 });
 

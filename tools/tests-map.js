@@ -20,7 +20,7 @@ function imports(file) {
   for (const match of text.matchAll(/require\(['"](\.[^'"]+)['"]\)/g)) {
     const base = path.posix.normalize(path.posix.join(path.posix.dirname(file), match[1]));
     const target = [base, `${base}.js`, `${base}/index.js`].find((p) => files.includes(p));
-    if (target && target !== 'bin/tower-crane.js') deps.add(target);
+    if (target) deps.add(target);
   }
   // Fixtures passed as argv or preload paths do not use require in the caller.
   for (const source of sources.filter((p) => p.startsWith('test/fixtures/'))) {
@@ -46,6 +46,8 @@ for (const suite of suites) {
 for (const file of ['bin/tower-crane.js', 'lib/commands.js', 'lib/state.js', 'lib/util.js', 'lib/project.js', 'lib/tasks.js', 'lib/authority.js', 'package.json', 'test/run.js', 'test/helpers.js', 'test/repo-seed.js']) {
   if (files.includes(file)) map[file] = new Set(suites);
 }
+// The CLI loads handlers by path and starts modules in child processes, beyond static imports.
+for (const source of sources.filter(p => /^(bin|lib|hooks)\//.test(p))) map[source] = new Set(suites);
 // npm discovers packed markdown at runtime, including files the test never names.
 map['**/*.md'] = new Set(['test/package.test.js']);
 map['docs/**'] = new Set(['test/ci-required.test.js', 'test/shared-files.test.js']);
