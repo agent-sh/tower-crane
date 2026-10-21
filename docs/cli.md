@@ -779,7 +779,7 @@ Status hides live-spend lines for accepted or cancelled tasks and readings older
 
 Submitting ends lease renewal and retries; live usage collection and budget enforcement continue until the harness closes. Missing telemetry or a smaller cumulative reading retains known spend and its age, and marks it stale. Only an explicit invocation result may lower that total. A fresh reading restores live status. The open board ages each reading every five seconds, even when no state change arrives: past its stale limit the page draws the agent row and the Spend row stale itself, then asks serve to redraw the queue and status sentence.
 
-A budget stop keeps a ranged task on its current rung and asks the owner about the budget. Live and final spend use configured model prices in the task's per-rung cost breakdown.
+A budget stop keeps a ranged task on its current rung and opens a `kind: "spend"` question about the budget. The spend kind keeps that question with the owner under escalation delegation unless the owner lifts it; the orchestrator cannot answer or withdraw another agent's unlifted spend question. Answering the question still grants no budget change. Live and final spend use configured model prices in the task's per-rung cost breakdown.
 
 `supervision.usage_ms` defaults to 30000 ms and is clamped to a minimum of 1000 ms at runtime. State-file notifications cannot shorten that interval. Unchanged readings write no usage event and retain their age. Each completed attempt is also sampled before a retry or fallback, and the launch checks its budget under the state lock. An initial read failure appears as unavailable telemetry with an error class, without the message or session path.
 
