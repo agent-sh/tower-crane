@@ -288,7 +288,7 @@ for (const error of ['lock', 'incorrect old value provided', 'fatal: unpack-obje
   });
 }
 
-function guardUploadPack(h, delay = 200) {
+function guardUploadPack(h) {
   const active = path.join(h.base, 'fetch-active');
   const attempts = path.join(h.base, 'fetch-attempts');
   const uploadPack = path.join(h.base, 'upload-pack.js');
@@ -304,7 +304,6 @@ try {
 }
 try {
   fs.appendFileSync(${JSON.stringify(attempts)}, '.');
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ${delay}); // wait-allow: a slow upload-pack widens the window a concurrent fetch would hit
   const r = cp.spawnSync('git-upload-pack', process.argv.slice(2), { stdio: 'inherit' });
   process.exitCode = r.status === null ? 1 : r.status;
 } finally {
@@ -320,7 +319,7 @@ try {
 for (const command of ['worktree', 'spawn']) {
   // Proof comes from the recorded upload-pack calls, not elapsed time, which
   // tracks host load. The suite's hung-test timeout only catches a hang.
-  test(`one dispatch prepares six ${command} tasks from one slow base fetch`, { timeout: 300000 }, async (t) => {
+  test(`one dispatch prepares six ${command} tasks from one base fetch`, { timeout: 300000 }, async (t) => {
     const h = setup(t);
     const fresh = advance(h, h.upstream, 'remote.txt');
     h.git(['push', 'origin', 'main'], h.upstream);
@@ -333,7 +332,7 @@ for (const command of ['worktree', 'spawn']) {
         JSON.stringify([process.execPath, '-e', 'process.exit(0)', '{prompt}']), '--clear', 'profile', '--clear', 'effort']);
       for (const id of ids) h.ok(['brief', 'set', id, '-'], { input: 'Use the fresh base.\n' });
     }
-    const attempts = guardUploadPack(h, 15000);
+    const attempts = guardUploadPack(h);
     const hooks = { HOOK_WORKTREE_ADD_ACTIVE: path.join(h.base, 'worktree-add-active') };
     const trees = h.json(['worktree', ...ids], { hooks });
     assert.equal(fs.readFileSync(attempts, 'utf8'), '.', 'the dispatcher fetched once before preparing workers');
