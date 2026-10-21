@@ -265,6 +265,70 @@ test('process identity lookup closes its sampler on macOS and Windows', async (t
   }
 });
 
+test('Windows supervision fixture covers every snapshot consumer', async (t) => {
+  const root = require('./tmp-root').tempRoot();
+  fs.mkdirSync(root, { recursive: true });
+  const dir = fs.mkdtempSync(path.join(root, 'windows-sampler-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const audit = path.join(dir, 'taskkill.jsonl');
+  const script = `
+const assert = require('node:assert/strict');
+const mode = process.argv[1];
+process.argv[1] = 'spawn-monitor.js';
+require(${JSON.stringify(path.join(__dirname, 'fixtures', 'windows-supervision.js'))});
+const C = require(${JSON.stringify(require.resolve('../lib/containment'))});
+const cp = require('node:child_process');
+const children = [];
+const spawn = cp.spawn;
+cp.spawn = (...args) => {
+  const child = spawn(...args);
+  if (args[0] === 'powershell.exe') children.push(child);
+  return child;
+};
+(async () => {
+  if (mode === 'identity') {
+    const identity = await C.processIdentity();
+    assert.equal(identity.pid, process.pid);
+    assert.ok(Number.isSafeInteger(identity.start));
+  } else if (mode === 'keeper') {
+    await C.guardRemaining({ rows: [], limits: { tasks_max: 64, memory_max_bytes: 512 * 1024 ** 2 } });
+  } else if (mode === 'one-shot') {
+    const output = await new Promise((resolve, reject) => cp.execFile('powershell.exe', [], {},
+      (error, stdout) => error ? reject(error) : resolve(stdout)));
+    assert.equal(Number(output.split(' ')[0]), process.pid);
+  } else {
+    const sampler = C.processSampler();
+    try {
+      if (mode === 'concurrent') {
+        const first = sampler.sample();
+        const second = sampler.sample();
+        assert.equal(first, second);
+        const [a, b] = await Promise.all([first, second]);
+        assert.deepEqual(a, b);
+      } else {
+        const first = await sampler.sample();
+        assert.equal(first[0].pid, process.pid);
+        assert.deepEqual(await sampler.sample(), first);
+        assert.deepEqual(await sampler.sample(), first);
+      }
+    } finally { sampler.close(); }
+  }
+  assert.equal(children.length, mode === 'one-shot' ? 0 : 1);
+  for (const child of children) assert.equal(child.killed, true);
+})().catch(error => { console.error(error); process.exitCode = 1; });
+`;
+  for (const mode of ['identity', 'repeated', 'concurrent', 'keeper', 'one-shot']) {
+    await t.test(mode, () => {
+      const result = cp.spawnSync(process.execPath, ['-e', script, mode], {
+        encoding: 'utf8', timeout: 10000, // wait-allow: reject an unframed fixture reply before the sampler's 60-second request deadline
+        env: { ...process.env, TOWER_CRANE_TEST_TASKKILL: audit },
+      });
+      assert.equal(result.status, 0, `${mode}: ${result.stderr || result.error}`);
+      assert.equal(fs.existsSync(audit), false, mode);
+    });
+  }
+});
+
 test('CLI watchdog survives a failed sample but stops after consecutive failures', { skip: process.platform === 'win32' }, (t) => {
   for (const mode of ['once', 'slow', 'always']) {
     const h = cachedFixture(t, 'sampling-cli', h => {
