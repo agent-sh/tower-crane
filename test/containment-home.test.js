@@ -4,9 +4,9 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { cachedFixture, detachedAlive } = require('./helpers');
-const { readPublished } = require('./atomic-file');
-const { killPid, waitOnRepo } = require('./signals');
+const { cachedFixture, detachedAlive, fakeAgentEnv, dispatch, BIN } = require('./helpers');
+const { readPublished, writeAtomic } = require('./atomic-file');
+const { killPid, waitOnRepo, fileWritten, HUNG_TEST_MS } = require('./signals');
 const P = require('../lib/processes');
 
 test('home liveness and output cleanup use different controller ownership tables', {
@@ -30,8 +30,8 @@ test('home liveness and output cleanup use different controller ownership tables
       const child = pid + 1;
       fs.readdirSync = (dir, ...args) => dir === '/proc' ? [String(pid), String(child)] : originalDir(dir, ...args);
       fs.readFileSync = (file, ...args) => {
-        if (file === `/proc/${pid}/stat`) return `${pid} (root) S 1 ${pid}`;
-        if (file === `/proc/${child}/stat`) return `${child} (child) S ${pid} ${child}`;
+        if (file === `/proc/${pid}/stat`) return `${pid} (root) S 1 ${pid} ${Array(16).fill('0').join(' ')} start`;
+        if (file === `/proc/${child}/stat`) return `${child} (child) S ${pid} ${child} ${Array(16).fill('0').join(' ')} child-start`;
         if (file === `/proc/${pid}/environ`) return `${mark}=1\0${supervisor ? P.SUPERVISOR_MARK + '=1\0' : ''}`;
         if (file === `/proc/${child}/environ`) return '';
         if (file === `/proc/${pid}/cmdline`) return command.replace(/ /g, '\0');
@@ -40,9 +40,11 @@ test('home liveness and output cleanup use different controller ownership tables
       };
       const live = supervisor ? [] : [pid, child];
       const cleanup = kind === 'ordinary' ? [pid, child] : [];
-      assert.deepEqual(P.strayIndex([mark], { spareSupervisors: true })([mark]).sort(), live, kind);
-      assert.deepEqual(P.strays(null, mark, { spareSupervisors: true }).sort(), live, kind);
-      assert.deepEqual(P.strays(null, mark, { spareSupervisors: true, spareControllers: true }).sort(), cleanup, kind);
+      const identity = { pid, start: 'start' };
+      assert.deepEqual(P.strayIndex([mark], { spared: supervisor ? [identity] : [] })([mark]).sort(), live, kind);
+      assert.deepEqual(P.strays(null, mark, { spared: supervisor ? [identity] : [] }).sort(), live, kind);
+      assert.deepEqual(P.strays(null, mark, { spared: kind === 'ordinary' ? [] : [identity] }).sort(), cleanup, kind);
+      assert.deepEqual(P.strays(null, mark).sort(), [pid, child], 'names and markers alone grant no retention');
     }
   } finally {
     fs.readFileSync = originalRead;
@@ -50,8 +52,11 @@ test('home liveness and output cleanup use different controller ownership tables
   }
 });
 
-test('a subsequent CLI spawn keeps a retained controller home and prunes it after the controller exits', {
+for (const detached of [true, false]) {
+for (const delayed of [false, true]) {
+test(`a subsequent CLI spawn keeps a ${detached ? 'detached' : 'same-group'} controller home until it exits${delayed ? ' after held startup' : ''}`, {
   skip: process.platform !== 'linux' && 'Linux marked-home liveness',
+  timeout: HUNG_TEST_MS,
 }, async (t) => {
   const h = cachedFixture(t, 'controller-home', h => {
     h.init(['--tasks-max', '64', '--memory-max-bytes', String(512 * 1024 ** 2)]);
@@ -64,50 +69,123 @@ test('a subsequent CLI spawn keeps a retained controller home and prunes it afte
   const dir = path.join(h.base, 'probe');
   fs.mkdirSync(dir);
   const ready = path.join(dir, 'ready.json');
+  const started = path.join(dir, 'controller-started.json');
+  const forked = path.join(dir, 'controller-forked.json');
   const release = path.join(dir, 'release');
-  const done = path.join(dir, 'done.json');
-  const controller = path.join(dir, 'tower-crane.js');
-  const writeAtomic = require.resolve('./atomic-file');
-  fs.writeFileSync(controller, `
-const fs = require('node:fs');
-const {writeAtomic} = require(${JSON.stringify(writeAtomic)});
-const paths = JSON.parse(process.argv[3]);
-writeAtomic(${JSON.stringify(ready)}, JSON.stringify({pid:process.pid,...paths}));
-const timer = setInterval(() => {
-  if (!fs.existsSync(${JSON.stringify(release)})) return;
-  writeAtomic(${JSON.stringify(done)}, JSON.stringify(Object.fromEntries(Object.entries(paths).map(([k,p])=>[k,fs.existsSync(p)]))));
-  clearInterval(timer);
-},25); // wait-allow: controller ends when the test releases it
-setTimeout(()=>process.exit(0),10000).unref(); // wait-allow: independent upper bound for the finite controller
+  const atomic = require.resolve('./atomic-file');
+  const preload = path.join(dir, 'startup.js');
+  fs.writeFileSync(preload, `
+const fs=require('node:fs'),path=require('node:path');
+if(${delayed}&&path.basename(process.argv[1]||'')==='agent.js'){
+ const timeout=global.setTimeout;
+ global.setTimeout=(fn,ms,...args)=>timeout(fn,ms===10000?1:ms,...args);
+}
+if(process.argv[1]===${JSON.stringify(BIN)}&&process.argv[2]==='wait'){
+ require(${JSON.stringify(atomic)}).writeAtomic(${JSON.stringify(started)},JSON.stringify({
+  pid:process.pid,startTicks:require(${JSON.stringify(require.resolve('../lib/processes'))}).identity(process.pid).start_ticks,
+  hostRoot:process.env.TOWER_CRANE_HOST_ROOT
+ }));
+ if(${delayed}){
+  const until=performance.now()+${HUNG_TEST_MS}; // wait-allow: injected startup barrier shares the test's hung backstop
+  while(!fs.existsSync(${JSON.stringify(release)})){
+   if(performance.now()>=until)throw new Error('controller startup was not released');
+   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,25);
+  }
+ }
+}
 `);
+  h.env.NODE_OPTIONS += ` --require ${JSON.stringify(preload)}`;
   const agent = path.join(dir, 'agent.js');
   fs.writeFileSync(agent, `
 const fs=require('node:fs');const path=require('node:path');const cp=require('node:child_process');
+const {fakeAgentEnv}=require(${JSON.stringify(require.resolve('./agent-env'))});
+if(!process.env.TOWER_CRANE_HOST_ROOT)throw new Error('agent lost its fixture host');
+require(${JSON.stringify(atomic)}).writeAtomic(path.join(${JSON.stringify(dir)},'host-'+process.env.TOWER_CRANE_TASK+'.json'),
+ JSON.stringify({hostRoot:process.env.TOWER_CRANE_HOST_ROOT}));
 if(process.env.TOWER_CRANE_TASK==='T1'){
  const home=path.dirname(process.env.TOWER_CRANE_HOOK);
  const paths={home,cache:path.join(home,'home','.cache'),tmp:path.join(home,'tmp')};
  for(const p of Object.values(paths))fs.mkdirSync(p,{recursive:true});
- const child=cp.spawn(process.execPath,[${JSON.stringify(controller)},'wait',JSON.stringify(paths)],{
-  env:{...process.env,HOME:path.join(home,'home'),XDG_CACHE_HOME:paths.cache,TMPDIR:paths.tmp},
-  detached:true,stdio:'ignore'});child.unref();
- setTimeout(()=>process.exit(0),400); // wait-allow: agent exits before its finite controller
+ const env=fakeAgentEnv({...process.env,HOME:path.join(home,'home'),XDG_CACHE_HOME:paths.cache,TMPDIR:paths.tmp});
+ if(env.TOWER_CRANE_HOST_ROOT!==process.env.TOWER_CRANE_HOST_ROOT)throw new Error('nested wait lost its fixture host');
+ const child=cp.spawn(process.execPath,[${JSON.stringify(BIN)},'wait','--observe','--follow','--agent',process.env.TOWER_CRANE_AGENT],{
+  env,
+  detached:${detached},stdio:'ignore'});child.unref();
+ require(${JSON.stringify(atomic)}).writeAtomic(${JSON.stringify(forked)},JSON.stringify({
+  pid:child.pid,startTicks:require(${JSON.stringify(require.resolve('../lib/processes'))}).identity(child.pid).start_ticks
+ }));
+ const registered=()=>{
+  const dir=path.join(process.env.TOWER_CRANE_STATE,'controllers');
+  if(!fs.existsSync(dir)||!fs.readdirSync(dir).some(name=>name.startsWith(child.pid+'-')))return setTimeout(registered,25); // wait-allow: wait for the controller's recorded identity
+  require(${JSON.stringify(atomic)}).writeAtomic(${JSON.stringify(ready)},JSON.stringify({pid:child.pid,...paths}));
+  process.exit(0);
+ };
+ registered();
+ setTimeout(()=>{process.stderr.write('controller '+child.pid+' did not register\\n');process.exit(1);},${HUNG_TEST_MS}).unref(); // wait-allow: registration shares the test's hung backstop
 }
 `);
-  h.ok(['ladder', 'set', 'easy', '--harness', 'command', '--command',
-    JSON.stringify([process.execPath, agent, '{prompt}']), '--clear', 'profile', '--clear', 'effort']);
+  for (const rung of ['easy', 'orchestrator']) {
+    h.ok(['ladder', 'set', rung, '--harness', 'command', '--command',
+      JSON.stringify([process.execPath, agent, '{prompt}']),
+      '--env', JSON.stringify(fakeAgentEnv({ NODE_OPTIONS: h.env.NODE_OPTIONS })),
+      '--clear', 'profile', '--clear', 'effort']);
+  }
   let held;
-  t.after(() => { if (held && detachedAlive({ pid: held.pid })) killPid(held.pid, 'SIGKILL'); });
-  h.ok(['spawn', '--task', 'T1', '--wait']);
+  let controller;
+  let phase = 'spawn';
+  t.after(() => {
+    if (t.signal.aborted) console.error(`controller-home timeout at ${phase}; controller=${controller?.pid || held?.pid || 'unknown'}`);
+    const owned = controller || held || (fs.existsSync(forked) ? JSON.parse(readPublished(forked, 'utf8')) : null);
+    if (owned && detachedAlive(owned)) killPid(owned.pid, 'SIGKILL');
+  });
+  const deadline = new AbortController();
+  const bound = setTimeout(() => deadline.abort(new Error('controller handshake timed out')), HUNG_TEST_MS);
+  const dispatched = dispatch(t, h, { args: ['spawn', '--task', 'T1', '--role', 'orchestrator', '--wait', '--json'] });
+  const pending = dispatched.run;
+  const checked = pending.then(result => {
+    assert.equal(result.code, 0, `spawn --wait exited ${result.code}\nagent stderr:\n${result.stderr}\nstdout:\n${result.stdout}`);
+    return JSON.parse(result.stdout);
+  });
+  let spawned;
+  try {
+    if (delayed) {
+      phase = 'controller startup';
+      controller = await Promise.race([
+        fileWritten(started, { json: true, signal: deadline.signal }),
+        checked,
+      ]);
+      writeAtomic(release, 'release');
+    }
+    phase = 'spawn completion';
+    spawned = await checked;
+    phase = 'controller identity';
+    controller ||= await fileWritten(started, { json: true, signal: deadline.signal });
+  } finally {
+    clearTimeout(bound);
+    deadline.abort();
+    writeAtomic(release, 'release');
+    await pending;
+  }
   held = JSON.parse(readPublished(ready, 'utf8'));
+  assert.equal(controller.pid, held.pid);
+  assert.equal(controller.hostRoot, h.env.TOWER_CRANE_HOST_ROOT, 'nested wait uses the fixture host');
   assert.ok(detachedAlive({ pid: held.pid }));
+  phase = 'prune while live';
   h.ok(['spawn', '--task', 'T2', '--wait']);
   for (const key of ['home', 'cache', 'tmp']) assert.ok(fs.existsSync(held[key]), `${key} pruned while its controller runs`);
-  const kept = h.json(['status']).kept_homes.find(entry => entry.agent === 'worker-T1-1');
-  assert.ok(kept?.pids.includes(held.pid));
-  fs.writeFileSync(release, '');
-  await waitOnRepo(h, () => fs.existsSync(done), 'controller did not finish with its paths intact', { alive: held.pid });
-  assert.deepEqual(JSON.parse(readPublished(done, 'utf8')), { home: true, cache: true, tmp: true });
+  const kept = h.json(['status']).kept_homes.find(entry => entry.agent === spawned.agent);
+  if (detached) assert.ok(kept?.pids.includes(held.pid));
+  else assert.notEqual(P.processGroupState({ pid: spawned.pid }), 'exited');
+  killPid(held.pid, 'SIGTERM');
+  phase = 'controller exit';
   await waitOnRepo(h, () => !detachedAlive({ pid: held.pid }), 'controller did not exit');
+  phase = 'prune after exit';
   h.ok(['spawn', '--task', 'T3', '--wait']);
   for (const key of ['home', 'cache', 'tmp']) assert.equal(fs.existsSync(held[key]), false, `${key} retained after its last user exits`);
+  for (const id of ['T1', 'T2', 'T3']) {
+    assert.equal(JSON.parse(readPublished(path.join(dir, `host-${id}.json`), 'utf8')).hostRoot,
+      h.env.TOWER_CRANE_HOST_ROOT, `${id} spawn uses the fixture host`);
+  }
 });
+}
+}
