@@ -132,6 +132,7 @@ Workers, reviewers and every other identity are refused both. For an operational
 
 | Setting | Class | Changed by |
 | --- | --- | --- |
+| `hot_paths` | operational | `project set --hot-paths JSON`: serialize overlapping task scopes and diffs on repository-relative globs |
 | `gates.tests_cmd`, `gates.clean_cmd`, `gates.tests_proof_cmd` | operational | `project set --tests-cmd`, `--clean-cmd`, `--tests-proof-cmd`; gate self-pinning below |
 | `gates.clean_paths` | operational | `project set --clean-paths`: read-only tool dependency paths for sandboxed agents |
 | `gates.executors` | operational | `project set --executors` |
@@ -1322,9 +1323,19 @@ The gate rejects duplicate URLs (fragments do not distinguish pages), duplicate 
 
 ### Ready and blocked
 
-A task is ready when its status is `todo` or `rework`, every dependency is `accepted`, `needs_owner` is null, and no open decision lists it in `blocks`. Otherwise `tower-crane ready --all` says what blocks it.
+A task is ready when its status is `todo` or `rework`, every dependency is `accepted` or eligible for stacking, `needs_owner` is null, no open decision lists it in `blocks`, and no resource lock or hot path blocks it. Otherwise `tower-crane ready --all` says what blocks it.
 
 Ready tasks come in priority order: urgent first, then most outstanding dependents (direct or transitive, not yet accepted or cancelled), then by id.
+
+`project.json` may contain `hot_paths`, an array of repository-relative globs using the `tests.paths` syntax (`*`, `**`, `?`, and brace alternatives). `init --hot-paths JSON` and `project set --hot-paths JSON` set the list; `[]` disables it and `null` removes the field. It is operational, so the orchestrator or owner can change it. `project show` prints the list; an absent list has no hot-path waits.
+
+A task touches a hot glob when a repository path or glob in its brief's `## Scope` section overlaps it, or its local diff changes a matching file. Directory scopes include their descendants. New paths count before they are tracked. Diffs include committed changes against the merge base of the task's effective base, staged and unstaged worktree changes, and untracked files. Stacked task diffs use the dependency branch while it is unmerged. Paths mentioned in other brief sections do not acquire a hot path.
+
+Tasks in `in_progress`, `submitted`, `rework`, and accepted tasks awaiting merge hold their hot paths. A live unclaimed worker reservation also holds them. Lease expiry frees a worker slot but does not release an in-progress task's hot paths. A ready task waits with `waits on hot path <glob> held by T<n>`, shown by `status`, `ready --all`, and the blocked views. Claims, expired-lease renewals, and worker dispatch enforce the same wait under the state lock, using git snapshots prepared before taking it. An eligible dependent stack may share its parent chain's hot paths; holders outside that chain still block it.
+
+Merge evidence or cancellation releases the holder. Automatic refill skips waiting tasks and dispatches other ready work; later passes reconsider the waiting task after release.
+
+Tower Crane's own project seeds the measured hot paths with `["docs/state.md", "docs/state/*", "docs/cli.md", "bin/tower-crane.js", "lib/automation.js"]`. The two state-document patterns cover the current file and a future split. The orchestrator can replace this list through `project set`.
 
 ### Release for a decision
 
