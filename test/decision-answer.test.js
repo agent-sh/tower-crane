@@ -53,6 +53,43 @@ function setup(t) {
   });
 }
 
+for (const rule of [null, 'owner', 'owner-named-agent', 'owner-technical-delegation', 'orchestrator-escalated-question']) {
+  test(`decision notes retain the answer rule: ${rule || 'legacy'}`, () => {
+    const note = 'Use Redis.\nKeep the extra requirement.';
+    const text = Decisions.line({
+      id: 'D1', status: 'answered', question: 'Which store?', options: [],
+      blocks: [], answer: 'redis', answer_rule: rule, note,
+    });
+    assert.ok(text.split('\n')[0].includes(` -> redis${rule ? ` (${rule})` : ''}`), text);
+    assert.ok(text.endsWith(`\nOrchestrator note:\n${note}`), text);
+  });
+}
+
+for (const note of [null, '', 'Keep this requirement.', 'Use Redis.\nAlso fix the CI gate.']) {
+  test(`delegated answer notes retain the authority notice: ${note === null ? 'absent' : note === '' ? 'empty' : note.includes('\n') ? 'multiline' : 'single line'}`, (t) => {
+    const h = setup(t);
+    h.ok(['ask', '--kind', 'technical', '--setting', 'sandbox', '--question', 'How should we continue?',
+      '--option', 'redis', '--blocks', 'T1', '--agent', 'asking-worker']);
+    const before = h.readState('project.json');
+    const output = h.ok(['answer', 'D1', '--choice', 'redis', '--agent', 'orchestrator',
+      ...(note === null ? [] : ['--note', note])]);
+    const notice = 'This answer authorizes no setting change; any widening still needs a separate owner approval request.';
+    assert.ok(output.startsWith('D1 answered: redis'));
+    assert.ok(output.endsWith(notice), output);
+    if (note) {
+      assert.ok(output.includes(`\nOrchestrator note:\n${note}\n${notice}`), output);
+    } else assert.doesNotMatch(output, /Orchestrator note:/);
+    const decision = h.readState('decisions.json').decisions[0];
+    assert.equal(decision.answer_rule, 'orchestrator-escalated-question');
+    assert.ok(h.ok(['decisions']).includes('redis (orchestrator-escalated-question)'));
+    const message = h.json(['wait', '--after', '0', '--for', 'asking-worker', '--agent', 'asking-worker',
+      '--types', 'worker-message', '--observe', '--timeout', '0']);
+    assert.ok(message.detail.text.includes('redis'));
+    if (note) assert.ok(message.detail.text.endsWith(`\nOrchestrator note:\n${note}`));
+    assert.deepEqual(h.readState('project.json'), before, 'the answer grants no setting change');
+  });
+}
+
 test('a resumed worker gets the answer again after its hook acknowledged it', (t) => {
   const h = setup(t);
   const first = h.json(['spawn', '--task', 'T1', '--wait']);
