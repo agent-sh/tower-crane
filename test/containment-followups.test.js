@@ -370,7 +370,7 @@ test('Windows cleanup preserves retained identities beneath non-kept ancestors',
       const script = Buffer.from(args.at(-1), 'base64').toString('utf16le');
       const targets = /\$t = @\(([\d,]*)\)/.exec(script)[1].split(',').filter(Boolean).map(Number)
         .filter((_, index) => index % 2 === 0);
-      const recursive = script.includes('taskkill.exe /PID $id /T /F');
+      const recursive = script.includes('$t = Expand $t');
       calls.push({ targets, recursive });
       for (const pid of targets) {
         killed.add(pid);

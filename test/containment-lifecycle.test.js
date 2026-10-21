@@ -262,7 +262,7 @@ test('a CLI worker fixture named like a supervisor ends with its worker', async 
   assert.equal(fs.existsSync(path.join(dir, 'ordinary.done')), false);
 });
 
-test('a detached Windows contained agent stops its job tree with taskkill /T', {
+test('a detached Windows contained agent stops its detached descendant with its tree', {
   skip: process.platform !== 'win32' && 'Windows detached process and job behavior',
 }, async t => {
   const h = cachedFixture(t, 'windows-contained-job', h => h.init());
@@ -298,5 +298,5 @@ if(process.argv[2]==='leaf'){
   fs.writeFileSync(go, '');
   await closed;
   assert.equal(child.resourceReason, 'resource-memory-max');
-  await waitOnRepo(h, () => !detachedAlive(leaf), 'taskkill /T stops the detached job descendant');
+  await waitOnRepo(h, () => !detachedAlive(leaf), 'the tree stop stops the detached descendant');
 });

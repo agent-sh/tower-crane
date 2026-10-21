@@ -270,35 +270,42 @@ for (const [harness, scope, logOnly] of [['claude', 'project'], ['claude', 'task
   });
 }
 
-// What a taskkill run leaves decides whether the child's own handle stops it.
-const ETIMEDOUT = Object.assign(new Error('spawnSync taskkill ETIMEDOUT'), { code: 'ETIMEDOUT' });
+// What the tree stop reports for the child decides whether its own handle stops it.
+const ETIMEDOUT = Object.assign(new Error('spawnSync powershell.exe ETIMEDOUT'), { code: 'ETIMEDOUT' });
 for (const [name, result, child, killed] of [
-  ['taskkill stopped the tree', { status: 0 }, { exitCode: null, signalCode: null }, false],
-  ['taskkill failed', { status: 1 }, { exitCode: null, signalCode: null }, true],
-  ['taskkill outlasted its timeout', { status: null, signal: 'SIGTERM', error: ETIMEDOUT }, { exitCode: null, signalCode: null }, true],
-  ['taskkill failed after the child exited', { status: 128 }, { exitCode: 0, signalCode: null }, false],
-  ['taskkill failed after the child was signalled', { status: 1 }, { exitCode: null, signalCode: 'SIGKILL' }, false],
+  ['the stop stopped the child', { status: 0, stdout: '4242 stopped\r\n' }, { exitCode: null, signalCode: null }, false],
+  ['the child was gone at its turn', { status: 0, stdout: '4242 gone\r\n' }, { exitCode: null, signalCode: null }, false],
+  ['the stop failed on the child', { status: 0, stdout: '4242 failed\r\n' }, { exitCode: null, signalCode: null }, true],
+  ['the child was not in the snapshot', { status: 0, stdout: '' }, { exitCode: null, signalCode: null }, true],
+  ['PowerShell failed', { status: 1, stdout: '4242 stopped\r\n' }, { exitCode: null, signalCode: null }, true],
+  ['the stop outlasted its timeout', { status: null, signal: 'SIGTERM', error: ETIMEDOUT }, { exitCode: null, signalCode: null }, true],
+  ['the stop failed after the child exited', { status: 1 }, { exitCode: 0, signalCode: null }, false],
+  ['the stop failed after the child was signalled', { status: 1 }, { exitCode: null, signalCode: 'SIGKILL' }, false],
 ]) {
   test(`a Windows tree stop: ${name}`, () => {
     const P = require('../lib/processes');
     const calls = [];
     const kills = [];
     const target = { pid: 4242, ...child, kill: (signal) => kills.push(signal) };
-    P.windowsKillTree(target, { run: (file, args, options) => { calls.push([file, args, options.timeout]); return result; } });
-    assert.deepEqual(calls, [['taskkill', ['/PID', '4242', '/T', '/F'], 10000]]);
+    P.windowsKillTree(target, { run: (file, args, options) => { calls.push([file, Buffer.from(args.at(-1), 'base64').toString('utf16le'), options.timeout]); return result; } });
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0][0], 'powershell.exe');
+    assert.match(calls[0][1], /^\$t = @\(4242,-1\)\n\$t = Expand \$t @\(Rows\)$/m, 'the child, at the snapshot\'s creation time, and what it started');
+    assert.equal(calls[0][1].includes('taskkill'), false);
+    assert.equal(calls[0][2], 10000);
     assert.deepEqual(kills, killed ? ['SIGKILL'] : []);
   });
 }
 
-test('a budget stop ends the harness when taskkill outlasts its timeout, as on a loaded Windows runner', { skip: process.platform !== 'win32' && 'taskkill is the Windows stop' }, async (t) => {
+test('a budget stop ends the harness when the tree stop outlasts its timeout, as on a loaded Windows runner', { skip: process.platform !== 'win32' && 'the tree stop is the Windows stop' }, async (t) => {
   const h = setup(t, 'claude');
   h.ok(['task', 'update', 'T1', '--budget-tokens', '3500']);
-  const taskkill = path.join(h.base, 'taskkill');
+  const stops = path.join(h.base, 'tree-stops');
   const spawned = h.json(['spawn', '--task', 'T1'], { env: h.liveEnv({
-    LIVE_STEPS: '4', LIVE_EVERY: '300', LIVE_COMPLETE: path.join(h.base, 'complete'), LIVE_TASKKILL_TIMEOUT: taskkill,
+    LIVE_STEPS: '4', LIVE_EVERY: '300', LIVE_COMPLETE: path.join(h.base, 'complete'), LIVE_TREE_STOP_TIMEOUT: stops,
   }) });
   await until(t, h, () => exited(h, spawned.agent), 'the agent was not stopped');
-  assert.ok(fs.readFileSync(taskkill, 'utf8').includes('/T /F'), 'the supervisor ran taskkill');
+  assert.match(fs.readFileSync(stops, 'utf8'), /^\$t = @\(\d+,-1\)$/m, 'the supervisor ran the tree stop');
   assert.ok(events(h).some((e) => e.cmd === 'budget stop'));
   assert.equal(fs.existsSync(h.done), false, 'the agent was stopped before it finished on its own');
   await until(t, h, () => recordedSpend(h).entries?.length && recordedSpend(h).entries.every((e) => !e.live), 'exit usage was not finalized');

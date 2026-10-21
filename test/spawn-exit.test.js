@@ -1,6 +1,6 @@
 'use strict';
 
-const { waitOnRepo, childExit, killPid } = require('./signals');
+const { waitOnRepo, childExit, childClosed, killPid } = require('./signals');
 const { readPublished } = require('./atomic-file');
 
 const test = require('node:test');
@@ -466,6 +466,8 @@ test('the Windows tree of an exited harness keeps only processes it started', ()
 // Windows PowerShell on Windows; on Linux PowerShell 7 when it is installed
 // (GitHub's Ubuntu runners have it), which runs the same script and reads
 // creation times from /proc.
+// Windows hands a freed pid out again within a few hundred new processes.
+const WINDOWS_REUSE_SPAWNS = 400;
 const POWERSHELL = process.platform === 'win32' ? 'powershell.exe'
   : process.platform === 'linux' && cp.spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-Command', 'exit 0'], { stdio: 'ignore', timeout: 300000 }).status === 0 ? 'pwsh' : null;
 
@@ -517,6 +519,75 @@ test('the Windows stop takes one target, skips a target that is gone and leaves 
   ]);
   await childExit(kept, { signal: t.signal });
   assert.equal(reused.exitCode === null && reused.signalCode === null, true, 'a pid with another creation time was stopped');
+});
+
+// A Windows child keeps its exited parent's pid, and a new process can get
+// that pid: 13 and 17 are orphans of earlier holders of pids 10 and 11. The
+// walk follows a link only to a child that started no earlier than its parent,
+// with the creation clock's tick of slack (14).
+test('the Windows tree walk leaves the orphans of an earlier holder of a pid', {
+  skip: !POWERSHELL && 'no PowerShell',
+}, () => {
+  const { WINDOWS_TREE } = require('../lib/processes');
+  const rows = [[10, 1, 1001], [11, 10, 1050], [13, 10, 500], [14, 10, 950], [12, 11, 1100], [17, 11, 700], [16, 13, 600], [20, 1, 1200]];
+  const cases = [
+    ['the snapshot\'s time', [10, -1], [10, 1001, 11, 1050, 14, 950, 12, 1100]],
+    ['the given time', [10, 1001], [10, 1001, 11, 1050, 14, 950, 12, 1100]],
+    ['a pid another process has', [10, 999], [10, 999]],
+    ['a pid not in the snapshot', [99, -1], []],
+    ['a target already reached', [10, -1, 11, 1050, 20, 1200], [10, 1001, 11, 1050, 20, 1200, 14, 950, 12, 1100]],
+    ['an orphan itself', [13, 500], [13, 500, 16, 600]],
+  ];
+  const script = [WINDOWS_TREE, `$rows = @(${rows.map((r) => `,@(${r.join(',')})`).join(' + ')})`,
+    ...cases.map(([, t]) => `[Console]::Out.WriteLine((Expand @(${t.join(',')}) $rows) -join ",")`)].join('\n');
+  const r = cp.spawnSync(POWERSHELL, ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')],
+    { encoding: 'utf8', windowsHide: true, timeout: 300000 });
+  assert.equal(r.status, 0, r.stderr);
+  const lines = r.stdout.split(/\r?\n/).slice(0, cases.length);
+  cases.forEach(([name, , expected], i) => assert.deepEqual(lines[i] ? lines[i].split(',').map(Number) : [], expected, name));
+});
+
+// The grandchild holds the child's output, so the pipe closes only once both
+// have exited, whatever pid Windows gives out meanwhile.
+test('a Windows tree stop ends the child and what it started', {
+  skip: !POWERSHELL && 'no PowerShell',
+}, async (t) => {
+  const { windowsKillTree } = require('../lib/processes');
+  const h = require('./helpers').makeRepo(t);
+  const started = path.join(h.base, 'grandchild');
+  const child = cp.spawn(process.execPath, ['-e', `require('node:child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: ['ignore', 'inherit', 'ignore'], windowsHide: true }); require('node:fs').writeFileSync(${JSON.stringify(started)}, ''); setInterval(() => {}, 1000)`], { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }); // wait-allow: a process tree that runs until it is stopped
+  child.stdout.resume();
+  const closed = childClosed(child, { signal: t.signal });
+  t.after(() => { if (child.exitCode === null && child.signalCode === null) killPid(child.pid, 'SIGKILL'); });
+  await waitOnRepo(h, () => fs.existsSync(started), 'the grandchild did not start', { signal: t.signal });
+  windowsKillTree(child, { timeout: 300000, run: (file, args, options) => cp.spawnSync(POWERSHELL, args, options) });
+  await closed;
+});
+
+// The orphan keeps naming its exited parent, whose pid a new process then
+// gets, as a detached supervisor names its exited dispatch. A stop of the new
+// process must leave the orphan running.
+test('a Windows tree stop leaves the orphan of an earlier holder of its pid', {
+  skip: process.platform !== 'win32' && 'Windows pid reuse',
+}, async (t) => {
+  const { windowsKillTree, windowsCreated } = require('../lib/processes');
+  const parent = cp.spawnSync(process.execPath, ['-e', `const c = require('node:child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore', windowsHide: true }); c.unref(); console.log(process.pid + ' ' + c.pid)`], { encoding: 'utf8', windowsHide: true }); // wait-allow: an orphan that runs until it is stopped
+  const [pid, orphan] = parent.stdout.trim().split(' ').map(Number);
+  const born = windowsCreated([orphan], 300000).get(orphan);
+  assert.equal(Number.isSafeInteger(born), true, `no creation time for the orphan ${orphan}`);
+  t.after(() => { if (windowsCreated([orphan], 300000).get(orphan) === born) killPid(orphan, 'SIGKILL'); });
+  const holders = [];
+  t.after(() => { for (const c of holders) if (c.exitCode === null && c.signalCode === null) c.kill(); });
+  let reused;
+  while (!reused && holders.length < WINDOWS_REUSE_SPAWNS) {
+    const c = cp.spawn('ping.exe', ['-n', '300', '127.0.0.1'], { stdio: 'ignore', windowsHide: true });
+    holders.push(c);
+    if (c.pid === pid) reused = c;
+  }
+  if (!reused) return t.skip(`Windows did not give out pid ${pid} again in ${holders.length} processes`);
+  windowsKillTree(reused, { timeout: 300000 });
+  await childExit(reused, { signal: t.signal });
+  assert.equal(windowsCreated([orphan], 300000).get(orphan), born, 'the stop reached the orphan of the earlier holder of its pid');
 });
 
 test('the Windows stop splits a long target list into calls that fit a Windows command line', async () => {

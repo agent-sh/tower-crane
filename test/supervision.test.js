@@ -988,19 +988,19 @@ test('quiet supervision samples state and progress paths on a seconds-scale inte
 });
 
 describe('supervision completion cases', { concurrency: windowsConcurrency }, () => {
-test('Windows natural exits do not send taskkill to an exited or reused pid', (t) => {
+test('Windows natural exits do not send a tree stop to an exited or reused pid', (t) => {
   const h = setup(t, { failures: 0 });
-  const audit = path.join(h.base, 'taskkill.jsonl');
+  const audit = path.join(h.base, 'tree-stops');
   const hook = path.join(__dirname, 'fixtures', 'windows-supervision.js').replace(/\\/g, '/');
   const result = h.run(['spawn', '--task', 'T1', '--wait'], { env: {
-    NODE_OPTIONS: `--require "${hook}"`, TOWER_CRANE_TEST_TASKKILL: audit,
+    NODE_OPTIONS: `--require "${hook}"`, TOWER_CRANE_TEST_TREE_STOP: audit,
   } });
   if (result.code !== 0) {
     const exit = log(h).findLast((event) => event.cmd === 'spawn exit');
     const output = exit?.detail.log && fs.existsSync(exit.detail.log) ? readPublished(exit.detail.log, 'utf8') : '';
     assert.fail(result.stderr + result.stdout + output + JSON.stringify(exit));
   }
-  assert.equal(fs.existsSync(audit), false, 'taskkill can target a new process after the harness pid is released');
+  assert.equal(fs.existsSync(audit), false, 'a tree stop can target a new process after the harness pid is released');
 });
 
 test('stopping the monitor terminates the process group and kills children that ignore SIGTERM', {
