@@ -9,6 +9,7 @@ const crypto = require('node:crypto');
 const { cachedFixture } = require('./helpers');
 const { gateFixture, gateEvidence } = require('./gate-helpers');
 const Archive = require('../lib/archive');
+const S = require('../lib/state');
 
 const MIB = 1024 * 1024;
 const sha256 = (data) => crypto.createHash('sha256').update(data).digest('hex');
@@ -22,6 +23,7 @@ function setTask(h, id, fields) {
 
 const task = (h, id) => h.readState('tasks.json').tasks.find((t) => t.id === id);
 const manifest = (h, id) => JSON.parse(fs.readFileSync(path.join(h.state, 'archive', id, 'manifest.json'), 'utf8'));
+const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
 const stored = (h, id, rel) => fs.readFileSync(path.join(h.state, 'archive', id, 'files', ...rel.split('/')));
 
 // T1 submitted with PR 7 and every gate passed, so accept goes straight to acceptance; T2 is open.
@@ -121,6 +123,53 @@ test('accept refuses, naming them, when a cited path is missing or over the hard
   setTask(h, 'T1', { notes: [{ at: new Date().toISOString(), agent: 'w-1', text: `fill record: ${h.scratch}/gone.txt` }] });
   h.ok(['accept', 'T1']);
   assert.deepEqual(manifest(h, 'T1').cited, ['gone.txt']);
+});
+
+test('a refused accept is an inbox item, and the orchestrator drops a stale citation with an audit', (t) => {
+  const h = ready(t);
+  fs.mkdirSync(path.join(h.scratch, 'runs'));
+  h.ok(['task', 'note', 'T1', 'probe runs in $XDG_CACHE_HOME/runs and fill record in $XDG_CACHE_HOME/fill.json', '--agent', 'w-1']);
+  const r = h.run(['accept', 'T1']);
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /fill\.json \(missing; cited in a note\); runs \(an empty directory; cited in a note\); restore each in the task scratch, then retry; the orchestrator drops a stale citation with tower-crane accept T1 --drop-citation PATH --reason R/);
+  // A repeat at the same head records no second refusal.
+  assert.equal(h.run(['accept', 'T1']).code, 1);
+  const refusals = () => events(h).filter((e) => e.cmd === 'archive refused');
+  assert.equal(refusals().length, 1);
+  const inbox = () => h.json(['inbox', '--agent', 'orchestrator']).items.filter((i) => i.kind === 'archive_refused');
+  const [entry] = inbox();
+  assert.equal(entry.task, 'T1');
+  assert.deepEqual(entry.paths.map((p) => [p.path, p.reason, p.cited_in]), [['fill.json', 'missing', ['a note']], ['runs', 'an empty directory', ['a note']]]);
+  assert.equal(entry.action.command, 'tower-crane accept T1');
+  assert.equal(entry.drop_citation, "tower-crane accept T1 --drop-citation fill.json --drop-citation runs --reason '<why>'");
+
+  assert.match(h.run(['accept', 'T1', '--drop-citation', 'fill.json']).stderr, /needs --reason/);
+  assert.match(h.run(['accept', 'T1', '--drop-citation', 'fill.json', '--reason', 'never written', '--agent', 'w-1']).stderr, /accept\.drop_citation is operational/);
+  assert.match(h.run(['accept', 'T1', '--drop-citation', 'other.log', '--reason', 'x', '--agent', 'orchestrator']).stderr, /names no cited path: other\.log; cited: fill\.json, runs/);
+  // Dropping one citation still refuses on the other.
+  assert.match(h.run(['accept', 'T1', '--drop-citation', 'fill.json', '--reason', 'x', '--agent', 'orchestrator']).stderr, /cannot be archived: runs \(an empty directory/);
+  h.ok(['accept', 'T1', '--drop-citation', 'fill.json', '--drop-citation', 'runs', '--reason', 'the probe was rerun under T2', '--agent', 'orchestrator']);
+  assert.equal(task(h, 'T1').status, 'accepted');
+  assert.deepEqual(inbox(), []);
+  const m = manifest(h, 'T1');
+  assert.deepEqual(m.cited, []);
+  assert.deepEqual(m.dropped.map((d) => [d.path, d.reason, d.by]), [['fill.json', 'the probe was rerun under T2', 'orchestrator'], ['runs', 'the probe was rerun under T2', 'orchestrator']]);
+  const log = events(h);
+  const accepted = log.findLast((e) => e.cmd === 'accept' && e.task === 'T1');
+  assert.deepEqual(accepted.detail.dropped_citations, ['fill.json', 'runs']);
+  assert.equal(accepted.detail.reason, 'the probe was rerun under T2');
+  const audit = log[log.indexOf(accepted) - 1];
+  assert.equal(audit.cmd, 'setting');
+  assert.deepEqual(audit.detail.settings, { 'accept.drop_citation': 'operational' });
+  // Retirement's refresh keeps the drop and does not cite the paths again.
+  // In process, with the fixture's user config, as retirement calls it.
+  const config = process.env.TOWER_CRANE_CONFIG;
+  process.env.TOWER_CRANE_CONFIG = h.userConfig;
+  let again;
+  try { again = Archive.save({ stateDir: h.state, cwd: h.repo }, S.loadState(h.state), task(h, 'T1'), { reason: 'accept' }); }
+  finally { if (config === undefined) delete process.env.TOWER_CRANE_CONFIG; else process.env.TOWER_CRANE_CONFIG = config; }
+  assert.equal(again.missing_cited, undefined);
+  assert.deepEqual(manifest(h, 'T1').dropped.map((d) => d.path), ['fill.json', 'runs']);
 });
 
 test('$XDG_CACHE_HOME a reviewer or the orchestrator wrote is their own cache and does not block accept', (t) => {
