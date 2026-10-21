@@ -7,6 +7,20 @@ const path = require('node:path');
 const { makeTaskRepo, pinRung } = require('./helpers');
 const { scratchRoot } = require('../lib/scratch-root');
 
+test('command scratch keeps host defaults and selects sandbox temp aliases after explicit overrides', () => {
+  const { commandRoot } = require('../lib/scratch-root');
+  for (const [env, home, platform, expected] of [
+    [{ TMPDIR: '/sentinel', TMP: '/sentinel', TEMP: '/sentinel' }, '/users/me', 'linux', '/users/me/.cache/tower-crane'],
+    [{ TOWER_CRANE_TMP: '/override', TOWER_CRANE_SANDBOX: '1', TMPDIR: '/private' }, '/users/me', 'linux', '/override'],
+    [{ TOWER_CRANE_SANDBOX: '1', TMPDIR: '/private', TMP: '/other' }, '/users/me', 'linux', '/private'],
+    [{ TOWER_CRANE_SANDBOX: '1', TMP: '/private' }, '/users/me', 'linux', '/private'],
+    [{ TOWER_CRANE_SANDBOX: '1', TEMP: '/private' }, '/users/me', 'darwin', '/private'],
+    [{ TOWER_CRANE_SANDBOX: '1', TMPDIR: 'relative', TMP: '/private' }, '/users/me', 'linux', '/private'],
+    [{ TOWER_CRANE_SANDBOX: '1' }, '/users/me', 'linux', '/users/me/.cache/tower-crane'],
+    [{ TOWER_CRANE_SANDBOX: '1', TMP: 'C:\\private' }, 'C:\\Users\\me', 'win32', 'C:\\private'],
+  ]) assert.equal(commandRoot(env, home, platform), expected);
+});
+
 test('scratch roots follow the platform cache and ignore relative or inherited agent caches', () => {
   for (const [platform, home, env, expected] of [
     ['linux', '/users/me', {}, '/users/me/.cache/tower-crane'],

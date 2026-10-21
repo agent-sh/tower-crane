@@ -164,6 +164,36 @@ test('masked merge scratch ignores inherited system temp directories', (t) => {
   }
 });
 
+test('sandboxed masked Git moves use private temp when the origin cache is unwritable', (t) => {
+  for (const operation of ['merge', 'checkout']) {
+    for (const key of ['TMPDIR', 'TMP', 'TEMP']) {
+      const f = fixture(t, {
+        base: { 'a.txt': 'a\n', '.mcp.json': 'base\n' },
+        task: { 'b.txt': 'branch\n' },
+        main: { '.mcp.json': 'upstream\n' },
+      });
+      const cache = path.join(f.env.HOME, 'cache', 'tower-crane', 'tasks', '0123456789ab', 'T1');
+      const privateTmp = path.join(f.env.HOME, 'private');
+      const log = path.join(f.env.HOME, 'scratch.jsonl');
+      fs.mkdirSync(privateTmp);
+      // A file at the origin cache makes it unusable even when tests run as root.
+      const originCache = process.platform === 'win32' ? path.join(f.env.HOME, 'AppData', 'Local') : path.join(f.env.HOME, '.cache');
+      fs.mkdirSync(path.dirname(originCache), { recursive: true });
+      fs.writeFileSync(originCache, 'unwritable cache root');
+      for (const name of ['TMPDIR', 'TMP', 'TEMP']) delete f.env[name];
+      Object.assign(f.env, { XDG_CACHE_HOME: cache, LOCALAPPDATA: cache, USERPROFILE: f.env.HOME, TOWER_CRANE_SANDBOX: '1', [key]: privateTmp,
+        TC_SCRATCH_LOG: log, NODE_OPTIONS: `--require "${path.join(__dirname, 'fixtures', 'scratch-record.js')}"` });
+      const result = operation === 'merge' ? f.merge('--no-edit', 'origin/main') : f.checkout('--detach', 'origin/main');
+      assert.equal(result.status, 0, `${operation} ${key}: ${result.stderr}`);
+      assert.equal(f.show('HEAD:.mcp.json'), 'upstream');
+      const allocations = fs.readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse);
+      assert.ok(allocations.length > 0);
+      assert.ok(allocations.every((dir) => dir.startsWith(privateTmp + path.sep)), allocations.join('\n'));
+      assert.deepEqual(fs.readdirSync(privateTmp), []);
+    }
+  }
+});
+
 test('a merge through the shim that changes a tracked masked path keeps the file the sandbox gave and applies the rest', (t) => {
   const f = fixture(t, {
     base: { 'a.txt': 'a\n', '.mcp.json': '{"v":1}\n' },

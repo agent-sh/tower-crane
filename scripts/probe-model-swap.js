@@ -2,12 +2,12 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const { scratchRoot } = require('../lib/scratch-root');
+const { commandRoot } = require('../lib/scratch-root');
 const cp = require('node:child_process');
 const { suiteTime, reportSuiteTime, DEADLINE_MIN } = require('./suite-time');
 
 const root = path.resolve(__dirname, '..');
-const cache = process.env.TOWER_CRANE_TEST_TMP || process.env.TOWER_CRANE_TMP || scratchRoot();
+const cache = process.env.TOWER_CRANE_TEST_TMP || commandRoot();
 fs.mkdirSync(cache, { recursive: true });
 const probe = fs.mkdtempSync(path.join(cache, 'model-swap-'));
 const temporary = fs.mkdtempSync(path.join(cache, 'model-swap-tmp-'));

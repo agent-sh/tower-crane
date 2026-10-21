@@ -9,13 +9,13 @@ const os = require('node:os');
 const path = require('node:path');
 const assert = require('node:assert/strict');
 const { measure, median } = require('./test-cost');
-const { scratchRoot } = require('../lib/scratch-root');
+const { commandRoot } = require('../lib/scratch-root');
 
 const ROOT = path.join(__dirname, '..');
 const FILES = ['test/browser-startup.test.js', 'test/gates/tests.test.js', 'test/test-tools.test.js'];
 
 async function main() {
-  const root = process.env.TOWER_CRANE_TEST_TMP || process.env.TOWER_CRANE_TMP || scratchRoot();
+  const root = process.env.TOWER_CRANE_TEST_TMP || commandRoot();
   fs.mkdirSync(root, { recursive: true });
   const scratch = fs.mkdtempSync(path.join(root, 'tower-crane-options-'));
   const fixture = path.join(scratch, 'options.test.cjs');
