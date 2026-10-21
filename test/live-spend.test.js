@@ -37,7 +37,6 @@ function until(t, h, fn, message, stream) {
         seen = `last events: ${log.slice(-12).map((e) => e.cmd).join(', ')}; supervisor ${spawned?.monitor_pid} ${spawned ? alive(spawned.monitor_pid) : '-'}; `
           + `harness ${spawned?.pid} ${spawned?.pid ? alive(spawned.pid) : '-'}, done: ${fs.existsSync(h.done)}; state lock: ${holders}; `
           + `dispatch log ends: ${spawned ? fs.readFileSync(spawned.log, 'utf8').slice(-2000) : '(none)'}; `
-          // read-published: the trace is only appended to, never replaced
           + `trace ends: ${fs.existsSync(h.trace) ? fs.readFileSync(h.trace, 'utf8').split('\n').slice(-60).join('\n') : '(none)'}`;
       } catch (e) { seen = `fixture unreadable: ${e.message}`; }
       process.stderr.write(`${message}: still waiting when the test was aborted; ${seen}\n`);
@@ -74,33 +73,6 @@ function setup(t, harness, supervision = {}) {
   });
   return h;
 }
-
-// DIAGNOSTIC, revert before review: does a stop of the process that got an
-// exited parent's pid reach that parent's detached orphan?
-test('DIAGNOSTIC taskkill /T, the tree stop and a reused parent pid', { skip: process.platform !== 'win32' }, async () => {
-  const { takePid } = require('./windows-pid-reuse');
-  const P = require('../lib/processes');
-  const hold = ['-e', 'setInterval(() => {}, 1000)'];
-  for (const stop of ['tree stop', 'taskkill /T', 'tree stop', 'taskkill /T']) {
-    const parent = cp.spawnSync(process.execPath, ['-e', `const c = require('node:child_process').spawn(process.execPath, ${JSON.stringify(hold)}, { detached: true, stdio: 'ignore', windowsHide: true }); c.unref(); console.log(process.pid + ' ' + c.pid)`], { encoding: 'utf8', windowsHide: true });
-    const [ppid, orphan] = parent.stdout.trim().split(' ').map(Number);
-    const born = P.windowsCreated([orphan], 300000).get(orphan);
-    const took = takePid(ppid);
-    let line = `T486 probe ${stop}: parent ${ppid}, orphan ${orphan} born ${born}, ${took.detail}`;
-    if (took.taken) {
-      const holder = P.windowsCreated([ppid], 300000).get(ppid);
-      line += `, holder born ${holder}`;
-      if (stop === 'tree stop') P.windowsKillTree({ pid: ppid, exitCode: null, signalCode: null, kill: () => {} }, { timeout: 300000 });
-      else line += `; taskkill said: ${Object.values(cp.spawnSync('taskkill', ['/PID', String(ppid), '/T', '/F'], { encoding: 'utf8', windowsHide: true })).filter((v) => typeof v === 'string').join(' ').replace(/\s+/g, ' ').trim()}`;
-      await new Promise((resolve) => setTimeout(resolve, 1000)); // wait-allow: diagnostic probe lets the stop land
-      const after = P.windowsCreated([orphan, ppid], 300000);
-      line += `; holder ${after.get(ppid) === holder ? 'still runs' : 'stopped'}; orphan ${after.get(orphan) === born ? 'survived' : 'stopped'}`;
-      if (after.get(ppid) === holder) killPid(ppid, 'SIGKILL');
-    }
-    if (P.windowsCreated([orphan], 300000).get(orphan) === born) killPid(orphan, 'SIGKILL');
-    process.stderr.write(line + '\n');
-  }
-});
 
 const exited = (h, agent) => events(h).some((e) => e.cmd === 'spawn exit' && e.detail.agent === agent && e.detail.code !== undefined);
 
@@ -267,42 +239,35 @@ for (const [harness, scope, logOnly] of [['claude', 'project'], ['claude', 'task
   });
 }
 
-// What the tree stop reports for the child decides whether its own handle stops it.
-const ETIMEDOUT = Object.assign(new Error('spawnSync powershell.exe ETIMEDOUT'), { code: 'ETIMEDOUT' });
+// What a taskkill run leaves decides whether the child's own handle stops it.
+const ETIMEDOUT = Object.assign(new Error('spawnSync taskkill ETIMEDOUT'), { code: 'ETIMEDOUT' });
 for (const [name, result, child, killed] of [
-  ['the stop stopped the child', { status: 0, stdout: '4242 stopped\r\n' }, { exitCode: null, signalCode: null }, false],
-  ['the child was gone at its turn', { status: 0, stdout: '4242 gone\r\n' }, { exitCode: null, signalCode: null }, false],
-  ['the stop failed on the child', { status: 0, stdout: '4242 failed\r\n' }, { exitCode: null, signalCode: null }, true],
-  ['the child was not in the snapshot', { status: 0, stdout: '' }, { exitCode: null, signalCode: null }, true],
-  ['PowerShell failed', { status: 1, stdout: '4242 stopped\r\n' }, { exitCode: null, signalCode: null }, true],
-  ['the stop outlasted its timeout', { status: null, signal: 'SIGTERM', error: ETIMEDOUT }, { exitCode: null, signalCode: null }, true],
-  ['the stop failed after the child exited', { status: 1 }, { exitCode: 0, signalCode: null }, false],
-  ['the stop failed after the child was signalled', { status: 1 }, { exitCode: null, signalCode: 'SIGKILL' }, false],
+  ['taskkill stopped the tree', { status: 0 }, { exitCode: null, signalCode: null }, false],
+  ['taskkill failed', { status: 1 }, { exitCode: null, signalCode: null }, true],
+  ['taskkill outlasted its timeout', { status: null, signal: 'SIGTERM', error: ETIMEDOUT }, { exitCode: null, signalCode: null }, true],
+  ['taskkill failed after the child exited', { status: 128 }, { exitCode: 0, signalCode: null }, false],
+  ['taskkill failed after the child was signalled', { status: 1 }, { exitCode: null, signalCode: 'SIGKILL' }, false],
 ]) {
   test(`a Windows tree stop: ${name}`, () => {
     const P = require('../lib/processes');
     const calls = [];
     const kills = [];
     const target = { pid: 4242, ...child, kill: (signal) => kills.push(signal) };
-    P.windowsKillTree(target, { run: (file, args, options) => { calls.push([file, Buffer.from(args.at(-1), 'base64').toString('utf16le'), options.timeout]); return result; } });
-    assert.equal(calls.length, 1);
-    assert.equal(calls[0][0], 'powershell.exe');
-    assert.match(calls[0][1], /^\$t = @\(4242,-1\)\n\$t = Expand \$t @\(Rows\)$/m, 'the child, at the snapshot\'s creation time, and what it started');
-    assert.equal(calls[0][1].includes('taskkill'), false);
-    assert.equal(calls[0][2], 10000);
+    P.windowsKillTree(target, { run: (file, args, options) => { calls.push([file, args, options.timeout]); return result; } });
+    assert.deepEqual(calls, [['taskkill', ['/PID', '4242', '/T', '/F'], 10000]]);
     assert.deepEqual(kills, killed ? ['SIGKILL'] : []);
   });
 }
 
-test('a budget stop ends the harness when the tree stop outlasts its timeout, as on a loaded Windows runner', { skip: process.platform !== 'win32' && 'the tree stop is the Windows stop' }, async (t) => {
+test('a budget stop ends the harness when taskkill outlasts its timeout, as on a loaded Windows runner', { skip: process.platform !== 'win32' && 'taskkill is the Windows stop' }, async (t) => {
   const h = setup(t, 'claude');
   h.ok(['task', 'update', 'T1', '--budget-tokens', '3500']);
-  const stops = path.join(h.base, 'tree-stops');
+  const taskkill = path.join(h.base, 'taskkill');
   const spawned = h.json(['spawn', '--task', 'T1'], { env: h.liveEnv({
-    LIVE_STEPS: '4', LIVE_EVERY: '300', LIVE_COMPLETE: path.join(h.base, 'complete'), LIVE_TREE_STOP_TIMEOUT: stops,
+    LIVE_STEPS: '4', LIVE_EVERY: '300', LIVE_COMPLETE: path.join(h.base, 'complete'), LIVE_TASKKILL_TIMEOUT: taskkill,
   }) });
   await until(t, h, () => exited(h, spawned.agent), 'the agent was not stopped');
-  assert.match(fs.readFileSync(stops, 'utf8'), /^\$t = @\(\d+,-1\)$/m, 'the supervisor ran the tree stop');
+  assert.ok(fs.readFileSync(taskkill, 'utf8').includes('/T /F'), 'the supervisor ran taskkill');
   assert.ok(events(h).some((e) => e.cmd === 'budget stop'));
   assert.equal(fs.existsSync(h.done), false, 'the agent was stopped before it finished on its own');
   await until(t, h, () => recordedSpend(h).entries?.length && recordedSpend(h).entries.every((e) => !e.live), 'exit usage was not finalized');
@@ -369,7 +334,7 @@ test('final session usage repairs spend collected before submitted supervisor re
   assert.equal(h.json(['task', 'show', 'T1']).spend.tokens, 2000, 'recollection preserves the reconciled total');
 });
 
-for (const round of [1, 2]) test(`a periodic sample that crosses the budget after submit keeps early collection behind the supervisor (diagnostic round ${round})`, async (t) => {
+test('a periodic sample that crosses the budget after submit keeps early collection behind the supervisor', async (t) => {
   const h = setup(t, 'claude');
   const finish = path.join(h.base, 'finish');
   const paused = path.join(h.base, 'final-paused');

@@ -111,16 +111,15 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
     const processState = P.processState;
     P.processState = function (spawn, ...rest) { return spawn?.agent ? 'running' : processState.call(this, spawn, ...rest); };
   }
-  // LIVE_TREE_STOP_TIMEOUT: the tree stop outlasts its timeout and stops
-  // nothing, as on a loaded Windows runner.
-  if (path.basename(process.argv[1] || '') === 'spawn-monitor.js' && process.env.LIVE_TREE_STOP_TIMEOUT) {
+  // LIVE_TASKKILL_TIMEOUT: taskkill outlasts its timeout and stops nothing, as
+  // on a loaded Windows runner.
+  if (path.basename(process.argv[1] || '') === 'spawn-monitor.js' && process.env.LIVE_TASKKILL_TIMEOUT) {
     const spawnSync = cp.spawnSync;
     cp.spawnSync = function (file, ...rest) {
-      const script = file === 'powershell.exe' ? Buffer.from(rest[0].at(-1), 'base64').toString('utf16le') : '';
-      if (!script.includes('$t = Expand $t')) return spawnSync.call(this, file, ...rest);
-      fs.appendFileSync(process.env.LIVE_TREE_STOP_TIMEOUT, `${/^\$t = @\(.*\)$/m.exec(script)[0]}\n`);
+      if (file !== 'taskkill') return spawnSync.call(this, file, ...rest);
+      fs.appendFileSync(process.env.LIVE_TASKKILL_TIMEOUT, `${rest[0].join(' ')}\n`);
       return { pid: 0, output: [null, null, null], stdout: null, stderr: null, status: null, signal: 'SIGTERM',
-        error: Object.assign(new Error('spawnSync powershell.exe ETIMEDOUT'), { code: 'ETIMEDOUT' }) };
+        error: Object.assign(new Error('spawnSync taskkill ETIMEDOUT'), { code: 'ETIMEDOUT' }) };
     };
   }
   if (path.basename(process.argv[1] || '') === 'spawn-monitor.js' && process.env.LIVE_READS) {
