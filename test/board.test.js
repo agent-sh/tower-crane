@@ -1268,6 +1268,33 @@ test('runaway rules: status and the board flag the same claim, from the project\
   assert.doesNotMatch(page(), /hard median/);
 });
 
+test('the board shows escalated questions as questions and only marked requests as approvals', (t) => {
+  const h = makeRepo(t);
+  useFixtureUserFile(t, h);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Waiting work', '--acceptance', 'the board distinguishes questions']);
+  for (const [kind, setting] of [['technical', 'sandbox'], ['credential', 'env'], ['technical', 'budget.raise']]) {
+    h.ok(['ask', '--kind', kind, '--setting', setting, '--question', `Question about ${setting}?`,
+      '--option', 'host', '--option', 'widen', '--blocks', 'T1', '--agent', 'worker-ask']);
+  }
+  assert.equal(h.run(['project', 'set', '--merge-admin', 'true', '--agent', 'orchestrator']).code, 1);
+  const st = require('../lib/state').loadState(h.state);
+  st.decisions.decisions[0].approval_request = false;
+  delete st.decisions.decisions[2].kind;
+  st.decisions.decisions[2].technical = false;
+  st.decisions.decisions[2].escalation.change = { scope: 'T1', what: 'tokens', limit: 10 };
+  const queue = require('../lib/board/model').build(st).queue;
+  for (const id of ['D1', 'D2', 'D3']) {
+    assert.equal(queue.find((q) => q.id === id).kind, 'decision');
+    const page = require('../lib/render').renderHtml(st);
+    assert.match(page, new RegExp(`data-kind=\"decision\" data-key=\"${id}\"`));
+    assert.doesNotMatch(page, new RegExp(`data-kind=\"approval\" data-key=\"${id}\"`));
+    assert.match(page, new RegExp(`Question ${id}`));
+  }
+  assert.equal(queue.find((q) => q.id === 'D4').kind, 'approval');
+  assert.match(require('../lib/render').renderHtml(st), /data-kind=\"approval\" data-key=\"D4\"/);
+});
+
 test('the queue orders Now before Your turn, and an approval reads as a sentence', (t) => {
   const h = makeRepo(t);
   h.init();
@@ -1405,4 +1432,18 @@ test('the board marks a ready task without a brief until its brief is written', 
   assert.deepEqual(marks(), [[false], true]);
   h.ok(['brief', 'set', 'T1', '-'], { input: 'Context.\n' });
   assert.deepEqual(marks(), [[true], false]);
+});
+
+test('the board names days and months as English Intl does, in UTC', () => {
+  const { dayName, clock } = require('../lib/board/parts');
+  const day = new Intl.DateTimeFormat('en', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'UTC' });
+  const month = new Intl.DateTimeFormat('en', { month: 'short', timeZone: 'UTC' });
+  // A leap year at shifting hours, so a local-time slip or a wrong table entry shows.
+  for (let t = Date.UTC(2024, 0, 1, 0, 30); t < Date.UTC(2025, 0, 2); t += 86400000 * 0.85) {
+    const d = new Date(t);
+    assert.equal(dayName(d), day.format(d), d.toISOString());
+    const hm = d.toISOString().slice(11, 16);
+    assert.equal(clock(d.toISOString(), '2030-01-01T00:00:00Z'), `${month.format(d)} ${d.getUTCDate()} ${hm}`, d.toISOString());
+    assert.equal(clock(d.toISOString(), d.toISOString()), hm, 'the same day shows the time alone');
+  }
 });
