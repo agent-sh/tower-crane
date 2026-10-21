@@ -17,8 +17,8 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 26
-      - run: npm run docs:cli
       - run: npm run docs:cli:check
+      - run: npm run docs:cli
       - run: npm run docs:links
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

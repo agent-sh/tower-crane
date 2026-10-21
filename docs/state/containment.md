@@ -269,7 +269,38 @@ The governor signals only processes the registry recorded when Tower Crane start
 
 ### Deferral and resumption
 
-A deferred dispatch or gate refuses with code 3: `TASK: UNIT deferred by the host governor: REASON`. `spawn` asks before any stack read, fetch or worktree; `spawn --ready` and automatic refill stop at the first deferral, since the reason holds for every task behind it, and a wait's refill reports it once each time it starts and retries on every pass. A deferred reaction stays owed in the persistent automation queue, whichever process deferred it; any trusted `wait` retries it in its original turn once five seconds have passed and the governor would admit its unit, as described under [events.jsonl](storage.md#eventsjsonl). The registry keeps each deferral's reason, first time and latest time, and drops it when the unit is admitted or after ten minutes without a retry; a stop is kept for an hour. An owed reaction remains in the gate queue and keeps its `governor_deferred` inbox item after that registry hint expires, until its receipt settles or its source no longer matches an active submitted or accepted head.
+`review dispatch deferred` events persist a governor-deferred reviewer dispatch
+with `sha`, `revision`, `reason`, `since` and the original `body_recheck` context
+when it is an automatic light check. Refill restores that context on the reviewer
+spawn, preserving the automatic marker in its evidence and the two-failure stop.
+If an automatic check replaces an outstanding explicit request, a
+`review dispatch context` event records its `sha`, `revision` and `body_recheck`
+without adding another debt. An unchanged context emits nothing, and a context
+event cannot revive debt a matching spawn has already settled.
+The trusted wait host retries these
+on every refill pass alongside ready workers, in urgent-first order followed by
+descending unblock count and task id. Reviewer retries do not use worker slots.
+A governor deferral holds only its unit kind: workers and reviewers have
+independent memory reservations, and an admitted kind continues in priority
+order while the deferred kind waits for the next pass. This applies to the
+per-kind prechecks and to a refusal during dispatch. A dispatch lock still
+stops the whole batch.
+A live task reaction postpones its retry. Dispatch debt clears when a matching
+reviewer spawn is recorded, the submitted head or revision changes, the task
+leaves submitted status, or a current eligible review verdict arrives. A failed
+PR-body verdict keeps a deferred light review eligible. An outstanding debt is
+written once per task, head and revision, even when load, pressure or memory
+readings change its reason. A matching spawn settles that debt; a later review
+attempt can record its own debt and context. `status` lists the task, first
+deferral time and reason in `deferred reviewers`, with the persisted entries in
+JSON `deferred_reviewers`. It reads the latest matching reviewer reason from the
+governor registry without writing state, and falls back to the saved reason after
+the registry hint expires.
+Paused projects and missing or stale software gates add a `waiting` explanation
+to the deferred reviewer in text and JSON. Its governor `reason` is retained,
+so the original resource deferral and the current retry blocker remain visible.
+
+A deferred dispatch or gate refuses with code 3: `TASK: UNIT deferred by the host governor: REASON`. `spawn` asks before any stack read, fetch or worktree; `spawn --ready` stops at the first worker deferral, and automatic refill skips the remaining tasks of the deferred kind. A wait's refill rechecks each kind on every pass and reports a precheck deferral once when it starts. A deferred reaction stays owed in the persistent automation queue, whichever process deferred it; any trusted `wait` retries it in its original turn once five seconds have passed and the governor would admit its unit, as described under [events.jsonl](storage.md#eventsjsonl). The registry keeps each deferral's reason, first time and latest time, and drops it when the unit is admitted or after ten minutes without a retry; a stop is kept for an hour. An owed reaction remains in the gate queue and keeps its `governor_deferred` inbox item after that registry hint expires, until its receipt settles or its source no longer matches an active submitted or accepted head.
 
 Where it shows:
 
@@ -292,7 +323,7 @@ Where it shows:
 | `growth_window_min` | 60 | how long a growth window follows its units, and how long a crossed window's raise lasts: a tests gate, the unit most often deferred, ran a median 55 minutes (p90 78) from `gate run` `running` to `done` over the 65 runs that started in the day to 2026-10-20 07:30 UTC, so a set's growth is measured over about as long as the unit admitted beside it runs |
 | `growth_samples_min` | 20 | windows before measured growth replaces the sum: the count unit sizes learn from (the largest of a kind's last 20 peaks). Below 100 windows the ratio is the largest seen, so it is the worst of at least 20 minutes of running work |
 | `others_window_min` | 30 | other sessions' test runs and builds repeat within minutes; on 2026-10-17 two of them peaked near 11 GiB and came back |
-| `expected_mb` | `worker` 1536, `reviewer` 1024, `small` 1024, `orchestrator` 1024, `tests` 2048, `clean` 1024, `ci` 2048, `suite` 2048 | starting sizes, replaced by measured peaks once three exist: on 2026-10-17 the scope holding an orchestrator, two workers and their tools used 3.0 GiB (peak 3.5 GiB); a full suite at test concurrency 3 runs about six Node processes and their git commands |
+| `expected_mb` | `worker` 1536, `reviewer` 1024, `small` 1024, `orchestrator` 1024, `tests` 2560, `clean` 1024, `ci` 2048, `suite` 2560 | starting sizes, replaced by measured peaks once three exist: on 2026-10-17 the scope holding an orchestrator, two workers and their tools used 3.0 GiB (peak 3.5 GiB); on 2026-10-20 Tower Crane's own full suite at 12 file workers, the tests gate's planned setting on its 24-core host, peaked at 2.5 GiB (2458 MiB anonymous) over its scope's idle use |
 
 ### Registry
 

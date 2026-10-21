@@ -48,12 +48,39 @@ test('the eight state areas, compatibility redirects and every docs link resolve
   check(ROOT);
 });
 
-test('the release workflow regenerates and checks the same CLI output before saving it', () => {
+test('the release workflow checks committed CLI output before regenerating and saving it', () => {
   const workflow = fs.readFileSync(path.join(ROOT, '.github', 'workflows', 'release-docs.yml'), 'utf8');
   assert.match(workflow, /release:\s*\n\s*types: \[published\]/);
-  assert.ok(workflow.indexOf('npm run docs:cli\n') < workflow.indexOf('npm run docs:cli:check'));
+  assert.ok(workflow.indexOf('npm run docs:cli:check') < workflow.indexOf('npm run docs:cli\n'));
   assert.ok(workflow.indexOf('npm run docs:cli:check') < workflow.indexOf('actions/upload-artifact'));
   const scripts = require('../package.json').scripts;
   assert.equal(scripts['docs:cli'], 'node scripts/cli-docs.js');
   assert.equal(scripts['docs:cli:check'], 'node scripts/cli-docs.js --check');
+});
+
+test('release documentation steps reject stale help and prose without overwriting the evidence', (t) => {
+  const workflow = fs.readFileSync(path.join(ROOT, '.github', 'workflows', 'release-docs.yml'), 'utf8');
+  const steps = [...workflow.matchAll(/^\s+- run: npm run (\S+)$/gm)].map((match) => match[1]);
+  for (const variant of ['clean', 'help drift', 'prose drift']) {
+    const h = makeDocsRepo(t);
+    const file = path.join(h.repo, 'docs', 'cli.md');
+    if (variant === 'help drift') {
+      const bin = path.join(h.repo, 'bin', 'tower-crane.js');
+      fs.writeFileSync(bin, fs.readFileSync(bin, 'utf8').replace("'show help'", "'show changed help'"));
+    } else if (variant === 'prose drift') {
+      fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace('# CLI', '# Stale CLI'));
+    }
+    const before = fs.readFileSync(file, 'utf8');
+    const scripts = JSON.parse(fs.readFileSync(path.join(h.repo, 'package.json'), 'utf8')).scripts;
+    let result;
+    for (const step of steps) {
+      const [node, ...args] = scripts[step].split(' ');
+      assert.equal(node, 'node');
+      result = cp.spawnSync(process.execPath, args, { cwd: h.repo, env: h.env, encoding: 'utf8', timeout: 300000 });
+      if (result.status !== 0) break;
+    }
+    assert.equal(result.status, variant === 'clean' ? 0 : 1, `${variant}: ${result.stderr}`);
+    assert.equal(fs.readFileSync(file, 'utf8'), before, variant);
+    if (variant !== 'clean') assert.match(result.stderr, /docs\/cli.md.*drifted/);
+  }
 });

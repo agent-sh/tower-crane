@@ -170,7 +170,7 @@ test('status names the growth rule and its sample count, and closed windows go t
   const h = makeRepo(t);
   h.init();
   writeHost(h.env.TOWER_CRANE_HOST_ROOT, { limit: 10, used: 2 });
-  h.ok(['project', 'set', '--governor', '{"growth_samples_min":1}']);
+  h.ok(['project', 'set', '--governor', '{"growth_samples_min":1,"expected_mb":{"tests":2048}}']);
   const project = h.readState('project.json');
   const held = G.admit({ stateDir: h.state, env: h.env, agent: 'orchestrator' }, { kind: 'tests', task: 'T1', project });
   t.after(() => held.release());
@@ -237,11 +237,17 @@ test('governor settings are validated and set as an operational setting', (t) =>
 test('the governor key lists in the contract and the --governor help name every setting', () => {
   const keys = Object.keys(G.DEFAULTS).sort();
   const root = path.join(__dirname, '..');
-  const contract = fs.readFileSync(path.join(root, 'docs', 'state.md'), 'utf8').split('\n').find((l) => l.startsWith('`governor`, set through'));
+  const contract = fs.readFileSync(path.join(root, 'docs', 'state', 'storage.md'), 'utf8').split('\n').find((l) => l.startsWith('`governor`, set through'));
   const listed = contract.slice(contract.indexOf('holds the lines'), contract.indexOf('Unknown keys'));
-  assert.deepEqual([...listed.matchAll(/`([a-z_]+)`/g)].map((m) => m[1]).sort(), keys, 'docs/state.md');
-  const help = /host governor lines for this project\S* admissions \{([^}]*)\}/.exec(fs.readFileSync(path.join(root, 'bin', 'tower-crane.js'), 'utf8'));
-  assert.deepEqual(help[1].split(', ').sort(), keys, 'bin/tower-crane.js --governor');
+  const { SETTINGS } = require('../lib/commands-specs');
+  const { COMMANDS } = require('../bin/tower-crane');
+  const variants = [
+    ['docs/state/storage.md', [...listed.matchAll(/`([a-z_]+)`/g)].map((m) => m[1])],
+    ...[['SETTINGS', SETTINGS.governor.help], ...['init', 'project set'].map((name) =>
+      [name, COMMANDS.find((command) => command.name === name).flags.governor.help])].map(([name, help]) =>
+      [name, /admissions \{([^}]*)\}/.exec(help)[1].split(', ')]),
+  ];
+  for (const [name, listedKeys] of variants) assert.deepEqual(listedKeys.sort(), keys, name);
 });
 
 // A task an easy command-harness rung runs: it claims, then idles until stopped.
@@ -297,7 +303,8 @@ test('every project on the host draws on one budget', (t) => {
   // One user and one host: the same cache directory and the same machine.
   b.env.XDG_CACHE_HOME = a.env.XDG_CACHE_HOME;
   b.env.TOWER_CRANE_HOST_ROOT = a.env.TOWER_CRANE_HOST_ROOT;
-  writeHost(a.env.TOWER_CRANE_HOST_ROOT, { limit: 13, used: 2 });
+  // Four 2.5 GiB tests gates fit under the 85% line of 15 GiB; a 1.5 GiB worker on top does not.
+  writeHost(a.env.TOWER_CRANE_HOST_ROOT, { limit: 15, used: 2 });
   supervised(b, ['T1']);
   const project = a.readState('project.json');
   const held = [];
@@ -305,7 +312,7 @@ test('every project on the host draws on one budget', (t) => {
   for (const task of ['T1', 'T2', 'T3', 'T4']) held.push(G.admit({ stateDir: a.state, env: a.env, agent: 'orchestrator' }, { kind: 'tests', task, project }));
   const refused = b.run(['spawn', '--task', 'T1']);
   assert.equal(refused.code, 3, refused.stderr);
-  assert.match(refused.stderr, /running Tower Crane work may grow 8\.0 GiB/);
+  assert.match(refused.stderr, /running Tower Crane work may grow 10\.0 GiB/);
   const seen = b.json(['status']).governor.budget;
   assert.deepEqual([seen.units, seen.projects], [4, 1], 'project b sees project a\'s four gates');
   held.forEach((u) => u.release());
@@ -330,8 +337,11 @@ test('a release that meets a busy registry lands once the lock is free, so no pl
     S.releaseMarkedLock(lock);
   }
   await waitOnRepo(h, () => G.read(env).units.length === 0, 'the queued release lands');
-  // A bind, which a dispatch about to exit makes, says whether it landed.
-  const next = G.admit({ stateDir: h.state, env, agent: 'orchestrator' }, { kind: 'worker', task: 'T1', project: h.readState('project.json') });
+  // A bind, which a dispatch about to exit makes, says whether it landed. The
+  // release above waited the production registry lock wait; this unit's env
+  // shortens both waits (lib/intervals.js), which the bind spends in full.
+  const short = { ...env, TOWER_CRANE_INTERVALS: JSON.stringify({ governor_lock_wait: 300, governor_bind_wait: 600 }) };
+  const next = G.admit({ stateDir: h.state, env: short, agent: 'orchestrator' }, { kind: 'worker', task: 'T1', project: h.readState('project.json') });
   const held = S.tryMarkedLock(G.registryLock(env), { keepLive: true });
   let landed;
   try { landed = next.bind(process.pid, undefined, 'worker-T1-1'); } finally { S.releaseMarkedLock(held); }
@@ -339,6 +349,28 @@ test('a release that meets a busy registry lands once the lock is free, so no pl
   assert.equal(next.bind(process.pid, undefined, 'worker-T1-1'), true);
   assert.deepEqual(G.read(env).units.map((u) => [u.agent, u.bound]), [['worker-T1-1', true]]);
   next.release();
+});
+
+// The production bind wait on the real clock. Only the registry lock wait each
+// retry spends is shortened, so the bind's own deadline sets the time.
+test('a bind against a busy registry keeps trying for the production bind wait, then reports it did not land', (t) => {
+  const S = require('../lib/state');
+  const Intervals = require('../lib/intervals');
+  const h = makeRepo(t);
+  h.init();
+  const env = { ...h.env, TOWER_CRANE_INTERVALS: JSON.stringify({ governor_lock_wait: 300 }) };
+  assert.equal(Intervals.ms('governor_bind_wait', env), Intervals.DEFAULTS.governor_bind_wait);
+  const unit = G.admit({ stateDir: h.state, env, agent: 'orchestrator' }, { kind: 'worker', task: 'T1', project: h.readState('project.json') });
+  t.after(() => unit.release());
+  const held = S.tryMarkedLock(G.registryLock(env), { keepLive: true });
+  assert.ok(held);
+  const started = Date.now();
+  let landed;
+  try { landed = unit.bind(process.pid, undefined, 'worker-T1-1'); } finally { S.releaseMarkedLock(held); }
+  const waited = Date.now() - started; // wait-allow: the bind's wait is the contract under test
+  assert.equal(landed, false, 'a bind past its wait reports that it did not land');
+  assert.ok(waited >= Intervals.DEFAULTS.governor_bind_wait, `the bind gave up after ${waited} ms`); // wait-allow: the production bind wait is the contract under test
+  assert.equal(G.read(env).units[0].bound, undefined, 'the bind did not write');
 });
 
 // A submitted task whose tests command records that it started, then holds until killed.

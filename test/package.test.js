@@ -22,14 +22,32 @@ test('pack output parses from the npm 11 array and npm 12 object shapes', () => 
   }
 });
 
-test('fixture children disable Node compile caches', (t) => {
+// A child exiting after teardown must not write a compile cache into its fixture.
+test('fixture children share only the run\'s compile cache, and none without one', (t) => {
   const h = makeRepo(t);
-  const child = cp.spawnSync(process.execPath, ['-e', `
+  const probe = (env) => {
+    const child = cp.spawnSync(process.execPath, ['-e', `
 const cache = require('node:module').enableCompileCache();
 console.log(JSON.stringify(cache));
-`], { env: h.env, encoding: 'utf8', timeout: 300000 });
-  assert.equal(child.status, 0, child.stderr);
-  assert.equal(JSON.parse(child.stdout).status, require('node:module').constants.compileCacheStatus.DISABLED);
+`], { env, encoding: 'utf8', timeout: 300000 });
+    assert.equal(child.status, 0, child.stderr);
+    return JSON.parse(child.stdout);
+  };
+  const { ALREADY_ENABLED, DISABLED } = require('node:module').constants.compileCacheStatus;
+  // test/run.js names the run's cache, which test/global-setup.js keeps beside the git seed.
+  assert.ok(process.env.TC_TEST_COMPILE_CACHE, 'the runner names a compile cache');
+  const shared = probe(h.env);
+  assert.equal(shared.status, ALREADY_ENABLED);
+  assert.ok(shared.directory.startsWith(process.env.TC_TEST_COMPILE_CACHE + path.sep), shared.directory);
+  assert.ok(!shared.directory.startsWith(h.base + path.sep), 'the cache is not in the fixture');
+  const saved = process.env.TC_TEST_COMPILE_CACHE;
+  delete process.env.TC_TEST_COMPILE_CACHE;
+  try {
+    const own = makeRepo(t);
+    assert.equal(probe(own.env).status, DISABLED, 'a test file run without the runner gets no cache');
+  } finally {
+    process.env.TC_TEST_COMPILE_CACHE = saved;
+  }
 });
 
 test('the npm package ships the plugin and loads pi skills through its CLI', (t) => {
