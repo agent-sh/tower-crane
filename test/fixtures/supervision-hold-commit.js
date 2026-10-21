@@ -2,6 +2,7 @@
 
 const path = require('node:path');
 const fs = require('node:fs');
+const { HUNG_TEST_MS } = require('../signals');
 
 // A supervisor launches a rerun inside the mutation that records it, so the
 // harness can run ahead of its commit on a loaded machine. Holding the named
@@ -16,7 +17,7 @@ if (path.basename(process.argv[1] || '') === 'spawn-monitor.js' && process.env.T
     if (name !== cmd) return mutate.call(this, ctx, name, fn, ...rest);
     return mutate.call(this, ctx, name, (...args) => {
       const result = fn(...args);
-      const until = Date.now() + 30000;
+      const until = Date.now() + HUNG_TEST_MS;
       while (!fs.existsSync(file)) {
         if (Date.now() >= until) throw new Error(`the harness never wrote ${file} while ${cmd} was held`);
         Atomics.wait(delay, 0, 0, 10);
