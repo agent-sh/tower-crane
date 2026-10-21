@@ -272,6 +272,19 @@ for (const [name, { local, prepare, move }, reason] of overlaps) {
   });
 }
 
+test('the merge queue reruns a failed local CI receipt behind the tip even when the base change is disjoint', (t) => {
+  const h = accepted(t);
+  h.ok(['project', 'set', '--ci-local', JSON.stringify({ command: [process.execPath, '-e', 'process.exit(process.env.T493_FAIL ? 1 : 0)'], timeout: 5 })]);
+  assert.equal(h.run(['check', 'ci', 'T1'], { env: { T493_FAIL: '1' } }).code, 1);
+  const tip = advanceMain(h, { 'README.md': 'Updated base.\n' });
+  h.ok(['merge', '--accepted', '--agent', 'orchestrator']);
+  assert.equal(h.github().prs['7'].state, 'MERGED');
+  const task = h.readState('tasks.json').tasks[0];
+  assert.equal(task.revision, 1, 'no rework');
+  assert.equal(task.evidence.findLast((e) => e.type === 'ci').receipt.base_sha, tip);
+  assert.deepEqual(h.logs().filter((e) => e.cmd === 'local ci rerun').map((e) => e.detail.reason), ['its local CI run did not pass']);
+});
+
 // The command stands in for a two-hour run: a merge that changes the script it runs lands on
 // main during each of the next two runs, so each comes back behind an overlapping change.
 const BUSY_BASE = `
