@@ -120,8 +120,8 @@ process.exit(result.status ?? 1);
   return { home, out, env: runEnv, report: () => JSON.parse(fs.readFileSync(out, 'utf8')) };
 }
 
-function setup(t) {
-  const h = makeRepo(t);
+function setup(t, options = {}) {
+  const h = makeRepo(t, options);
   // A repository whose own claude settings carry a hook.
   fs.mkdirSync(path.join(h.repo, '.claude'));
   fs.writeFileSync(path.join(h.repo, '.claude', 'settings.json'), JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: 'command', command: 'planted-project-hook' }] }] } }));

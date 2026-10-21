@@ -8,7 +8,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { pluginRoot, shortCacheRoot, ROOT } = require('./helpers');
+const { pluginRoot, shortCacheRoot, ROOT, BIN, TMP_ROOT } = require('./helpers');
 const A = require('../lib/agents');
 const TOML = require('../lib/toml');
 const ClaudeSandboxPlaceholders = require('../lib/claude-sandbox-placeholders');
@@ -144,6 +144,41 @@ test('worker sandboxes grant their short socket leaf without granting writes to 
     const sibling = path.join(path.dirname(dir), 'tower-crane-another-worker', 's');
     assert.equal(commandsWrite(seen, wt, common, sibling), false, `${harness}: sibling sockets stay unwritable`);
     assert.equal(fs.existsSync(dir), false, `${harness}: an exited broker removes its leaf`);
+  }
+});
+
+test('under a deep temp root, runtime directory and agent home the broker starts, and its sandboxed agent reaches it through a socket within the limit', { skip: NO_STUBS }, (t) => {
+  const { MAX_SOCKET_PATH } = require('../lib/socket-path');
+  const root = path.join(TMP_ROOT, 'r'.repeat(MAX_SOCKET_PATH));
+  fs.mkdirSync(root, { recursive: true });
+  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+  const { h, u } = setup(t, { root });
+  const deep = (name) => {
+    const dir = path.join(h.base, name, 'd'.repeat(MAX_SOCKET_PATH));
+    fs.mkdirSync(dir, { recursive: true });
+    return dir;
+  };
+  const runtime = deep('runtime');
+  const cli = (...args) => [process.execPath, BIN, ...args];
+  const address = [process.execPath, '-e', 'process.stderr.write(require("fs").readFileSync(process.env.TOWER_CRANE_BROKER, "utf8"))'];
+  // A short TMPDIR is passed over too: no socket goes under TMPDIR.
+  for (const [label, tmp] of [['deep TMPDIR', deep('tmp')], ['short TMPDIR', shortCacheRoot(t, MAX_SOCKET_PATH - 40)]]) {
+    assert.ok(tmp, `${label}: the account cache holds a short directory`);
+    isolated(h, 'small', 'claude');
+    const { agent } = spawn(h, u, 'small', { TMPDIR: tmp, TMP: tmp, TEMP: tmp, XDG_RUNTIME_DIR: runtime,
+      STUB_RUN: JSON.stringify([cli('task', 'note', 'T1', `from a deep root, ${label}`), address]) });
+    const home = path.join(h.state, 'homes', agent);
+    assert.ok(Buffer.byteLength(path.join(h.state, 'brokers', agent, 'broker.sock')) > MAX_SOCKET_PATH, `${label}: the broker directory is too deep for its socket`);
+    assert.ok(Buffer.byteLength(home) > MAX_SOCKET_PATH, `${label}: the agent home is deep: ${home}`);
+    const seen = u.report();
+    assert.deepEqual(seen.ran.map((r) => r.code), [0, 0], `${label}: ${JSON.stringify(seen.ran.map((r) => r.stderr))}`);
+    const { socket } = JSON.parse(seen.ran[1].stderr);
+    assert.ok(Buffer.byteLength(socket) <= MAX_SOCKET_PATH, `${label}: ${socket} fits the socket limit`);
+    assert.equal(path.dirname(socket), seen.socketDir, `${label}: the broker listens in the leaf the spawn granted`);
+    for (const shared of [tmp, runtime, '/tmp', TMP_ROOT]) assert.ok(!socket.startsWith(shared + path.sep), `${label}: ${socket} is not under ${shared}`);
+    for (const access of ['allowRead', 'allowWrite']) assert.ok(seen.settings.sandbox.filesystem[access].includes(seen.socketDir), `${label}: ${access} grants the socket leaf`);
+    assert.deepEqual(h.readState('tasks.json').tasks[0].notes.filter((n) => n.agent === agent).map((n) => n.text), [`from a deep root, ${label}`], `${label}: the note came through the broker`);
+    assert.equal(fs.existsSync(seen.socketDir), false, `${label}: the exited broker removes its leaf`);
   }
 });
 
