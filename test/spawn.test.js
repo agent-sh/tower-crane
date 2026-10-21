@@ -1417,3 +1417,24 @@ test('a worker spawn in a repository without origin is refused before its worktr
   // A dry run still previews the command, on the rung the marker belongs to.
   assert.equal(h.json(['spawn', '--task', 'T1', '--dry-run']).rung, 'medium');
 });
+
+test('a failed origin read is read again, and one that keeps failing reports git, not a missing origin', async (t) => {
+  for (const [mode, starts] of [['once', true], ['always', false]]) {
+    await t.test(mode, (t) => {
+      const h = setup(t);
+      const marker = path.join(h.base, 'harness-started');
+      commandRung(h, 'medium', [process.execPath, '-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)}, '')`]);
+      const r = h.run(['spawn', '--task', 'T1', '--wait'], { hooks: { HOOK_ORIGIN_READ_FAIL: mode } });
+      assert.doesNotMatch(r.stderr, /no origin remote/);
+      if (starts) {
+        assert.equal(r.code, 0, r.stderr);
+        assert.ok(fs.existsSync(marker), 'the harness started');
+        return;
+      }
+      assert.equal(r.code, 1, r.stdout);
+      assert.match(r.stderr, /cannot read this repository's origin remote: fatal: unable to access '\.git\/config': Permission denied/);
+      assert.equal(h.readState('tasks.json').tasks[0].worktree, undefined);
+      assert.ok(!fs.existsSync(marker), 'the harness did not start');
+    });
+  }
+});

@@ -894,6 +894,7 @@ test('gates retry --from-rework restores an automatic gate rework at its submitt
   const h = brokenEnvironment(t);
   const submitted = h.logs().findLast((e) => e.cmd === 'rework').detail.previous_revision;
   const rework = h.logs().findLast((e) => e.cmd === 'rework');
+  h.run(['wait', '--inbox', '--observe', '--after', 'now', '--timeout', '0.01', '--agent', 'orchestrator']); // wait-allow: populate the host follower cache before checking the restoration hint
   const item = h.json(['inbox', '--agent', 'orchestrator']).items.find((i) => i.kind === 'rework_ready');
   assert.equal(item.restore, 'gates retry T1 --from-rework');
   assert.equal(item.hold_until, new Date(Date.parse(rework.at) + 5 * 60000).toISOString(), 'refill waits the default five minutes');
@@ -991,6 +992,7 @@ test('gates retry --from-rework refuses a moved head, a changed acceptance and a
   github.prs['7'].headRefOid = 'f'.repeat(40);
   h.saveGithub(github);
   refused(/PR #7 head moved to fffffff/);
+  h.run(['wait', '--inbox', '--observe', '--after', 'now', '--timeout', '0.01', '--agent', 'orchestrator']); // wait-allow: refresh the moved PR head before reading the cached inbox hint
   const hint = h.json(['inbox', '--agent', 'orchestrator']).items.find((i) => i.kind === 'rework_ready');
   assert.equal(hint.restore, undefined, 'no restore command the restore would refuse');
   assert.match(hint.restore_blocked, /PR #7 head moved/);
