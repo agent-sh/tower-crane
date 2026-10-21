@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { cachedFixture } = require('./helpers');
 const { gateFixture, gateEvidence } = require('./gate-helpers');
-const FinalReview = require('../lib/gates/final-review');
+const FinalReview = require('../lib/final-review');
 
 const CAPPED = { FIXTURE_CAPPED: '1' };
 // A review app that reviewed this head and said so in its check run.
