@@ -1,5 +1,7 @@
 'use strict';
 
+const { scopeEnv, harnessArgv } = require('./containment-plan');
+
 const { HUNG_TEST_MS, waitOnRepo, killPid } = require('./signals');
 const { readPublished } = require('./atomic-file');
 
@@ -366,7 +368,8 @@ for (const harness of ['codex', 'claude']) {
     assert.equal(receipt.detail.harness, harness);
     sendBack(h);
     h.env.XDG_CACHE_HOME = path.join(h.base, 'another-cache');
-    const dry = h.json(['spawn', '--task', 'T1', '--dry-run']);
+    const dry = h.json(['spawn', '--task', 'T1', '--dry-run'], { env: scopeEnv(h) });
+    const argv = harnessArgv(dry.argv);
     assert.equal(dry.harness, harness);
     assert.equal(dry.resumed, harness === 'codex');
     if (harness === 'codex') assert.equal(dry.session_id, 'worker-session-1');
@@ -375,10 +378,10 @@ for (const harness of ['codex', 'claude']) {
       assert.notEqual(dry.session_id, first.session_id);
     }
     if (harness === 'codex') {
-      assert.deepEqual(dry.argv.slice(0, 5), ['codex', 'exec', '-p', 'fixture-main', 'resume']);
+      assert.deepEqual(argv.slice(0, 5), ['codex', 'exec', '-p', 'fixture-main', 'resume']);
       assert.ok(dry.argv.includes('--json'));
     } else {
-      assert.deepEqual(dry.argv.slice(0, 2), ['claude', '-p']);
+      assert.deepEqual(argv.slice(0, 2), ['claude', '-p']);
       assert.ok(!dry.argv.includes('--resume'));
       assert.ok(!dry.argv.includes('--fork-session'));
     }
