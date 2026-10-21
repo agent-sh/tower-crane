@@ -37,6 +37,7 @@ function until(t, h, fn, message, stream) {
         seen = `last events: ${log.slice(-12).map((e) => e.cmd).join(', ')}; supervisor ${spawned?.monitor_pid} ${spawned ? alive(spawned.monitor_pid) : '-'}; `
           + `harness ${spawned?.pid} ${spawned?.pid ? alive(spawned.pid) : '-'}, done: ${fs.existsSync(h.done)}; state lock: ${holders}; `
           + `dispatch log ends: ${spawned ? fs.readFileSync(spawned.log, 'utf8').slice(-2000) : '(none)'}; `
+          // read-published: the trace is only appended to, never replaced
           + `trace ends: ${fs.existsSync(h.trace) ? fs.readFileSync(h.trace, 'utf8').split('\n').slice(-60).join('\n') : '(none)'}`;
       } catch (e) { seen = `fixture unreadable: ${e.message}`; }
       process.stderr.write(`${message}: still waiting when the test was aborted; ${seen}\n`);
@@ -73,6 +74,36 @@ function setup(t, harness, supervision = {}) {
   });
   return h;
 }
+
+// DIAGNOSTIC, revert before review: does taskkill /T stop a detached process
+// whose exited parent's pid a new process now holds?
+test('DIAGNOSTIC taskkill /T and a reused parent pid', { skip: process.platform !== 'win32' }, async () => {
+  const hold = ['-e', 'setInterval(() => {}, 1000)'];
+  for (let trial = 1; trial <= 3; trial++) {
+    const parent = cp.spawnSync(process.execPath, ['-e', `const c = require('node:child_process').spawn(process.execPath, ${JSON.stringify(hold)}, { detached: true, stdio: 'ignore', windowsHide: true }); c.unref(); console.log(process.pid + ' ' + c.pid)`], { encoding: 'utf8', windowsHide: true });
+    const [ppid, orphan] = parent.stdout.trim().split(' ').map(Number);
+    const holders = [];
+    let reused;
+    const deadline = Date.now() + 60000;
+    while (!reused && holders.length < 400 && Date.now() < deadline) {
+      const c = cp.spawn('ping.exe', ['-n', '120', '127.0.0.1'], { stdio: 'ignore', windowsHide: true });
+      holders.push(c);
+      if (c.pid === ppid) reused = c;
+      if (holders.length % 25 === 0) await new Promise((resolve) => setImmediate(resolve));
+    }
+    let line = `T486 probe trial ${trial}: parent ${ppid}, orphan ${orphan}, ${holders.length} spawns, `;
+    if (reused) {
+      const r = cp.spawnSync('taskkill', ['/PID', String(ppid), '/T', '/F'], { encoding: 'utf8', windowsHide: true });
+      await new Promise((resolve) => setTimeout(resolve, 500)); // wait-allow: diagnostic probe gives taskkill time to land
+      let alive;
+      try { process.kill(orphan, 0); alive = 'orphan survived'; } catch (e) { alive = `orphan ${e.code}`; }
+      line += `pid reused; taskkill /T status ${r.status}: ${alive}; taskkill said: ${(r.stdout + r.stderr).replace(/\s+/g, ' ').trim()}`;
+    } else line += 'pid not reused';
+    for (const c of holders) try { c.kill(); } catch { /* exited */ }
+    try { process.kill(orphan); } catch { /* gone */ }
+    process.stderr.write(line + '\n');
+  }
+});
 
 const exited = (h, agent) => events(h).some((e) => e.cmd === 'spawn exit' && e.detail.agent === agent && e.detail.code !== undefined);
 
