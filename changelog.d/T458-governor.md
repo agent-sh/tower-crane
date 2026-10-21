@@ -1,0 +1,1 @@
+- The governor stop regression waits for the original suite's exit and accounts for unreaped zombies and reused PIDs.
