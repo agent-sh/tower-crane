@@ -10,6 +10,105 @@ function events(h) {
   return fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
 }
 
+test('escalated question delegation covers policy, approval markers and verified identities', () => {
+  const D = require('../lib/decisions');
+  const question = { id: 'D1', kind: 'credential', technical: false, answerers: ['worker-1'],
+    escalation: { settings: ['sandbox', 'scope'], change: null } };
+  const spawned = (role) => [{ cmd: 'spawn', detail: { agent: 'manager-1', role } }];
+  for (const row of [
+    { name: 'default', allowed: true },
+    { name: 'explicit true', policy: { orchestrator_escalated_questions: true }, allowed: true },
+    { name: 'explicit false', policy: { orchestrator_escalated_questions: false } },
+    { name: 'technical off', policy: { orchestrator_technical: false } },
+    { name: 'both off', policy: { orchestrator_technical: false, orchestrator_escalated_questions: false } },
+    { name: 'false approval marker', decision: { approval_request: false }, allowed: true },
+    { name: 'approval request', decision: { approval_request: true } },
+    { name: 'approval without escalation', decision: { approval_request: true, escalation: null, technical: true } },
+    { name: 'legacy question', decision: { kind: undefined }, allowed: true },
+    { name: 'named worker', agent: 'worker-1' },
+    { name: 'spawned orchestrator', agent: 'manager-1', events: spawned('orchestrator'), allowed: true },
+    { name: 'spawned worker', agent: 'manager-1', events: spawned('worker') },
+    { name: 'forged orchestrator', env: { TOWER_CRANE_AGENT: 'worker-1', TOWER_CRANE_TASK: 'T1' } },
+    { name: 'broker cannot be orchestrator', env: { TOWER_CRANE_AGENT: 'orchestrator', TOWER_CRANE_VIA: 'broker' } },
+  ]) {
+    const st = { project: { decision_delegation: row.policy }, events: row.events || [] };
+    const decision = { ...question, ...row.decision };
+    const ctx = { agent: row.agent || 'orchestrator', agentExplicit: true, env: row.env || {} };
+    if (row.allowed) assert.equal(D.answerRule(st, decision, ctx), 'orchestrator-escalated-question', row.name);
+    else assert.throws(() => D.answerRule(st, decision, ctx), /only .*owner/, row.name);
+    if (!row.agent && !row.env) assert.equal(D.orchestratorAnswers(st, decision), !!row.allowed, row.name);
+  }
+});
+
+test('an escalated question records the orchestrator rule without granting a sandbox change', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Choose sandbox access', '--acceptance', 'only an owner approval grants access']);
+  const worker = { env: { TOWER_CRANE_AGENT: 'worker-T1-1', TOWER_CRANE_TASK: 'T1' } };
+  const before = h.readState('project.json');
+  for (const [id, choice] of [['D1', 'host receipt'], ['D2', 'widen']]) {
+    h.ok(['ask', '--kind', 'credential', '--setting', 'sandbox', '--question', 'How should we run the probe?',
+      '--option', 'host receipt', '--option', 'widen', '--blocks', 'T1'], worker);
+    const action = h.json(['inbox', '--agent', 'orchestrator']).items.find((i) => i.decision?.id === id).action;
+    assert.equal(action.argv.at(-1), '<answer>');
+    assert.doesNotMatch(h.ok(['status']), /waiting when convenient/);
+    const output = h.ok(['answer', id, '--choice', choice, '--agent', 'orchestrator']);
+    assert.match(output, /authorizes no setting change.*owner.*approval/i);
+    const answered = h.readState('decisions.json').decisions.at(-1);
+    assert.deepEqual([answered.status, answered.answer, answered.answered_by, answered.answer_rule],
+      ['answered', choice, 'orchestrator', 'orchestrator-escalated-question']);
+    assert.equal(answered.applied, undefined);
+    assert.deepEqual(h.readState('project.json'), before);
+    assert.equal(events(h).filter((e) => e.cmd === 'setting').length, 0);
+    const event = events(h).findLast((e) => e.cmd === 'answer');
+    assert.deepEqual([event.agent, event.detail.answered_by, event.detail.answer_rule],
+      ['orchestrator', 'orchestrator', 'orchestrator-escalated-question']);
+    assert.match(h.ok(['decisions']), /orchestrator-escalated-question/);
+    assert.match(h.ok(['status']), /orchestrator-escalated-question/);
+    assert.equal(h.json(['status']).decisions_orchestrator_escalated.at(-1).answer_rule,
+      'orchestrator-escalated-question');
+  }
+
+  const sandbox = { write: [path.join(h.base, 'shared')] };
+  const widen = ['project', 'set', '--sandbox', JSON.stringify(sandbox), '--agent', 'orchestrator'];
+  const requested = h.run(widen);
+  assert.equal(requested.code, 1, requested.stderr);
+  assert.match(requested.stderr, /sandbox is owner-required; opened D3/);
+  const approval = h.readState('decisions.json').decisions.at(-1);
+  assert.equal(approval.approval_request, true);
+  assert.deepEqual(h.readState('project.json'), before);
+  const beforeRefusal = events(h);
+  const refused = h.run(['answer', 'D3', '--choice', 'approve', '--agent', 'orchestrator']);
+  assert.equal(refused.code, 1, refused.stderr);
+  assert.match(refused.stderr, /only the owner answers it/);
+  assert.deepEqual(events(h), beforeRefusal);
+  assert.equal(h.run(widen).code, 1, 'an unanswered approval applies nothing');
+  assert.deepEqual(h.readState('project.json'), before);
+  h.ok(['answer', 'D3', '--choice', 'approve', '--agent', 'owner']);
+  assert.deepEqual(h.readState('project.json'), before, 'owner approval still needs the command repeated');
+  h.ok(widen);
+  assert.deepEqual(h.readState('project.json').sandbox, sandbox);
+  assert.equal(h.readState('decisions.json').decisions.at(-1).applied.by, 'orchestrator');
+});
+
+test('the escalated question project rule restores the old refusal and resets to true', (t) => {
+  const h = makeRepo(t);
+  h.init(['--decision-delegation', '{"orchestrator_escalated_questions":false}', '--agent', 'owner']);
+  h.ok(['ask', '--kind', 'credential', '--setting', 'sandbox', '--question', 'Widen access?',
+    '--option', 'yes', '--option', 'no', '--agent', 'worker-ask']);
+  const before = events(h);
+  const refused = h.run(['answer', 'D1', '--choice', 'no', '--agent', 'orchestrator']);
+  assert.equal(refused.code, 1, refused.stderr);
+  assert.match(refused.stderr, /D1 escalates sandbox to the owner; only the owner answers it/);
+  assert.deepEqual(events(h), before);
+  assert.equal(h.json(['inbox', '--agent', 'orchestrator']).items.find((i) => i.decision?.id === 'D1').action.argv.at(-1),
+    '<owner answer>');
+  assert.match(h.ok(['project', 'show']), /decision_delegation\.orchestrator_escalated_questions: false/);
+  h.ok(['project', 'set', '--decision-delegation', 'null', '--agent', 'owner']);
+  assert.match(h.ok(['project', 'show']), /decision_delegation\.orchestrator_escalated_questions: true/);
+  h.ok(['answer', 'D1', '--choice', 'no', '--agent', 'orchestrator']);
+});
+
 test('only the owner or a named agent can answer, and the answer event records its rule', (t) => {
   const h = makeRepo(t);
   h.init();
@@ -243,7 +342,7 @@ test('a terminal owner question is technical unless it names an owner-required s
   assert.deepEqual([decision.asked_by, decision.technical], ['owner', true]);
 });
 
-test('a worker ask is answerable by the orchestrator; an owner-required escalation is not', (t) => {
+test('a worker ask and an escalated question are answerable by the orchestrator', (t) => {
   const h = makeRepo(t);
   h.init();
   h.ok(['task', 'add', '--title', 'Choose a store', '--acceptance', 'answer is authorized']);
@@ -263,13 +362,8 @@ test('a worker ask is answerable by the orchestrator; an owner-required escalati
   assert.equal(escalated.technical, false);
   assert.deepEqual(escalated.escalation, { settings: ['budget.raise'], change: null });
   h.ok(['decision', 'delegate', 'D2', '--technical', 'true', '--agent', 'owner']);
-  const before = events(h);
-  const refused = h.run(['answer', 'D2', '--choice', 'yes', '--agent', 'orchestrator']);
-  assert.equal(refused.code, 1, refused.stderr);
-  assert.match(refused.stderr, /D2 escalates budget\.raise to the owner/);
-  assert.deepEqual(events(h), before, 'a refused escalation answer writes no event');
-  h.ok(['answer', 'D2', '--choice', 'yes', '--agent', 'owner']);
-  assert.equal(h.readState('decisions.json').decisions[1].answer_rule, 'owner');
+  h.ok(['answer', 'D2', '--choice', 'yes', '--agent', 'orchestrator']);
+  assert.equal(h.readState('decisions.json').decisions[1].answer_rule, 'orchestrator-escalated-question');
 });
 
 test('without the setting, the orchestrator answers a worker technical decision; owner-only decisions refuse it', (t) => {
@@ -297,9 +391,6 @@ test('without the setting, the orchestrator answers a worker technical decision;
   const marked = h.run(['answer', 'D2', '--choice', 'yes', '--agent', 'orchestrator']);
   assert.equal(marked.code, 1, marked.stderr);
   assert.match(marked.stderr, /D2 is owner-required \(spend needs the owner\); only the owner answers it/);
-  const escalated = h.run(['answer', 'D3', '--choice', 'yes', '--agent', 'orchestrator']);
-  assert.equal(escalated.code, 1, escalated.stderr);
-  assert.match(escalated.stderr, /D3 escalates budget\.raise to the owner/);
   assert.deepEqual(events(h), before, 'refused owner-only answers write no event');
 
   // The owner's --technical false on a technical decision keeps it with the owner, and the inbox says so.
@@ -311,7 +402,9 @@ test('without the setting, the orchestrator answers a worker technical decision;
   assert.match(unmarked.stderr, /only the owner with explicit identity can answer D5/);
   const actions = Object.fromEntries(h.json(['inbox', '--agent', 'orchestrator']).items
     .filter((i) => i.kind === 'decision').map((i) => [i.decision.id, i.action.argv.at(-1)]));
-  assert.deepEqual(actions, { D2: '<owner answer>', D3: '<owner answer>', D4: '<answer>', D5: '<owner answer>' });
+  assert.deepEqual(actions, { D2: '<owner answer>', D3: '<answer>', D4: '<answer>', D5: '<owner answer>' });
+  h.ok(['answer', 'D3', '--choice', 'yes', '--agent', 'orchestrator']);
+  assert.equal(h.readState('decisions.json').decisions[2].answer_rule, 'orchestrator-escalated-question');
 
   h.ok(['project', 'set', '--decision-delegation', '{"orchestrator_technical":false}', '--agent', 'owner']);
   h.ok(['ask', '--kind', 'technical', '--question', 'Cache in memory or disk?', '--option', 'memory', '--option', 'disk'], worker);
@@ -320,7 +413,7 @@ test('without the setting, the orchestrator answers a worker technical decision;
   assert.match(kept.stderr, /only the owner/);
 });
 
-test('spend and credential questions stay with the owner without a marker, whatever their wording', (t) => {
+test('an untagged spend question stays with the owner while a tagged credential question grants nothing', (t) => {
   const h = makeRepo(t);
   h.init();
   h.ok(['task', 'add', '--title', 'Rent a GPU box', '--acceptance', 'the owner decides spend and credentials']);
@@ -333,12 +426,13 @@ test('spend and credential questions stay with the owner without a marker, whate
   assert.deepEqual([credentials.kind, credentials.technical, credentials.owner_required], ['credential', false, null]);
 
   const before = events(h);
-  for (const [id, why] of [['D1', 'is a spend decision'], ['D2', 'escalates env to the owner']]) {
-    const refused = h.run(['answer', id, '--choice', 'yes', '--agent', 'orchestrator']);
-    assert.equal(refused.code, 1, refused.stderr);
-    assert.match(refused.stderr, new RegExp(`${id} ${why}; only the owner answers it`));
-  }
+  const refused = h.run(['answer', 'D1', '--choice', 'yes', '--agent', 'orchestrator']);
+  assert.equal(refused.code, 1, refused.stderr);
+  assert.match(refused.stderr, /D1 is a spend decision; only the owner answers it/);
   assert.deepEqual(events(h), before, 'refused owner-only answers write no event');
+  h.ok(['answer', 'D2', '--choice', 'yes', '--agent', 'orchestrator']);
+  assert.equal(h.readState('decisions.json').decisions[1].answer_rule, 'orchestrator-escalated-question');
+  assert.equal(h.readState('project.json').env, undefined);
 
   const named = h.run(['decision', 'delegate', 'D1', '--answerers', '["worker-T1-1"]', '--agent', 'owner']);
   assert.equal(named.code, 1, named.stderr);
@@ -418,12 +512,11 @@ test('the owner lifts a spend kind or an asker reason with --technical true, nam
   assert.match(refused.stderr, /D2 is owner-required \(spend needs the owner\); only the owner answers it/);
 
   h.ok(['decision', 'delegate', 'D3', '--technical', 'true', '--agent', 'owner']);
-  const escalated = h.run(['answer', 'D3', '--choice', 'yes', '--agent', 'orchestrator']);
-  assert.equal(escalated.code, 1, escalated.stderr);
-  assert.match(escalated.stderr, /D3 escalates budget\.raise to the owner/);
+  h.ok(['answer', 'D3', '--choice', 'yes', '--agent', 'orchestrator']);
+  assert.equal(h.readState('decisions.json').decisions[2].answer_rule, 'orchestrator-escalated-question');
 });
 
-test('an open decision opened before kinds is technical unless an escalation or reason keeps it with the owner', (t) => {
+test('an open decision opened before kinds delegates questions while an owner reason keeps it with the owner', (t) => {
   const h = makeRepo(t);
   h.init();
   h.ok(['task', 'add', '--title', 'Choose a store', '--acceptance', 'answer is authorized']);
@@ -444,13 +537,12 @@ test('an open decision opened before kinds is technical unless an escalation or 
   h.ok(['answer', 'D1', '--choice', 'a', '--agent', 'orchestrator']);
   assert.equal(h.readState('decisions.json').decisions[0].answer_rule, 'owner-technical-delegation');
   const before = events(h);
-  const escalated = h.run(['answer', 'D3', '--choice', 'a', '--agent', 'orchestrator']);
-  assert.equal(escalated.code, 1, escalated.stderr);
-  assert.match(escalated.stderr, /D3 escalates budget\.raise to the owner/);
   const reasoned = h.run(['answer', 'D4', '--choice', 'a', '--agent', 'orchestrator']);
   assert.equal(reasoned.code, 1, reasoned.stderr);
   assert.match(reasoned.stderr, /D4 is owner-required \(spend needs the owner\); only the owner answers it/);
   assert.deepEqual(events(h), before, 'refused owner-only answers write no event');
+  h.ok(['answer', 'D3', '--choice', 'a', '--agent', 'orchestrator']);
+  assert.equal(h.readState('decisions.json').decisions[2].answer_rule, 'orchestrator-escalated-question');
 
   h.ok(['decision', 'delegate', 'D2', '--technical', 'false', '--agent', 'owner']);
   const kept = h.readState('decisions.json').decisions[1];
