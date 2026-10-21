@@ -1,6 +1,6 @@
 'use strict';
 
-const { waitOnRepo, childExit, childClosed, killPid } = require('./signals');
+const { waitUntil, waitOnRepo, childExit, childClosed, killPid } = require('./signals');
 const { readPublished } = require('./atomic-file');
 
 const test = require('node:test');
@@ -466,8 +466,6 @@ test('the Windows tree of an exited harness keeps only processes it started', ()
 // Windows PowerShell on Windows; on Linux PowerShell 7 when it is installed
 // (GitHub's Ubuntu runners have it), which runs the same script and reads
 // creation times from /proc.
-// Windows hands a freed pid out again within a few hundred new processes.
-const WINDOWS_REUSE_SPAWNS = 400;
 const POWERSHELL = process.platform === 'win32' ? 'powershell.exe'
   : process.platform === 'linux' && cp.spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-Command', 'exit 0'], { stdio: 'ignore', timeout: 300000 }).status === 0 ? 'pwsh' : null;
 
@@ -575,19 +573,17 @@ test('a Windows tree stop leaves the orphan of an earlier holder of its pid', {
   const [pid, orphan] = parent.stdout.trim().split(' ').map(Number);
   const born = windowsCreated([orphan], 300000).get(orphan);
   assert.equal(Number.isSafeInteger(born), true, `no creation time for the orphan ${orphan}`);
-  t.after(() => { if (windowsCreated([orphan], 300000).get(orphan) === born) killPid(orphan, 'SIGKILL'); });
-  const holders = [];
-  t.after(() => { for (const c of holders) if (c.exitCode === null && c.signalCode === null) c.kill(); });
-  let reused;
-  while (!reused && holders.length < WINDOWS_REUSE_SPAWNS) {
-    const c = cp.spawn('ping.exe', ['-n', '300', '127.0.0.1'], { stdio: 'ignore', windowsHide: true });
-    holders.push(c);
-    if (c.pid === pid) reused = c;
-  }
-  if (!reused) return t.skip(`Windows did not give out pid ${pid} again in ${holders.length} processes`);
-  windowsKillTree(reused, { timeout: 300000 });
-  await childExit(reused, { signal: t.signal });
-  assert.equal(windowsCreated([orphan], 300000).get(orphan), born, 'the stop reached the orphan of the earlier holder of its pid');
+  const running = (target, start) => windowsCreated([target], 300000).get(target) === start;
+  try {
+    const took = require('./windows-pid-reuse').takePid(pid);
+    assert.equal(took.taken, true, `no process got pid ${pid} back: ${took.detail}`);
+    const holder = windowsCreated([pid], 300000).get(pid);
+    try {
+      windowsKillTree({ pid, exitCode: null, signalCode: null, kill: () => {} }, { timeout: 300000 });
+      await waitUntil(() => !running(pid, holder), { what: 'the stop left the process it was given', signal: t.signal });
+      assert.equal(running(orphan, born), true, 'the stop reached the orphan of the earlier holder of its pid');
+    } finally { if (running(pid, holder)) killPid(pid, 'SIGKILL'); }
+  } finally { if (running(orphan, born)) killPid(orphan, 'SIGKILL'); }
 });
 
 test('the Windows stop splits a long target list into calls that fit a Windows command line', async () => {
