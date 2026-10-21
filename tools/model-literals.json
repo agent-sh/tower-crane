@@ -203,5 +203,10 @@
     "path": "lib/ladder.js",
     "text": "claude-provider",
     "reason": "Relative import of the Claude provider routing module"
+  },
+  {
+    "path": "lib/sandbox-policy.js",
+    "text": "claude-code",
+    "reason": "Claude Code config directory under ~/.config, a credential store the sandbox policy keeps owner-only"
   }
 ]
