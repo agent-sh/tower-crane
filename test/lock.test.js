@@ -1,6 +1,6 @@
 'use strict';
 
-const { fileWritten } = require('./signals');
+const { fileWritten, waitUntil } = require('./signals');
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -705,4 +705,23 @@ test('a failing or sleeping sleep hook does not break the wait it runs in', () =
     U.sleepHooks.delete(sleeping);
   }
   assert.equal(calls, 1, 'a sleep inside a hook runs no hooks');
+});
+
+// The production refresh on the real clock; the dispatch test in
+// test/automation-dispatch.test.js drives the same refresh at one second.
+test('a marked lock kept fresh touches its marker once the production refresh interval has passed', async (t) => {
+  const Intervals = require('../lib/intervals');
+  assert.equal(Intervals.ms('lock_refresh'), Intervals.DEFAULTS.lock_refresh, 'this process runs the production interval');
+  const h = makeRepo(t);
+  const lock = S.tryMarkedLock(path.join(h.base, 'fresh-lock'), { keepLive: true });
+  assert.ok(lock);
+  t.after(() => S.releaseMarkedLock(lock));
+  const old = new Date(Date.now() - 300000); // wait-allow: an old marker shows the touch apart from the taking
+  fs.utimesSync(lock.file, old, old);
+  const kept = Date.now();
+  S.keepMarkedLockFresh(lock);
+  const touchedAt = () => fs.statSync(lock.file).mtimeMs;
+  await waitUntil(() => touchedAt() > kept - 1000, { what: 'the held lock touches its marker' }); // wait-allow: the refresh is newer than the marker's old time
+  // File times may round down to the second on some file systems.
+  assert.ok(touchedAt() >= kept + Intervals.DEFAULTS.lock_refresh - 1000, `touched ${touchedAt() - kept} ms after it was kept fresh`); // wait-allow: the touch waits the production interval
 });

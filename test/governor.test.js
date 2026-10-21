@@ -331,6 +331,28 @@ test('a release that meets a busy registry lands once the lock is free, so no pl
   next.release();
 });
 
+// The production bind wait on the real clock. Only the registry lock wait each
+// retry spends is shortened, so the bind's own deadline sets the time.
+test('a bind against a busy registry keeps trying for the production bind wait, then reports it did not land', (t) => {
+  const S = require('../lib/state');
+  const Intervals = require('../lib/intervals');
+  const h = makeRepo(t);
+  h.init();
+  const env = { ...h.env, TOWER_CRANE_INTERVALS: JSON.stringify({ governor_lock_wait: 300 }) };
+  assert.equal(Intervals.ms('governor_bind_wait', env), Intervals.DEFAULTS.governor_bind_wait);
+  const unit = G.admit({ stateDir: h.state, env, agent: 'orchestrator' }, { kind: 'worker', task: 'T1', project: h.readState('project.json') });
+  t.after(() => unit.release());
+  const held = S.tryMarkedLock(G.registryLock(env), { keepLive: true });
+  assert.ok(held);
+  const started = Date.now();
+  let landed;
+  try { landed = unit.bind(process.pid, undefined, 'worker-T1-1'); } finally { S.releaseMarkedLock(held); }
+  const waited = Date.now() - started; // wait-allow: the bind's wait is the contract under test
+  assert.equal(landed, false, 'a bind past its wait reports that it did not land');
+  assert.ok(waited >= Intervals.DEFAULTS.governor_bind_wait, `the bind gave up after ${waited} ms`); // wait-allow: the production bind wait is the contract under test
+  assert.equal(G.read(env).units[0].bound, undefined, 'the bind did not write');
+});
+
 // A submitted task whose tests command records that it started, then holds until killed.
 function heldGate(h, submit = true) {
   h.git(['remote', 'remove', 'origin']);
