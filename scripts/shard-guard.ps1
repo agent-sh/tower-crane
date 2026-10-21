@@ -116,7 +116,7 @@ function Write-Log([string]$line) {
 function Format-Machine {
   $m = [ShardJob]::Memory()
   $procs = @(Get-Process -ErrorAction SilentlyContinue)
-  $handles = ($procs | Measure-Object HandleCount -Sum).Sum
+  $handles = [long]($procs | Measure-Object HandleCount -Sum).Sum
   $disks = @([IO.DriveInfo]::GetDrives() | Where-Object { $_.DriveType -eq 'Fixed' -and $_.IsReady } | ForEach-Object { "$($_.Name.TrimEnd('\')) $(& $mib $_.AvailableFreeSpace) MiB free" }) -join ', '
   "free memory $(& $mib $m.AvailPhys) MiB of $(& $mib $m.TotalPhys), free commit $(& $mib $m.AvailPageFile) MiB of $(& $mib $m.TotalPageFile); system $($procs.Count) processes, $handles handles; disks $disks"
 }
@@ -161,8 +161,8 @@ $peakHandles = 0
 function Format-Job {
   $usage = [ShardJob]::Usage($job)
   $procs = @(Get-JobProcesses)
-  $handles = ($procs | Measure-Object HandleCount -Sum).Sum
-  $private = ($procs | Measure-Object PrivateMemorySize64 -Sum).Sum
+  $handles = [long]($procs | Measure-Object HandleCount -Sum).Sum
+  $private = [long]($procs | Measure-Object PrivateMemorySize64 -Sum).Sum
   if ($handles -gt $script:peakHandles) { $script:peakHandles = $handles }
   "job $($usage[0]) processes, $handles handles, $(& $mib $private) MiB committed; peaks $script:peakActive processes, $script:peakHandles handles, $(& $mib $usage[2]) MiB committed (largest process $(& $mib $usage[3]) MiB); $($usage[1]) processes started"
 }
@@ -173,6 +173,8 @@ $checkUrl = $null
 $api = $env:GITHUB_API_URL ? $env:GITHUB_API_URL : 'https://api.github.com'
 $runUrl = $env:GITHUB_RUN_ID ? "$($env:GITHUB_SERVER_URL)/$($env:GITHUB_REPOSITORY)/actions/runs/$($env:GITHUB_RUN_ID)" : ''
 $cut = { param($text, $max) $text.Length -gt $max ? $text.Substring(0, $max - 3) + '...' : $text }
+# A test file's node process puts the file last, after a long list of flags.
+$ends = { param($text, $max) $text.Length -gt $max ? $text.Substring(0, 100) + ' ... ' + $text.Substring($text.Length - ($max - 105)) : $text }
 
 # The check run is completed and neutral from the start: a runner that freezes before the
 # last update cannot leave a pending check behind, and the test job keeps the verdict.
@@ -243,7 +245,7 @@ function Write-Dump {
     $set = [Collections.Generic.HashSet[long]]::new([long[]]$pids)
     Write-Log 'job process command lines (pid, parent, command):'
     foreach ($row in @(Receive-Job $cim | Where-Object { $set.Contains([long]$_.ProcessId) })) {
-      Write-Log "  $($row.ProcessId) $($row.ParentProcessId) $(& $cut "$($row.CommandLine)" 400)"
+      Write-Log "  $($row.ProcessId) $($row.ParentProcessId) $(& $ends "$($row.CommandLine)" 500)"
     }
   } else { Write-Log 'process command lines: CIM did not answer in 40 s' }
   # A storm outside the job, such as a system service, shows here.
