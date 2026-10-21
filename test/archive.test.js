@@ -108,8 +108,12 @@ test('accept refuses, naming them, when a cited path is missing or over the hard
   h.ok(['task', 'note', 'T1', `fill record: ${h.scratch}/gone.txt and ${h.scratch}/huge.bin`]);
   const r = h.run(['accept', 'T1']);
   assert.equal(r.code, 1);
-  assert.match(r.stderr, /cited scratch paths cannot be archived: gone\.txt \(missing\); huge\.bin \(33554433 bytes, over the 32 MiB hard cap\)/);
+  assert.match(r.stderr, /cited scratch paths cannot be archived: gone\.txt \(missing; cited in a note\); huge\.bin \(33554433 bytes, over the 32 MiB hard cap; cited in a note\); restore each in the task scratch, then retry/);
   assert.equal(task(h, 'T1').status, 'submitted');
+  // Only a path the PR body alone cites can be fixed by editing the body, and only then is that offered.
+  const both = h.run(['accept', 'T1'], { env: { FIXTURE_PR_BODY: `see ${h.scratch}/gone.txt and $XDG_CACHE_HOME/body.txt` } });
+  assert.equal(both.code, 1);
+  assert.match(both.stderr, /body\.txt \(missing; cited in the PR body\); gone\.txt \(missing; cited in the PR body, a note\); .*or drop the citation from the PR body where only the PR body cites it/);
   assert.equal(fs.existsSync(path.join(h.state, 'archive', 'T1')), false);
   // Restoring the file and dropping the oversized citation lets it through.
   fs.writeFileSync(path.join(h.scratch, 'gone.txt'), 'back\n');
@@ -117,6 +121,17 @@ test('accept refuses, naming them, when a cited path is missing or over the hard
   setTask(h, 'T1', { notes: [{ at: new Date().toISOString(), agent: 'w-1', text: `fill record: ${h.scratch}/gone.txt` }] });
   h.ok(['accept', 'T1']);
   assert.deepEqual(manifest(h, 'T1').cited, ['gone.txt']);
+});
+
+test('$XDG_CACHE_HOME a reviewer or the orchestrator wrote is their own cache and does not block accept', (t) => {
+  const h = ready(t);
+  h.ok(['task', 'note', 'T1', 'replayed the probe into $XDG_CACHE_HOME/probe.log', '--agent', 'r-1']);
+  h.ok(['task', 'note', 'T1', 'gate log at ${XDG_CACHE_HOME}/ci.log', '--agent', 'orchestrator']);
+  h.ok(['evidence', 'T1', '--type', 'note', '--ok', '--summary', 'checked $XDG_CACHE_HOME/review.txt', '--agent', 'r-1']);
+  h.ok(['task', 'note', 'T1', 'telemetry in $XDG_CACHE_HOME/probe/stderr.log', '--agent', 'w-1']);
+  h.ok(['accept', 'T1']);
+  assert.equal(task(h, 'T1').status, 'accepted');
+  assert.deepEqual(manifest(h, 'T1').cited, ['probe/stderr.log']);
 });
 
 test('task archive lists an archive and copies it into another task with evidence, for a granted worker', (t) => {
@@ -218,10 +233,39 @@ test('citations find the scratch path in its absolute, home and XDG_CACHE_HOME f
     ['a markdown link', `[log](${scratch}/a/b.log)`, ['a/b.log']],
   ];
   for (const [what, text, expected] of cases) {
-    const st = { decisions: { decisions: [] } };
-    assert.deepEqual(Archive.citations(st, { scratch, notes: [{ text }], evidence: [] }), expected, what);
+    const st = { decisions: { decisions: [] }, events: [] };
+    assert.deepEqual(Archive.citations(st, { id: 'T5', scratch, notes: [{ agent: 'w-1', text }], evidence: [], claim: { agent: 'w-1' } }), expected, what);
   }
-  // A decision cites the scratch only by its path: its $XDG_CACHE_HOME is another agent's.
-  const st = { decisions: { decisions: [{ question: `use ${scratch}/d.log`, why: '$XDG_CACHE_HOME/e.log' }] } };
-  assert.deepEqual(Archive.citations(st, { scratch, notes: [], evidence: [{ summary: 'probe at $XDG_CACHE_HOME/f.log' }] }), ['d.log', 'f.log']);
+  // $XDG_CACHE_HOME is the scratch only for the task's workers: the claim holder, past claim
+  // holders and spawned workers. The scratch path itself cites from anyone.
+  const events = [
+    { task: 'T5', cmd: 'claim', agent: 'w-1', detail: { holder: 'w-1' } },
+    { task: 'T5', cmd: 'claim', agent: 'orchestrator', detail: { holder: 'w-2' } },
+    { task: 'T5', cmd: 'spawn', agent: 'orchestrator', detail: { role: 'worker', agent: 'w-3' } },
+    { task: 'T5', cmd: 'spawn', agent: 'orchestrator', detail: { role: 'reviewer', agent: 'r-1' } },
+    { task: 'T6', cmd: 'claim', agent: 'w-9', detail: { holder: 'w-9' } },
+  ];
+  const by = [
+    ['current claim holder without an event', 'w-0', { agent: 'w-0' }, true],
+    ['an earlier claim holder', 'w-1', null, true],
+    ['a holder claimed for by the orchestrator', 'w-2', null, true],
+    ['a spawned worker', 'w-3', null, true],
+    ['a reviewer', 'r-1', null, false],
+    ['the orchestrator', 'orchestrator', null, false],
+    ['the owner', 'owner', null, false],
+    ['another task\'s worker', 'w-9', null, false],
+    ['no recorded agent', undefined, null, false],
+  ];
+  for (const [what, agent, claim, isWorker] of by) {
+    const st = { decisions: { decisions: [] }, events };
+    const note = { scratch, id: 'T5', claim, notes: [{ agent, text: 'see $XDG_CACHE_HOME/x.log' }], evidence: [] };
+    assert.deepEqual(Archive.citations(st, note), isWorker ? ['x.log'] : [], `note by ${what}`);
+    const ev = { scratch, id: 'T5', claim, notes: [], evidence: [{ type: 'review', agent, summary: 'see ${XDG_CACHE_HOME}/y.log', findings: [{ body: '$XDG_CACHE_HOME/z.log' }] }] };
+    assert.deepEqual(Archive.citations(st, ev), isWorker ? ['y.log', 'z.log'] : [], `evidence by ${what}`);
+    const abs = { scratch, id: 'T5', claim, notes: [{ agent, text: `see ${scratch}/a.log` }], evidence: [] };
+    assert.deepEqual(Archive.citations(st, abs), ['a.log'], `absolute path by ${what}`);
+  }
+  // The PR body is the worker's; a decision cites the scratch only by its path.
+  const st = { decisions: { decisions: [{ question: `use ${scratch}/d.log`, why: '$XDG_CACHE_HOME/e.log' }] }, events: [] };
+  assert.deepEqual(Archive.citations(st, { id: 'T5', scratch, notes: [], evidence: [] }, 'probe at $XDG_CACHE_HOME/f.log'), ['d.log', 'f.log']);
 });
