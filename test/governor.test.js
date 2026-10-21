@@ -367,7 +367,8 @@ test('past the stop line a running gate stops without a verdict and says why', {
   const done = await run;
   assert.equal(done.code, 3, done.stderr);
   assert.match(done.stderr, /T1: tests gate stopped by the host governor: memory: tests\.slice has 9\.6 GiB of 10\.0 GiB in use, at or past the 95% stop line \(9\.5 GiB\); it runs again once there is room/);
-  assert.throws(() => killPid(suitePid, 0), { code: 'ESRCH' }, 'the suite process was stopped');
+  // The suite's shell dies in the same group kill, so whoever inherits the suite may not have reaped it yet.
+  assert.equal(require('../lib/processes').processState({ pid: suitePid }), 'exited', 'the suite process was stopped');
   assert.deepEqual(h.readState('tasks.json').tasks[0].evidence.filter((e) => e.type === 'tests'), [], 'no verdict was recorded');
   const stops = h.json(['status']).governor.stops;
   assert.deepEqual(stops.map((x) => [x.task, x.kind]), [['T1', 'tests']]);
