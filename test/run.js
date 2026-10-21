@@ -135,6 +135,8 @@ delete env.NODE_TEST_CONTEXT;
 
 // With every file skipped there is nothing to run; node --test with no file would search the directory.
 if (!run.length) return;
+const swept = require('./tmp-root').sweepTempRoot();
+console.error(`Test tmp sweep: removed ${swept.count} directories, ${swept.bytes} bytes`);
 const started = Date.now();
 const child = cp.spawn(process.execPath, args, { stdio: 'inherit', env });
 // A job its time limit cancels keeps no log, so a shard stops a few minutes under
