@@ -19,6 +19,7 @@ globalThis[Symbol.for('tower-crane.test-fixture')] = true;
 
 // Every CLI fails when it resolves the user ladder file outside the test roots.
 require('./user-config-guard');
+require('./no-fsync');
 
 const AUTHORITY = path.join('lib', 'authority.js');
 const GATE_TMP = path.join('lib', 'gate-tmp.js');
