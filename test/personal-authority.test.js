@@ -220,6 +220,11 @@ test('generated spend questions retain budget authority and reuse only matching 
           assert.equal(emitted[0].detail.kind, 'spend', label);
         }
         if (existing) assert.deepEqual(existing, before, `${label}: existing delegation is retained`);
+        if (row.legacy) {
+          assert.equal(D.orchestratorAnswers(st, existing), false, `${label}: the old alert remains owner-only`);
+          assert.throws(() => D.answerRule(st, existing, { agent: 'orchestrator', agentExplicit: true, env: {} }),
+            /only the owner/, label);
+        }
       }
     }
   }

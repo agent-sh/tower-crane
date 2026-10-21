@@ -4,11 +4,124 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { makeRepo, runPty, PTY_AVAILABLE } = require('./helpers');
+const { makeRepo, cachedFixture, runPty, PTY_AVAILABLE } = require('./helpers');
 
 function events(h) {
   return fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
 }
+
+test('legacy budget breach questions retain spend authority across scopes and payload variants', () => {
+  const D = require('../lib/decisions');
+  const ctx = { agent: 'orchestrator', agentExplicit: true, env: {} };
+  const st = { project: {}, events: [] };
+  const breach = { settings: ['budget.raise'], change: { scope: 'T1', what: 'tokens', limit: 10 } };
+  for (const row of [
+    ...['project', 'T1'].flatMap((scope) => ['hours', 'tokens'].flatMap((what) => [0, 10].map((limit) => ({
+      name: `${scope}/${what}/${limit}`, escalation: { settings: ['budget.raise'], change: { scope, what, limit } },
+    })))),
+    { name: 'null kind and fractional hours', kind: null,
+      escalation: { settings: ['budget.raise'], change: { scope: 'project', what: 'hours', limit: 0.5 } } },
+    { name: 'owner lifted', technical: true, allowed: true },
+    { name: 'owner reason retained after lift', technical: true, owner_required: 'owner must decide' },
+    { name: 'explicit technical kind', kind: 'technical', allowed: true },
+    { name: 'tagged budget question', escalation: { settings: ['budget.raise'], change: null }, allowed: true },
+    { name: 'setting payload', escalation: { settings: ['budget.raise'], change: { 'budget-tokens': 10 } }, allowed: true },
+    { name: 'unrelated setting', escalation: { settings: ['sandbox'], change: breach.change }, allowed: true },
+    { name: 'missing limit', escalation: { settings: ['budget.raise'], change: { scope: 'T1', what: 'tokens' } }, allowed: true },
+    { name: 'no limit', escalation: { settings: ['budget.raise'], change: { scope: 'T1', what: 'tokens', limit: null } }, allowed: true },
+    { name: 'approval request', approval_request: true },
+  ]) {
+    const { name, allowed, ...fields } = row;
+    const d = { id: 'D1', answerers: [], technical: false, escalation: breach, ...fields };
+    assert.equal(D.orchestratorAnswers(st, d), !!allowed, name);
+    if (allowed) assert.equal(D.answerRule(st, d, ctx), 'orchestrator-escalated-question', name);
+    else assert.throws(() => D.answerRule(st, d, ctx), /only the owner/, name);
+  }
+});
+
+test('an open budget alert from before upgrade stays visible to the owner and refuses answer and withdraw', (t) => {
+  for (const scope of ['project', 'T1']) {
+    for (const what of ['hours', 'tokens']) {
+      const h = cachedFixture(t, 'legacy-budget-alert', (h) => {
+        h.init();
+        h.ok(['task', 'add', '--title', 'Budget held work', '--acceptance', 'owner retains its budget alert']);
+      });
+      h.ok(['ask', '--kind', 'technical', '--question', 'Budget crossed', '--option', 'raise', '--option', 'stop',
+        '--blocks', 'T1', '--agent', 'worker-T1-1']);
+      const stored = h.readState('decisions.json');
+      const d = stored.decisions[0];
+      delete d.kind;
+      delete d.owner_required;
+      d.technical = false;
+      d.escalation = { settings: ['budget.raise'], change: { scope, what, limit: 10 } };
+      d.blocks = scope === 'project' ? [] : ['T1'];
+      h.writeState('decisions.json', stored);
+      const before = events(h);
+      assert.deepEqual(h.json(['status']).owner.waiting, ['D1'], `${scope}/${what}`);
+      assert.match(h.ok(['status']), /waiting when convenient: D1/);
+      const action = h.json(['inbox', '--agent', 'orchestrator']).items.find((i) => i.decision?.id === 'D1').action;
+      assert.equal(action.argv.at(-1), '<owner answer>');
+      for (const args of [
+        ['answer', 'D1', '--choice', 'raise', '--agent', 'orchestrator'],
+        ['decision', 'withdraw', 'D1', '--reason', 'moot', '--agent', 'orchestrator'],
+      ]) {
+        const refused = h.run(args);
+        assert.equal(refused.code, 1, `${scope}/${what}: ${refused.stderr}`);
+        assert.match(refused.stderr, /only .*owner/);
+      }
+      assert.deepEqual(h.readState('decisions.json'), stored);
+      assert.deepEqual(events(h).filter((e) => ['answer', 'decision withdraw'].includes(e.cmd)),
+        before.filter((e) => ['answer', 'decision withdraw'].includes(e.cmd)));
+      h.ok(['answer', 'D1', '--choice', 'stop', '--agent', 'owner']);
+      assert.equal(h.readState('decisions.json').decisions[0].answer_rule, 'owner');
+    }
+  }
+});
+
+test('status bounds escalated answer history by age and open task links while keeping a total count', (t) => {
+  const R = require('../lib/render');
+  const now = Date.parse('2026-10-21T12:00:00Z');
+  const day = 24 * 60 * 60 * 1000;
+  const rows = [
+    { id: 'D1', age: 0, shown: true },
+    { id: 'D2', age: day, shown: true },
+    { id: 'D3', age: day + 1 },
+    { id: 'D4', age: day + 1, blocks: ['T1'], shown: true },
+    { id: 'D5', age: day + 1, blocks: ['T2'] },
+    { id: 'D6', age: day + 1, blocks: ['T3'] },
+    { id: 'D7', age: day + 1, blocks: ['T9'] },
+    { id: 'D8', age: -1 },
+    { id: 'D9', date: null },
+    { id: 'D10', date: null, blocks: ['T1'], shown: true },
+  ];
+  const st = {
+    tasks: { tasks: [{ id: 'T1', status: 'todo' }, { id: 'T2', status: 'accepted' }, { id: 'T3', status: 'cancelled' }] },
+    decisions: { decisions: rows.map((r) => ({
+      id: r.id, status: 'answered', answer_rule: 'orchestrator-escalated-question', answer: 'host', answered_by: 'orchestrator',
+      answered_at: r.date === null ? null : new Date(now - r.age).toISOString(), blocks: r.blocks || [],
+    })) },
+  };
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Still open', '--acceptance', 'history remains useful']);
+  h.ok(['ask', '--kind', 'technical', '--setting', 'sandbox', '--question', 'Old resolved question?',
+    '--option', 'host', '--option', 'widen', '--agent', 'worker-ask']);
+  h.ok(['answer', 'D1', '--choice', 'host', '--agent', 'orchestrator']);
+  const stored = h.readState('decisions.json');
+  stored.decisions[0].answered_at = new Date(Date.now() - 2 * day).toISOString();
+  h.writeState('decisions.json', stored);
+  const hidden = h.json(['status']);
+  assert.deepEqual(hidden.decisions_orchestrator_escalated, []);
+  assert.equal(hidden.decisions_orchestrator_escalated_count, 1);
+  assert.doesNotMatch(h.ok(['status']), /D1 -> host/);
+  stored.decisions[0].blocks = ['T1'];
+  h.writeState('decisions.json', stored);
+  assert.equal(h.json(['status']).decisions_orchestrator_escalated[0].id, 'D1');
+  assert.match(h.ok(['status']), /D1 -> host/);
+  const summary = R.escalatedAnswerSummary(st, now);
+  assert.equal(summary.count, rows.length);
+  assert.deepEqual(summary.answers.map((d) => d.id), rows.filter((r) => r.shown).map((r) => r.id));
+});
 
 test('escalated question delegation covers policy, approval markers and verified identities', () => {
   const D = require('../lib/decisions');
