@@ -8,6 +8,11 @@ on:
   schedule:
     - cron: '17 3 * * *'
   workflow_dispatch:
+    inputs:
+      hang:
+        description: 'Test only: block every shard runner so its watchdog dumps and stops it after 2 minutes'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -45,7 +50,7 @@ jobs:
     # test/run.js splits shards by measured file time (test/durations.json). Three Windows shards
     # took 28 to 36 minutes, against test/run.js's 36-minute shard deadline, so Windows runs four.
     # This is a per-shard hang limit, not the suite deadline in scripts/suite-time.js; the runner
-    # still bounds each test independently.
+    # still bounds each test independently. The test step's own limit leaves time to upload its log.
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -72,10 +77,23 @@ jobs:
       - run: npm run check:shared
         env:
           TOWER_CRANE_CHANGE_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+      # The shard watchdog stops a hung run at 36 minutes; this limit ends the step if it cannot.
       - run: npm test
+        timeout-minutes: 40
         env:
           TOWER_CRANE_TEST_TMP: ${{ runner.temp }}/tower-crane-tests
           TC_TEST_SHARD: ${{ matrix.shard }}
+          TC_TEST_SHARD_LOG_DIR: ${{ runner.temp }}/shard-log
+          TC_TEST_SHARD_HANG: ${{ inputs.hang && '1' || '' }}
+          TC_TEST_SHARD_DEADLINE_MIN: ${{ inputs.hang && '2' || '' }}
+      # A job its limit cancels keeps no log; this keeps the file progress and the watchdog's dump.
+      - name: Save shard progress
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: shard-progress-${{ matrix.os }}-node-${{ matrix.node }}-${{ strategy.job-index }}
+          path: ${{ runner.temp }}/shard-log
+          if-no-files-found: warn
 
   # Flake repeats for Windows-only races. They run in their own job so the test shards keep
   # an even, measured share of the suite.
@@ -83,9 +101,10 @@ jobs:
     name: repeat (windows-latest, node 26)
     if: github.event_name != 'pull_request'
     runs-on: windows-latest
-    # About 40 to 50 minutes: ten passes of the authority files take about 16 and ten of
-    # the mutation tests about 15, within their 40-minute step limit.
-    timeout-minutes: 85
+    # About 45 to 60 minutes: ten passes of the authority files take about 16, twenty of the
+    # interrupt backoff and origin read tests about 8 and ten of the mutation tests about 15,
+    # within their 40-minute step limit.
+    timeout-minutes: 95
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -130,6 +149,16 @@ jobs:
           foreach ($attempt in 1..10) {
             Write-Host "Owner authority and board approval files: pass $attempt/10"
             npm test -- test/authority.test.js test/approval-context.test.js test/board-controls.test.js test/windows-ancestry.test.js
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+        env:
+          TOWER_CRANE_TEST_TMP: ${{ runner.temp }}/tower-crane-tests
+      - name: Repeat interrupt during backoff and origin read tests twenty times
+        shell: pwsh
+        run: |
+          foreach ($attempt in 1..20) {
+            Write-Host "Interrupt during backoff and origin read: pass $attempt/20"
+            npm test -- test/interrupt.test.js test/spawn.test.js --test-name-pattern="interrupt during backoff cancels the retry" --test-name-pattern="a failed origin read is read again"
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
         env:
