@@ -142,6 +142,10 @@ test('a Windows root that exited before its first snapshot keeps the children it
     for (const [name, os, snapshot, launch, expected] of [
       ['exited root', 'win32', rows, 1000, [11, 12, 14]],
       ['live root', 'win32', [root, ...rows.filter(r => r.pid !== 13)], 1000, [10, 11, 12, 14]],
+      // 13 and the process it started belong to the earlier holder of pid 10,
+      // as a detached supervisor does once its dispatch exits.
+      ['live root and an earlier orphan', 'win32', [root, ...rows, { pid: 16, parent: 13, group: null, start: 600 }], 1000, [10, 11, 12, 14]],
+      ['a live child and an earlier orphan', 'win32', [root, ...rows, { pid: 17, parent: 11, group: null, start: 700 }], 1000, [10, 11, 12, 14]],
       ['no launch time', 'win32', rows, undefined, []],
       ['Linux reparents', 'linux', rows, 1000, []],
     ]) {
