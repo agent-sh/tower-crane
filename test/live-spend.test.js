@@ -84,7 +84,7 @@ test('DIAGNOSTIC taskkill /T and a reused parent pid', { skip: process.platform 
     const [ppid, orphan] = parent.stdout.trim().split(' ').map(Number);
     const holders = [];
     let reused;
-    const deadline = Date.now() + 60000;
+    const deadline = Date.now() + 60000; // wait-allow: diagnostic probe bounds its pid search
     while (!reused && holders.length < 400 && Date.now() < deadline) {
       const c = cp.spawn('ping.exe', ['-n', '120', '127.0.0.1'], { stdio: 'ignore', windowsHide: true });
       holders.push(c);
@@ -96,11 +96,11 @@ test('DIAGNOSTIC taskkill /T and a reused parent pid', { skip: process.platform 
       const r = cp.spawnSync('taskkill', ['/PID', String(ppid), '/T', '/F'], { encoding: 'utf8', windowsHide: true });
       await new Promise((resolve) => setTimeout(resolve, 500)); // wait-allow: diagnostic probe gives taskkill time to land
       let alive;
-      try { process.kill(orphan, 0); alive = 'orphan survived'; } catch (e) { alive = `orphan ${e.code}`; }
+      try { killPid(orphan, 0); alive = 'orphan survived'; } catch (e) { alive = `orphan ${e.code}`; }
       line += `pid reused; taskkill /T status ${r.status}: ${alive}; taskkill said: ${(r.stdout + r.stderr).replace(/\s+/g, ' ').trim()}`;
     } else line += 'pid not reused';
     for (const c of holders) try { c.kill(); } catch { /* exited */ }
-    try { process.kill(orphan); } catch { /* gone */ }
+    try { killPid(orphan); } catch { /* gone */ }
     process.stderr.write(line + '\n');
   }
 });

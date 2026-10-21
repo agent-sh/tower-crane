@@ -48,7 +48,7 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
       const started = performance.now();
       const done = rest.pop();
       return execFile.call(this, file, ...rest, (error, ...out) => {
-        if (error || performance.now() - started > 5000) trace(`supervisor ${file} took ${Math.round(performance.now() - started)} ms${error ? `, failed: ${error.code ?? ''} ${error.signal ?? ''} ${error.message.slice(0, 200)}` : ''}`);
+        if (error || performance.now() - started > 5000) trace(`supervisor ${file} took ${Math.round(performance.now() - started)} ms${error ? `, failed: ${error.code ?? ''} ${error.signal ?? ''} ${error.message.slice(0, 200)}` : ''}`); // wait-allow: the trace names slow snapshots and passes nothing
         done(error, ...out);
       });
     };
