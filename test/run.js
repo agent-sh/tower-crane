@@ -44,17 +44,76 @@ function shardFiles(files, index, total, durations = fileDurations()) {
 }
 // A fresh 0700 directory for a run's sockets: in the runtime directory, or,
 // in a sandbox that grants only its own socket leaf there, in that leaf. Its
-// name is none the broker sweep takes. Null when neither can hold one.
+// name is none the broker sweep takes. RUNNER in it names this process, so a
+// later run removes the directory of a run that died without cleaning up, as
+// one the shard watchdog kills does. Null when neither base can hold one.
+const RUNNER = 'runner.json';
 function privateRuntime(env) {
   for (const base of [env.XDG_RUNTIME_DIR, env.TOWER_CRANE_SOCKET_DIR]) {
     if (!base || !path.isAbsolute(base)) continue;
+    let dir;
     try {
-      return fs.mkdtempSync(path.join(base, 'tct-'));
+      dir = fs.mkdtempSync(path.join(base, 'tct-'));
     } catch {
       // A base this run cannot write: the next one.
+      continue;
     }
+    fs.writeFileSync(path.join(dir, RUNNER), JSON.stringify(runner(process.pid)), { mode: 0o600 });
+    sweepRuns(base, dir);
+    return dir;
   }
   return null;
+}
+// What tells this runner from a later process at its pid, as lib/processes.js
+// records it (identity). The runner keeps to node: built-ins, since the mutant
+// harness runs it in a copy without lib/.
+function procRead(read) {
+  try { return read(); } catch { return null; }
+}
+function runner(pid) {
+  const stat = procRead(() => fs.readFileSync(`/proc/${pid}/stat`, 'utf8'));
+  return {
+    pid, host: os.hostname(),
+    start_ticks: stat ? stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/)[19] : null,
+    pidns: procRead(() => fs.readlinkSync('/proc/self/ns/pid')),
+  };
+}
+// Whether the runner a record names has provably exited (processState in
+// lib/processes.js): on this host, in this pid namespace, and its pid is free
+// or now holds a process that started later.
+function runnerExited(record) {
+  const own = runner(process.pid);
+  if (!record || record.host !== own.host || record.pidns !== own.pidns || !Number.isInteger(record.pid) || record.pid <= 0) return false;
+  try {
+    process.kill(record.pid, 0);
+  } catch (e) {
+    return e.code === 'ESRCH';
+  }
+  const now = runner(record.pid).start_ticks;
+  return record.start_ticks != null && now != null && now !== record.start_ticks;
+}
+// Removes the tct- directories in base whose runner has exited. One whose
+// record is missing, does not parse or names a runner that cannot be told
+// gone (another host or pid namespace) stays: inside an agent's sandbox a
+// live run on the host looks exited to kill(pid, 0) alone.
+function sweepRuns(base, keep) {
+  const uid = process.getuid();
+  for (const name of fs.readdirSync(base)) {
+    if (!/^tct-[A-Za-z0-9]{6}$/.test(name)) continue;
+    const dir = path.join(base, name);
+    if (dir === keep) continue;
+    try {
+      const d = fs.lstatSync(dir);
+      if (!d.isDirectory() || d.uid !== uid) continue;
+      const file = path.join(dir, RUNNER);
+      const f = fs.lstatSync(file);
+      if (!f.isFile() || f.uid !== uid) continue;
+      if (!runnerExited(JSON.parse(fs.readFileSync(file, 'utf8')))) continue;
+      fs.rmSync(dir, { recursive: true, force: true });
+    } catch {
+      // Gone already, or nothing proves its runner exited.
+    }
+  }
 }
 // A healthy Windows shard runs its tests in about 28 minutes; this leaves its dump
 // and stop time inside the 40-minute test step limit in .github/workflows/ci.yml.
@@ -152,14 +211,19 @@ if (!run.length) return;
 // A broker a test starts sweeps its socket roots for directories that killed
 // brokers left (sweep in lib/broker.js). The real runtime directory holds the
 // live sockets of agents, a worker's own included, so the run gets a private
-// one there, removed when the run ends.
-const runtime = privateRuntime(process.env);
+// one there, removed when the run ends. A test that probes the host's own
+// runtime directory, such as its session bus, reads TOWER_CRANE_HOST_RUNTIME_DIR.
+const runtime = process.platform === 'win32' ? null : privateRuntime(process.env);
 if (runtime) {
+  if (!env.TOWER_CRANE_HOST_RUNTIME_DIR && process.env.XDG_RUNTIME_DIR) env.TOWER_CRANE_HOST_RUNTIME_DIR = process.env.XDG_RUNTIME_DIR;
   env.XDG_RUNTIME_DIR = runtime;
   process.on('exit', () => fs.rmSync(runtime, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
 }
 const started = Date.now();
 const child = cp.spawn(process.execPath, args, { stdio: 'inherit', env });
+// Node skips exit handlers when a signal ends it, so a stop request goes to the
+// tests, and this process exits, cleanup included, once they have.
+for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(signal, () => child.kill(signal));
 // A job its time limit cancels keeps no log, so a shard stops a few minutes under
 // the test step's limit: test/shard-watchdog.js prints the processes the run still
 // holds, stops them and fails. It runs in a process of its own, since a timer here
