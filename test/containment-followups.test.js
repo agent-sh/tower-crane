@@ -219,24 +219,34 @@ test('the governor retains the full scope through delayed registry attachment', 
   }
 });
 
-test('wait follow retries an unchanged failed refill after its timer expires', async t => {
+for (const failure of ['returned', 'thrown']) {
+test(`wait follow retries an unchanged failed refill after its timer expires: ${failure}`, async t => {
   const { refillFixture } = require('./automation-helpers');
   const Automation = require('../lib/automation');
-  const Actions = require('../lib/actions');
+  const Spawn = require('../lib/spawn');
+  const S = require('../lib/state');
+  const { TowerCraneError } = require('../lib/util');
   const h = refillFixture(t);
   const ctx = { stateDir: h.state, env: h.env, agent: 'orchestrator', agentExplicit: true, flags: {}, pos: [] };
-  let calls = 0;
-  t.mock.method(Actions, 'spawn', async () => { calls++; return { code: 1, text: 'temporarily refused' }; });
+  const ready = require('../lib/inbox').dispatchable(S.loadState(h.state), true).map(task => task.id);
+  assert.ok(ready.length > 1, 'multiple ready tasks keep separate refusal entries');
+  const calls = [];
+  t.mock.method(Spawn, 'spawn', async ctx => {
+    calls.push(ctx.flags.task);
+    if (failure === 'thrown') throw new TowerCraneError(1, 'temporarily refused');
+    return { code: 1, text: 'temporarily refused' };
+  });
   const attempt = {};
   await Automation.refillWorkers(ctx, attempt);
-  assert.equal(calls, 1);
+  assert.deepEqual(calls, ready);
   await Automation.refillWorkers(ctx, attempt);
-  assert.equal(calls, 1);
+  assert.deepEqual(calls, ready, 'unchanged task refusals are still cached');
   const now = Date.now();
   t.mock.method(Date, 'now', () => now + 60001);
   await Automation.refillWorkers(ctx, attempt);
-  assert.equal(calls, 2, 'the branch can be repaired without a state event');
+  assert.deepEqual(calls, [...ready, ...ready], 'each task can be repaired without a state event');
 });
+}
 
 test('an idle CLI wait follower sweeps new leaks without another launch or event', { skip: process.platform !== 'linux' }, async t => {
   const h = cachedFixture(t, 'idle-sweep', h => h.init());
