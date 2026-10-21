@@ -379,9 +379,12 @@ require('node:test')('spins', () => { const end = Date.now() + 400; let n = 0; w
 `);
   const out = path.join(h.base, 'profile.json');
   // This checkout stands in for the baseline, so the verdict is a coin toss; the exit follows it.
-  const r = cp.spawnSync(process.execPath, [path.join(ROOT, 'scripts', 'suite-profile.js'), '--test-concurrency=1', '--json', out, '--baseline-dir', ROOT, fixture],
+  // The request is over any core count, so the report must name the runner's capped workers.
+  const r = cp.spawnSync(process.execPath, [path.join(ROOT, 'scripts', 'suite-profile.js'), '--test-concurrency=999', '--json', out, '--baseline-dir', ROOT, fixture],
     { cwd: ROOT, env: { ...h.env, TOWER_CRANE_TEST_TMP: h.base }, encoding: 'utf8', timeout: 300000 });
   assert.equal(r.status, /: not lower$/m.test(r.stdout) ? 1 : 0, r.stderr + r.stdout);
+  const workers = Math.max(1, require('node:os').availableParallelism() - 1);
+  assert.equal(r.stdout.match(new RegExp(`^suite wall [\\d.]+ s at ${workers} file workers;`, 'gm'))?.length, 2, r.stdout);
   assert.match(r.stdout, /^# suite profile: baseline run 1 of 1 in /m);
   assert.match(r.stdout, /^host: \d+ cores; 1-minute load /m);
   assert.match(r.stdout, /^median of 1: CPU seconds \((cgroup|file processes)\) head [\d.]+ vs baseline [\d.]+ .*: (lower|not lower)$/m);

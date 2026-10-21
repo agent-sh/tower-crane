@@ -303,6 +303,8 @@ for (let i = 0; i < args.length; i++) {
 if (baselineRef !== null && baselineDir !== null) fail('--baseline and --baseline-dir name the same thing; give one');
 if (baselineRef === '' || baselineRef === undefined) fail('--baseline takes a commit');
 if (!pass.some((a) => a.startsWith('--test-concurrency'))) pass.unshift(`--test-concurrency=${concurrency}`);
+// test/run.js caps the request at one below the core count, so the report names the workers that ran.
+const workers = Math.min(Math.max(1, require('node:os').availableParallelism() - 1), concurrency);
 const base = process.env.TOWER_CRANE_TEST_TMP || process.env.TMPDIR || require('node:os').tmpdir();
 fs.mkdirSync(base, { recursive: true });
 
@@ -318,7 +320,7 @@ function profileRun(tree) {
     const host = stopSampling();
     const records = fs.readdirSync(dir).flatMap((name) => fs.readFileSync(path.join(dir, name), 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line)));
     fs.rmSync(dir, { recursive: true, force: true });
-    resolve({ wall_ms: wall, concurrency, status: status ?? 1, host, ...summarize(records, tree) });
+    resolve({ wall_ms: wall, concurrency: workers, status: status ?? 1, host, ...summarize(records, tree) });
   }));
 }
 
@@ -340,7 +342,7 @@ async function main() {
         console.log(`\n# suite profile: ${tree} run ${i} of ${runs} in ${dir}`);
         const r = await profileRun(dir);
         done.push({ tree, ...r });
-        console.log(`\n${report(r, { wall_ms: r.wall_ms, concurrency, top, host: r.host })}`);
+        console.log(`\n${report(r, { wall_ms: r.wall_ms, concurrency: workers, top, host: r.host })}`);
       }
     }
   } finally {
