@@ -42,6 +42,28 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
       trace(`supervisor mutate ${cmd} start`);
       try { return mutate.call(this, ctx, cmd, ...rest); } catch (e) { trace(`supervisor mutate ${cmd} threw ${e.code ?? ''} ${e.message}`); throw e; } finally { trace(`supervisor mutate ${cmd} end`); }
     };
+    const execFile = cp.execFile;
+    cp.execFile = function (file, ...rest) {
+      if (!/powershell/i.test(file) || typeof rest.at(-1) !== 'function') return execFile.call(this, file, ...rest);
+      const started = performance.now();
+      const done = rest.pop();
+      return execFile.call(this, file, ...rest, (error, ...out) => {
+        if (error || performance.now() - started > 5000) trace(`supervisor ${file} took ${Math.round(performance.now() - started)} ms${error ? `, failed: ${error.code ?? ''} ${error.signal ?? ''} ${error.message.slice(0, 200)}` : ''}`);
+        done(error, ...out);
+      });
+    };
+    const spawnChild = cp.spawn;
+    cp.spawn = function (...args) {
+      const child = spawnChild.apply(this, args);
+      trace(`supervisor spawned ${path.basename(String(args[0]))} pid ${child.pid}`);
+      child.on('exit', (code, signal) => trace(`supervisor saw pid ${child.pid} exit ${code} ${signal}`));
+      const emit = child.emit;
+      child.emit = function (name, ...rest) {
+        if (['resourceLimit', 'error'].includes(name)) trace(`supervisor child ${child.pid} ${name} ${rest[0]?.message || rest[0]}`);
+        return emit.call(this, name, ...rest);
+      };
+      return child;
+    };
     let last = performance.now();
     setInterval(() => {
       const now = performance.now();
