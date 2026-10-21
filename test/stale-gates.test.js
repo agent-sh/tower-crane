@@ -195,30 +195,158 @@ test('restoring a cleanup pin queues and runs an accepted task blocked by missin
   assert.equal(h.github().prs['7'].state, 'MERGED');
 });
 
+// Commits files on main, as a merge of another task would, and returns the new tip.
+function advanceMain(h, files, message = 'advance base') {
+  h.git(['switch', '-q', 'main']);
+  for (const [name, text] of Object.entries(files)) {
+    fs.mkdirSync(path.dirname(path.join(h.repo, name)), { recursive: true });
+    fs.writeFileSync(path.join(h.repo, name), text);
+    h.git(['add', name]);
+  }
+  h.git(['commit', '--allow-empty', '-qm', message]);
+  const tip = h.git(['rev-parse', 'HEAD']);
+  h.git(['switch', '-q', 'fixture-change']);
+  return tip;
+}
+
+// T476's review: on a busy base every base move reran a long local CI, and a run as long as
+// ginza T26's came back behind the tip each time, so the task never landed.
 for (const change of ['source', 'empty']) {
-  test(`the merge queue reruns pinned local CI on the real merged tree after a ${change} commit advances its checked base`, (t) => {
+  test(`the merge queue lands a local CI receipt behind the tip without a rerun after a disjoint ${change} commit`, (t) => {
     const h = accepted(t);
-    h.ok(['project', 'set', '--ci-local',
-      JSON.stringify({ command: [process.execPath, '-e', 'process.exit(0)'], timeout: 5 })]);
+    h.ok(['project', 'set', '--ci-local', localCI]);
     h.ok(['check', 'ci', 'T1']);
-    h.git(['switch', '-q', 'main']);
-    if (change === 'source') {
-      fs.appendFileSync(path.join(h.repo, 'README.md'), 'Updated base.\n');
-      h.git(['add', 'README.md']);
-    }
-    h.git(['commit', '--allow-empty', '-qm', 'advance base']);
-    const tip = h.git(['rev-parse', 'HEAD']);
-    h.git(['switch', '-q', 'fixture-change']);
+    const checked = h.git(['rev-parse', 'main']);
+    const tip = advanceMain(h, change === 'source' ? { 'README.md': 'Updated base.\n' } : {});
+    assert.notEqual(tip, checked);
     const count = h.logs().filter((e) => e.cmd === 'check ci').length;
-    const report = h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'ci');
-    assert.equal(report.ok, true, 'reports keep the receipt on the tree it checked');
     h.ok(['merge', '--accepted', '--agent', 'orchestrator']);
     assert.equal(h.github().prs['7'].state, 'MERGED');
     const ci = h.readState('tasks.json').tasks[0].evidence.findLast((e) => e.type === 'ci');
-    assert.equal(ci.receipt.base_sha, tip);
-    assert.equal(h.logs().filter((e) => e.cmd === 'check ci').length, count + 1);
+    assert.equal(ci.receipt.base_sha, checked, 'the receipt behind the tip is the one that landed');
+    assert.equal(h.logs().filter((e) => e.cmd === 'check ci').length, count, 'no rerun');
+    assert.ok(!h.logs().some((e) => e.cmd === 'local ci rerun'));
   });
 }
+
+// What a base move can change that the run depends on: a file the task changes too, a script the
+// command names, a path the owner lists in `inputs`, or the history the receipt was checked on.
+const overlaps = [
+  ['a path the task changes', { local: localCI, move: (h) => advanceMain(h, { 'value.js': 'module.exports = 1;\n' }) },
+    /the base changed value\.js, which the task changes or the CI command reads/],
+  ['a script the command names', {
+    local: JSON.stringify({ command: [process.execPath, 'ci.js'], timeout: 5 }),
+    prepare: (h) => advanceMain(h, { 'ci.js': 'process.exit(0);\n' }, 'add the CI script'),
+    move: (h) => advanceMain(h, { 'ci.js': 'process.exit(0);\n// changed\n' }),
+  }, /the base changed ci\.js,/],
+  ['an inputs glob', {
+    local: JSON.stringify({ command: [process.execPath, '-e', 'process.exit(0)'], timeout: 5, inputs: ['config/**'] }),
+    move: (h) => advanceMain(h, { 'config/ci.json': '{}\n' }),
+  }, /the base changed config\/ci\.json,/],
+  // A force-push drops the checked commit and keeps the base the head branched from.
+  ['a rewritten base', { local: localCI, prepare: (h) => advanceMain(h, { 'notes.txt': 'notes\n' }), move: (h) => {
+    const base = h.git(['rev-parse', 'main']);
+    const tip = h.git(['commit-tree', `${base}^{tree}`, '-p', `${base}^`, '-m', 'rewritten base']);
+    h.git(['update-ref', 'refs/heads/main', tip]);
+    return tip;
+  } }, /its checked base [0-9a-f]+ is not in the history of [0-9a-f]+/],
+];
+
+for (const [name, { local, prepare, move }, reason] of overlaps) {
+  test(`the merge queue reruns local CI behind the tip when the base moved ${name}`, (t) => {
+    const h = accepted(t);
+    h.ok(['project', 'set', '--ci-local', local]);
+    prepare?.(h);
+    h.ok(['check', 'ci', 'T1']);
+    const checked = h.git(['rev-parse', 'main']);
+    const tip = move(h);
+    const count = h.logs().filter((e) => e.cmd === 'check ci').length;
+    h.ok(['merge', '--accepted', '--agent', 'orchestrator']);
+    assert.equal(h.github().prs['7'].state, 'MERGED');
+    const ci = h.readState('tasks.json').tasks[0].evidence.findLast((e) => e.type === 'ci');
+    assert.equal(ci.receipt.base_sha, tip, 'what landed was checked on the tip');
+    assert.equal(h.logs().filter((e) => e.cmd === 'check ci').length, count + 1);
+    const reruns = h.logs().filter((e) => e.cmd === 'local ci rerun');
+    assert.deepEqual(reruns.map((e) => [e.detail.from, e.detail.tip, e.detail.lost, e.detail.hold]), [[checked, tip, 0, undefined]]);
+    assert.match(reruns[0].detail.reason, reason);
+  });
+}
+
+// The command stands in for a two-hour run: a merge that changes the script it runs lands on
+// main during each of the next two runs, so each comes back behind an overlapping change.
+const BUSY_BASE = `
+const fs = require('node:fs');
+const cp = require('node:child_process');
+const [count, repo, cli, out] = process.argv.slice(2);
+// The other task's own runs leave main alone.
+if (fs.existsSync('other.txt')) process.exit(0);
+const run = (fs.existsSync(count) ? Number(fs.readFileSync(count, 'utf8')) : 0) + 1;
+fs.writeFileSync(count, String(run));
+const env = { ...process.env, GIT_AUTHOR_NAME: 'T', GIT_AUTHOR_EMAIL: 't@localhost', GIT_COMMITTER_NAME: 'T', GIT_COMMITTER_EMAIL: 't@localhost' };
+const git = (args, input) => cp.execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8', input, env }).trim();
+if (run === 2 || run === 3) {
+  const base = git(['rev-parse', 'refs/heads/main']);
+  const blob = git(['hash-object', '-w', '--stdin'], git(['show', base + ':ci.js']) + '\\n// moved during run ' + run + '\\n');
+  const tree = git(['mktree'], git(['ls-tree', base]).split('\\n').map((l) => (l.endsWith('\\tci.js') ? '100644 blob ' + blob + '\\tci.js' : l)).join('\\n') + '\\n');
+  git(['update-ref', 'refs/heads/main', git(['commit-tree', tree, '-p', base, '-m', 'busy base ' + run])]);
+}
+// The other task checks the current base, so only the hold keeps it from landing during this run.
+if (run === 4) {
+  const tc = (args) => cp.spawnSync(process.execPath, [cli, ...args, '--agent', 'merger'], { cwd: repo, encoding: 'utf8' });
+  const check = tc(['check', 'ci', 'T2']);
+  const r = tc(['merge', 'T2']);
+  fs.writeFileSync(out, JSON.stringify({ check: check.status, code: r.status, stderr: r.stderr }));
+}
+`;
+
+test('local CI reruns lost to base moves twice in a row hold merges to the base until the task lands', (t) => {
+  const h = accepted(t);
+  const count = path.join(h.base, 'ci-runs');
+  const out = path.join(h.base, 'held-merge.json');
+  const cli = path.join(__dirname, '..', 'bin', 'tower-crane.js');
+  advanceMain(h, { 'ci.js': BUSY_BASE }, 'add the CI script');
+  h.ok(['project', 'set', '--ci-local', JSON.stringify({ command: [process.execPath, 'ci.js', count, h.repo, cli, out], timeout: 30 })]);
+  h.ok(['check', 'ci', 'T1']);
+
+  // T2, accepted after T1, merges to the same base.
+  h.git(['switch', '-qc', 'other-change', 'main']);
+  fs.writeFileSync(path.join(h.repo, 'other.txt'), 'other\n');
+  h.git(['add', 'other.txt']);
+  h.git(['commit', '-qm', 'other change']);
+  const other = h.git(['rev-parse', 'HEAD']);
+  h.git(['switch', '-q', 'fixture-change']);
+  const github = h.github();
+  github.prs['8'] = { ...github.prs['7'], headRefOid: other, headRefName: 'other-change', url: 'https://github.com/acme/demo/pull/8' };
+  github.ci[other] = 'success';
+  h.saveGithub(github);
+  h.ok(['task', 'add', '--title', 'Other', '--acceptance', 'it works', '--kind', 'docs']);
+  h.ok(['brief', 'set', 'T2', '-'], { input: '# Other\n\nImplement the acceptance.\n' });
+  h.ok(['claim', 'T2', '--agent', 'worker']);
+  h.ok(['submit', 'T2', '--sha', other, '--pr', '8', '--agent', 'worker']);
+  h.reviewer('T2', 'reviewer', other);
+  h.ok(['evidence', 'T2', '--revision', h.revision('T2'), '--type', 'review', '--sha', other, '--ok', '--agent', 'reviewer']);
+  h.ok(['accept', 'T2', '--agent', 'orchestrator']);
+
+  // A merge after T1's check changes the script, so the queue reruns it.
+  const first = advanceMain(h, { 'ci.js': `${BUSY_BASE}// merged after the check\n` });
+  h.ok(['merge', '--accepted', '--agent', 'orchestrator']);
+
+  const reruns = h.logs().filter((e) => e.cmd === 'local ci rerun' && e.task === 'T1');
+  assert.deepEqual(reruns.map((e) => e.detail.lost), [0, 1, 2]);
+  assert.equal(reruns[0].detail.tip, first);
+  assert.deepEqual(reruns.map((e) => e.detail.hold), [undefined, undefined, '2 local CI reruns in a row came back behind a moved main']);
+  const held = JSON.parse(fs.readFileSync(out, 'utf8'));
+  assert.equal(held.check, 0, 'T2 has a receipt on the current base');
+  assert.equal(held.code, 1, 'a merge to the held base during the run is refused');
+  assert.match(held.stderr, /T2: merges to main are held for T1 until its local CI lands: 2 local CI reruns in a row came back behind a moved main/);
+
+  const [t1, t2] = h.readState('tasks.json').tasks;
+  assert.equal(h.github().prs['7'].state, 'MERGED', 'the task lands');
+  assert.equal(t1.evidence.findLast((e) => e.type === 'ci').receipt.base_sha, h.git(['rev-parse', 'main']));
+  assert.equal(fs.readFileSync(count, 'utf8'), '4');
+  assert.equal(h.github().prs['8'].state, 'MERGED', 'the hold ends when the task lands');
+  assert.equal(t2.evidence.at(-1).type, 'merge');
+});
 
 for (const [change, ref] of [
   ['empty', 'main'], ['empty', 'refs/remotes/origin/main'],

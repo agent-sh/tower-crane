@@ -864,18 +864,21 @@ test('confirming a merged stack member records evidence for it alone, not for me
 
 test('local CI covers each dependency base and merge rechecks lower receipts', (t) => {
   const f = stacked(t);
-  f.h.ok(['project', 'set', '--ci-local', JSON.stringify({ command: [process.execPath, '-e', 'process.exit(0)'], timeout: 30 })]);
+  // The command reads moved.txt, so a main that adds it voids the lower receipt.
+  f.h.ok(['project', 'set', '--ci-local', JSON.stringify({ command: [process.execPath, '-e', 'process.exit(0)'], timeout: 30, inputs: ['moved.txt'] })]);
   for (const id of ['T1', 'T2']) {
     f.h.ok(['check', 'ci', id]);
     f.h.ok(['accept', id, '--waive', 'review', '--reason', 'offline fixture']);
   }
   const receipt = f.h.json(['task', 'show', 'T2']).evidence.findLast((e) => e.type === 'ci').receipt;
   assert.equal(receipt.base_sha, f.sha);
-  f.h.git(['commit', '--allow-empty', '-qm', 'main moved']);
+  fs.writeFileSync(path.join(f.h.repo, 'moved.txt'), 'moved\n');
+  f.h.git(['add', 'moved.txt']);
+  f.h.git(['commit', '-qm', 'main moved']);
   f.h.git(['push', 'origin', 'main']);
   const r = f.h.run(['merge', 'T2']);
   assert.equal(r.code, 1);
-  assert.match(r.stderr, /check ci T1 before merging/);
+  assert.match(r.stderr, /the base changed moved\.txt, which the task changes or the CI command reads; run tower-crane check ci T1 before merging/);
   assert.deepEqual(routes(f), []);
 });
 
