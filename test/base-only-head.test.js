@@ -46,14 +46,18 @@ function gated(t) {
   return attach(h);
 }
 
-// Upstream advances main; the worker merges it into A and submits the new head.
-function advance(h, { conflict = false, extra = null } = {}) {
+// Upstream advances main, with an edit next to the own change's line when conflict is set.
+function upstream(h, conflict) {
   h.git(['switch', '-q', 'main']);
   write(h, 'upstream.md', 'An upstream change.\n');
   if (conflict) write(h, 'shared.txt', 'one\ntwo\nTHREE\n');
   h.git(['add', '.']);
   h.git(['commit', '-qm', 'advance the base']);
   h.git(['switch', '-q', 'fixture-change']);
+}
+
+// The worker merges main into A, resolving the conflict upstream() made, and submits the new head.
+function mergeAndSubmit(h, { conflict = false, extra = null, agent = 'worker' } = {}) {
   let merge = true;
   try { h.git(['merge', '-q', '--no-ff', '-m', 'merge the base', 'main']); } catch { merge = false; }
   assert.equal(merge, !conflict, conflict ? 'the base edit must conflict with the own change' : 'the merge must be automatic');
@@ -69,11 +73,16 @@ function advance(h, { conflict = false, extra = null } = {}) {
   }
   const head = h.git(['rev-parse', 'HEAD']);
   const github = h.github();
-  github.prs['7'].headRefOid = head;
+  Object.assign(github.prs['7'], { headRefOid: head, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' });
   github.ci[head] = 'success';
   h.saveGithub(github);
-  h.ok(['submit', 'T1', '--sha', head, '--pr', '7', '--agent', 'worker']);
+  h.ok(['submit', 'T1', '--sha', head, '--pr', '7', '--agent', agent]);
   return head;
+}
+
+function advance(h, { conflict = false, extra = null } = {}) {
+  upstream(h, conflict);
+  return mergeAndSubmit(h, { conflict, extra });
 }
 
 const gate = (h, type) => h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === type);
@@ -104,13 +113,26 @@ test('a base-only head keeps tests, clean and review at the same revision and qu
   assert.equal(after.status, 'accepted');
 });
 
-test('a conflict-resolving head is reviewed on the resolved hunks and tests only the resolved file', (t) => {
+// The worker resolves the conflict on its own, or after automation's conflict
+// rework sent the task back; the rework's revision bump keeps the link.
+for (const path_ of ['resubmit', 'conflict rework']) test(`a conflict-resolving head (${path_}) is reviewed on the resolved hunks and tests only the resolved file`, (t) => {
   const h = gated(t);
   const reviewed = h.readState('tasks.json').tasks[0].sha;
-  const head = advance(h, { conflict: true });
+  upstream(h, true);
+  if (path_ === 'conflict rework') {
+    const github = h.github();
+    Object.assign(github.prs['7'], { mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY' });
+    h.saveGithub(github);
+    h.consume();
+    const rework = h.logs().findLast((e) => e.cmd === 'rework');
+    assert.equal(rework?.detail.conflict, true, 'automation sends a conflicting PR back as a conflict rework');
+  }
+  // Refill hands the rework to a fresh worker, whose claim the submit uses.
+  const head = mergeAndSubmit(h, { conflict: true, agent: h.readState('tasks.json').tasks[0].claim?.agent || 'worker' });
   const task = h.readState('tasks.json').tasks[0];
   assert.equal(task.carry.kind, 'resolved');
   assert.deepEqual(task.carry.files, ['shared.txt']);
+  assert.deepEqual([task.carry.from_revision, task.carry.revision], path_ === 'resubmit' ? [1, 1] : [1, 2]);
   for (const type of ['tests', 'clean', 'review']) assert.equal(gate(h, type).ok, false, type);
   h.ok(['check', 'tests', 'T1']);
   const tests = h.readState('tasks.json').tasks[0].evidence.findLast((e) => e.type === 'tests');
