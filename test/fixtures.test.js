@@ -155,6 +155,41 @@ test('shortCacheRoot measures the real path of a linked cache and never makes a 
   assert.deepEqual(fs.readdirSync(path.join(bare, '.cache')), [], 'the existing cache stays, without the root');
 });
 
+test('socket fixtures keep excluded roots out of the preferred and fallback candidates', {
+  skip: process.platform === 'win32' && 'Unix socket fixtures are POSIX only',
+}, (t) => {
+  const { socketDir } = require('./socket-dir');
+  const { MAX_SOCKET_PATH } = require('../lib/socket-path');
+  const base = socketDir(t, MAX_SOCKET_PATH - 40);
+  const parent = path.join(base, 'parent');
+  const preferred = path.join(parent, 'preferred');
+  const fallback = path.join(base, 'fallback');
+  const alias = path.join(base, 'alias');
+  const neighbor = path.join(base, 'parent-other');
+  for (const dir of [preferred, fallback, neighbor]) fs.mkdirSync(dir, { recursive: true });
+  fs.symlinkSync(preferred, alias, 'dir');
+  const saved = { own: process.env.TOWER_CRANE_SOCKET_DIR, runtime: process.env.XDG_RUNTIME_DIR };
+  Object.assign(process.env, { TOWER_CRANE_SOCKET_DIR: preferred, XDG_RUNTIME_DIR: fallback });
+  try {
+    for (const [outside, expected] of [
+      [[], preferred],
+      [[preferred], fallback],
+      [[parent], fallback],
+      [[alias], fallback],
+      [[neighbor], preferred],
+      [[path.join(base, 'missing')], preferred],
+    ]) {
+      const made = socketDir(t, MAX_SOCKET_PATH - 2, { outside });
+      assert.equal(path.dirname(made), fs.realpathSync(expected), JSON.stringify(outside));
+    }
+  } finally {
+    for (const [key, value] of [['TOWER_CRANE_SOCKET_DIR', saved.own], ['XDG_RUNTIME_DIR', saved.runtime]]) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
 // Linux CI alone runs /proc; the lsof variants stand in for macOS, where the
 // leak check would otherwise pass without looking.
 test('the fixture process probe uses lsof off Linux and reports a skip where nothing probes', async (t) => {
