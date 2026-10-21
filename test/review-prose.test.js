@@ -251,7 +251,7 @@ test('changelog correction diffs are prepared once outside the spawn state lock'
     hooks: { HOOK_REVIEW_DIFF_REPORT: report },
   });
   const calls = fs.readFileSync(report, 'utf8').trim().split('\n').map(JSON.parse);
-  assert.deepEqual(calls, Array.from({ length: 5 }, () => ({ locked: false })));
+  assert.deepEqual(calls, Array.from({ length: 7 }, () => ({ locked: false })));
   assert.match(fs.readFileSync(path.join(h.state, 'reviews', `T1-${sha}.md`), 'utf8'), /## Light claim check/);
 });
 
