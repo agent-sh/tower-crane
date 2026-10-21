@@ -621,10 +621,12 @@ test('a native child crash reruns only the failing file once: a one-off passes w
 test('a failing test reruns once: one that then passes is flaky with both runs, one that fails twice keeps the failure, and a reverted failure is not rerun', async () => {
   const spec = `${NODE} --test --test-reporter=spec --test-concurrency=1`;
   const suite = `${spec} test/*.test.js`;
-  for (const [name, { times, mode = 'run-only', selector = true }, want] of [
+  for (const [name, { times, mode = 'run-only', selector = true, cut = false }, want] of [
     ['fails once', { times: 1 }, { ok: true, flaky: true, runs: 2, counted: 1, rerun: ['test/flaky.test.js'], note: /Rerun: reran test\/flaky\.test\.js once in the same checkout: exit 0; flaky: test\/flaky\.test\.js > sometimes fails\./ }],
     ['fails twice', { times: 2 }, { ok: false, flaky: false, runs: 2, counted: 1, rerun: ['test/flaky.test.js'], note: /Rerun: reran test\/flaky\.test\.js once in the same checkout: exit 1; the failure stands\./ }],
     ['fails once with no file selector', { times: 1, selector: false }, { ok: true, flaky: true, runs: 2, counted: 2, rerun: [], note: /reran the whole command \(the pinned runner has no file selector \(gates\.tests_proof_cmd with \{tests\}\)\) once in the same checkout: exit 0/ }],
+    // A failure printed before the kept tail would go unnamed, so the whole command reruns.
+    ['fails once with its output cut', { times: 1, cut: true }, { ok: true, flaky: true, runs: 2, counted: 2, rerun: [], note: /reran the whole command \(the first run's output was cut to its last \d+ characters\) once in the same checkout: exit 0/ }],
     // The reverted run fails test/add.test.js as the proof wants, and that failure is not rerun.
     ['fails once in prove mode', { times: 1, mode: 'prove' }, { ok: true, flaky: true, runs: 3, counted: 2, rerun: ['test/flaky.test.js'], note: /flaky: test\/flaky\.test\.js > sometimes fails\./ }],
   ]) {
@@ -641,6 +643,7 @@ test('sometimes fails', () => {
   // read-published: only this test writes the marker, and runs are sequential.
   const runs = fs.existsSync(${JSON.stringify(marker)}) ? fs.readFileSync(${JSON.stringify(marker)}, 'utf8').length : 0;
   fs.appendFileSync(${JSON.stringify(marker)}, 'x');
+  if (${cut} && runs < ${times}) process.stdout.write(('x'.repeat(1023) + '\\n').repeat(1536));
   assert.ok(runs >= ${times}, 'flaked on run ' + runs);
 });
 `,
@@ -666,7 +669,7 @@ test('sometimes fails', () => {
     assert.equal(flaky.first_failure.status, 1, name);
     assert.match(flaky.first_failure.error, /flaked on run 0/, name);
     assert.match(flaky.first_failure.excerpt, /^✖ sometimes fails[^\n]*\n[\s\S]*flaked on run 0/, name);
-    assert.equal(flaky.rerun.command, selector ? `${spec} ${shellQuote('test/flaky.test.js')}` : suite, name);
+    assert.equal(flaky.rerun.command, selector && !cut ? `${spec} ${shellQuote('test/flaky.test.js')}` : suite, name);
     assert.equal(flaky.rerun.status, 0, name);
     assert.ok(flaky.rerun.duration_ms >= 0 && flaky.first_failure.duration_ms >= 0, name);
     assertCleanedUp();
