@@ -448,7 +448,10 @@ async function main(argv) {
     automationCredential = AutomationKey.take(process.env);
     resolved = resolveCommand(argv);
     if (resolved.version) {
-      out(require('../package.json').version);
+      const fs = require('node:fs');
+      const file = require('node:path').join(__dirname, '..', 'tool.json');
+      const pinned = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : null;
+      out(`${require('../package.json').version}${pinned ? ` (commit ${pinned.sha || 'unknown'})` : ''}`);
       return 0;
     }
     if (resolved.help) {

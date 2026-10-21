@@ -744,6 +744,10 @@ test('a real codex sandbox starts for a home among 5,000 entries and reads nothi
 // (2026-10-14), and the stub test in isolation-shims.test.js covers claude's shim.
 function shimProbe(h, out, { before = '', extra = '', inject = false } = {}) {
   const dir = path.dirname(out);
+  const oldBin = path.join(dir, 'old-bin');
+  fs.mkdirSync(oldBin);
+  fs.writeFileSync(path.join(oldBin, 'tower-crane'), '#!/bin/sh\nif [ "$1" = --version ]; then echo 0.0.1; else echo "unknown command" >&2; exit 2; fi\n', { mode: 0o755 });
+  h.env.PATH = oldBin + path.delimiter + h.env.PATH;
   const repo = path.join(dir, 'shim-repo');
   for (const args of [['init', '-q', repo], ['-C', repo, 'commit', '-q', '--allow-empty', '-m', 'probe'],
     ['-C', repo, 'remote', 'add', 'origin', 'https://127.0.0.1:9/agent-sh/tower-crane.git']]) h.git(args);
@@ -751,18 +755,25 @@ function shimProbe(h, out, { before = '', extra = '', inject = false } = {}) {
   const evil = path.join(dir, 'evil.cjs');
   if (inject) fs.writeFileSync(evil, `require("node:fs").writeFileSync(${JSON.stringify(injected)}, "LOADED");\n`);
   return `const fs=require("fs"),cp=require("child_process");const o={};${before}`
-    + `for(const t of ["git","gh"]){const p=cp.spawnSync("sh",["-c","command -v "+t],{encoding:"utf8"}).stdout.trim();o[t]=p;`
-    + `try{o[t+"Shim"]=fs.readFileSync(p,"utf8").includes("shim.js")}catch(e){o[t+"Shim"]="ERR "+e.code}}`
+    + `for(const t of ["git","gh","tower-crane"]){const p=cp.spawnSync("sh",["-c","command -v "+t],{encoding:"utf8"}).stdout.trim();o[t]=p;`
+    + `try{o[t+"Shim"]=fs.readFileSync(p,"utf8").includes(t==="tower-crane"?"tower-crane.js":"shim.js")}catch(e){o[t+"Shim"]="ERR "+e.code}}`
+    + `for(const[k,a]of [["version",["--version"]],["dispatch",["ci","dispatch","--help"]]]){const r=cp.spawnSync("tower-crane",a,{encoding:"utf8"});o[k]={status:r.status,out:r.stdout,err:r.stderr}}`
     + `const r=cp.spawnSync("git",["push","origin","HEAD:refs/heads/tower-crane/T999-another-task"],{cwd:${JSON.stringify(repo)},encoding:"utf8",env:{...process.env,GIT_TERMINAL_PROMPT:"0"${inject ? `,NODE_OPTIONS:${JSON.stringify(`--require=${evil}`)}` : ''}}});`
     + `o.push=r.status;o.pushErr=String(r.stderr).trim().split("\\n").pop();o.injected=fs.existsSync(${JSON.stringify(injected)});${extra}fs.writeFileSync(${JSON.stringify(out)},JSON.stringify(o))`;
 }
 
 function assertShims(h, seen, label) {
   const homes = [h.state, fs.realpathSync(h.state)].map((s) => path.join(s, 'homes') + path.sep);
-  for (const tool of ['git', 'gh']) {
+  for (const tool of ['git', 'gh', 'tower-crane']) {
     assert.ok(homes.some((dir) => seen[tool].startsWith(dir)), `${label}: the first ${tool} on PATH is the agent's, not ${seen[tool]}`);
     assert.equal(seen[`${tool}Shim`], true, `${label}: ${seen[tool]} is a shim`);
   }
+  const tool = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n')
+    .map(JSON.parse).findLast(e => e.cmd === 'spawn').detail.tool;
+  assert.equal(seen.version.status, 0, `${label}: ${seen.version.err}`);
+  assert.equal(seen.version.out.trim(), `${tool.version} (commit ${tool.sha || 'unknown'})`);
+  assert.equal(seen.dispatch.status, 0, `${label}: ${seen.dispatch.err}`);
+  assert.match(seen.dispatch.out, /ci dispatch/);
   assert.equal(seen.push, 126, `${label}: the shim refused the push: ${seen.pushErr}`);
   assert.match(seen.pushErr, /^tower-crane: git push.* is not allowed by this agent's agent file$/);
   assert.equal(seen.injected, false, `${label}: the shim did not load the file NODE_OPTIONS names`);

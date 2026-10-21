@@ -88,7 +88,7 @@ test('cancel removes worker task scratch with read-only module trees alongside t
   assert.equal(h.json(['task', 'show', 'T1']).scratch, undefined);
 });
 
-test('a live spawn keeps its git, gh, hooks and policy on its recorded tool after a checkout upgrade', { skip: NO_STUBS }, (t) => {
+test('a live spawn keeps its git, gh, tower-crane, hooks and policy on its recorded tool after a checkout upgrade', { skip: NO_STUBS }, (t) => {
   const { h, u, wt } = setup(t);
   isolated(h, 'medium', 'codex');
   h.git(['remote', 'set-url', 'origin', 'https://github.com/acme/app.git']);
@@ -151,11 +151,18 @@ for (const [command, args, opts] of calls) {
       ['git', 'push', '-u', 'origin', `HEAD:refs/heads/${branch}`],
       ['gh', 'pr', 'create'],
       [process.execPath, '-e', hooks],
+      [process.execPath, '-e', `
+const cp = require('node:child_process');
+const version = cp.spawnSync('tower-crane', ['--version'], { encoding: 'utf8' });
+if (version.status !== 0 || version.stdout.trim() !== ${JSON.stringify(`${require('../package.json').version} (commit ${toolSha})`)}) throw new Error(version.stderr || version.stdout);
+const dispatch = cp.spawnSync('tower-crane', ['ci', 'dispatch', '--help'], { encoding: 'utf8' });
+if (dispatch.status !== 0) throw new Error(dispatch.stderr);
+`],
     ]) },
   });
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(u.report().ran.map((r) => [r.code, r.stderr]), [[0, ''],
-    [0, `tower-crane: the broker pushes ${h.git(['rev-parse', 'HEAD'], wt).slice(0, 12)} to ${branch} on https://github.com/acme/app.git\n`], [0, ''], [0, '']]);
+    [0, `tower-crane: the broker pushes ${h.git(['rev-parse', 'HEAD'], wt).slice(0, 12)} to ${branch} on https://github.com/acme/app.git\n`], [0, ''], [0, ''], [0, '']]);
   const started = JSON.parse(result.stdout);
   assert.equal(started.tool.sha, toolSha);
   assert.notEqual(h.git(['rev-parse', 'HEAD'], checkout), toolSha);
@@ -419,7 +426,7 @@ function claudeShows(fsRules, p) {
 // runs in a project whose package.json says "type": "module", and with
 // NODE_OPTIONS asking node to require a file first: the shim still runs as
 // CommonJS and never loads the file.
-test('for every harness the first git and gh on the agent\'s PATH are its shims, and claude and codex sandboxes show them', { skip: NO_STUBS }, (t) => {
+test('for every harness the first git, gh and tower-crane on the agent\'s PATH are its pinned shims, and claude and codex sandboxes show them', { skip: NO_STUBS }, (t) => {
   const { h, u } = setup(t);
   fs.writeFileSync(path.join(h.repo, 'package.json'), '{"type":"module"}\n');
   h.git(['add', 'package.json']);
@@ -433,16 +440,22 @@ test('for every harness the first git and gh on the agent\'s PATH are its shims,
   fs.writeFileSync(script, `
 const fs = require('node:fs');
 const path = require('node:path');
+const cp = require('node:child_process');
 const which = (tool) => String(process.env.PATH || '').split(path.delimiter).filter(Boolean)
   .map((dir) => path.join(dir, tool)).find((f) => { try { fs.accessSync(f, fs.constants.X_OK); return fs.statSync(f).isFile(); } catch { return false; } }) || null;
-const seen = { git: which('git'), gh: which('gh'), home: process.env.CODEX_HOME || process.env.CLAUDE_CONFIG_DIR || null };
-for (const tool of ['git', 'gh']) seen[tool + 'Text'] = seen[tool] ? fs.readFileSync(seen[tool], 'utf8').slice(0, 4096) : null;
+const seen = { git: which('git'), gh: which('gh'), 'tower-crane': which('tower-crane'), home: process.env.CODEX_HOME || process.env.CLAUDE_CONFIG_DIR || null };
+for (const tool of ['git', 'gh', 'tower-crane']) seen[tool + 'Text'] = seen[tool] ? fs.readFileSync(seen[tool], 'utf8').slice(0, 4096) : null;
+for (const [key, args] of [['version', ['--version']], ['dispatch', ['ci', 'dispatch', '--help']]]) {
+  const r = cp.spawnSync('tower-crane', args, { encoding: 'utf8' });
+  seen[key] = { code: r.status, stdout: r.stdout, stderr: r.stderr };
+}
 fs.writeFileSync(process.env.PROBE_OUT, JSON.stringify(seen));
 if (path.basename(process.argv[1]) === 'codex') process.stdout.write(JSON.stringify({ type: 'thread.started', thread_id: 'probe' }) + '\\n');
 `);
   for (const name of ['claude', 'codex', 'opencode', 'agy', 'pi']) {
     fs.writeFileSync(path.join(probe, name), `#!${process.execPath}\nrequire(${JSON.stringify(script)});\n`, { mode: 0o755 });
   }
+  fs.writeFileSync(path.join(probe, 'tower-crane'), '#!/bin/sh\nif [ "$1" = --version ]; then echo 0.0.1; else echo "unknown command" >&2; exit 2; fi\n', { mode: 0o755 });
   const out = path.join(h.base, 'probe.json');
   const env = { ...u.env, PATH: `${probe}${path.delimiter}${u.env.PATH}`, PROBE_OUT: out };
   const rungs = {
@@ -456,7 +469,7 @@ if (path.basename(process.argv[1]) === 'codex') process.stdout.write(JSON.string
   for (const [harness, args] of Object.entries(rungs)) {
     h.ok(['ladder', 'set', 'small', ...args, '--clear', 'profile', '--clear', 'effort', '--clear', 'args']);
     fs.rmSync(out, { force: true });
-    const r = h.run(['spawn', '--role', 'small', '--task', 'T1', '--wait'], { env });
+    const r = h.run(['spawn', '--role', 'small', '--task', 'T1', '--wait', '--json'], { env });
     assert.equal(r.code, 0, `${harness}: ${r.stderr}`);
     const seen = JSON.parse(fs.readFileSync(out, 'utf8'));
     for (const tool of ['git', 'gh']) {
@@ -467,17 +480,25 @@ if (path.basename(process.argv[1]) === 'codex') process.stdout.write(JSON.string
     }
     assert.equal(path.dirname(seen.git), path.dirname(seen.gh));
     const bin = path.dirname(seen.git);
-    for (const tool of ['git', 'gh']) {
-      const ran = cp.spawnSync(path.join(bin, tool), tool === 'git' ? ['version'] : ['auth', 'status'], { cwd: h.repo, encoding: 'utf8',
+    const started = JSON.parse(r.stdout);
+    assert.equal(seen['tower-crane'], path.join(bin, 'tower-crane'), `${harness}: the pinned CLI precedes the old global install`);
+    const cliRoot = harness === 'codex' ? path.join(path.dirname(bin), 'tool') : started.tool.path;
+    assert.ok(seen['tower-craneText'].includes(path.join(cliRoot, 'bin', 'tower-crane.js')));
+    assert.equal(seen.version.code, 0, seen.version.stderr);
+    assert.equal(seen.version.stdout.trim(), `${started.tool.version} (commit ${started.tool.sha || 'unknown'})`);
+    assert.equal(seen.dispatch.code, 0, seen.dispatch.stderr);
+    assert.match(seen.dispatch.stdout, /ci dispatch/);
+    for (const tool of ['git', 'gh', 'tower-crane']) {
+      const ran = cp.spawnSync(path.join(bin, tool), tool === 'git' ? ['version'] : tool === 'tower-crane' ? ['--version'] : ['auth', 'status'], { cwd: h.repo, encoding: 'utf8',
         env: { ...env, NODE_OPTIONS: `--require=${evil}`, NODE_PATH: path.join(h.base, 'planted-modules') } });
       assert.doesNotMatch(String(ran.stderr), /require is not defined|ERR_REQUIRE|ES module/, `${harness}: ${tool} runs as CommonJS`);
-      if (tool === 'git') assert.equal(ran.status, 0, `${harness}: git version through the shim: ${ran.stderr}`);
+      if (tool !== 'gh') assert.equal(ran.status, 0, `${harness}: ${tool} version through the shim: ${ran.stderr}`);
       assert.equal(fs.existsSync(injected), false, `${harness}: ${tool} loaded NODE_OPTIONS's file`);
     }
     if (harness === 'codex') {
       const rules = TOML.parse(fs.readFileSync(path.join(seen.home, 'config.toml'), 'utf8')).permissions['tower-crane'].filesystem;
       const tool = path.join(path.dirname(bin), 'tool');
-      for (const p of [bin, path.join(bin, 'git'), path.join(bin, 'tower-crane'), path.join(path.dirname(bin), 'policy.json'), path.join(tool, 'lib', 'shim.js'), path.join(tool, 'bin', 'tower-crane.js')]) {
+      for (const p of [bin, path.join(bin, 'git'), path.join(bin, 'tower-crane'), path.join(path.dirname(bin), 'policy.json'), path.join(tool, 'lib', 'shim.js'), path.join(tool, 'bin', 'tower-crane.js'), path.join(tool, 'tool.json')]) {
         assert.ok(codexShows(rules, fs.realpathSync(p)), `codex shows ${p}`);
       }
       assert.ok(!codexShows(rules, fs.realpathSync(path.join(h.state, 'homes'))), 'codex hides homes/');
@@ -485,7 +506,7 @@ if (path.basename(process.argv[1]) === 'codex') process.stdout.write(JSON.string
     }
     if (harness === 'claude') {
       const fsRules = JSON.parse(fs.readFileSync(path.join(seen.home, 'settings.json'), 'utf8')).sandbox.filesystem;
-      for (const p of [path.join(bin, 'git'), path.join(path.dirname(bin), 'policy.json')]) assert.ok(claudeShows(fsRules, fs.realpathSync(p)), `claude shows ${p}`);
+      for (const p of [path.join(bin, 'git'), path.join(bin, 'tower-crane'), path.join(cliRoot, 'bin', 'tower-crane.js'), path.join(cliRoot, 'tool.json'), path.join(path.dirname(bin), 'policy.json')]) assert.ok(claudeShows(fsRules, fs.realpathSync(p)), `claude shows ${p}`);
     }
   }
 });
