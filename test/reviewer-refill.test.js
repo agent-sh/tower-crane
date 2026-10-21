@@ -10,7 +10,7 @@ const { gateEvidence } = require('./gate-helpers');
 const { waitOnRepo } = require('./signals');
 const S = require('../lib/state');
 const Body = require('../lib/review-body');
-const { readPublished, writeAtomic } = require('./atomic-file');
+const { readPublished, writeAtomic, updateJson } = require('./atomic-file');
 
 function fixture(t) {
   const h = cachedFixture(t, 'reviewer-refill', (repo) => {
@@ -306,67 +306,121 @@ G.view = (ctx, project) => {
   }
 }
 
-for (const mode of ['ordinary', 'governor', 'mixed']) {
-  test(`refill keeps the minute retry separate from ${mode} refusals`, (t) => {
+for (const mode of ['ordinary', 'governor', 'mixed-worker', 'mixed-reviewer', 'mixed-worker-throw', 'mixed-reviewer-throw', 'same-worker', 'same-reviewer']) {
+  test(`refill caches ordinary refusals independently: ${mode}`, (t) => {
     const h = fixture(t);
-    const trace = path.join(h.base, 'retry-trace.json');
-    const seed = path.join(h.base, 'retry-seed');
-    const preload = path.join(h.base, 'retry-refill.js');
-    fs.writeFileSync(seed, '');
-    fs.writeFileSync(preload, `const fs = require('node:fs');
-const { writeAtomic } = require(${JSON.stringify(path.join(__dirname, 'atomic-file.js'))});
+    const same = mode.startsWith('same-');
+    const reviewerRefusal = mode.includes('reviewer');
+    const refused = reviewerRefusal ? 'T1' : 'T2';
+    const deferredKind = reviewerRefusal ? 'worker' : 'reviewer';
+    if (same) {
+      h.ok(['task', 'add', '--title', 'Deferred sibling', '--acceptance', 'works', '--tier', 'easy']);
+      h.ok(['brief', 'set', 'T3', '-'], { input: 'Implement T3.\n' });
+      if (reviewerRefusal) {
+        h.ok(['task', 'update', 'T2', '--status', 'cancelled']);
+        const sha = h.json(['task', 'show', 'T1']).sha;
+        h.ok(['claim', 'T3', '--agent', 'worker']);
+        h.ok(['submit', 'T3', '--sha', sha, '--pr', '7', '--agent', 'worker']);
+        for (const gate of ['tests', 'clean', 'ci']) h.ok(['check', gate, 'T3', '--agent', 'orchestrator']);
+      }
+    }
+    if (mode.startsWith('mixed-') || mode === 'same-reviewer') {
+      const seed = path.join(h.base, 'cache-seed.js');
+      fs.writeFileSync(seed, `const G = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'governor.js'))});
+const { TowerCraneError } = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'util.js'))});
+G.check = (ctx, unit) => { throw Object.assign(new TowerCraneError(3, 'fixture deferral'),
+  { governorDeferred: true, task: unit.task, kind: unit.kind, reason: 'cache pressure' }); };
+`);
+      for (const id of mode === 'same-reviewer' ? ['T1', 'T3'] : ['T1']) {
+        assert.equal(h.run(['accept', id, '--agent', 'orchestrator'], { pre: ['--require', seed] }).code, 3);
+      }
+    }
+    const trace = path.join(h.base, 'cache-trace.json');
+    const preload = path.join(h.base, 'cache-refill.js');
+    fs.writeFileSync(preload, `const { writeAtomic } = require(${JSON.stringify(path.join(__dirname, 'atomic-file.js'))});
 const G = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'governor.js'))});
 const A = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'automation.js'))});
+const T = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'tasks.js'))});
 const Spawn = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'spawn.js'))});
 const { TowerCraneError } = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'util.js'))});
-const mode = ${JSON.stringify(mode)};
+const mode = ${JSON.stringify(mode)}, same = ${same}, refused = ${JSON.stringify(refused)};
 let probes = 0, dispatches = 0, measured = false;
-// Gate reactions have their own coverage; keep these probes on refill's path.
+// Isolate refill from concurrent gate reactions, which have separate coverage.
 A.consume = async () => [];
+const deferred = (task, kind) => Object.assign(new TowerCraneError(3, 'fixture governor deferral'),
+  { governorDeferred: true, task, kind, reason: 'cache pressure' });
 G.check = (ctx, unit) => {
-  if (unit.kind === 'worker') probes++;
-  if (fs.existsSync(${JSON.stringify(seed)}) && unit.kind === 'reviewer' || mode !== 'ordinary' && unit.kind === 'worker') {
-    throw Object.assign(new TowerCraneError(3, unit.task + ': deferred by the host governor: retry pressure'),
-      { governorDeferred: true, task: unit.task, kind: unit.kind, reason: 'retry pressure' });
+  if (same) return;
+  if (mode === 'ordinary') { probes++; return; }
+  if (unit.kind === (mode === 'governor' ? 'worker' : ${JSON.stringify(deferredKind)})) {
+    probes++; throw deferred(unit.task, unit.kind);
   }
 };
-Spawn.spawn = async () => { dispatches++; return { code: 1, text: 'fixture ordinary refusal' }; };
+Spawn.spawn = async (ctx) => {
+  if (same && ctx.flags.task === 'T3') { probes++; throw deferred('T3', ${JSON.stringify(reviewerRefusal ? 'reviewer' : 'worker')}); }
+  dispatches++;
+  if (mode.endsWith('-throw')) throw new TowerCraneError(1, 'fixture ordinary refusal');
+  return { code: 1, text: 'fixture ordinary refusal' };
+};
 const refill = A.refillWorkers;
 A.refillWorkers = async (ctx, attempt) => {
   if (measured) return refill(ctx, attempt);
   measured = true;
-  const counts = [];
-  const now = Date.now;
-  await refill(ctx, attempt);
-  counts.push({ probes, dispatches });
-  const retryAt = attempt.retryAt;
-  await refill(ctx, attempt);
-  counts.push({ probes, dispatches });
-  Date.now = () => retryAt ? retryAt + 1 : now() + 60001;
-  try { await refill(ctx, attempt); } finally { Date.now = now; }
-  counts.push({ probes, dispatches });
+  const counts = [], now = Date.now;
+  const take = async () => { await refill(ctx, attempt); counts.push({ probes, dispatches }); };
+  await take();
+  await take();
+  const cached = attempt.refusals?.get(refused);
+  Date.now = () => cached ? cached.until + 1 : attempt.retryAt ? attempt.retryAt + 1 : now() + 60001;
+  try { await take(); } finally { Date.now = now; }
+  T.taskNote({ ...ctx, pos: [refused, 'Progress note'], flags: {} });
+  await take();
+  T.taskUpdate({ ...ctx, pos: [refused], flags: { priority: 'urgent' } });
+  await take();
   writeAtomic(${JSON.stringify(trace)}, JSON.stringify(counts));
 };
 `);
-    if (mode === 'mixed') {
-      // Seed real reviewer debt before replacing dispatch with an ordinary refusal.
-      const seedPreload = path.join(h.base, 'retry-seed.js');
-      fs.writeFileSync(seedPreload, `const G = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'governor.js'))});
-const { TowerCraneError } = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'util.js'))});
-G.check = (ctx, unit) => { throw Object.assign(new TowerCraneError(3, 'fixture deferral'),
-  { governorDeferred: true, task: unit.task, kind: unit.kind, reason: 'retry pressure' }); };
-`);
-      assert.equal(h.run(['accept', 'T1', '--agent', 'orchestrator'], { pre: ['--require', seedPreload] }).code, 3);
-    }
-    fs.unlinkSync(seed);
-    const result = h.run(['wait', '--types', 'never', '--timeout', '0.01', '--agent', 'orchestrator'], // wait-allow: bounded CLI wait drives three refill probes with an explicit clock advance
+    const result = h.run(['wait', '--types', 'never', '--timeout', '0.01', '--agent', 'orchestrator'], // wait-allow: bounded wait drives cache probes, note/input changes and an explicit minute advance
       { pre: ['--require', preload] });
     assert.equal(result.code, 2, result.stderr);
     const counts = JSON.parse(readPublished(trace, 'utf8'));
-    assert.deepEqual(counts.map((c) => c.probes), mode === 'ordinary' ? [1, 1, 2] : [1, 2, 3],
-      'ordinary refusals wait a minute while governor deferrals retry every pass');
-    assert.deepEqual(counts.map((c) => c.dispatches), mode === 'ordinary' ? [1, 1, 2] : mode === 'mixed' ? [1, 2, 3] : [0, 0, 0],
-      'a deferred kind cannot cache an ordinary refusal from the other kind');
+    assert.deepEqual(counts.map((c) => c.dispatches), mode === 'governor' ? [0, 0, 0, 0, 0] : [1, 1, 2, 2, 3],
+      'ordinary refusals remain cached until expiry or changed inputs, including while a sibling is deferred');
+    assert.deepEqual(counts.map((c) => c.probes), mode === 'ordinary' ? [1, 1, 2, 2, 3] : [1, 2, 3, 4, 5],
+      'deferred tasks still get a governor retry each pass');
+    assert.equal((result.stderr.match(/fixture ordinary refusal/g) || []).length, mode === 'governor' ? 0 : 3,
+      'the diagnostic follows the ordinary refusal cache too');
+  });
+}
+
+for (const condition of ['paused', 'tests configuration', 'pending CI']) {
+  test(`status explains deferred reviewer waiting for ${condition}`, (t) => {
+    const h = fixture(t);
+    h.ok(['task', 'update', 'T2', '--status', 'cancelled']);
+    const preload = path.join(h.base, 'status-defer.js');
+    fs.writeFileSync(preload, `const G = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'governor.js'))});
+const { TowerCraneError } = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'util.js'))});
+G.check = (ctx, unit) => { throw Object.assign(new TowerCraneError(3, 'fixture deferral'),
+  { governorDeferred: true, task: unit.task, kind: unit.kind, reason: 'status pressure' }); };
+`);
+    assert.equal(h.run(['accept', 'T1', '--agent', 'orchestrator'], { pre: ['--require', preload] }).code, 3);
+    let expected;
+    if (condition === 'paused') {
+      h.ok(['project', 'set', '--paused', 'fixture hold']);
+      expected = /^project paused: fixture hold$/;
+    } else if (condition === 'tests configuration') {
+      h.ok(['project', 'set', '--tests-cmd', 'node -e "process.exit(0)"']);
+      expected = /^waiting for software gates: tests:/;
+    } else {
+      const sha = h.json(['task', 'show', 'T1']).sha;
+      updateJson(h.env.AUTOMATION_GITHUB, (github) => { github.ci[sha] = 'pending'; return github; });
+      assert.equal(h.run(['check', 'ci', 'T1', '--agent', 'orchestrator']).code, 1);
+      expected = /^waiting for software gates: ci:/;
+    }
+    const debt = h.json(['status']).deferred_reviewers[0];
+    assert.equal(debt.reason, 'status pressure', 'the governor reason remains available');
+    assert.match(debt.waiting || '', expected, 'the retry blocker is explicit');
+    assert.ok(h.ok(['status']).includes(`; ${debt.waiting}`), 'text status includes the same blocker');
   });
 }
 
