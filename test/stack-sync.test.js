@@ -1,6 +1,7 @@
 'use strict';
 
-const { waitOnRepo, fileWritten, HUNG_TEST_MS } = require('./signals');
+const { waitOnRepo, waitUntil, fileWritten, HUNG_TEST_MS } = require('./signals');
+const { writeAtomic, readPublished } = require('./atomic-file');
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -445,18 +446,13 @@ test('spawn of a task whose worktree is mid-rebase refuses with the refresh defe
   assert.equal(events.some((e) => e.cmd === 'spawn' && e.task === 'T2'), false);
 });
 
-// Runs wait until automatic stack maintenance holds its gh stack sync, then signals it.
-// The preload records each signal wait's event loop handles; a blocking sync delays it.
+// Signals only a held sync, then releases it after the CLI confirms its drain.
 async function signalDuringSync(t, f, { forced }) {
   const ready = path.join(f.h.base, 'sync-ready');
   const release = path.join(f.h.base, 'sync-release');
-  const observed = path.join(f.h.base, 'signal-observed');
-  const preload = path.join(f.h.base, 'signal-observer.js');
-  fs.writeFileSync(preload, `const fs = require('node:fs');
-for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => fs.appendFileSync(${JSON.stringify(observed)}, signal + '\\n'));
-`);
-  const env = { ...f.h.env, TEST_STACK_SYNC_READY: ready, TEST_STACK_SYNC_RELEASE: release,
-    NODE_OPTIONS: `${f.h.env.NODE_OPTIONS} --require=${JSON.stringify(preload)}` };
+  // Startup CI evidence would invalidate the held sync's snapshot.
+  f.h.ok(['check', 'ci', 'T1']);
+  const env = { ...f.h.env, TEST_STACK_SYNC_READY: ready, TEST_STACK_SYNC_RELEASE: release };
   const child = cp.spawn(process.execPath, [BIN, 'wait', '--after', '0', '--types', 'never',
     '--timeout', '300', '--agent', 'orchestrator'], { cwd: f.h.repo, env });
   let stdout = '', stderr = '';
@@ -464,20 +460,31 @@ for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => fs.appendFi
   child.stderr.on('data', (data) => { stderr += data; });
   const result = once(child, 'close').then(([code]) => ({ code, stdout, stderr }));
   const bound = setTimeout(() => child.kill('SIGKILL'), HUNG_TEST_MS);
+  const deadline = AbortSignal.timeout(HUNG_TEST_MS); // wait-allow: finite backstop for the sync/drain handshake
   let released = false;
   let backstop;
   try {
-    await fileWritten(ready, { alive: child, what: () => `automatic maintenance reaches gh stack sync: ${stderr}` });
+    const started = await fileWritten(ready, { alive: child, json: true, signal: deadline,
+      check: value => value.phase === 'sync' && Number.isInteger(value.pid),
+      what: () => `automatic maintenance reaches gh stack sync: ${stderr}` });
+    assert.notEqual(started.pid, child.pid, 'the ready acknowledgement comes from the held sync child');
     child.kill('SIGTERM');
-    await fileWritten(observed, { alive: child, what: 'wait handles the signal while gh stack sync runs' });
+    await waitUntil(() => stderr.includes('tower-crane: wait draining;'), {
+      alive: child, signal: deadline, what: 'wait applies its drain while gh stack sync runs',
+    });
     assert.equal(child.exitCode, null, 'the first signal lets the running sync finish');
     // A second signal that fails to stop the held sync leaves it to the gh call's own 60 s
     // timeout (lib/stack.js TIMEOUT). Releasing the stub sooner fails that regression sooner;
     // the caller tells the second signal's stop apart from the timeout by the recorded reason.
     if (forced) {
       child.kill('SIGINT');
-      backstop = setTimeout(() => { released = true; fs.writeFileSync(release, 'release'); }, 20000); // wait-allow: a bound that turns a sync the second signal never stops into a prompt failure
-    } else fs.writeFileSync(release, 'release');
+      backstop = setTimeout(() => { released = true; writeAtomic(release, 'release'); }, 20000); // wait-allow: a bound that turns a sync the second signal never stops into a prompt failure
+    } else writeAtomic(release, 'release');
+    await waitOnRepo(f.h, () => {
+      const events = readPublished(path.join(f.h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+      const synced = new Set(events.filter(event => event.cmd === 'stack sync').map(event => event.task));
+      return ['T1', 'T2'].every(task => synced.has(task));
+    }, () => `the held sync records both outcomes before wait ends: ${stderr}`, { alive: child, signal: deadline });
     const exited = await result;
     assert.equal(released, false, 'the second signal stops gh stack sync before the 20 s release backstop');
     assert.equal(exited.code, 0, JSON.stringify(exited));
@@ -486,7 +493,7 @@ for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => fs.appendFi
   } finally {
     clearTimeout(bound);
     clearTimeout(backstop);
-    fs.writeFileSync(release, 'release');
+    writeAtomic(release, 'release');
     if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
     await result;
   }
@@ -530,7 +537,8 @@ test('a signal during automatic stack maintenance stops it and wait exits', {
 // first. A drain during that refresh stops it, so no worker may start on the
 // unrefreshed stack; the spawn records why and the next wait dispatches it.
 // The rest of the refill batch waits for the next wait too.
-test('a drain during spawn\'s stack refresh records a deferral and starts no worker, for it or the rest of the batch', {
+for (const forced of [false, true]) {
+test(`a ${forced ? 'forced stop' : 'drain'} during spawn's stack refresh records a deferral and starts no worker, for it or the rest of the batch`, {
   skip: process.platform === 'win32' ? 'Windows child.kill does not deliver POSIX signals' : false,
 }, async (t) => {
   const f = stacked(t);
@@ -543,9 +551,10 @@ test('a drain during spawn\'s stack refresh records a deferral and starts no wor
   // Main moves outside any merge, so only the spawn's refresh syncs the stack.
   f.h.git(['commit', '--allow-empty', '-qm', 'main moved']);
   f.h.git(['push', 'origin', 'main']);
-  await signalDuringSync(t, f, { forced: false });
+  await signalDuringSync(t, f, { forced });
   const events = fs.readFileSync(path.join(f.h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   assert.deepEqual(events.filter((e) => e.cmd === 'stack sync').map((e) => e.task).sort(), ['T1', 'T2'], 'the running sync finished');
+  assert.equal(events.filter(e => e.cmd === 'stack sync').every(e => e.detail.ok === !forced), true);
   assert.equal(events.some((e) => e.cmd === 'spawn' && e.task === 'T2'), false, 'no worker starts on the unrefreshed stack');
   assert.equal(events.some((e) => e.cmd === 'spawn' && e.task === other), false, 'no worker starts during the drain');
   const deferred = events.filter((e) => e.cmd === 'stack sync deferred' && e.task === 'T2');
@@ -553,3 +562,4 @@ test('a drain during spawn\'s stack refresh records a deferral and starts no wor
   assert.match(deferred[0].detail.reason, /wait stopped before the stack refresh finished/);
   assert.equal(f.h.json(['task', 'show', 'T2']).status, 'rework');
 });
+}
