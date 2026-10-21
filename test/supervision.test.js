@@ -400,21 +400,7 @@ for (const [launch, launchEnv] of [['platform launch', {}], ['launch handshake',
       const retryReady = path.join(h.base, 'retry-ready');
       const auditHeld = path.join(h.base, 'retry-audit-held');
       const auditGo = path.join(h.base, 'retry-audit-go');
-      const auditHook = path.join(h.base, 'retry-audit-hook.js');
-      // The child may run before its monitor commits the retry transaction.
-      fs.writeFileSync(auditHook, `
-    const fs = require('node:fs');
-    if (require('node:path').basename(process.argv[1] || '') === 'spawn-monitor.js') {
-      const S = require(require('node:path').join(require('node:path').dirname(process.argv[1]), 'state.js'));
-      const mutate = S.mutate;
-      S.mutate = (ctx, cmd, fn, ...args) => mutate(ctx, cmd, cmd !== 'spawn retry' ? fn : (st, emit, commit) => {
-        const result = fn(st, emit, commit);
-        fs.writeFileSync(${JSON.stringify(auditHeld)}, '');
-        while (!fs.existsSync(${JSON.stringify(auditGo)})) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
-        return result;
-      }, ...args);
-    }
-    `);
+      const auditHook = path.join(__dirname, 'fixtures', 'supervision-hold-commit.js').replace(/\\/g, '/');
       const script = `
     const { fakeAgentEnv } = require(${JSON.stringify(path.join(__dirname, 'agent-env.js'))});
 
@@ -444,7 +430,8 @@ for (const [launch, launchEnv] of [['platform launch', {}], ['launch handshake',
 
       const backoff = controlledBackoff(h);
       const started = h.json(['spawn', '--task', 'T1'], {
-        env: { ...backoff.env, ...launchEnv, NODE_OPTIONS: `${backoff.env.NODE_OPTIONS} --require "${auditHook.replace(/\\/g, '/')}"` },
+        env: { ...backoff.env, ...launchEnv, NODE_OPTIONS: `${backoff.env.NODE_OPTIONS} --require "${auditHook}"`,
+          TOWER_CRANE_TEST_HOLD_COMMIT: JSON.stringify(['spawn retry', auditGo, auditHeld]) },
       });
       const home = path.join(h.state, 'homes', started.agent);
       const retryRecorded = () => log(h).some((e) => e.cmd === 'spawn retry' && e.task === 'T1');
