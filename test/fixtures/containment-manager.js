@@ -19,13 +19,9 @@ cp.spawnSync = (file, args, opts) => {
     record(args);
     return { status: 0, stdout: `${process.env.TC_FAKE_LINGER || 'yes'}\n`, stderr: '' };
   }
-  if (file === 'busctl' && args.includes('get-property')) {
-    record(args);
-    return { status: process.env.TC_FAKE_NO_BUS ? 1 : 0, stdout: 's "255"\n', stderr: '' };
-  }
   if (file !== 'systemctl') return spawnSync(file, args, opts);
   record(args);
-  return { status: 0, stdout: args.includes('list-units') ? process.env.TC_FAKE_FAILED_UNITS || '' : '', stderr: '' };
+  return { status: args.includes('show-environment') && process.env.TC_FAKE_NO_BUS ? 1 : 0, stdout: args.includes('list-units') ? process.env.TC_FAKE_FAILED_UNITS || '' : '', stderr: '' };
 };
 const execFile = cp.execFile;
 cp.execFile = (file, args, opts, callback) => {

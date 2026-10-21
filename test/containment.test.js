@@ -201,7 +201,7 @@ function scopeHost(t, group) {
   t.mock.method(fs, 'existsSync', file => file === '/sys/fs/cgroup/cgroup.controllers' || exists(file));
 }
 
-test('scope probes ignore missing or stale session buses and use the launch environment', {
+test('scope probes ignore missing or stale session buses and use the resolved launch runtime', {
   skip: process.platform !== 'linux',
 }, (t) => {
   scopeHost(t, '/user.slice/user-1000.slice/user@1000.service/agents.slice/session.scope');
@@ -209,22 +209,29 @@ test('scope probes ignore missing or stale session buses and use the launch envi
   for (const [session, runtime, available] of [
     [undefined, '/run/user/1000', true],
     ['unix:path=/nonexistent', '/custom/runtime', true],
-    ['unix:path=/nonexistent', '/custom/runtime', false],
+    ['unix:path=/nonexistent', '/custom/unavailable', false],
     [undefined, '/custom/run,time%dir', true],
-    [undefined, undefined, true],
+    ['unix:path=/nonexistent', undefined, true],
+    ['unix:path=/nonexistent', '', true],
   ]) {
+    const file = require.resolve('../lib/containment');
+    const cached = require.cache[file];
+    delete require.cache[file];
+    const F = require(file);
+    require.cache[file] = cached;
     const env = { XDG_RUNTIME_DIR: runtime, DBUS_SESSION_BUS_ADDRESS: session };
     const calls = [];
     t.mock.method(cp, 'spawnSync', (file, args, opts) => {
       calls.push({ file, args, opts });
-      return { status: file === 'busctl' && !available ? 1 : 0 };
+      return { status: file === 'systemctl' && available ? 0 : 1 };
     });
-    assert.equal(C.canScope(env), available, JSON.stringify(env));
+    assert.equal(F.canScope(env), available, JSON.stringify(env));
     assert.equal(calls.length, 1);
-    assert.equal(calls[0].file, 'busctl');
-    const socket = `${runtime || '/run/user/1000'}/systemd/private`;
-    assert.equal(calls[0].args[0], `--address=unix:path=${encodeURIComponent(socket).replaceAll('%2F', '/')}`);
-    assert.equal(calls[0].opts.env, env);
+    assert.equal(calls[0].file, 'systemctl');
+    assert.deepEqual(calls[0].args, ['--user', 'show-environment']);
+    assert.equal(calls[0].opts.env.XDG_RUNTIME_DIR, runtime || '/run/user/1000');
+    assert.equal(calls[0].opts.env.DBUS_SESSION_BUS_ADDRESS, session);
+    assert.equal(env.XDG_RUNTIME_DIR, runtime);
     cp.spawnSync.mock.restore();
   }
 });
@@ -426,13 +433,13 @@ test('launches reset their settled scope, and the next launch cleans up after a 
   const manager = path.join(__dirname, 'fixtures', 'containment-manager.js');
   const cache = path.join(h.base, 'manager-cache');
   const log = path.join(h.base, 'manager.jsonl');
-  const bin = path.join(h.base, 'no-busctl');
+  const bin = path.join(h.base, 'no-systemd-run');
   fs.mkdirSync(bin);
   const script = (mode) => `
 const C = require(${JSON.stringify(require.resolve('../lib/containment'))});
 const child = C.spawn(process.execPath, ['-e', ''], { resources: { tasks_max: 64, memory_max_bytes: ${memory} } });
 ${mode === 'kill' ? "process.kill(process.pid, 'SIGKILL');" : "child.on('close', () => console.log(child.containment.unit));"}`;
-  // Without busctl the runner fails its registration, so no real scope starts.
+  // Without systemd-run no real scope starts.
   const run = (mode, extra = {}) => require('node:child_process').spawnSync(process.execPath, ['--require', manager, '-e', script(mode)], {
     encoding: 'utf8', env: { ...h.env, PATH: bin, XDG_CACHE_HOME: cache, TC_FAKE_MANAGER_LOG: log, [C.MARK]: '', ...extra },
   });
@@ -451,42 +458,36 @@ ${mode === 'kill' ? "process.kill(process.pid, 'SIGKILL');" : "child.on('close',
   assert.ok(calls.some((args) => args.join(' ') === `--user reset-failed ${unit}`), JSON.stringify(calls));
 });
 
-test('systemd CLI and D-Bus launches use supported OOM policy and retain caps', {
-  skip: process.platform === 'win32' && 'Linux scope runner uses execve',
+test('outer scope launches use supported OOM policy and retain caps', {
+  skip: process.platform === 'win32' && 'scope runner uses execve',
 }, async (t) => {
   const h = fixture(t);
   const fake = path.join(__dirname, 'fixtures', 'containment-systemd.js');
   const runner = require.resolve('../lib/containment-runner');
   const unit = 'tower-crane-123-0123456789abcdef.scope';
   const limits = { tasks_max: 64, memory_max_bytes: memory };
-  for (const mode of ['cli', 'dbus', 'dbus-stale']) {
-    const dbus = mode.startsWith('dbus');
+  for (const configured of [false, true]) {
   for (const fleet of [false, true]) {
-    const label = `${mode}-${fleet}`;
+    const label = `${configured}-${fleet}`;
     const group = path.join(h.base, label, unit);
     fs.mkdirSync(group, { recursive: true });
     const log = path.join(h.base, `${label}.jsonl`);
     const report = path.join(h.base, `${label}-report.json`);
-    const args = [runner, JSON.stringify({ ...limits, ...(fleet ? { fleet } : {}) }),
-      dbus ? `@${unit}:test-fence.slice` : '', unit,
-      process.execPath, '-e', 'console.log("scoped command ran", process.env.TOWER_CRANE_SCOPED)'];
-    const command = dbus ? ['--require', fake, ...args]
-      : [fake, ...C.scopeArguments(unit, 'test-fence.slice', limits, {
-        CPUQuota: '200%', MemoryMax: '1', TasksMax: '999', Slice: 'app.slice',
-        OOMPolicy: 'stop', MemorySwapMax: '9G', Delegate: 'no',
-      }),
-        process.execPath, ...args];
-    const result = await G.treeExec(process.execPath, command, {
-      env: { ...h.env, TC_FAKE_CGROUP: group, TC_FAKE_SYSTEMD_LOG: log,
-        XDG_RUNTIME_DIR: path.join(h.base, 'runtime'),
-        DBUS_SESSION_BUS_ADDRESS: mode === 'dbus-stale' ? 'unix:path=/nonexistent' : undefined,
-        TOWER_CRANE_CONTAINMENT_REPORT: report },
-    });
+    const owner = configured ? { CPUQuota: '200%', MemoryMax: '1', TasksMax: '999', Slice: 'app.slice',
+      OOMPolicy: 'stop', MemorySwapMax: '9G', Delegate: 'no' } : {};
+    const result = await G.treeExec(process.execPath,
+      [fake, ...C.scopeArguments(unit, 'test-fence.slice', limits, owner), process.execPath, runner,
+        JSON.stringify({ ...limits, fleet }), '', unit, process.execPath, '-e',
+        'console.log("scoped command ran", process.env.TOWER_CRANE_SCOPED)'], {
+        env: { ...h.env, TC_FAKE_CGROUP: group, TC_FAKE_SYSTEMD_LOG: log,
+          XDG_RUNTIME_DIR: path.join(h.base, 'runtime'), DBUS_SESSION_BUS_ADDRESS: 'unix:path=/nonexistent',
+          TOWER_CRANE_CONTAINMENT_REPORT: report },
+      });
     const registration = fs.existsSync(report) ? JSON.parse(readPublished(report, 'utf8')) : {};
     assert.equal(result.status, 0, result.stderr + (registration.error || ''));
-    assert.equal(result.stdout, 'scoped command ran 1\n', 'every scoped launch sets TOWER_CRANE_SCOPED');
+    assert.equal(result.stdout, 'scoped command ran 1\n');
     assert.equal(registration.group, group);
-    assert.equal(registration.baseline, undefined, 'fresh attempt counters are measured from zero');
+    assert.equal(registration.baseline, undefined);
     assert.equal(fs.readFileSync(path.join(group, 'memory.oom.group'), 'utf8'), fleet ? '0' : '1');
     const properties = JSON.parse(fs.readFileSync(log, 'utf8').trim());
     assert.equal(properties.OOMPolicy, 'continue');
@@ -505,7 +506,7 @@ const scopeRuntimeCases = [
   ['custom runtime and bus stale', '/custom/runtime', 'unix:path=/nonexistent/stale-bus'],
 ];
 
-test('configured scopes share the probe runtime directory and preserve the command environment', {
+test('all outer scopes share the probe runtime directory and preserve the command environment', {
   skip: process.platform !== 'linux',
 }, async (t) => {
   const h = fixture(t);
@@ -514,8 +515,9 @@ test('configured scopes share the probe runtime directory and preserve the comma
   const unit = 'tower-crane-123-0123456789abcdef.scope';
   const limits = { tasks_max: 64, memory_max_bytes: memory };
   for (const [name, runtime, bus] of scopeRuntimeCases) {
+  for (const configured of [false, true]) {
     for (const fleet of [false, true]) {
-      const label = `${name}-${fleet}`;
+      const label = `${name}-${configured}-${fleet}`;
       const group = path.join(h.base, label, unit);
       fs.mkdirSync(group, { recursive: true });
       const report = path.join(h.base, `${label}-report.json`);
@@ -525,9 +527,9 @@ test('configured scopes share the probe runtime directory and preserve the comma
       const spawnSync = cp.spawnSync;
       scopeHost(t, '/user.slice/user-1000.slice/user@1000.service/test-fence.slice/session.scope');
       t.mock.method(cp, 'spawnSync', (file, args, opts) => {
-        if (file !== 'busctl') return spawnSync(file, args, opts);
-        assert.equal(args[0], `--address=unix:path=${runtime || '/run/user/1000'}/systemd/private`);
-        assert.equal(opts.env, env);
+        if (file !== 'systemctl') return spawnSync(file, args, opts);
+        assert.deepEqual(args, ['--user', 'show-environment']);
+        assert.equal(opts.env.XDG_RUNTIME_DIR, runtime || '/run/user/1000');
         return { status: 0 };
       });
       let plan;
@@ -536,7 +538,7 @@ test('configured scopes share the probe runtime directory and preserve the comma
           scoped: process.env.TOWER_CRANE_SCOPED,
           runtime: process.env.XDG_RUNTIME_DIR ?? null,
           bus: process.env.DBUS_SESSION_BUS_ADDRESS ?? null
-        }))`], { env, resources: limits, scope: { CPUQuota: '200%' }, fleet }, unit);
+        }))`], { env, resources: limits, scope: configured ? { CPUQuota: '200%' } : {}, fleet }, unit);
       } finally { t.mock.restoreAll(); }
       assert.equal(plan.argv[0], 'systemd-run', label);
       const result = await G.treeExec(process.execPath, [fake, ...plan.argv.slice(1)], {
@@ -548,6 +550,7 @@ test('configured scopes share the probe runtime directory and preserve the comma
       assert.equal(env.XDG_RUNTIME_DIR, runtime, 'planning does not mutate the caller environment');
       assert.equal(fs.readFileSync(path.join(group, 'memory.oom.group'), 'utf8'), fleet ? '0' : '1');
     }
+  }
   }
 });
 

@@ -664,21 +664,23 @@ one third headroom. These are containment defaults,
 not admission control across activities, sessions or projects.
 
 On Linux with cgroup v2, a reachable systemd user manager and safe placement, a launch uses a
-named transient user scope (registered through D-Bus, or `systemd-run` when
-optional scope properties are set) in the caller's slice with `TasksMax`, `MemoryMax`,
+named transient user scope through `systemd-run --user --scope`
+in the caller's slice with `TasksMax`, `MemoryMax`,
 `MemorySwapMax=0`, `OOMPolicy=continue` and delegated memory/pids controllers.
-The availability probe and D-Bus registration both use `busctl` with
-`--address=unix:path=$XDG_RUNTIME_DIR/systemd/private`, in the launch environment.
-When `XDG_RUNTIME_DIR` is absent or empty, the socket is `/run/user/<uid>/systemd/private`.
-Neither needs the user session bus or uses `DBUS_SESSION_BUS_ADDRESS`, so a
-missing session bus or a stale address does not break registration. An
-unreachable private socket selects the watchdog before launch.
-Configured outer scope properties use `systemd-run` with that same resolved
+The availability probe uses `systemctl --user show-environment`, and every
+outer scope uses `systemd-run --user --scope`. Both receive the same resolved
 `XDG_RUNTIME_DIR`, including when the caller left it unset or empty. Once the
 scope is ready, the runner restores the caller's original runtime directory
 value before executing the command. The wrapper's transport setting does not
 change the agent or gate command's environment. Dry runs show the wrapper's
 runtime directory and the runner's restoration setting.
+The default runtime directory is `/run/user/<uid>`. These clients first use
+`$XDG_RUNTIME_DIR/systemd/private` as a peer connection without bus-daemon
+`Hello`, so a missing session bus or stale `DBUS_SESSION_BUS_ADDRESS` does not
+break a reachable private manager. An unavailable manager selects the watchdog
+before an automatic launch. Manager probe results, including failures, are
+cached per process for each resolved runtime directory, PATH and session-bus
+address; changing those inputs triggers a new probe.
 The runner sets `memory.oom.group=1` for attempts, so a cgroup OOM stops the
 whole attempt, and the supervisor reports `resource-memory-max` from local OOM
 events. Orchestrator fleet scopes use `memory.oom.group=0`; an OOM in an attempt does not group-kill its healthy
@@ -793,14 +795,14 @@ Containment metadata retains sampled `pids_peak`, `memory_peak_bytes` and
 `refused_forks` from the scope's peak and local event files. Refused forks
 count that scope's cap violations where local events are available.
 
-On macOS, Windows, Linux without cgroup v2, Linux without a reachable private
-user-manager socket, Linux outside the user manager without confirmed linger,
+On macOS, Windows, Linux without cgroup v2, Linux without a reachable
+user manager, Linux outside the user manager without confirmed linger,
 or an inherited scope without writable delegated controllers,
 the executable launches directly with a watchdog. An existing parent cgroup
 continues to enforce its aggregate cap. The launcher never creates a sibling
 scope to escape an inherited scope that cannot delegate.
-Explicit outer `scope` properties require a reachable private user-manager
-socket, cgroup v2 and the same placement rule; failure of any requirement
+Explicit outer `scope` properties require a reachable user manager
+through the resolved transport, cgroup v2 and the same placement rule; failure of any requirement
 refuses the configured launch before starting the command with
 `resource-scope-failed`. Nested launches retain the outer scope's properties.
 

@@ -29,32 +29,8 @@ if (require.main !== module) {
   }
   const spawnSync = cp.spawnSync;
   cp.spawnSync = (file, args, opts) => {
-    if (process.env.TC_FAKE_NO_MANAGER && ['systemctl', 'busctl'].includes(file)) return { status: 1, stdout: '', stderr: 'no user manager' };
-    if (file !== 'busctl') return spawnSync(file, args, opts);
-    try {
-      const runtime = process.env.XDG_RUNTIME_DIR || `/run/user/${process.getuid()}`;
-      if (args[0] !== `--address=unix:path=${runtime}/systemd/private`) throw new Error('registration must use the systemd private socket');
-      let at = args.indexOf('ssa(sv)a(sa(sv))');
-      if (at < 0) throw new Error('invalid StartTransientUnit signature');
-      at += 3;
-      const count = Number(args[at++]);
-      const properties = {};
-      for (let n = 0; n < count; n++) {
-        const name = args[at++];
-        const type = args[at++];
-        if (!types[name] || type !== types[name]) throw new Error(`Cannot set property ${name}, or unknown property`);
-        if (type === 'au') {
-          const length = Number(args[at++]);
-          properties[name] = args.slice(at, at + length);
-          at += length;
-        } else properties[name] = args[at++];
-      }
-      if (properties.Slice !== 'test-fence.slice' || properties.PIDs?.[0] !== String(process.pid)) {
-        throw new Error('wrong slice or scope pid');
-      }
-      apply(properties);
-      return { status: 0, stdout: '', stderr: '' };
-    } catch (error) { return { status: 1, stdout: '', stderr: error.message }; }
+    if (process.env.TC_FAKE_NO_MANAGER && file === 'systemctl') return { status: 1, stdout: '', stderr: 'no user manager' };
+    return spawnSync(file, args, opts);
   };
 } else {
   try {
@@ -77,7 +53,6 @@ if (require.main !== module) {
     if (slice !== 'test-fence.slice') throw new Error('wrong scope slice');
     apply(properties);
     const command = args.slice(separator + 1);
-    const result = cp.spawnSync(command[0], ['--require', __filename, ...command.slice(1)], { stdio: 'inherit' });
-    process.exitCode = result.status ?? 1;
+    process.execve(command[0], [command[0], '--require', __filename, ...command.slice(1)], process.env);
   } catch (error) { console.error(error.message); process.exitCode = 1; }
 }
