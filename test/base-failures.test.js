@@ -26,7 +26,10 @@ test('base selection uses the newer complete daily or merge-base push, including
     ['different branch', [push, { ...daily, head_branch: 'other' }], [1]],
     ['newer green daily clears red', [push, { ...daily, conclusion: 'success' }], [2]],
     ['PR does not count', [push, run(3, 'pull_request', '12')], [1]],
-  ]) assert.deepEqual(CI.selectBaseRuns(runs, 'main', SHA).map((r) => r.id), ids, label);
+    ['old scheduled evidence', [push, run(3, 'schedule', '09')], [1]],
+    ['old schedule rerun recently', [push, run(3, 'schedule', '09', { updated_at: '2026-10-21T12:00:00Z' })], [1]],
+  ]) assert.deepEqual(CI.selectBaseRuns(runs, 'main', SHA, '2026-10-21T10:00:00Z').map((r) => r.id), ids, label);
+  assert.deepEqual(CI.selectBaseRuns([push], 'main', SHA, 'invalid'), []);
 });
 
 test('matching a base failure preserves run, test and error, and keeps new or different failures', () => {
@@ -68,7 +71,7 @@ function fixture(t) {
 
 function baseState(h) {
   const state = h.github();
-  state.baseRuns = [run(200, 'push', '10', { head_sha: h.git(['rev-parse', 'main']) })];
+  state.baseRuns = [run(200, 'push', '10', { head_sha: h.git(['rev-parse', 'main']), created_at: new Date().toISOString() })];
   state.baseJobs = { 200: [{ id: 201, name: 'test', status: 'completed', conclusion: 'failure' }] };
   state.jobLogs = { 201: failedLog() };
   h.saveGithub(state);
@@ -192,7 +195,7 @@ process.exit(1);\n`);
 test('an existing open task naming the failing test is reused; a cancelled task is replaced', (t) => {
   for (const cancelled of [false, true]) {
     const h = fixture(t);
-    const existing = h.json(['task', 'add', '--title', 'Repair base test CI failure', '--acceptance', 'passes']).id;
+    const existing = h.json(['task', 'add', '--title', 'base test fails on main', '--acceptance', 'passes']).id;
     if (cancelled) h.ok(['task', 'update', existing, '--status', 'cancelled']);
     const script = path.join(h.base, 'failure.js');
     fs.writeFileSync(script, `console.log(${JSON.stringify(failedLog())}); process.exit(1);\n`);
@@ -213,4 +216,94 @@ test('status preserves the legacy base_failure object used by a hotfix waiver', 
     sha: h.sha, revision: 1, base_failure: { base: SHA, names: ['old host failure'] } });
   fs.writeFileSync(path.join(h.state, 'tasks.json'), JSON.stringify(tasks));
   assert.deepEqual(h.json(['status']).base_failures, []);
+});
+
+test('known-flake identities apply only while their fix task is open', () => {
+  const events = [{ task: 'T9', cmd: 'task add', detail: { flake: 'known flake' } }];
+  for (const status of ['todo', 'in_progress', 'submitted', 'rework', 'accepted', 'cancelled']) {
+    assert.equal(T.knownFlakes(events, [{ id: 'T9', status }]).has('known flake'), !['accepted', 'cancelled'].includes(status), status);
+  }
+  assert.equal(T.knownFlakes(events, []).size, 0);
+});
+
+test('generic test names do not attach failure evidence to unrelated active tasks', (t) => {
+  for (const status of ['todo', 'in_progress', 'submitted', 'rework']) {
+    const h = fixture(t);
+    const other = h.json(['task', 'add', '--title', 'Fix submit refusing stacked PRs', '--acceptance', 'works']).id;
+    h.ok(['brief', 'set', other, '-'], { input: '# An unrelated feature\n' });
+    const tasks = h.readState('tasks.json');
+    const unrelated = tasks.tasks.find((t) => t.id === other);
+    unrelated.status = status;
+    if (status === 'in_progress') unrelated.claim = { agent: 'other-worker', since: new Date().toISOString(),
+      until: new Date(Date.now() + 3600000).toISOString(), from: 'todo' };
+    fs.writeFileSync(path.join(h.state, 'tasks.json'), JSON.stringify(tasks));
+    const before = fs.readFileSync(path.join(h.state, 'briefs', `${other}.md`), 'utf8');
+    const script = path.join(h.base, 'failure.js');
+    fs.writeFileSync(script, `console.log(${JSON.stringify(failedLog('submit'))}); process.exit(1);\n`);
+    h.ok(['project', 'set', '--tests-cmd', `node ${shellQuote(script)}`]);
+    baseState(h);
+    const state = h.github();
+    state.jobLogs[201] = failedLog('submit');
+    h.saveGithub(state);
+    h.submit();
+    const entry = JSON.parse(h.ok(['check', 'tests', 'T1', '--agent', 'orchestrator', '--json']));
+    assert.notEqual(entry.base_failure[0].fix_task, other, status);
+    assert.equal(fs.readFileSync(path.join(h.state, 'briefs', `${other}.md`), 'utf8'), before, status);
+    assert.equal(h.readState('tasks.json').tasks.find((t) => t.id === other).notes.length, 0, status);
+  }
+});
+
+test('closed flake tasks return recurrent passes to the two-task flake ledger', (t) => {
+  for (const status of ['accepted', 'cancelled']) {
+    const h = fixture(t);
+    const fix = h.json(['task', 'add', '--title', 'Fix flaky test known flake', '--acceptance', 'passes']).id;
+    const events = h.logs();
+    events.findLast((e) => e.cmd === 'task add').detail.flake = 'known flake';
+    fs.writeFileSync(path.join(h.state, 'events.jsonl'), events.map((e) => JSON.stringify(e) + '\n').join(''));
+    const tasks = h.readState('tasks.json');
+    tasks.tasks.find((t) => t.id === fix).status = status;
+    fs.writeFileSync(path.join(h.state, 'tasks.json'), JSON.stringify(tasks));
+    const marker = path.join(h.base, 'ran');
+    const script = path.join(h.base, 'flake.js');
+    fs.writeFileSync(script, `const fs=require('node:fs'), marker=${JSON.stringify(marker)};
+if (!fs.existsSync(marker)) { fs.writeFileSync(marker,''); console.log(${JSON.stringify(failedLog('known flake'))}); process.exit(1); }\n`);
+    h.ok(['project', 'set', '--tests-cmd', `node ${shellQuote(script)}`]);
+    h.submit();
+    const entry = JSON.parse(h.ok(['check', 'tests', 'T1', '--agent', 'orchestrator', '--json']));
+    assert.equal(entry.ok, true);
+    assert.equal(entry.known_flake, undefined);
+    assert.equal(entry.flaky[0].test, 'known flake');
+    assert.equal(h.readState('tasks.json').tasks.length, 2, status);
+    const next = h.json(['task', 'add', '--title', 'Second change', '--acceptance', 'works']).id;
+    h.ok(['claim', next, '--agent', 'worker']);
+    h.ok(['submit', next, '--sha', h.sha, '--pr', '7', '--agent', 'worker']);
+    fs.rmSync(marker);
+    h.ok(['check', 'tests', next, '--agent', 'orchestrator']);
+    const fixes = h.readState('tasks.json').tasks.filter((t) => t.title === 'Fix flaky test known flake'
+      && !['accepted', 'cancelled'].includes(t.status));
+    assert.equal(fixes.length, 1, status);
+    assert.notEqual(fixes[0].id, fix, status);
+  }
+});
+
+test('old base runs cannot excuse a current failure and the API query is bounded and projected', (t) => {
+  for (const event of ['schedule', 'push']) {
+    const h = fixture(t);
+    const script = path.join(h.base, 'failure.js');
+    fs.writeFileSync(script, `console.log(${JSON.stringify(failedLog())}); process.exit(1);\n`);
+    h.ok(['project', 'set', '--tests-cmd', `node ${shellQuote(script)}`]);
+    baseState(h);
+    const state = h.github();
+    const mergeTime = Date.parse(h.git(['show', '-s', '--format=%cI', 'main']));
+    Object.assign(state.baseRuns[0], { event, created_at: new Date(mergeTime - 86400000).toISOString(),
+      updated_at: new Date().toISOString() });
+    h.saveGithub(state);
+    h.submit();
+    const result = h.run(['check', 'tests', 'T1', '--agent', 'orchestrator', '--json']);
+    assert.equal(result.code, 1, event);
+    assert.equal(JSON.parse(result.stdout).base_failure, undefined, event);
+    const query = h.github().calls.find((args) => args[0] === 'api' && args[1].includes('actions/runs?branch='));
+    assert.match(query[1], /&created=%3E%3D/);
+    assert.match(query[query.indexOf('--jq') + 1], /workflow_id.*created_at.*html_url/);
+  }
 });
