@@ -7,7 +7,7 @@ const path = require('node:path');
 const cp = require('node:child_process');
 const { cachedFixture, BIN, HOOKS } = require('./helpers');
 const { CHROME, openBrowser, closeBrowser } = require('./browser');
-const { waitOnRepo } = require('./signals');
+const { waitOnRepo, killPid } = require('./signals');
 
 test.after(closeBrowser);
 
@@ -31,7 +31,7 @@ function until(t, h, fn, message, stream) {
       try {
         const log = events(h);
         const spawned = log.findLast((e) => e.cmd === 'spawn')?.detail;
-        const alive = (pid) => { try { process.kill(pid, 0); return 'alive'; } catch (e) { return e.code; } };
+        const alive = (pid) => { try { killPid(pid, 0); return 'alive'; } catch (e) { return e.code || e.message; } };
         const lock = path.join(h.state, 'lock');
         const holders = fs.existsSync(lock) ? fs.readdirSync(lock).map((n) => fs.readFileSync(path.join(lock, n), 'utf8')).join(' ') : 'none';
         seen = `last events: ${log.slice(-12).map((e) => e.cmd).join(', ')}; supervisor ${spawned?.monitor_pid} ${spawned ? alive(spawned.monitor_pid) : '-'}; `
