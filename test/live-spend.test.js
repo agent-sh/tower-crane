@@ -36,7 +36,8 @@ function until(t, h, fn, message, stream) {
         const holders = fs.existsSync(lock) ? fs.readdirSync(lock).map((n) => fs.readFileSync(path.join(lock, n), 'utf8')).join(' ') : 'none';
         seen = `last events: ${log.slice(-12).map((e) => e.cmd).join(', ')}; supervisor ${spawned?.monitor_pid} ${spawned ? alive(spawned.monitor_pid) : '-'}; `
           + `harness ${spawned?.pid} ${spawned?.pid ? alive(spawned.pid) : '-'}, done: ${fs.existsSync(h.done)}; state lock: ${holders}; `
-          + `dispatch log ends: ${spawned ? fs.readFileSync(spawned.log, 'utf8').slice(-2000) : '(none)'}`;
+          + `dispatch log ends: ${spawned ? fs.readFileSync(spawned.log, 'utf8').slice(-2000) : '(none)'}; `
+          + `trace ends: ${fs.existsSync(h.trace) ? fs.readFileSync(h.trace, 'utf8').split('\n').slice(-60).join('\n') : '(none)'}`;
       } catch (e) { seen = `fixture unreadable: ${e.message}`; }
       process.stderr.write(`${message}: still waiting when the test was aborted; ${seen}\n`);
     }
@@ -65,9 +66,10 @@ function setup(t, harness, supervision = {}) {
     JSON.stringify({ usage_ms: 500, stall_ms: 60000, ...supervision })]);
   const bin = path.join(h.base, 'bin');
   h.done = path.join(h.base, 'done');
+  h.trace = path.join(h.base, 'live-trace');
   h.liveEnv = (extra = {}) => ({
     PATH: bin + path.delimiter + (h.env.PATH || h.env.Path || ''),
-    NODE_OPTIONS: `--require "${STUB}"`, LIVE_DONE: h.done, ...extra,
+    NODE_OPTIONS: `--require "${STUB}"`, LIVE_DONE: h.done, LIVE_TRACE: h.trace, ...extra,
   });
   return h;
 }
