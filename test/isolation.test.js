@@ -8,7 +8,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
-const { makeRepo, BIN } = require('./helpers');
+const { makeRepo, ROOT, BIN } = require('./helpers');
 const A = require('../lib/agents');
 const TOML = require('../lib/toml');
 const ClaudeSandboxPlaceholders = require('../lib/claude-sandbox-placeholders');
@@ -27,6 +27,18 @@ const SANDBOX_MOUNTS = [
 ];
 // The repository tracks this file, so the sandbox never leaves a placeholder in its place.
 const TRACKED_SETTINGS = '.claude/settings.json';
+
+test('cache roots nested under a worker scratch remain explicit roots', { skip: process.platform === 'win32' && 'Windows uses LOCALAPPDATA' }, () => {
+  const home = path.join(ROOT, 'fixture-home');
+  for (const kind of ['tasks', 'agents']) {
+    const inherited = path.join(home, '.cache', 'tower-crane', kind, '012345abcdef', 'T1');
+    for (const [cache, expected] of [
+      [inherited, path.join(home, '.cache')],
+      [path.join(inherited, 'test-cache'), path.join(inherited, 'test-cache')],
+      [path.join(inherited, 'fixtures', 'home', '.cache'), path.join(inherited, 'fixtures', 'home', '.cache')],
+    ]) assert.equal(A.cacheDir({ XDG_CACHE_HOME: cache }, home), expected, `${kind}: ${cache}`);
+  }
+});
 
 test('isolation spawn probes report the cause of abnormal command exits', { skip: NO_STUBS }, (t) => {
   const { h, u } = setup(t);
@@ -222,7 +234,9 @@ test('research Claude gets native or explicit web MCP tools with worker file and
     const ownHome = path.dirname(report.home);
     // Outside the user's home it reopens only the agent's own home and broker directory.
     // And under /run, which it hides, the resolver (runReads).
-    assert.deepEqual(allowRead.filter((p) => !p.startsWith(fs.realpathSync(u.home) + path.sep)), [ownHome, path.join(h.state, 'brokers', path.basename(ownHome)), ...A.runReads(u.env)]);
+    assert.ok(shared.allowWrite.includes(report.socketDir));
+    shared.allowWrite = shared.allowWrite.filter((p) => p !== report.socketDir);
+    assert.deepEqual(allowRead.filter((p) => p !== report.socketDir && !p.startsWith(fs.realpathSync(u.home) + path.sep)), [ownHome, path.join(h.state, 'brokers', path.basename(ownHome)), ...A.runReads(u.env)]);
     assert.ok(shared.denyWrite.includes(h.state));
     // A mask on a path the host lacks leaves a placeholder there, so only existing paths are masked.
     for (const p of [...shared.denyRead, ...shared.denyWrite]) assert.ok(fs.existsSync(p), `${p} is masked but missing`);
@@ -287,6 +301,8 @@ test('research Codex explicitly enables live search with worker file and git con
     assert.equal(rules[path.join(h.state, 'brokers')], 'none');
     assert.equal(rules[path.join(h.state, 'ci-artifacts')], 'none', 'no agent reads unredacted local CI artifacts');
     assert.equal(rules[broker], 'write');
+    assert.equal(rules[report.socketDir], 'write');
+    delete rules[report.socketDir];
     assert.equal(rules[path.join(path.dirname(h.userConfig), 'owner')], 'none', 'no agent reads the owner key');
     for (const [p, mode] of Object.entries(rules)) if (mode === 'none') assert.ok(fs.existsSync(p), `${p} is masked but missing`);
     const cache = Object.keys(rules).filter((k) => path.dirname(path.dirname(k)) === path.join(u.home, '.cache', 'tower-crane', 'tasks'));
@@ -346,8 +362,8 @@ test('a spawned claude agent imports the user\'s global rules by path, loads non
   const box = seen.settings.sandbox;
   assert.equal(seen.args[seen.args.indexOf('--allowedTools') + 1], 'Bash,Read,Grep,Glob');
   assert.deepEqual([box.enabled, box.failIfUnavailable, box.allowUnsandboxedCommands, box.network.allowAllUnixSockets], [true, true, false, true]);
-  // Nothing but its own temp directory, where claude puts its proxy sockets (claudeTmp).
-  assert.deepEqual(box.filesystem.allowWrite.filter((w) => w !== seen.tmpdir), []);
+  // Its own temp and socket directories are the only writable leaves.
+  assert.deepEqual(box.filesystem.allowWrite.filter((w) => w !== seen.tmpdir), [seen.socketDir]);
   assert.equal(box.filesystem.denyWrite[0], h.state, 'the state is read-only');
   assert.ok(box.filesystem.denyWrite.includes(wt), 'the worktree is read-only');
   // claude writes a linked worktree's git directory itself; what runs code stays read-only.
@@ -357,13 +373,16 @@ test('a spawned claude agent imports the user\'s global rules by path, loads non
   assert.ok(box.filesystem.denyRead.includes(path.join(h.state, 'brokers')), 'no agent reads another agent\'s broker token');
   assert.ok(box.filesystem.denyRead.includes(path.join(h.state, 'ci-artifacts')), 'no agent reads unredacted local CI artifacts');
   assert.ok(box.filesystem.denyRead.includes(path.join(path.dirname(h.userConfig), 'owner')), 'no agent reads the owner key');
-  assert.deepEqual(box.filesystem.allowRead.filter((p) => p !== seen.tmpdir), [path.join(u.home, '.claude', 'CLAUDE.md'), home, path.join(h.state, 'brokers', started.agent), ...A.runReads(u.env)],
+  assert.deepEqual(box.filesystem.allowRead.filter((p) => p !== seen.tmpdir && p !== seen.socketDir), [path.join(u.home, '.claude', 'CLAUDE.md'), home, path.join(h.state, 'brokers', started.agent), ...A.runReads(u.env)],
     'only the user\'s global rules under the home, this dispatch home, its own broker directory, the resolver under /run and its own temp directory are readable');
   // /run is hidden whole, with docker's, the buses' and every other host socket in it.
   for (const p of A.runDirs()) assert.ok(box.filesystem.denyRead.includes(p), p);
   // /var/run links to /run on most hosts; the sandbox follows the link into the hidden /run.
   for (const p of ['/var/run/docker.sock', '/run/docker.sock', '/run/dbus/system_bus_socket', '/run/snapd.socket']) {
-    assert.equal(commandsRead(seen, fs.existsSync(p) ? fs.realpathSync(p) : p), false, p);
+    const parent = path.dirname(p);
+    const target = fs.existsSync(p) ? fs.realpathSync(p)
+      : fs.existsSync(parent) ? path.join(fs.realpathSync(parent), path.basename(p)) : p;
+    assert.equal(commandsRead(seen, target), false, p);
   }
   assert.ok(box.filesystem.denyRead.includes(u.home), 'the user\'s home is hidden whole');
   for (const p of [path.join(u.home, '.ssh'), path.join(u.home, '.aws')]) assert.equal(commandsRead(seen, p), false, p);

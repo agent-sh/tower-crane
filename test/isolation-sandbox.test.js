@@ -12,7 +12,7 @@ const { makeRepo, pluginRoot, shortCacheRoot, ROOT, BIN } = require('./helpers')
 const A = require('../lib/agents');
 const TOML = require('../lib/toml');
 const ClaudeSandboxPlaceholders = require('../lib/claude-sandbox-placeholders');
-const { STUB, NO_STUBS, SECRET, plant, setup, isolateGitEnvironment, spawn, isolated, commandsRead } = require('./isolation-helpers');
+const { STUB, NO_STUBS, SECRET, plant, setup, isolateGitEnvironment, spawn, isolated, commandsRead, commandsWrite } = require('./isolation-helpers');
 
 // What T106's credential table missed, with no entry for any of it now: an
 // arbitrary dotfile, an env-pointed file, OpenCode and Azure logins.
@@ -125,6 +125,25 @@ test('a project sandbox path inside a hidden credential store, or a writable one
     for (const f of [path.join(owner, 'key'), path.join(h.state, 'brokers', 'worker-T9-1', 'broker.json')]) {
       assert.equal(commandsRead(seen, f), false, `${harness}: ${f} stays hidden under a readable parent`);
     }
+  }
+});
+
+test('worker sandboxes grant their short socket leaf without granting writes to siblings', { skip: NO_STUBS }, (t) => {
+  const { h, u, wt } = setup(t);
+  const common = h.git(['rev-parse', '--path-format=absolute', '--git-common-dir'], wt);
+  for (const harness of ['claude', 'codex']) {
+    isolated(h, 'hard', harness);
+    spawn(h, u, 'hard');
+    const seen = u.report();
+    const dir = seen.socketDir;
+    assert.ok(dir, `${harness}: the environment names the granted directory`);
+    assert.ok(Buffer.byteLength(path.join(dir, 'tc-XXXXXX', 's')) <= 103, dir);
+    if (harness === 'claude') assert.ok(seen.settings.sandbox.filesystem.allowRead.includes(dir), 'Claude reopens the socket leaf inside its hidden runtime root');
+    assert.equal(commandsRead(seen, path.join(dir, 's')), true, `${harness}: the socket leaf is readable`);
+    assert.equal(commandsWrite(seen, wt, common, path.join(dir, 's')), true, `${harness}: the socket leaf is writable`);
+    const sibling = path.join(path.dirname(dir), 'tower-crane-another-worker', 's');
+    assert.equal(commandsWrite(seen, wt, common, sibling), false, `${harness}: sibling sockets stay unwritable`);
+    assert.equal(fs.existsSync(dir), false, `${harness}: an exited broker removes its leaf`);
   }
 });
 
@@ -242,11 +261,17 @@ test('the project\'s env and env_file cannot move a codex agent\'s temp director
   assert.equal(commandsRead(seen, path.join(elsewhere, 'x')), false, 'the directory the project names stays hidden');
 });
 
-test('a codex agent cannot read a caller TMPDIR outside the home that an entry of / exposes', { skip: (NO_STUBS || !fs.existsSync('/var/tmp')) && 'needs /var/tmp' }, t => {
+test('a codex agent cannot read a caller TMPDIR outside the home that an entry of / exposes', { skip: NO_STUBS }, t => {
   // Found in review 2026-10-14: /var/tmp on Linux, or /var/folders through
   // /private on macOS, stayed readable through the entry of / that holds it.
   const { h, u } = setup(t);
-  const caller = fs.mkdtempSync('/var/tmp/tower-crane-caller-');
+  let caller;
+  try {
+    caller = fs.mkdtempSync('/var/tmp/tower-crane-caller-');
+  } catch (error) {
+    if (['ENOENT', 'EACCES', 'EROFS'].includes(error.code)) return t.skip('needs writable /var/tmp');
+    throw error;
+  }
   t.after(() => fs.rmSync(caller, { recursive: true, force: true }));
   const planted = path.join(caller, 'other-task', 'fixture.txt');
   fs.mkdirSync(path.dirname(planted), { recursive: true });

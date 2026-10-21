@@ -2,7 +2,7 @@
 
 // The fixture every isolation test file builds on: a planted user home, a
 // repository with hooks of its own, spawn and policy probes, and what each
-// sandbox lets an agent read.
+// sandbox lets an agent read and write.
 
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -191,6 +191,7 @@ function spawn(h, u, role, env = {}, opts = {}) {
   }
   return h.json(['spawn', '--role', role, '--task', 'T1', '--wait', '--json'], { ...opts, env: { ...u.env, ...env } });
 }
+
 // The shim's decision for each command under each job's policy, as the spawn
 // writes it to policy.json, in one node process: 126 for a refusal, ALLOW for
 // a push or gh call the shim would hand on, and otherwise the exit code of
@@ -266,7 +267,25 @@ function commandsRead(seen, file) {
     && !hidden.some((dir) => under(file, dir) && !writable.some((w) => under(w, dir) && under(file, w)));
 }
 
+// Whether a sandboxed command may write file under the rendered rules. claude
+// writes its working directory, the common directory of a linked worktree and
+// allowWrite, and denyWrite wins over each. codex writes where the nearest
+// rule above the file says write, its workspace root included.
+function commandsWrite(seen, cwd, common, file) {
+  const under = (p, dir) => p === dir || p.startsWith(dir.endsWith(path.sep) ? dir : dir + path.sep);
+  if (seen.harness === 'claude') {
+    const box = seen.settings.sandbox.filesystem;
+    return [cwd, common, ...box.allowWrite].some((p) => under(file, p)) && !box.denyWrite.some((p) => under(file, p));
+  }
+  const profile = seen.config.permissions['tower-crane'].filesystem;
+  const rules = Object.entries(profile).filter(([, access]) => typeof access === 'string')
+    .flatMap(([p, access]) => codexTargets(seen, p).map((target) => [target, access]));
+  rules.push([cwd, profile[':workspace_roots']['.']]);
+  const nearest = rules.filter(([p]) => under(file, p)).sort((a, b) => b[0].length - a[0].length)[0];
+  return nearest?.[1] === 'write';
+}
+
 module.exports = {
   STUB, NO_STUBS, SECRET, plant, setup, isolateGitEnvironment, walk, noSecretsCopied, releaseExited, spawn,
-  ALLOW, decide, isolated, codexTargets, commandsRead,
+  ALLOW, decide, isolated, codexTargets, commandsRead, commandsWrite,
 };

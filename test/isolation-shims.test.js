@@ -13,7 +13,7 @@ const { makeRepo, ROOT, BIN, detachedAlive } = require('./helpers');
 const A = require('../lib/agents');
 const S = require('../lib/state');
 const TOML = require('../lib/toml');
-const { NO_STUBS, SECRET, setup, walk, noSecretsCopied, releaseExited, spawn, ALLOW, decide, isolated, codexTargets, commandsRead } = require('./isolation-helpers');
+const { NO_STUBS, SECRET, setup, walk, noSecretsCopied, releaseExited, spawn, ALLOW, decide, isolated, commandsRead, commandsWrite } = require('./isolation-helpers');
 
 test('a spawn from a supervisor running in another agent\'s env gets a cache of its own under the user cache root, never nested in the inherited one', { skip: NO_STUBS }, (t) => {
   const { h, u } = setup(t);
@@ -114,7 +114,7 @@ if (args[2] === 'push') {
   process.exit(0);
 }
 if (args[2] === 'fetch') process.exit(0);
-const r = cp.spawnSync('git', args, { env: { ...process.env, PATH: ${JSON.stringify(process.env.PATH)} }, stdio: 'inherit' });
+const r = cp.spawnSync('git', args, { env: { ...process.env, PATH: ${JSON.stringify(h.env.PATH)} }, stdio: 'inherit' });
 process.exit(r.status ?? 1);
 `, { mode: 0o755 });
   const upgrade = `
@@ -821,24 +821,6 @@ test('spawn refuses a sandbox.write path over the state directory or the worktre
     assert.equal(r.code, 0, `${harness}: ${r.stderr}`);
   }
 });
-
-// Whether a sandboxed command may write file under the rendered rules. claude
-// writes its working directory, the common directory of a linked worktree and
-// allowWrite, and denyWrite wins over each. codex writes where the nearest
-// rule above the file says write, its workspace root included.
-function commandsWrite(seen, cwd, common, file) {
-  const under = (p, dir) => p === dir || p.startsWith(dir.endsWith(path.sep) ? dir : dir + path.sep);
-  if (seen.harness === 'claude') {
-    const box = seen.settings.sandbox.filesystem;
-    return [cwd, common, ...box.allowWrite].some((p) => under(file, p)) && !box.denyWrite.some((p) => under(file, p));
-  }
-  const profile = seen.config.permissions['tower-crane'].filesystem;
-  const rules = Object.entries(profile).filter(([, access]) => typeof access === 'string')
-    .flatMap(([p, access]) => codexTargets(seen, p).map((target) => [target, access]));
-  rules.push([cwd, profile[':workspace_roots']['.']]);
-  const nearest = rules.filter(([p]) => under(file, p)).sort((a, b) => b[0].length - a[0].length)[0];
-  return nearest?.[1] === 'write';
-}
 
 // The worktree lock (lib/worktree.js underWorktreeLock) moved out of the git
 // directory, which a sandboxed worker writes, to the state directory.
