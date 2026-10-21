@@ -14,7 +14,7 @@ const os = require('node:os');
 const path = require('node:path');
 const cp = require('node:child_process');
 const { pinLiveRung, makeRepo, dispatch, ROOT, HOOKS, TMP_ROOT, LIVE_ROOT } = require('./helpers');
-const { waitUntil } = require('./signals');
+const { waitUntil, childClosed } = require('./signals');
 const A = require('../lib/agents');
 const { runtimeProbe, assertRuntimeEntries } = require('./runtime-entries');
 
@@ -241,12 +241,17 @@ function engineCheckout(h, dir) {
     + `fs.writeFileSync(${JSON.stringify(out)},JSON.stringify({show:run(["task","show","T1","--json"]),note:run(["task","note","T1","after-retirement"])}))`;
   // spawn from the copy, with the hooks h.runAsync adds, and without --wait:
   // its own process runs the copy, which is gone once it is retired.
-  const spawn = (env) => {
-    const r = cp.spawnSync(process.execPath, ['--require', HOOKS, path.join(checkout, 'bin', 'tower-crane.js'), 'spawn', '--role', 'small', '--task', 'T1', '--json'], {
-      cwd: h.repo, encoding: 'utf8', env: { ...h.env, HOOK_STATE: h.state, HOOK_PROCESSES_DIR: path.join(h.base, 'detached'), ...env, PATH: [env.PATH, bin, h.env.PATH].filter(Boolean).join(path.delimiter) },
+  const spawn = async (env) => {
+    const child = cp.spawn(process.execPath, ['--require', HOOKS, path.join(checkout, 'bin', 'tower-crane.js'), 'spawn', '--role', 'small', '--task', 'T1', '--json'], {
+      cwd: h.repo, env: { ...h.env, HOOK_STATE: h.state, HOOK_PROCESSES_DIR: path.join(h.base, 'detached'), ...env, PATH: [env.PATH, bin, h.env.PATH].filter(Boolean).join(path.delimiter) },
     });
-    assert.equal(r.status, 0, r.stderr);
-    return JSON.parse(r.stdout);
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (d) => (stdout += d));
+    child.stderr.on('data', (d) => (stderr += d));
+    const { code } = await childClosed(child);
+    assert.equal(code, 0, stderr);
+    return JSON.parse(stdout);
   };
   // A line still being written has no newline yet; the next check reads it.
   const exited = (agent) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').split('\n').slice(0, -1)
@@ -282,7 +287,7 @@ test('in a real codex sandbox the agent\'s tower-crane still answers after the d
   h.ok(['brief', 'set', 'T1', '-'], { input: 'retired engine probe\n' });
   const engine = engineCheckout(h, results(h));
   const bin = standInCodex(h, engine.script);
-  const started = engine.spawn({ PATH: bin });
+  const started = await engine.spawn({ PATH: bin });
   const r = await engine.retireWhileRunning(started.agent);
   assert.ok(r.running, `the copy was retired while the agent ran\n${agentLog(h)}`);
   assert.equal(r.code, 0, agentLog(h));
@@ -301,7 +306,7 @@ test('in a real claude sandbox the agent\'s tower-crane still answers after the 
     input: `Sandbox probe set up by the owner. Run exactly this one command with the Bash tool, then reply with its exit code and stop. Do not run tower-crane yourself.\n\n${node} ${JSON.stringify(probe)}\n`,
   });
   pinLiveRung(h, 'claude');
-  const started = engine.spawn({});
+  const started = await engine.spawn({});
   const r = await engine.retireWhileRunning(started.agent);
   assert.ok(r.running, `the copy was retired while the agent ran\n${agentLog(h)}`);
   assert.equal(r.code, 0, agentLog(h));
