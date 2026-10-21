@@ -6,11 +6,13 @@
 // named files miss is run against the suite before it counts as missed, except
 // for the pristine-anchor check, which cannot score a deliberately planted bug.
 //
-//   node scripts/mutants.js [--root DIR] [--jobs 4] [--only ID,ID] [--no-full] [--skip PATTERN] [--process-limit N]
+//   node scripts/mutants.js [--root DIR] [--jobs 4] [--only ID,ID] [--no-full] [--skip PATTERN] [--process-limit N] [--deadline-floor MS]
 //   node scripts/mutants.js --check [--root DIR] [--only ID,ID]
 //
 // --skip passes --test-skip-pattern to every run, for a test the current
 // environment cannot run, such as a nested git push inside an agent's sandbox.
+// --deadline-floor lowers the 30-second floor of a mutant's deadline, so a test
+// of the timeout catch waits seconds, not minutes.
 
 const cp = require('node:child_process');
 const fs = require('node:fs');
@@ -825,17 +827,18 @@ async function runContained(command, argv, { cwd, env = process.env, limit = 512
 }
 
 // Five baseline times leave room for loaded hosts; the floor covers process startup.
-function mutationTimeout(files, timings) {
+const DEADLINE_FLOOR_MS = 30000;
+function mutationTimeout(files, timings, floor = DEADLINE_FLOOR_MS) {
   const measured = files.reduce((sum, file) => {
     const ms = timings.get(file);
     if (!Number.isFinite(ms) || ms < 0) throw new Error(`missing baseline time for ${file}`);
     return sum + ms;
   }, 0);
-  return Math.ceil(Math.max(30000, measured * 5));
+  return Math.ceil(Math.max(floor, measured * 5));
 }
 
-async function runMutationTests(files, timings, testResult, onRetry = () => {}) {
-  const timeout = mutationTimeout(files, timings);
+async function runMutationTests(files, timings, testResult, onRetry = () => {}, floor = DEADLINE_FLOOR_MS) {
+  const timeout = mutationTimeout(files, timings, floor);
   let run = await testResult(files, timeout);
   if (run.reason?.startsWith('caught-by-timeout')) {
     onRetry();
@@ -862,6 +865,8 @@ async function main() {
   const skip = opt('--skip', null);
   const processLimit = Number(opt('--process-limit', '512'));
   if (!Number.isSafeInteger(processLimit) || processLimit < 2 || processLimit > 512) throw new Error('--process-limit must be an integer from 2 to 512');
+  const floor = Number(opt('--deadline-floor', String(DEADLINE_FLOOR_MS)));
+  if (!Number.isSafeInteger(floor) || floor < 1000 || floor > DEADLINE_FLOOR_MS) throw new Error(`--deadline-floor must be an integer from 1000 to ${DEADLINE_FLOOR_MS} ms`);
   const root = path.resolve(opt('--root', path.join(__dirname, '..')));
   const selected = only ? MUTANTS.filter((m) => only.includes(m.id)) : MUTANTS;
   if (!selected.length || only?.some((id) => !MUTANTS.some((m) => m.id === id))) throw new Error('unknown or empty mutation selection');
@@ -903,7 +908,7 @@ async function main() {
     if (failed) throw failed;
   }
   const runTests = (files, id) => runMutationTests(files, timings, testResult,
-    () => console.log(`retry   ${id}: timeout-only catch`));
+    () => console.log(`retry   ${id}: timeout-only catch`), floor);
 
   // Anchor validation checks the pristine catalog, not behavior under a planted bug.
   const allFiles = () => require(path.join(copy, 'test', 'run.js')).testFiles()

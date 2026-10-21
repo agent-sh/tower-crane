@@ -377,6 +377,8 @@ test('mutation timeouts use measured file baselines with a startup floor', () =>
   assert.equal(typeof mutationTimeout, 'function');
   const times = new Map([['fast', 100], ['slow', 20000]]);
   assert.equal(mutationTimeout(['fast'], times), 30000);
+  assert.equal(mutationTimeout(['fast'], times, 5000), 5000, '--deadline-floor lowers only the floor');
+  assert.equal(mutationTimeout(['slow'], times, 5000), 100000);
   assert.equal(mutationTimeout(['slow'], times), 100000);
   assert.equal(mutationTimeout(['fast', 'slow'], times), 100500);
   assert.throws(() => mutationTimeout(['unmeasured'], times), /missing baseline/);
@@ -456,11 +458,13 @@ test('a hung planted bug is caught by its baseline-derived timeout', async (t) =
   `);
   const result = await runContained(process.execPath, [
     path.join(ROOT, 'scripts/mutants.js'), '--root', h.repo,
-    '--only', 'stack-merge-unaccepted-lower', '--no-full', '--jobs', '1',
-  ], { env: { ...h.env, TOWER_CRANE_TEST_TMP: h.base }, limit: 48, timeout: 150000 }); // wait-allow: outer emergency deadline covers two 30-second mutation attempts and three Windows helper compiles
+    // The unit test above holds the production 30-second floor; this run lowers it.
+    '--only', 'stack-merge-unaccepted-lower', '--no-full', '--jobs', '1', '--deadline-floor', '5000',
+  ], { env: { ...h.env, TOWER_CRANE_TEST_TMP: h.base }, limit: 48, timeout: 150000 }); // wait-allow: outer emergency deadline covers two mutation attempts and three Windows helper compiles
   assert.equal(result.reason, null, result.output);
   assert.equal(result.status, 0, result.output);
-  assert.match(result.output, /caught.*stack-merge-unaccepted-lower \(caught-by-timeout \(30000 ms\)\)/);
+  const deadline = /caught.*stack-merge-unaccepted-lower \(caught-by-timeout \((\d+) ms\)\)/.exec(result.output);
+  assert.ok(deadline && Number(deadline[1]) >= 5000, result.output);
   assert.match(result.output, /retry.*stack-merge-unaccepted-lower.*timeout/);
   assert.match(result.output, /1\/1 mutants caught \(0 by tests, 1 by timeout, 0 by caps\)/);
   assert.equal(recorded(pids).length, 3, 'a baseline and two timed-out mutant runs');
