@@ -20,7 +20,11 @@ const { readPublished } = require('./atomic-file');
 const GATE_SKIP = process.platform === 'win32' && 'the lease gate is POSIX-only';
 // A dispatch that finds no /bin/sh spawns its workers through the Windows launch handshake.
 const NO_SH = { HOOK_NO_SH: '1' };
-const windowsConcurrency = process.platform === 'win32' ? 2 : false;
+// Independent cases run two at a time on every platform: most of each one waits on its child processes.
+const caseConcurrency = 2;
+// Long enough for a supervisor to boot on a loaded host, well under the production 10 s;
+// Windows, whose supervisor starts slower, keeps the production window.
+const SHORT_STARTUP_MS = process.platform === 'win32' ? 10000 : 4000;
 const S = require('../lib/state');
 
 const log = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
@@ -236,7 +240,7 @@ test('outages come only from harness error envelopes and stderr, and quoted erro
     transient(1, null, true), transient(1, null, false), transient(0, null, true)], [true, true, true, true, false, false]);
 });
 
-describe('independent retry cases', { concurrency: windowsConcurrency }, () => {
+describe('independent retry cases', { concurrency: caseConcurrency }, () => {
 test('a recorded Bedrock outage reruns with the session and claim kept', (t) => {
   const [attempt] = bedrockOutage.attempts;
   const h = setup(t, { records: attempt.records.filter((record) => record.type === 'error') });
@@ -525,7 +529,7 @@ test('release during backoff fences the old supervisor from a replacement claim'
   assert.equal(log(h).filter((e) => e.cmd === 'spawn retry').length, 0);
 });
 
-describe('other supervision cases', { concurrency: windowsConcurrency }, () => {
+describe('other supervision cases', { concurrency: caseConcurrency }, () => {
 test('an expired previous claim does not stop supervision before a slow replacement claims', (t) => {
   const h = setup(t, { claimDelay: 350 });
   h.ok(['claim', 'T1', '--agent', 'previous-worker', '--lease', '1']);
@@ -635,20 +639,22 @@ test('a worker whose lease is refused never starts, reports why and frees its sl
 
 test('a worker whose spawn is not recorded within its startup window never starts and says why', { skip: GATE_SKIP }, async (t) => {
   const h = setup(t, { claim: false, failures: 0 });
+  // A shorter startup window (lib/intervals.js); test/spawn-startup.test.js runs the production one.
+  h.env.TOWER_CRANE_INTERVALS = JSON.stringify({ startup: SHORT_STARTUP_MS });
   const started = path.join(h.base, 'started-paused');
   const completed = h.runAsync(['spawn', '--task', 'T1', '--wait', '--json'], { hooks: { HOOK_STOP_STARTED: started } });
   let result;
   try {
     await waitOnRepo(h, () => fs.existsSync(started), 'dispatch did not pause before committing its spawn');
     // The supervisor's startup window closes while the paused dispatch holds the state lock.
-    await new Promise((resolve) => setTimeout(resolve, 11000)); // wait-allow: verify that a held startup gate cannot outlive the production startup window
+    await new Promise((resolve) => setTimeout(resolve, SHORT_STARTUP_MS + 1000)); // wait-allow: verify that a held startup gate cannot outlive the startup window
     assert.equal(h.readAttempts().length, 0, 'the harness waits behind its gate');
   } finally {
     fs.writeFileSync(`${started}.go`, '');
     result = await completed;
   }
   assert.notEqual(result.code, 0, result.stderr);
-  assert.match(result.stderr, /no lease: its spawn was not recorded within 10 s/);
+  assert.match(result.stderr, new RegExp(`no lease: its spawn was not recorded within ${SHORT_STARTUP_MS / 1000} s`));
   assert.equal(h.readAttempts().length, 0, 'the worker never started');
 });
 
@@ -698,6 +704,7 @@ test('a worker without the lease gate, as on Windows, first runs on its own leas
 
 test('a worker without the lease gate whose supervisor stops waiting for its lease never starts, and its lease is rolled back', async (t) => {
   const h = setup(t, { claim: false, failures: 0 });
+  h.env.TOWER_CRANE_INTERVALS = JSON.stringify({ startup: SHORT_STARTUP_MS });
   // A paused harness past its interval admits this spawn as its probe.
   S.withLock(h.state, () => S.appendEvents(h.state, [{ at: new Date(Date.now() - 10 * 60000).toISOString(), agent: 'test', cmd: 'harness health',
     task: null, detail: { harness: 'command', status: 'unavailable', reason: 'login expired', source: 'exit' } }]));
@@ -710,13 +717,13 @@ test('a worker without the lease gate whose supervisor stops waiting for its lea
     assert.match(claim?.agent || '', /^worker-T1-/, 'the lease is on disk while the supervisor waits');
     assert.equal(h.readAttempts().length, 0, 'no harness runs before go');
     // The supervisor's wait for go closes while the paused dispatch holds the state lock.
-    await new Promise((resolve) => setTimeout(resolve, 11000)); // wait-allow: exercise the supervisor's 10-second no-lease refusal before releasing the paused dispatch
+    await new Promise((resolve) => setTimeout(resolve, SHORT_STARTUP_MS + 1000)); // wait-allow: exercise the supervisor's no-lease refusal before releasing the paused dispatch
   } finally {
     fs.writeFileSync(`${paused}.go`, '');
     result = await completed;
   }
   assert.notEqual(result.code, 0, result.stderr);
-  assert.match(result.stderr, /did not start: no lease: it was not recorded within 10 s/);
+  assert.match(result.stderr, new RegExp(`did not start: no lease: it was not recorded within ${SHORT_STARTUP_MS / 1000} s`));
   assert.equal(h.readAttempts().length, 0, 'the worker never started');
   const task = JSON.parse(fs.readFileSync(path.join(h.state, 'tasks.json'), 'utf8')).tasks.find((x) => x.id === 'T1');
   assert.equal(task.claim, null, 'the lease is rolled back');
@@ -797,14 +804,19 @@ test('submitted-task reviewers resume transient exits and show their phase', (t)
 });
 
 test('a state-lock timeout preserves the pending retry without spending another attempt', async (t) => {
-  const h = setup(t, { config: { retries: 1, backoff_ms: 5000, max_backoff_ms: 5000 } });
+  const backoff = 3000;
+  const h = setup(t, { config: { retries: 1, backoff_ms: backoff, max_backoff_ms: backoff } });
+  // A short lock wait (lib/intervals.js) lets the retry's write time out while the lock is held.
+  const lockWait = process.platform === 'win32' ? 3000 : 1000;
+  const trace = path.join(h.base, 'lock-trace.jsonl');
+  Object.assign(h.env, { TOWER_CRANE_INTERVALS: JSON.stringify({ lock_wait: lockWait }), TOWER_CRANE_LOCK_TRACE: trace });
   h.json(['spawn', '--task', 'T1']);
   await waitOnRepo(h, () => h.json(['task', 'show', 'T1']).run?.phase === 'retrying', 'retry was not scheduled');
   const paused = path.join(h.base, 'holder');
   const holder = h.runAsync(['task', 'note', 'T1', 'hold state lock'], { hooks: { HOOK_PAUSE_LOCKED: paused } });
   try {
     await waitOnRepo(h, () => fs.existsSync(paused), 'holder did not acquire the lock');
-    await new Promise((resolve) => setTimeout(resolve, 17000)); // wait-allow: hold the lock beyond the production state-lock timeout
+    await new Promise((resolve) => setTimeout(resolve, backoff + 4 * lockWait)); // wait-allow: hold the lock past the retry and several lock waits
   } finally {
     fs.writeFileSync(`${paused}.go`, '');
     assert.equal((await holder).code, 0);
@@ -813,9 +825,15 @@ test('a state-lock timeout preserves the pending retry without spending another 
   assert.equal(h.readAttempts().length, 2);
   assert.equal(log(h).filter((e) => e.cmd === 'spawn retry').length, 1);
   assert.equal(h.readAttempts()[1].retry, '1');
+  // The retry was recorded after the hold, by an attempt that waited at most one lock wait: earlier ones timed out.
+  const holdings = fs.readFileSync(trace, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+  const held = holdings.findIndex((row) => row.label === 'task note');
+  const retry = holdings.findIndex((row) => row.label === 'spawn retry');
+  assert.ok(held >= 0 && retry > held, JSON.stringify(holdings));
+  assert.ok(holdings[retry].wait_ms <= 2 * lockWait, JSON.stringify(holdings[retry]));
 });
 
-describe('remaining supervision settings', { concurrency: windowsConcurrency }, () => {
+describe('remaining supervision settings', { concurrency: caseConcurrency }, () => {
 test('rung supervision settings validate and clear through the CLI', (t) => {
   const h = setup(t);
   for (const config of [{ retries: -1 }, { backoff_ms: 0 }, { max_backoff_ms: 1 }, { progress_paths: ['../escape'] }, { typo: 1 }]) {
@@ -1011,7 +1029,7 @@ test('quiet supervision samples state and progress paths on a seconds-scale inte
   }
 });
 
-describe('supervision completion cases', { concurrency: windowsConcurrency }, () => {
+describe('supervision completion cases', { concurrency: caseConcurrency }, () => {
 test('Windows natural exits do not send taskkill to an exited or reused pid', (t) => {
   const h = setup(t, { failures: 0 });
   const audit = path.join(h.base, 'taskkill.jsonl');
