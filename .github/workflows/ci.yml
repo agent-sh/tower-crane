@@ -142,7 +142,8 @@ jobs:
     name: repeat (windows-latest, node 26)
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)
     runs-on: windows-latest
-    # About 25 to 35 minutes: ten passes of the authority files take about 16.
+    # About 30 to 45 minutes: ten passes of the authority files take about 16, and twenty of the
+    # interrupt backoff and origin read tests about 8.
     timeout-minutes: 55
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -188,6 +189,16 @@ jobs:
           foreach ($attempt in 1..10) {
             Write-Host "Owner authority and board approval files: pass $attempt/10"
             npm test -- test/authority.test.js test/approval-context.test.js test/board-controls.test.js test/windows-ancestry.test.js
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+        env:
+          TOWER_CRANE_TEST_TMP: ${{ runner.temp }}/tower-crane-tests
+      - name: Repeat interrupt during backoff and origin read tests twenty times
+        shell: pwsh
+        run: |
+          foreach ($attempt in 1..20) {
+            Write-Host "Interrupt during backoff and origin read: pass $attempt/20"
+            npm test -- test/interrupt.test.js test/spawn.test.js --test-name-pattern="interrupt during backoff cancels the retry" --test-name-pattern="a failed origin read is read again"
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
         env:
