@@ -275,7 +275,11 @@ test('default retry budget waits beyond the observed ten-minute outage and remai
   const h = setup(t, { failures: 5 });
   const backoff = controlledBackoff(h);
   h.ok(['ladder', 'set', 'easy', '--clear', 'supervision']);
-  const completed = h.runAsync(['spawn', '--task', 'T1', '--wait', '--json'], { env: backoff.env });
+  const spawned = h.json(['spawn', '--task', 'T1'], { env: backoff.env });
+  // Advancing the clock leaves earlier real wake timers pending after exit.
+  h.teardown.push(() => {
+    try { killPid(spawned.monitor_pid, 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') throw e; }
+  });
   let elapsed = 0;
   // Advance only the retry clock; process sampling and startup keep real deadlines.
   for (const [index, delay] of [30000, 60000, 120000, 240000, 480000].entries()) {
@@ -284,8 +288,10 @@ test('default retry budget waits beyond the observed ten-minute outage and remai
     elapsed += delay;
     backoff.advance(elapsed);
   }
-  const result = await completed;
-  assert.equal(result.code, 0, result.stderr);
+  await waitOnRepo(h, () => log(h).some((e) => e.cmd === 'spawn exit' && e.detail.agent === spawned.agent),
+    'the last retry did not exit');
+  const exit = log(h).findLast((e) => e.cmd === 'spawn exit' && e.detail.agent === spawned.agent);
+  assert.equal(exit.detail.code, 0);
   const attempts = h.readAttempts();
   assert.equal(attempts.length, 6);
   for (const attempt of attempts) assert.deepEqual(attempt.claim, attempts[0].claim);
