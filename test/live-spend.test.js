@@ -75,32 +75,29 @@ function setup(t, harness, supervision = {}) {
   return h;
 }
 
-// DIAGNOSTIC, revert before review: does taskkill /T stop a detached process
-// whose exited parent's pid a new process now holds?
-test('DIAGNOSTIC taskkill /T and a reused parent pid', { skip: process.platform !== 'win32' }, async () => {
+// DIAGNOSTIC, revert before review: does a stop of the process that got an
+// exited parent's pid reach that parent's detached orphan?
+test('DIAGNOSTIC taskkill /T, the tree stop and a reused parent pid', { skip: process.platform !== 'win32' }, async () => {
+  const { takePid } = require('./windows-pid-reuse');
+  const P = require('../lib/processes');
   const hold = ['-e', 'setInterval(() => {}, 1000)'];
-  for (let trial = 1; trial <= 3; trial++) {
+  for (const stop of ['tree stop', 'taskkill /T', 'tree stop', 'taskkill /T']) {
     const parent = cp.spawnSync(process.execPath, ['-e', `const c = require('node:child_process').spawn(process.execPath, ${JSON.stringify(hold)}, { detached: true, stdio: 'ignore', windowsHide: true }); c.unref(); console.log(process.pid + ' ' + c.pid)`], { encoding: 'utf8', windowsHide: true });
     const [ppid, orphan] = parent.stdout.trim().split(' ').map(Number);
-    const holders = [];
-    let reused;
-    const deadline = Date.now() + 60000; // wait-allow: diagnostic probe bounds its pid search
-    while (!reused && holders.length < 400 && Date.now() < deadline) {
-      const c = cp.spawn('ping.exe', ['-n', '120', '127.0.0.1'], { stdio: 'ignore', windowsHide: true });
-      holders.push(c);
-      if (c.pid === ppid) reused = c;
-      if (holders.length % 25 === 0) await new Promise((resolve) => setImmediate(resolve));
+    const born = P.windowsCreated([orphan], 300000).get(orphan);
+    const took = takePid(ppid);
+    let line = `T486 probe ${stop}: parent ${ppid}, orphan ${orphan} born ${born}, ${took.detail}`;
+    if (took.taken) {
+      const holder = P.windowsCreated([ppid], 300000).get(ppid);
+      line += `, holder born ${holder}`;
+      if (stop === 'tree stop') P.windowsKillTree({ pid: ppid, exitCode: null, signalCode: null, kill: () => {} }, { timeout: 300000 });
+      else line += `; taskkill said: ${Object.values(cp.spawnSync('taskkill', ['/PID', String(ppid), '/T', '/F'], { encoding: 'utf8', windowsHide: true })).filter((v) => typeof v === 'string').join(' ').replace(/\s+/g, ' ').trim()}`;
+      await new Promise((resolve) => setTimeout(resolve, 1000)); // wait-allow: diagnostic probe lets the stop land
+      const after = P.windowsCreated([orphan, ppid], 300000);
+      line += `; holder ${after.get(ppid) === holder ? 'still runs' : 'stopped'}; orphan ${after.get(orphan) === born ? 'survived' : 'stopped'}`;
+      if (after.get(ppid) === holder) killPid(ppid, 'SIGKILL');
     }
-    let line = `T486 probe trial ${trial}: parent ${ppid}, orphan ${orphan}, ${holders.length} spawns, `;
-    if (reused) {
-      const r = cp.spawnSync('taskkill', ['/PID', String(ppid), '/T', '/F'], { encoding: 'utf8', windowsHide: true });
-      await new Promise((resolve) => setTimeout(resolve, 500)); // wait-allow: diagnostic probe gives taskkill time to land
-      let alive;
-      try { killPid(orphan, 0); alive = 'orphan survived'; } catch (e) { alive = `orphan ${e.code}`; }
-      line += `pid reused; taskkill /T status ${r.status}: ${alive}; taskkill said: ${(r.stdout + r.stderr).replace(/\s+/g, ' ').trim()}`;
-    } else line += 'pid not reused';
-    for (const c of holders) try { c.kill(); } catch { /* exited */ }
-    try { killPid(orphan); } catch { /* gone */ }
+    if (P.windowsCreated([orphan], 300000).get(orphan) === born) killPid(orphan, 'SIGKILL');
     process.stderr.write(line + '\n');
   }
 });
@@ -372,7 +369,7 @@ test('final session usage repairs spend collected before submitted supervisor re
   assert.equal(h.json(['task', 'show', 'T1']).spend.tokens, 2000, 'recollection preserves the reconciled total');
 });
 
-for (const round of [1, 2, 3, 4, 5, 6, 7, 8]) test(`a periodic sample that crosses the budget after submit keeps early collection behind the supervisor (diagnostic round ${round})`, async (t) => {
+for (const round of [1, 2]) test(`a periodic sample that crosses the budget after submit keeps early collection behind the supervisor (diagnostic round ${round})`, async (t) => {
   const h = setup(t, 'claude');
   const finish = path.join(h.base, 'finish');
   const paused = path.join(h.base, 'final-paused');
