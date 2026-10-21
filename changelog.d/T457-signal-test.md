@@ -1,0 +1,1 @@
+- Verify stack merge backoff cancellation by its abort result, with both signal orders and delayed completion, instead of requiring the entire CLI to exit within three seconds.
