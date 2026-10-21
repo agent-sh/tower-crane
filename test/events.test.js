@@ -67,7 +67,7 @@ async function waiting(t, h, { automation, args = [], hooks = {}, seconds = HUNG
   if (typeof automation !== 'boolean') throw new Error('waiting needs automation: true or false');
   const signal = path.join(h.base, `watch-${require('node:crypto').randomUUID()}`);
   const ready = created(signal);
-  const actor = args.includes('--agent') ? [] : ['--agent', 'orchestrator'];
+  const actor = args.includes('--agent') || hooks.TOWER_CRANE_AGENT ? [] : ['--agent', 'orchestrator'];
   const observe = automation ? [] : ['--observe'];
   const c = child(t, h, ['wait', ...actor, ...observe, '--timeout', String(seconds), ...args], { ...hooks, HOOK_WATCH_READY: signal });
   // A baseline CLI that lacks wait closes immediately; never wait for a marker
@@ -330,6 +330,49 @@ test('worker messages use recipient and task filters, and can resume by id or of
   }
   const direct = h.run(['wait', '--agent', 'orchestrator', '--after', '0', '--for', 'another-agent', '--timeout', '0.1']); // wait-allow: verify the CLI observation, filtering or timeout contract with already-published state
   assert.equal(JSON.parse(direct.stdout).detail.text, 'other recipient');
+});
+
+for (const { agent, explicit } of [
+  { agent: 'worker-T1-1', explicit: false },
+  { agent: 'reviewer-T1-1', explicit: true },
+]) {
+  test(`${agent}: direct messages and steers bypass wait filters`, async (t) => {
+    const h = setup(t);
+    h.ok(['task', 'add', '--title', 'Other task', '--acceptance', 'works']);
+    const args = ['--types', 'submitted', ...(explicit ? ['--task', 'T1', '--agent', agent] : [])];
+    const hooks = { TOWER_CRANE_AGENT: agent, TOWER_CRANE_TASK: 'T1' };
+    for (const task of [[], ['--task', 'T1'], ['--task', 'T2']]) {
+      for (const steer of [[], ['--steer']]) {
+        const result = await waiting(t, h, { automation: false, args, hooks, seconds: 10 });
+        h.ok(['msg', '--agent', 'orchestrator', '--to', 'another-agent', ...task, ...steer, 'other recipient']);
+        h.ok(['msg', '--agent', 'orchestrator', '--to', agent, ...task, ...steer, 'direct message']);
+        const e = await event(result, 'worker-message', task[1] ?? null);
+        assert.equal(e.to, agent);
+        assert.equal(e.detail.text, 'direct message');
+        assert.equal(e.detail.steer, steer.length ? true : undefined);
+      }
+    }
+  });
+}
+
+test('another agent message cannot bypass wait types', (t) => {
+  const h = setup(t);
+  h.ok(['msg', '--agent', 'orchestrator', '--to', 'another-agent', '--task', 'T1', '--steer', 'other recipient']);
+  const result = h.run(['wait', '--task', 'T1', '--agent', 'worker-T1-1', '--after', '0',
+    '--types', 'submitted', '--timeout', '0.05']); // wait-allow: verify filtering of an already-published message to another agent
+  assert.equal(result.code, 2, result.stderr || result.stdout);
+  assert.equal(JSON.parse(result.stdout).type, 'timeout');
+});
+
+test('orchestrator wait types still exclude direct messages and steers', async (t) => {
+  const h = setup(t);
+  h.ok(['claim', 'T1', '--agent', 'worker']);
+  const result = await waiting(t, h, { automation: false, args: ['--types', 'submitted'] });
+  for (const steer of [[], ['--steer']]) {
+    h.ok(['msg', '--agent', 'owner', '--to', 'orchestrator', '--task', 'T1', ...steer, 'filtered message']);
+  }
+  h.ok(['submit', 'T1', '--agent', 'worker', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736']);
+  await event(result, 'submitted');
 });
 
 test('owner task comment wakes, worker progress notes are not owner comments', async (t) => {
