@@ -1517,6 +1517,39 @@ test('a head the queue cannot advance is reported once and the PR behind it merg
   assert.equal(h.readState('tasks.json').tasks[0].status, 'accepted');
 });
 
+test('a supervisor stopping at another task\'s head of line hands it to the wait host', (t) => {
+  const h = queueFixture(t);
+  acceptBoth(h);
+  const github = h.github();
+  // T1 heads the line and is passed over without merging.
+  github.prs['7'].refuseMerge = true;
+  h.saveGithub(github);
+  // T2's accept reaction already ran while T1's supervisor held the queue and
+  // ended deferred, so no receipt or marker of its own keeps it owed.
+  const accept = h.logs().findLast((e) => e.cmd === 'accept' && e.task === 'T2');
+  fs.appendFileSync(path.join(h.state, 'events.jsonl'), `${JSON.stringify({ at: new Date().toISOString(), agent: 'orchestrator',
+    cmd: 'automation', task: 'T2', detail: { source: accept.id, phase: 'deferred', error: null } })}\n`);
+  const script = path.join(h.base, 'supervisor.js');
+  fs.writeFileSync(script, `const lib = ${JSON.stringify(path.join(path.dirname(BIN), '..', 'lib'))};
+const stateDir = ${JSON.stringify(h.state)};
+const events = require(lib + '/state').readEvents(stateDir).filter((e) => e.cmd === 'accept' && e.task === 'T1');
+require(lib + '/automation').consume({ stateDir, cwd: ${JSON.stringify(h.repo)}, env: process.env, agent: 'orchestrator',
+  flags: {}, pos: [], reactionTask: 'T1' }, events, true).then(() => {}, (e) => { console.error(e); process.exit(1); });
+`);
+  const run = require('node:child_process').spawnSync(process.execPath, [script], { cwd: h.repo, env: h.env, encoding: 'utf8' });
+  assert.equal(run.status, 0, run.stderr);
+  assert.equal(h.github().prs['8'].state, 'OPEN', 'the supervisor merged nothing of T2');
+  const done = h.logs().findLast((e) => e.cmd === 'merge queue' && e.detail.phase !== 'requested');
+  assert.equal(done.detail.phase, 'done');
+  assert.equal(done.detail.blocked.task, 'T2', 'the release names the head it stopped at');
+  const handoffs = h.logs().filter((e) => e.cmd === 'automation reconcile' && e.detail.handoff);
+  assert.deepEqual(handoffs.map((e) => [e.task, e.detail.handoff, e.detail.sha]), [['T2', 'T1', h.second]]);
+  assert.deepEqual(h.json(['status']).gate_queue.queued.map((q) => q.id), ['T2'], 'the handoff is owed in the queue');
+  h.consume();
+  assert.equal(h.github().prs['8'].state, 'MERGED');
+  assert.deepEqual(h.json(['status']).gate_queue.queued, [], 'the merge settled the handoff');
+});
+
 for (const failure of ['failView', 'invalidView']) {
   test(`an unreadable queue head (${failure}) is skipped once and the ready PR behind it merges`, (t) => {
     const h = queueFixture(t);

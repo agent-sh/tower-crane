@@ -45,7 +45,7 @@ function answer(state) {
       return;
     }
     if (args[1] === 'merge') {
-      if (state.refuseMerge) {
+      if (state.refuseMerge || pr.refuseMerge) {
         refusal = 'merge refused by fixture policy';
         return;
       }
