@@ -192,3 +192,33 @@ await Actions.spawn({ ...ctx, flags: { ready: true } });
 assert.equal(calls, 1);
 `);
 });
+
+test('a lasting worker refusal leaves deferred reviewers runnable with free or full worker slots', (t) => {
+  const f = refusedStack(t);
+  holdingWorkers(f);
+  probe(f, 'await A.refillWorkers(ctx, {});');
+  probe(f, `
+const R = require(${JSON.stringify(path.resolve(__dirname, '../lib/reviewer'))});
+const T = require(${JSON.stringify(path.resolve(__dirname, '../lib/tasks'))});
+const st = S.loadState(ctx.stateDir);
+assert.match(Spawn.readyRefusal(ctx, st, T.getTask(st, 'T2')), /holds its own changes/);
+assert.ok(require(${JSON.stringify(path.resolve(__dirname, '../lib/inbox'))}).dispatchable(st, true).some(t => t.id === 'T2'));
+R.deferredDispatches = () => [{ id: 'T1' }];
+R.softwareReport = () => ({ ok: true });
+const holders = T.workerHolders;
+const calls = [];
+Spawn.spawn = async dispatch => {
+  calls.push([dispatch.flags.task, dispatch.flags.role]);
+  assert.equal(dispatch.flags.role, 'review', 'cached workers never reach dispatch');
+  return { text: 'reviewer started' };
+};
+for (const full of [false, true]) {
+  T.workerHolders = (st, now) => full
+    ? Array.from({ length: st.project.limits.workers }, () => ({ task: 'occupied' }))
+    : holders(st, now);
+  await A.refillWorkers(ctx, {});
+  assert.equal(calls.length, full ? 2 : 1, 'reviewer debt remains runnable');
+}
+assert.deepEqual(calls, [['T1', 'review'], ['T1', 'review']]);
+`);
+});
