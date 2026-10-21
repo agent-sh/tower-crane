@@ -142,6 +142,41 @@ test('a refusal accepts, with the refusal recorded and shown by accept, its even
   assert.match(board, /final review refused on <a [^>]*>T1<\/a> at [0-9a-f]{7}/);
 });
 
+// Stands in for wait's forced shutdown: accept's gate gets the signal wait passes to automation,
+// and it aborts as the reviewer command returns, before runGate records the result.
+const INTERRUPT = `const lib = ${JSON.stringify(path.join(__dirname, '..', 'lib'))};
+const force = new AbortController();
+const gate = require(lib + '/gates/final-review.js');
+const run = gate.run;
+gate.run = async (ctx) => { const r = await run(ctx); force.abort(); return r; };
+const check = require(lib + '/check.js');
+const runGate = check.runGate;
+check.runGate = (ctx, name) => runGate({ ...ctx, gateSignal: force.signal }, name);
+`;
+
+for (const [said, then, outcome, status] of [['2', '0', 'pass', 'accepted'], ['0', '2', 'concerns', 'rework']]) {
+  test(`a final review that exited ${said} but was interrupted by wait shutdown is no verdict: the task stays submitted and the next accept asks again (exit ${then})`, (t) => {
+    const h = submitted(t);
+    gatesPass(h, CAPPED);
+    const preload = path.join(h.base, 'interrupt.js');
+    fs.writeFileSync(preload, INTERRUPT);
+    const r = h.run(['accept', 'T1', '--agent', 'orchestrator'], { env: { FINAL_LOG: h.log, ...CAPPED, FINAL_EXIT: said }, pre: ['--require', preload] });
+    assert.equal(r.code, 1, r.stderr);
+    assert.match(r.stdout, /T1: not accepted; the final review at [0-9a-f]{7} gave no verdict \(final-review gate interrupted by wait shutdown; retry with gates retry\); retry accept/);
+    assert.equal(task(h).status, 'submitted');
+    assert.equal(events(h).filter((e) => e.cmd === 'rework').length, 0);
+    assert.equal(accepted(h).length, 0);
+    assert.deepEqual(finals(h).map((e) => [e.ok, e.final_review.outcome, e.final_review.interrupted]), [[false, 'not_run', true]]);
+    assert.equal(h.json(['status']).final_reviews.length, 0, 'an interrupted run is not the head\'s final review');
+
+    const again = accept(h, { ...CAPPED, FINAL_EXIT: then });
+    assert.equal(again.code, status === 'accepted' ? 0 : 1, again.stderr);
+    assert.equal(task(h).status, status);
+    assert.equal(runs(h).length, 2);
+    assert.equal(finals(h).at(-1).final_review.outcome, outcome);
+  });
+}
+
 test('an uncapped head with a real external review skips the final review when "when" is "capped", and "always" runs it', (t) => {
   const h = submitted(t);
   gatesPass(h, REVIEWED);
