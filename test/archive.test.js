@@ -245,6 +245,7 @@ test('citations find the scratch path in its absolute, home and XDG_CACHE_HOME f
     ['the scratch root alone', `everything is in ${scratch}/ and ${scratch}`, []],
     ['a markdown link', `[log](${scratch}/a/b.log)`, ['a/b.log']],
     ['bold and italic emphasis', `**${scratch}/bold.log** and *$XDG_CACHE_HOME/em.log*`, ['bold.log', 'em.log']],
+    ['emphasis with a period outside or inside', `**${scratch}/out.log**. and **${scratch}/in.log.**`, ['in.log', 'out.log']],
     ['an HTML closing tag', `<code>${scratch}/c.log</code>`, ['c.log']],
     // A pattern or placeholder names no one file; its prefix is not a citation.
     ['a * glob', 'RSS runs in $XDG_CACHE_HOME/probe-*.log', []],
