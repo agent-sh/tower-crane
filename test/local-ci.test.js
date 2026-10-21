@@ -355,6 +355,7 @@ const cp = require('node:child_process');
 const [log, ...rest] = process.argv.slice(2);
 // read-published: the test wrote the config before the gate started.
 const config = JSON.parse(fs.readFileSync(log + '.config', 'utf8'));
+// read-published: appended only, by one gate run at a time.
 const runs = fs.existsSync(log + '.runs') ? fs.readFileSync(log + '.runs', 'utf8').length : 0;
 fs.appendFileSync(log + '.runs', 'x');
 fs.appendFileSync(log + '.argv', JSON.stringify(rest) + '\\n');

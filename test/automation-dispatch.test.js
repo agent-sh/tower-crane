@@ -1100,6 +1100,7 @@ fs.appendFileSync(${JSON.stringify(h.suiteLog)}, JSON.stringify({ pr7: gh.prs['7
 // Gate runs that fail, as gates did for tasks accepted before evidence; the file holds how many.
 const failRuns = ${JSON.stringify(path.join(h.base, 'fail-runs'))};
 if (fs.existsSync(failRuns)) {
+  // read-published: only this script rewrites the count, one gate run at a time.
   const left = Number(fs.readFileSync(failRuns, 'utf8')) - 1;
   if (left > 0) fs.writeFileSync(failRuns, String(left));
   else fs.rmSync(failRuns);
