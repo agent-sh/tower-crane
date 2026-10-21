@@ -204,3 +204,13 @@ test('an existing open task naming the failing test is reused; a cancelled task 
     assert.equal(h.readState('tasks.json').tasks.length, cancelled ? 3 : 2);
   }
 });
+
+test('status preserves the legacy base_failure object used by a hotfix waiver', (t) => {
+  const h = fixture(t);
+  h.submit();
+  const tasks = h.readState('tasks.json');
+  tasks.tasks[0].evidence.push({ type: 'tests', ok: true, waived: true, agent: 'owner',
+    sha: h.sha, revision: 1, base_failure: { base: SHA, names: ['old host failure'] } });
+  fs.writeFileSync(path.join(h.state, 'tasks.json'), JSON.stringify(tasks));
+  assert.deepEqual(h.json(['status']).base_failures, []);
+});
