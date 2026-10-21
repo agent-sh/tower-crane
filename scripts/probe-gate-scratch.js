@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const cp = require('node:child_process');
-const { suiteTime, reportSuiteTime, DEADLINE_MIN } = require('./suite-time');
+const { suiteTime, reportSuiteTime, PROOF_FILES, PROOF_DEADLINE_MIN } = require('./suite-time');
 
 const ROOT = path.resolve(__dirname, '..');
 const BIN = path.join(ROOT, 'bin', 'tower-crane.js');
@@ -12,7 +12,7 @@ const BIN = path.join(ROOT, 'bin', 'tower-crane.js');
 // The gate bounds each suite run. A failing head runs the suite again on the
 // base for the failing names, so the probe outlasts two runs and still gets
 // the gate's report naming the failures.
-const TESTS_MIN = DEADLINE_MIN;
+const TESTS_MIN = PROOF_DEADLINE_MIN;
 
 function contents(root) {
   return fs.readdirSync(root, { recursive: true }).sort();
@@ -30,7 +30,7 @@ function probe({ root = ROOT, cache, command, environment = process.env } = {}) 
     throw new Error('the complete gate scratch proof must run on the host, outside the worker sandbox');
   }
   cache ||= environment.TOWER_CRANE_TEST_TMP || path.join(os.homedir(), '.cache', 'tower-crane-proof');
-  command ||= 'node test/run.js --test-concurrency=3';
+  command ||= `node test/run.js --test-concurrency=3 ${PROOF_FILES.join(' ')}`;
   fs.mkdirSync(cache, { recursive: true });
   const run = fs.mkdtempSync(path.join(cache, 'gate-scratch-proof-'));
   const outer = path.join(run, 'outer');
@@ -91,7 +91,7 @@ function probe({ root = ROOT, cache, command, environment = process.env } = {}) 
     const checked = call(['check', 'tests', id]);
     // A passing head runs the suite once, so this is its wall time; a failing
     // head adds the base rerun, and the proof fails anyway.
-    result.suite_time = suiteTime(performance.now() - started);
+    result.suite_time = suiteTime(performance.now() - started, TESTS_MIN);
     result.gate = checked.data;
     result.exit = checked.status;
     result.stderr = checked.stderr;

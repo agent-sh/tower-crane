@@ -10,7 +10,7 @@ const { cachedFixture } = require('./helpers');
 const { writeHost } = require('./host');
 const { HUNG_TEST_MS } = require('./signals');
 const { probe } = require('../scripts/probe-gate-scratch');
-const { suiteTime, reportSuiteTime, DEADLINE_MIN } = require('../scripts/suite-time');
+const { suiteTime, reportSuiteTime, DEADLINE_MIN, PROOF_DEADLINE_MIN } = require('../scripts/suite-time');
 
 function fixture(t) {
   return cachedFixture(t, 'scratch-proof', (h) => {
@@ -34,6 +34,27 @@ if (process.env.PROOF_FAIL === '1') process.exit(7);
   });
 }
 
+test('the default gate proof runs the representative files and still rejects leaked scratch', (t) => {
+  const h = fixture(t);
+  const files = ['test/ladder.test.js', 'test/broker.test.js', 'test/spawn.test.js', 'test/gates/tests.test.js'];
+  fs.mkdirSync(path.join(h.repo, 'test'));
+  fs.writeFileSync(path.join(h.repo, 'test', 'run.js'), `
+require('node:assert/strict').deepEqual(process.argv.slice(2), ['--test-concurrency=3', ...${JSON.stringify(files)}]);
+require('../scratch.js');
+`);
+  h.git(['add', 'test/run.js']);
+  h.git(['commit', '-qm', 'Add representative runner']);
+  for (const leak of [false, true]) {
+    const result = probe({ root: h.repo, cache: path.join(h.base, 'probe'),
+      environment: { ...h.env, TOWER_CRANE_SANDBOX: '0', TOWER_CRANE_BROKER: '', PROOF_LEAK: leak ? '1' : '0' } });
+    assert.equal(result.command, `node test/run.js --test-concurrency=3 ${files.join(' ')}`);
+    assert.equal(result.exit, 0);
+    assert.equal(result.cleanup_ok, !leak);
+    assert.equal(result.ok, !leak);
+    assert.deepEqual(result.outer_after, leak ? ['escaped'] : []);
+  }
+});
+
 test('the gate proof measures caller contents and the actual removed parent', (t) => {
   const h = fixture(t);
   const result = probe({ root: h.repo, cache: path.join(h.base, 'probe'), command: 'node scratch.js', environment: h.env });
@@ -44,8 +65,8 @@ test('the gate proof measures caller contents and the actual removed parent', (t
   assert.deepEqual(result.gate_root_after, []);
   assert.equal(result.gate_parents.length, 1);
   assert.equal(result.gate_parents[0].removed, true);
-  assert.equal(result.suite_time.deadline_min, DEADLINE_MIN);
-  assert.ok(result.suite_time.wall_ms > 0 && result.suite_time.wall_ms < DEADLINE_MIN * 60000);
+  assert.equal(result.suite_time.deadline_min, PROOF_DEADLINE_MIN);
+  assert.ok(result.suite_time.wall_ms > 0 && result.suite_time.wall_ms < PROOF_DEADLINE_MIN * 60000);
   assert.equal(result.suite_time.warn, false);
 });
 
