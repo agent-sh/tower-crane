@@ -167,6 +167,35 @@ test('accept keeps a receipt on its pinned base while the base moves, and merge 
   assert.doesNotMatch(merge.stderr, /tower-crane rework/);
 });
 
+test('reports merge the pinned base once per base move', (t) => {
+  const h = mergeFixture(t);
+  h.ok(['check', 'ci', 'T1']);
+  const log = path.join(h.base, 'tree-queries');
+  const opts = { env: { LOCAL_TREE_LOG: log } };
+  const pinnedMerges = () => (fs.existsSync(log) ? fs.readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse) : [])
+    .filter((args) => args.includes('merge-tree') && args.includes(h.baseSha)).length;
+  for (const name of ['later.txt', 'last.txt']) {
+    fs.writeFileSync(path.join(h.repo, name), `${name}\n`);
+    h.git(['add', '.']);
+    h.git(['commit', '-qm', `base adds ${name}`]);
+    const before = pinnedMerges();
+    assert.equal(h.json(['task', 'show', 'T1'], opts).gates.ok, true);
+    assert.equal(h.json(['task', 'show', 'T1'], opts).gates.ok, true);
+    assert.equal(h.json(['task', 'list'], opts)[0].gates.ok, true);
+    assert.equal(pinnedMerges() - before, 1, `one pinned merge after the base adds ${name}`);
+  }
+});
+
+test('merge without origin records its base read in its command receipts', (t) => {
+  const h = mergeFixture(t);
+  h.ok(['check', 'ci', 'T1']);
+  h.ok(['accept', 'T1']);
+  const merged = h.json(['merge', 'T1']);
+  assert.equal(merged.ok, true, merged.summary);
+  assert.ok(merged.commands.some((c) => c.command === 'git' && c.args.includes('rev-parse') && c.args.includes('main^{commit}') && c.status === 0),
+    JSON.stringify(merged.commands.map((c) => c.args)));
+});
+
 // The command advances main from inside its run: HEAD^1 of the gate checkout is the base it merged.
 const ADVANCE_BASE = `
 const cp = require('node:child_process');

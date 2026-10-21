@@ -1590,6 +1590,17 @@ if (!fs.existsSync(${JSON.stringify(once)})) { fs.writeFileSync(${JSON.stringify
         assert.deepEqual(after.evidence.filter((e) => e.type === 'tests').map((e) => [e.ok, !!e.voided, !!e.runner_crash]),
           [[false, true, true], [false, false, true], [true, false, false]]);
       }
+      if (forced && proof) {
+        // accept reruns a void like a missing gate instead of asking for an explicit check.
+        assert.equal(tasks[0].evidence[0].voided, true);
+        fs.writeFileSync(release, '');
+        const accepted = h.run(['accept', 'T1', '--agent', 'orchestrator']);
+        assert.match(accepted.stderr, /running voided tests software gate/);
+        const tests = h.readState('tasks.json').tasks[0].evidence.filter((e) => e.type === 'tests');
+        // The slow suite passes without the change too, so the rerun records a real proof verdict.
+        assert.deepEqual(tests.map((e) => [e.ok, !!e.voided]), [[false, true], [false, false]]);
+        assert.match(tests.at(-1).summary, /do not prove it/);
+      }
     });
   }
 });
