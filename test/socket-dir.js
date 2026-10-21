@@ -6,15 +6,27 @@ const { assertFits, roots, MAX_SOCKET_PATH } = require('../lib/socket-path');
 
 // A fresh socket directory under the worker's TOWER_CRANE_SOCKET_DIR, then the
 // broker's own socket bases (lib/socket-path.js), never TMPDIR, which a gate or
-// test root nests too deep.
-function socketDir(t, maxDirBytes = MAX_SOCKET_PATH - 2) {
+// test root nests too deep. Roots within an `outside` directory are skipped.
+function socketDir(t, maxDirBytes = MAX_SOCKET_PATH - 2, { outside = [] } = {}) {
   const own = process.env.TOWER_CRANE_SOCKET_DIR && path.isAbsolute(process.env.TOWER_CRANE_SOCKET_DIR)
     ? [process.env.TOWER_CRANE_SOCKET_DIR] : [];
+  const avoid = outside.flatMap((dir) => {
+    try {
+      return [fs.realpathSync(dir)];
+    } catch {
+      return [];
+    }
+  });
   const tried = [];
   for (const root of [...new Set([...own, ...roots(process.env).filter((r) => r.real).map((r) => r.real)])]) {
     let dir;
     try {
       const real = fs.realpathSync(root);
+      const skip = avoid.find((a) => real === a || real.startsWith(a + path.sep));
+      if (skip) {
+        tried.push(`${real} (within ${skip})`);
+        continue;
+      }
       const template = path.join(real, 'sXXXXXX');
       tried.push(`${template} (${Buffer.byteLength(template)} bytes)`);
       if (Buffer.byteLength(template) > maxDirBytes) continue;
