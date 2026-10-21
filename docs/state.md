@@ -39,10 +39,16 @@ A gate waits until the child's submitted head contains the latest submitted
 parent head. Gate freshness uses that head across parent rework and active
 claims. Dispatch and merge still apply their lifecycle checks. Acceptance
 checks freshness before reusing gate receipts, and reviewer dispatch checks
-it before starting a model. A dry-run
-review checks ancestry without publishing. Acceptance and reviewer startup
+it before starting a model. Current independent FAIL recovery runs before
+these parent checks and keeps `from_review: true`. A submitted dry-run review
+checks ancestry without publishing; an unsubmitted review previews its fallback
+command without an ancestry check. Acceptance and reviewer startup
 compare the parent inputs again in their final state transactions.
-Live workers, dirty checkouts and stopped Git operations defer refresh. Merged
+Live workers and dirty checkouts defer parent refresh, with one
+`stack sync deferred` event per parent head. A dirty child can dispatch its worker on the
+unchanged branch and checkout; its brief names the parent head it must include
+before resubmitting. Gates still wait for that head. Stopped Git operations
+keep their worktree operation checks and prevent automatic refresh. Merged
 parents take the completed-chain retirement path before any parent branch fetch.
 Refresh only merges a newer submitted or accepted head from an unmerged parent
 without a retirement reservation. Blocked-parent dispatch and merge-base

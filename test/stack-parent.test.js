@@ -93,6 +93,151 @@ function reviewProbe(f) {
   }
 }
 
+function failReview(f, top, kind = 'code') {
+  const ref = 'https://github.com/acme/app/pull/12#issuecomment-501';
+  const file = kind === 'changelog' ? 'changelog.d/T2.md' : 'lib/child.js';
+  const body = `Review (Tower Crane)\nSHA: ${top.sha}\nVerdict: FAIL\n${file}:1 - fix the finding`;
+  f.write((data) => { data.comments = kind === 'missing' ? [] : [{ id: 501, body, html_url: ref }]; });
+  f.h.ok(['evidence', 'T2', '--type', 'review', '--fail', '--sha', top.sha, '--revision', '1',
+    '--summary', body, '--ref', ref, '--findings', JSON.stringify([
+      { kind: kind === 'changelog' ? 'false-claim' : 'defect', path: file, claim: 'fix the finding' },
+    ])]);
+}
+
+function reviewEntry(f, entry) {
+  return f.h.run(entry === 'review spawn' ? ['spawn', '--task', 'T2', '--role', 'review', '--wait']
+    : ['accept', 'T2', ...(entry === 'waived accept' ? ['--waive', 'review', '--reason', 'offline fixture'] : [])]);
+}
+
+for (const entry of ['accept', 'waived accept', 'review spawn']) {
+  for (const parentStatus of ['submitted', 'accepted', 'rework', 'in_progress']) {
+    test(`current FAIL takes precedence over parent ${parentStatus} in ${entry}`, (t) => {
+      const f = setup(t);
+      const top = upper(f);
+      f.h.ok(['check', 'ci', 'T2']);
+      failReview(f, top);
+      resubmit(f, false);
+      if (parentStatus === 'accepted') f.accept('T1');
+      if (['rework', 'in_progress'].includes(parentStatus)) f.h.ok(['rework', 'T1', '--reason', 'parent continues']);
+      if (parentStatus === 'in_progress') f.h.ok(['claim', 'T1', '--agent', 'worker-T1']);
+      const result = reviewEntry(f, entry);
+      assert.equal(result.code, 1, result.stdout + result.stderr);
+      assert.match(result.stdout + result.stderr, /current review FAIL/);
+      const task = f.h.json(['task', 'show', 'T2']);
+      assert.equal(task.status, 'rework');
+      const rework = events(f).findLast((e) => e.task === 'T2' && e.cmd === 'rework');
+      assert.equal(rework.detail.from_review, true);
+      assert.equal(rework.detail.previous_revision, 1);
+      assert.equal(task.stack.parent_sha, f.sha, 'failed review is recovered before parent synchronization');
+      assert.equal(f.h.git(['rev-parse', 'HEAD'], top.wt.path), top.sha);
+    });
+  }
+}
+
+for (const entry of ['accept', 'review spawn']) {
+  for (const kind of ['changelog', 'missing']) {
+    test(`current FAIL ${kind} findings are handled before refresh in ${entry}`, (t) => {
+      const f = setup(t);
+      const top = upper(f);
+      f.h.ok(['check', 'ci', 'T2']);
+      failReview(f, top, kind);
+      resubmit(f, false);
+      const result = reviewEntry(f, entry);
+      assert.equal(result.code, 1, result.stdout + result.stderr);
+      const task = f.h.json(['task', 'show', 'T2']);
+      if (kind === 'missing') {
+        assert.equal(task.status, 'submitted');
+        assert.match(result.stderr, /linked review comment/);
+      } else {
+        assert.equal(task.status, 'rework');
+        assert.equal(events(f).findLast((e) => e.task === 'T2' && e.cmd === 'rework').detail.from_review, true);
+      }
+      assert.equal(f.h.git(['rev-parse', 'HEAD'], top.wt.path), top.sha);
+    });
+  }
+}
+
+for (const status of ['todo', 'rework', 'in_progress']) {
+  for (const newer of [false, true]) {
+    test(`unsubmitted ${status} review preview ignores ${newer ? 'newer' : 'current'} parent ancestry`, (t) => {
+      const f = setup(t);
+      if (status === 'rework') {
+        upper(f);
+        f.h.ok(['rework', 'T2', '--reason', 'child continues']);
+      } else f.h.ok(['worktree', 'T2']);
+      if (status === 'in_progress') f.h.ok(['claim', 'T2', '--agent', 'worker-T2']);
+      if (newer) resubmit(f, false);
+      reviewProbe(f);
+      const before = f.h.json(['task', 'show', 'T2']);
+      const offset = events(f).length;
+      const result = f.h.run(['spawn', '--task', 'T2', '--role', 'review', '--dry-run', '--json']);
+      assert.equal(result.code, 0, result.stdout + result.stderr);
+      assert.ok(JSON.parse(result.stdout).argv, 'fallback command is previewed');
+      assert.deepEqual(f.h.json(['task', 'show', 'T2']), before);
+      assert.equal(events(f).length, offset, 'preview publishes no state');
+    });
+  }
+}
+
+for (const linked of [false, true]) {
+  for (const [dirty, timing] of [['unstaged', 'before'], ['staged', 'before'], ['untracked', 'before'], ['untracked', 'during merge']]) {
+    test(`dirty ${dirty} ${linked ? 'linked' : 'prepared'} child defers its parent refresh and dispatches (${timing})`, (t) => {
+      const f = setup(t);
+      let top;
+      if (linked) {
+        top = upper(f);
+        f.h.ok(['rework', 'T2', '--reason', 'child continues']);
+      } else top = child(f, false, false);
+      const parent = resubmit(f, false);
+      const name = dirty === 'untracked' ? 'pending.txt' : linked ? 'T2.txt' : 'child.txt';
+      if (timing === 'during merge') f.h.env.TEST_STACK_DIRTY_AFTER_MERGE = path.join(top.wt.path, name);
+      else fs.writeFileSync(path.join(top.wt.path, name), 'pending edits\n');
+      if (dirty === 'staged') f.h.git(['add', name], top.wt.path);
+      const status = f.h.git(['status', '--porcelain'], top.wt.path);
+      const inspect = inspector(f);
+      const result = f.h.run(['spawn', '--task', 'T2', '--wait', '--json']);
+      assert.equal(result.code, 0, result.stdout + result.stderr);
+      assert.equal(inspect().head, top.sha);
+      assert.match(inspect().prompt, new RegExp(parent));
+      assert.equal(f.h.git(['status', '--porcelain'], top.wt.path), timing === 'during merge' ? `?? ${name}` : status);
+      assert.equal(fs.readFileSync(path.join(top.wt.path, name), 'utf8'), 'pending edits\n');
+      assert.equal(f.h.json(['task', 'show', 'T2']).stack.parent_sha, f.sha);
+      const gate = f.h.run(['check', 'ci', 'T2']);
+      assert.equal(gate.code, 1);
+      assert.match(gate.stderr, new RegExp(`containing T1 at ${parent}`));
+    });
+  }
+}
+
+for (const busy of ['live', 'dirty']) {
+  for (const linked of [false, true]) {
+    test(`parent refresh records ${busy} ${linked ? 'linked' : 'prepared'} deferral once per parent head`, (t) => {
+      const f = setup(t);
+      const top = linked ? upper(f) : child(f, false, false);
+      if (linked) f.h.ok(['rework', 'T2', '--reason', 'child continues']);
+      if (busy === 'live') f.h.ok(['claim', 'T2', '--agent', 'worker-T2']);
+      else fs.writeFileSync(path.join(top.wt.path, 'pending.txt'), 'pending edits\n');
+      const count = (sha) => events(f).filter((e) => e.task === 'T2' && e.cmd === 'stack sync deferred' && e.detail.parent_sha === sha).length;
+      const refresh = () => {
+        f.h.run(['check', 'ci', 'T2']);
+        if (linked) f.h.ok(['worktree', 'T1']);
+      };
+      const first = resubmit(f, false);
+      refresh();
+      refresh();
+      assert.equal(count(first), 1);
+      fs.writeFileSync(path.join(f.lower.path, 'T1c.txt'), 'another parent head\n');
+      f.h.git(['add', 'T1c.txt'], f.lower.path);
+      const second = resubmit(f, false);
+      refresh();
+      refresh();
+      assert.equal(count(second), 1);
+      assert.equal(events(f).filter((e) => e.task === 'T2' && e.cmd === 'stack sync deferred').length, 2);
+      assert.equal(f.h.git(['rev-parse', 'HEAD'], top.wt.path), top.sha);
+    });
+  }
+}
+
 for (const entry of ['waived accept', 'accept review', 'review dry-run', 'review spawn', 'unlinked review', 'automatic accept', 'automatic review']) {
   for (const stale of [false, true]) {
     test(`${entry} ${stale ? 'refuses stale' : 'allows current'} stacked child after cached software gates`, (t) => {
