@@ -192,6 +192,29 @@ for (const [kind, ending, owner, late, survives] of cases) {
         if (file === 'systemctl' && args.includes('ActiveState')) settled.push(args[2]);
         return execFile.call(this, file, args, ...rest);
       });
+      if (late !== 'none') {
+        // The keeper releases the late probe as it starts. A memory probe's OOM empties a
+        // systemd scope, whose manager then removes it with its counters, so that keeper
+        // starts only once the kernel ended the probe: the launcher's watch must see it.
+        const preload = path.join(h.base, 'keeper-preload.js');
+        fs.writeFileSync(preload, `
+const path=require('node:path');
+const {writeAtomic,readPublished}=require(${JSON.stringify(require.resolve('./atomic-file'))});
+const dir=${JSON.stringify(dir)};
+writeAtomic(path.join(dir,'probe.go'),'go');
+if(process.env.TC_KEEPER_HOLD){
+ const [id]=JSON.parse(readPublished(path.join(dir,'identities.json'),'utf8'));
+ const P=require(${JSON.stringify(require.resolve('../lib/processes'))});
+ while(P.processState({pid:id.pid,start_ticks:id.start})!=='exited')Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,25); // wait-allow: hold the keeper until the kernel ended the probe
+}
+`);
+        const spawn = cp.spawn;
+        t.mock.method(cp, 'spawn', function (file, args, options) {
+          if (!String(args?.[0]).endsWith('containment-keeper.js')) return spawn.apply(this, arguments);
+          const hold = late === 'memory' && child.containment.unit ? '1' : '';
+          return spawn.call(this, file, ['--require', preload, ...args], { ...options, env: { ...options.env, TC_KEEPER_HOLD: hold } });
+        });
+      }
       // The caller row deliberately terminates its own launcher to prove the
       // detached keeper retains the bound after that launcher is gone.
       const child = C.spawn(process.execPath, args, {
@@ -216,13 +239,21 @@ for (const [kind, ending, owner, late, survives] of cases) {
         }
       }
     }
+    if (late !== 'none') {
+      const [id] = JSON.parse(readPublished(path.join(dir, 'identities.json'), 'utf8'));
+      const work = { pid: id.pid, ...process.platform === 'linux' ? { startTicks: id.start } : {},
+        ...process.platform === 'win32' ? { startTime: require('./windows-process').startTime(id.pid) } : {} };
+      t.after(() => { if (detachedAlive(work)) killPid(work.pid, 'SIGKILL'); });
+      await waitOnRepo(h, () => reason, 'late limit reported');
+      await waitOnRepo(h, () => !detachedAlive(work), 'late limit stopped the dispatched work');
+    }
     await new Promise(resolve => setTimeout(resolve, 2200 * scale)); // wait-allow: all finite fixture children and the keeper end
     if (survives) {
       assert.equal(fs.existsSync(path.join(dir, 'managed.done')), true);
       assert.equal(fs.existsSync(path.join(dir, 'grandchild.done')), true);
       assert.ok(metadata.retained?.length, JSON.stringify(metadata));
     } else if (late !== 'none') {
-      assert.equal(reason, late === 'tasks' ? 'resource-tasks-max' : 'resource-memory-max');
+      assert.equal(reason, late === 'tasks' ? 'resource-tasks-max' : 'resource-memory-max', JSON.stringify(metadata));
       assert.equal(fs.existsSync(path.join(dir, 'managed.done')), false);
     } else {
       assert.equal(metadata.retained, undefined);
