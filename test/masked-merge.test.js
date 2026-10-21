@@ -141,6 +141,29 @@ test('a merge through the shim that brings in a sandbox-masked path succeeds and
   assert.equal(git(['status', '--porcelain'], f.wt, f.env), '');
 });
 
+test('masked merge scratch ignores inherited system temp directories', (t) => {
+  for (const tmpdir of ['unset', 'sentinel', 'override']) {
+    const f = fixture(t, { base: { 'a.txt': 'a\n' }, task: { 'b.txt': 'b\n' }, main: { '.mcp.json': '{}\n' } });
+    const sentinel = path.join(f.env.HOME, 'sentinel');
+    const cache = path.join(f.env.HOME, 'cache');
+    const log = path.join(f.env.HOME, 'scratch.jsonl');
+    fs.mkdirSync(sentinel);
+    Object.assign(f.env, { XDG_CACHE_HOME: cache, LOCALAPPDATA: cache, TMP: sentinel, TEMP: sentinel,
+      TC_SCRATCH_LOG: log, NODE_OPTIONS: `--require "${path.join(__dirname, 'fixtures', 'scratch-record.js')}"` });
+    if (tmpdir === 'unset') delete f.env.TMPDIR;
+    else f.env.TMPDIR = sentinel;
+    const root = tmpdir === 'override' ? path.join(f.env.HOME, 'override') : path.join(cache, 'tower-crane');
+    if (tmpdir === 'override') f.env.TOWER_CRANE_TMP = root;
+    fs.mkdirSync(path.join(f.wt, '.mcp.json'));
+    const r = f.merge('--no-edit', 'origin/main');
+    assert.equal(r.status, 0, r.stderr);
+    const allocations = fs.readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse);
+    assert.ok(allocations.some((dir) => path.basename(dir).startsWith('tower-crane-merge-')));
+    assert.ok(allocations.every((dir) => dir.startsWith(root + path.sep)), allocations.join('\n'));
+    assert.deepEqual(fs.readdirSync(sentinel), [], tmpdir);
+  }
+});
+
 test('a merge through the shim that changes a tracked masked path keeps the file the sandbox gave and applies the rest', (t) => {
   const f = fixture(t, {
     base: { 'a.txt': 'a\n', '.mcp.json': '{"v":1}\n' },

@@ -9,6 +9,28 @@ const { makeRepo, ROOT } = require('./helpers');
 const { readText, escapeTableCell } = require('../scripts/text');
 const { fakeAgentEnvFindings } = require('../scripts/fake-agent-env');
 
+test('the shared check rejects system temp fallbacks in runtime and scripts', (t) => {
+  const f = fixture(t);
+  f.change();
+  for (const [dir, source, extension = 'js'] of [
+    ['lib', 'os.tmpdir()'],
+    ['bin', 'os . tmpdir (\n)'],
+    ['scripts', "const dir = '/tmp';"],
+    ['lib', 'const dir = "/tmp/child";'],
+    ['scripts', 'const dir = `/tmp/${name}`;'],
+    ['lib', 'os.tmpdir()', 'cjs'],
+    ['scripts', 'mkdir "/tmp/work"', 'sh'],
+  ]) {
+    const file = `${dir}/scratch-fallback.${extension}`;
+    f.write(file, source);
+    const rejected = f.check();
+    assert.equal(rejected.status, 1, source);
+    assert.match(rejected.stderr, /scratch-fallback\.(?:js|cjs|sh):.*scratch-root/);
+    fs.rmSync(path.join(f.h.repo, file));
+  }
+  assert.equal(f.check().status, 0);
+});
+
 test('the shared check rejects CLI-running fake fixtures without the env helper', (t) => {
   const lines = [
     "const cp = require('node:child_process');",

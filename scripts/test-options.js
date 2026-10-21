@@ -9,12 +9,15 @@ const os = require('node:os');
 const path = require('node:path');
 const assert = require('node:assert/strict');
 const { measure, median } = require('./test-cost');
+const { scratchRoot } = require('../lib/scratch-root');
 
 const ROOT = path.join(__dirname, '..');
 const FILES = ['test/browser-startup.test.js', 'test/gates/tests.test.js', 'test/test-tools.test.js'];
 
 async function main() {
-  const scratch = fs.mkdtempSync(path.join(process.env.TOWER_CRANE_TEST_TMP || os.tmpdir(), 'tower-crane-options-'));
+  const root = process.env.TOWER_CRANE_TEST_TMP || process.env.TOWER_CRANE_TMP || scratchRoot();
+  fs.mkdirSync(root, { recursive: true });
+  const scratch = fs.mkdtempSync(path.join(root, 'tower-crane-options-'));
   const fixture = path.join(scratch, 'options.test.cjs');
   fs.writeFileSync(path.join(scratch, 'service.cjs'), 'exports.read = () => "real";\n');
   fs.writeFileSync(fixture, `

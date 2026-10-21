@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
-const { makeRepo, cachedFixture } = require('./helpers');
+const { makeRepo, cachedFixture, shortCacheRoot } = require('./helpers');
 const TOML = require('../lib/toml');
 const A = require('../lib/agents');
 const { socketDir } = require('./socket-dir');
@@ -579,8 +579,8 @@ test('claude: a sandboxed agent gets a temp directory of its own that its comman
   const caller = path.join(h.base, 'caller-tmp');
   fs.mkdirSync(caller);
   // A cache root short enough for claude's 73-byte socket bound.
-  const cache = fs.mkdtempSync(path.join(os.homedir(), '.cache', 'tcl-'));
-  t.after(() => fs.rmSync(cache, { recursive: true, force: true }));
+  const cache = shortCacheRoot(t, 45);
+  if (!cache) return t.skip('no writable cache root within the Claude socket bound');
   // Exercise the runtime-directory branch independently of the caller's session.
   const runtime = path.join(cache, 'runtime');
   fs.mkdirSync(runtime);
@@ -622,14 +622,27 @@ test('claude: a sandboxed agent gets a temp directory of its own that its comman
   assert.ok(Buffer.byteLength(path.join(short, 'cc-socks', '4194304.sock')) <= 103, short);
   assert.ok(short.startsWith(`${bare.tmp.TMPDIR}-own`), `beside claude's TMPDIR: ${short}`);
   assert.ok(!seen.stdout.includes('TMPDIR'), seen.stdout);
-  // Under a root too deep for the sockets, the caller's TMPDIR stays, and
-  // spawn says so: under the home the agent's https fails, and under /tmp
-  // other agents' proxy sockets are in reach. A fresh task, since a worker
-  // keeps the scratch its first spawn recorded.
-  const other = setup(t, 'claude');
-  const deep = spawnSeen(path.join(other.base, 'a-cache-root-deep-enough-that-no-socket-path-fits-under-it'), other);
-  assert.equal(deep.tmp.TMPDIR, caller);
-  assert.ok(deep.stdout.includes(`keeps the caller's TMPDIR ${caller}`), deep.stdout);
+});
+
+test('claude: a deep cache keeps private scratch and leaves the caller temp sentinel empty', { skip: NO_STUBS }, (t) => {
+  const h = setup(t, 'claude');
+  const bin = path.join(h.base, 'bin');
+  const out = path.join(h.base, 'result.json');
+  const caller = path.join(h.base, 'sentinel');
+  const cache = path.join(h.base, 'a-cache-root-deep-enough-that-no-socket-path-fits-under-it');
+  fs.mkdirSync(bin);
+  fs.mkdirSync(caller);
+  writeClaudeStub(bin, out);
+  const stdout = h.ok(['spawn', '--task', 'T1', '--wait'], { env: { ...h.env,
+    PATH: `${bin}${path.delimiter}${process.env.PATH}`, CLAUDE_CONFIG_DIR: '',
+    TMPDIR: caller, TMP: caller, TEMP: caller, XDG_CACHE_HOME: cache } });
+  const seen = JSON.parse(fs.readFileSync(out, 'utf8'));
+  assert.ok(seen.tmp.TMPDIR.startsWith(path.join(cache, 'tower-crane') + path.sep), seen.tmp.TMPDIR);
+  assert.deepEqual([seen.tmp.TMP, seen.tmp.TEMP], [seen.tmp.TMPDIR, seen.tmp.TMPDIR]);
+  assert.ok(fs.lstatSync(seen.tmp.TMPDIR).isDirectory());
+  assert.ok(seen.sandbox.filesystem.allowWrite.includes(seen.tmp.TMPDIR));
+  assert.ok(stdout.includes('set a shorter cache root'), stdout);
+  assert.deepEqual(fs.readdirSync(caller), []);
 });
 
 test('claude: sandbox.session_bus grants the bus socket, read and write, and off it grants nothing', { skip: NO_STUBS }, (t) => {

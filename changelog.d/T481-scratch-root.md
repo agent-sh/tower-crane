@@ -1,0 +1,1 @@
+- Gate worktrees, masked Git moves, agent temp directories and test tooling use Tower Crane's user cache for default scratch. Deep cache paths keep private scratch instead of falling back to the system temp directory. Shared checks reject system temp fallbacks in runtime code and scripts.

@@ -1,18 +1,18 @@
 'use strict';
 
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
+const { scratchRoot } = require('../lib/scratch-root');
 const cp = require('node:child_process');
 const { suiteTime, reportSuiteTime, DEADLINE_MIN } = require('./suite-time');
 
 const root = path.resolve(__dirname, '..');
-const cache = process.env.TOWER_CRANE_TEST_TMP || path.join(os.homedir(), '.cache', 'tower-crane-tests');
+const cache = process.env.TOWER_CRANE_TEST_TMP || process.env.TOWER_CRANE_TMP || scratchRoot();
 fs.mkdirSync(cache, { recursive: true });
 const probe = fs.mkdtempSync(path.join(cache, 'model-swap-'));
 const temporary = fs.mkdtempSync(path.join(cache, 'model-swap-tmp-'));
 // Chrome's Unix socket paths have a much smaller limit than filesystem paths.
-const aliasRoot = process.platform === 'win32' ? null : fs.mkdtempSync(path.join(os.tmpdir(), 'tc-swap-'));
+const aliasRoot = process.platform === 'win32' ? null : fs.mkdtempSync(path.join(cache, 'tc-swap-'));
 const testTmp = aliasRoot ? path.join(aliasRoot, 't') : temporary;
 if (aliasRoot) fs.symlinkSync(temporary, testTmp, 'dir');
 const files = cp.execFileSync('git', ['ls-files', '--cached', '--others', '--exclude-standard', '-z'],

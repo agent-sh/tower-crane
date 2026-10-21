@@ -14,8 +14,8 @@
 
 const cp = require('node:child_process');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
+const { scratchRoot } = require('../lib/scratch-root');
 const { readText } = require('./text');
 
 // from must occur exactly once in file. tests are the files expected to catch it.
@@ -597,9 +597,9 @@ async function main() {
     return;
   }
 
-  const scratchRoot = process.env.TOWER_CRANE_TEST_TMP || os.tmpdir();
-  fs.mkdirSync(scratchRoot, { recursive: true });
-  const copy = fs.mkdtempSync(path.join(scratchRoot, 'tower-crane-mutants-'));
+  const scratch = process.env.TOWER_CRANE_TEST_TMP || process.env.TOWER_CRANE_TMP || scratchRoot();
+  fs.mkdirSync(scratch, { recursive: true });
+  const copy = fs.mkdtempSync(path.join(scratch, 'tower-crane-mutants-'));
   const scope = scopeAvailable();
   console.log(`Containment: ${scope ? 'systemd scope (MemoryMax=4G) and watchdog' : 'process watchdog'}; process limit ${processLimit}`);
   const timings = new Map();

@@ -453,7 +453,12 @@ test('research Claude gets native or explicit web MCP tools with worker file and
     // And under /run, which it hides, the resolver (runReads).
     assert.ok(shared.allowWrite.includes(report.socketDir));
     shared.allowWrite = shared.allowWrite.filter((p) => p !== report.socketDir);
-    assert.deepEqual(allowRead.filter((p) => p !== report.socketDir && !p.startsWith(fs.realpathSync(u.home) + path.sep)), [ownHome, path.join(h.state, 'brokers', path.basename(ownHome)), ...A.runReads(u.env)]);
+    if (report.ownTmpdir) {
+      assert.ok(allowRead.includes(report.ownTmpdir) && shared.denyWrite.includes(report.ownTmpdir));
+      assert.ok(!shared.allowWrite.includes(report.ownTmpdir));
+      shared.denyWrite = shared.denyWrite.filter((p) => p !== report.ownTmpdir);
+    }
+    assert.deepEqual(allowRead.filter((p) => ![report.socketDir, report.tmpdir, report.ownTmpdir].includes(p) && !p.startsWith(fs.realpathSync(u.home) + path.sep)), [ownHome, path.join(h.state, 'brokers', path.basename(ownHome)), ...A.runReads(u.env)]);
     assert.ok(shared.denyWrite.includes(h.state));
     // A mask on a path the host lacks leaves a placeholder there, so only existing paths are masked.
     for (const p of [...shared.denyRead, ...shared.denyWrite]) assert.ok(fs.existsSync(p), `${p} is masked but missing`);
@@ -590,7 +595,11 @@ test('a spawned claude agent imports the user\'s global rules by path, loads non
   assert.ok(box.filesystem.denyRead.includes(path.join(h.state, 'brokers')), 'no agent reads another agent\'s broker token');
   assert.ok(box.filesystem.denyRead.includes(path.join(h.state, 'ci-artifacts')), 'no agent reads unredacted local CI artifacts');
   assert.ok(box.filesystem.denyRead.includes(path.join(path.dirname(h.userConfig), 'owner')), 'no agent reads the owner key');
-  assert.deepEqual(box.filesystem.allowRead.filter((p) => p !== seen.tmpdir && p !== seen.socketDir), [path.join(u.home, '.claude', 'CLAUDE.md'), home, path.join(h.state, 'brokers', started.agent), ...A.runReads(u.env)],
+  if (seen.ownTmpdir) {
+    assert.ok(box.filesystem.allowRead.includes(seen.ownTmpdir) && box.filesystem.denyWrite.includes(seen.ownTmpdir));
+    assert.ok(!box.filesystem.allowWrite.includes(seen.ownTmpdir));
+  }
+  assert.deepEqual(box.filesystem.allowRead.filter((p) => ![seen.tmpdir, seen.ownTmpdir, seen.socketDir].includes(p)), [path.join(u.home, '.claude', 'CLAUDE.md'), home, path.join(h.state, 'brokers', started.agent), ...A.runReads(u.env)],
     'only the user\'s global rules under the home, this dispatch home, its own broker directory, the resolver under /run and its own temp directory are readable');
   // /run is hidden whole, with docker's, the buses' and every other host socket in it.
   for (const p of A.runDirs()) assert.ok(box.filesystem.denyRead.includes(p), p);
@@ -1548,10 +1557,10 @@ test('a codex agent\'s temp directory fits a browser\'s singleton socket when it
   // ran 98 to 104 bytes under a fixture's root.
   const { h, u } = setup(t);
   isolated(h, 'review', 'codex');
-  // A cache root of 46 bytes or less, as /home/<user>/.cache is for a user name of up to 34 letters.
+  // The private path under tower-crane adds 28 bytes to the cache root.
   // Made after the fixture, so it is removed after the fixture's agents stop.
-  const root = shortCacheRoot(t, 46);
-  if (!root) return t.skip('no writable cache root of at most 46 bytes');
+  const root = shortCacheRoot(t, 34);
+  if (!root) return t.skip('no writable cache root of at most 34 bytes');
   spawn(h, u, 'review', { XDG_CACHE_HOME: root });
   const tmp = u.report().tmpdir;
   assert.ok(Buffer.byteLength(tmp) <= 62, `${tmp} is ${Buffer.byteLength(tmp)} bytes`);

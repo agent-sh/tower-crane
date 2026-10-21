@@ -10,8 +10,8 @@
 
 const cp = require('node:child_process');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
+const { scratchRoot } = require('../lib/scratch-root');
 const { createRepoSeed, cleanupRepoSeed } = require('../test/repo-seed');
 
 const ROOT = path.join(__dirname, '..');
@@ -51,7 +51,9 @@ function hits(text) {
 }
 
 async function main() {
-  const scratch = fs.mkdtempSync(path.join(process.env.TOWER_CRANE_TEST_TMP || os.tmpdir(), 'tower-crane-coverage-'));
+  const root = process.env.TOWER_CRANE_TEST_TMP || process.env.TOWER_CRANE_TMP || scratchRoot();
+  fs.mkdirSync(root, { recursive: true });
+  const scratch = fs.mkdtempSync(path.join(root, 'tower-crane-coverage-'));
   const seed = createRepoSeed();
   const covered = new Map();
   const queue = [...files];

@@ -31,6 +31,27 @@ function checkStdinReads(root) {
   if (found.length) throw new Error(found.join('\n'));
 }
 
+function checkScratchRoots(root) {
+  const found = [];
+  // Construct forbidden spellings so this script also obeys the rule.
+  const systemTemp = new RegExp('\\bos\\s*\\.\\s*' + 'tmpdir\\s*\\(', 'g');
+  const literalTemp = new RegExp('[\\x27"`]/' + 'tmp(?:/|[\\x27"`])', 'g');
+  for (const dir of ['lib', 'bin', 'scripts']) {
+    for (const name of fs.readdirSync(path.join(root, dir), { recursive: true })) {
+      const file = `${dir}/${name.replace(/\\/g, '/')}`;
+      if (!fs.statSync(path.join(root, file)).isFile()) continue;
+      const text = readText(path.join(root, file));
+      for (const pattern of [systemTemp, literalTemp]) {
+        for (const match of text.matchAll(pattern)) {
+          const line = text.slice(0, match.index).split('\n').length;
+          found.push(`${file}:${line} uses the system temp directory; use lib/scratch-root.js`);
+        }
+      }
+    }
+  }
+  if (found.length) throw new Error(found.join('\n'));
+}
+
 const RELEASE_HEADING = /^## [0-9]/;
 const body = (text) => text.replace(/^# Changelog\n/, '').trim();
 
@@ -106,6 +127,7 @@ function main(args) {
   }
   check(root);
   checkStdinReads(root);
+  checkScratchRoots(root);
   checkTestWaits(root);
   checkFakeAgentEnvs(root);
   checkSuiteDeadline(root);
