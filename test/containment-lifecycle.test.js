@@ -227,6 +227,7 @@ for (const [kind, ending, owner, late, survives] of cases) {
       assert.ok(metadata.retained?.length, JSON.stringify(metadata));
     } else if (late !== 'none') {
       // The keeper reports the limit, then stops the work; release lets work it missed finish.
+      assert.ok(metadata.keeper_pid, JSON.stringify(metadata));
       await waitOnRepo(h, () => reason && !detachedAlive({ pid: metadata.keeper_pid }), 'late limit reported and stopped');
       assert.equal(reason, late === 'tasks' ? 'resource-tasks-max' : 'resource-memory-max');
       fs.writeFileSync(path.join(dir, 'release'), '');
