@@ -85,13 +85,15 @@ function jobBlock(workflow, id) {
   return workflow.split(`\n  ${id}:\n`)[1].split(/\n {2}[\w-]+:\n/)[0];
 }
 
-// A job's `if:` under one event's github context. The workflow's conditions use ==, !=, &&, ||,
-// startsWith and cancelled(), whose JavaScript forms mean the same for these values.
-function runsOn(workflow, id, github) {
+// A job's `if:` under one event's github context and dispatch inputs. The workflow's conditions use
+// ==, !=, !, &&, ||, startsWith and cancelled(), whose JavaScript forms mean the same for these values.
+function runsOn(workflow, id, { inputs = {}, ...github }) {
   const condition = /^ {4}if: (.+)$/m.exec(jobBlock(workflow, id))?.[1];
   if (!condition) return true;
-  const js = condition.replace(/^\$\{\{\s*|\s*\}\}$/g, '')
-    .replace(/github(?:\.[\w]+)+/g, (name) => JSON.stringify(name.split('.').slice(1).reduce((o, k) => o?.[k], github) ?? null));
+  const value = (root, name) => JSON.stringify(name.split('.').slice(1).reduce((o, k) => o?.[k], root) ?? null);
+  const js = condition.replace(/^"(.*)"$/, '$1').replace(/^\$\{\{\s*|\s*\}\}$/g, '')
+    .replace(/github(?:\.[\w]+)+/g, (name) => value(github, name))
+    .replace(/inputs(?:\.[\w]+)+/g, (name) => value(inputs, name));
   return Function('startsWith', 'cancelled', `return (${js});`)((a, b) => String(a).startsWith(b), () => false);
 }
 
@@ -103,12 +105,13 @@ const EVENTS = {
   'release tag': { event_name: 'push', ref: 'refs/tags/v0.1.0', repository: REPO },
   schedule: { event_name: 'schedule', ref: 'refs/heads/main', repository: REPO },
   'manual run': { event_name: 'workflow_dispatch', ref: 'refs/heads/main', repository: REPO },
+  'profile dispatch': { event_name: 'workflow_dispatch', ref: 'refs/heads/main', repository: REPO, inputs: { profile: true } },
 };
 
 test('main pushes and same-repo PRs run only the shared check; fork PRs, tags, daily and manual runs the full matrix', () => {
   const workflow = readWorkflow(path.resolve(__dirname, '..'));
   const jobs = [...workflow.split('\njobs:\n')[1].matchAll(/^ {2}([\w-]+):\n/gm)].map((m) => m[1]);
-  assert.deepEqual(jobs, ['checks', 'test', 'coverage-map', 'repeats', 'gate-scratch', 'model-swap']);
+  assert.deepEqual(jobs, ['checks', 'test', 'coverage-map', 'repeats', 'gate-scratch', 'model-swap', 'profile', 'mutants']);
   const full = ['test', 'repeats', 'gate-scratch', 'model-swap'];
   for (const [event, expected] of [
     ['main push', ['checks']],
@@ -117,6 +120,7 @@ test('main pushes and same-repo PRs run only the shared check; fork PRs, tags, d
     ['release tag', full],
     ['schedule', [...full, 'coverage-map']],
     ['manual run', [...full, 'coverage-map']],
+    ['profile dispatch', ['profile', 'mutants']],
   ]) {
     assert.deepEqual(jobs.filter((id) => runsOn(workflow, id, EVENTS[event])).sort(), expected.sort(), event);
   }
@@ -124,6 +128,7 @@ test('main pushes and same-repo PRs run only the shared check; fork PRs, tags, d
   const coverage = /TC_TEST_COVERAGE_DIR: \$\{\{ (.+) && format\('\{0\}\/coverage', runner\.temp\) \|\| '' \}\}/.exec(jobBlock(workflow, 'test'))?.[1];
   assert.ok(coverage, 'the shard step sets TC_TEST_COVERAGE_DIR from the event and matrix');
   for (const [event, github] of Object.entries(EVENTS)) {
+    if (!runsOn(workflow, 'test', github)) continue;
     const shards = workflowMatrix(workflow).filter((m) => Function('github', 'matrix', `return (${coverage});`)(github, m));
     assert.deepEqual(jobNames(shards), ['schedule', 'manual run'].includes(event) ? REQUIRED.slice(0, 3) : [], event);
   }
@@ -149,6 +154,16 @@ test('the matrix is all ten shards, beside the proofs and the repeat job', () =>
   // their own job so the shards keep the share of the suite test/run.js measured for them.
   assert.doesNotMatch(testJob, /- name: Repeat /, 'the test shards run no repeat loops');
   const repeatJob = jobBlock(workflow, 'repeats');
+  // A profile dispatch measures the suite and the mutation sample on hosted runners and runs nothing else.
+  assert.match(workflow, /^ {6}profile:\n {8}description: [^\n]+\n {8}type: boolean\n {8}default: false\n {6}profile_baseline:\n/m);
+  for (const [id, command] of [['profile', /- run: node scripts\/suite-profile\.js [^\n]*--baseline "\$BASELINE" --runs 3 [^\n]*\| tee /],
+    ['mutants', /- run: node scripts\/mutants\.js --no-full 2>&1 \| tee /]]) {
+    const job = workflow.split(`\n  ${id}:\n`)[1].split(/\n {2}[\w-]+:\n/)[0];
+    assert.match(job, /^ {4}if: github\.event_name == 'workflow_dispatch' && inputs\.profile$/m, `${id} runs on a profile dispatch only`);
+    assert.match(job, command, id);
+    assert.match(job, /\| tee [^\n]*\n(?: {8}#[^\n]*\n)* {8}shell: bash\n/, `${id}: pipefail keeps the exit status through tee`);
+    assert.match(job, /uses: actions\/upload-artifact@/, `${id} keeps its output`);
+  }
   assert.match(repeatJob, /^ {4}runs-on: windows-latest$/m);
   const repeats = [...repeatJob.matchAll(/- name: (Repeat [^\n]+)/g)].map((m) => m[1]);
   assert.deepEqual(repeats, ['Repeat Claude Code mod wakeup twenty times', 'Repeat Claude interrupted native worker ten times',

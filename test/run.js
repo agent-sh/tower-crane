@@ -2,7 +2,8 @@
 
 // npm test runs the whole suite; `npm test -- FILE... [--test-* flags]` runs
 // only the files given. File workers stay below the machine's core count,
-// since every file also starts CLI and git processes of its own.
+// since every file also starts CLI and git processes of its own. npm test asks
+// for 4; a caller such as the tests gate on a large host may ask for more.
 
 const cp = require('node:child_process');
 const fs = require('node:fs');
@@ -18,21 +19,57 @@ function testFiles() {
 }
 // Seconds each file's tests took in CI on this platform, from test/durations.json.
 // scripts/test-durations.js refreshes the table from CI logs. A platform without a
-// table of its own uses the Linux one.
+// table of its own uses the Linux one; a copy without the table, such as a
+// fixture's, measures nothing.
 function fileDurations(platform = process.platform) {
-  const table = JSON.parse(fs.readFileSync(path.join(__dirname, 'durations.json'), 'utf8'));
+  let text;
+  // read-published: a checked-in table no process replaces while the runner reads it.
+  try { text = fs.readFileSync(path.join(__dirname, 'durations.json'), 'utf8'); }
+  catch (e) { if (e.code === 'ENOENT') return {}; throw e; }
+  const table = JSON.parse(text);
   return table[platform] || table.linux || {};
 }
-// Shard INDEX of TOTAL gets an equal share of the measured time: the longest file
-// goes to the shard with the least time so far. A file the table does not list,
-// such as a new one, counts as the table's median file. The runner owns the split
-// and it depends only on the file list and the table, so every Node version on a
-// platform runs the same files in each shard.
-function shardFiles(files, index, total, durations = fileDurations()) {
+// A file the table does not list, such as a new one, counts as the table's median file.
+function fileCost(durations) {
   const known = Object.values(durations).filter((s) => Number.isFinite(s) && s >= 0).sort((a, b) => a - b);
   const fallback = known.length ? known[Math.floor(known.length / 2)] : 1;
-  const cost = (file) => (Number.isFinite(durations[file]) && durations[file] >= 0 ? durations[file] : fallback);
-  const order = [...files].sort().sort((a, b) => cost(b) - cost(a));
+  return (file) => (Number.isFinite(durations[file]) && durations[file] >= 0 ? durations[file] : fallback);
+}
+// Longest measured file first; equal times keep the sorted order.
+function longestFirst(files, durations = fileDurations()) {
+  const cost = fileCost(durations);
+  return [...files].sort().sort((a, b) => cost(b) - cost(a));
+}
+// A long file that started late would hold the run open after every other file
+// finished. node --test sorts the paths it is given as text, so it takes no
+// order, but each spelling of a path sorts in a band of its own: more `../`
+// steps up from the working directory sort first, then absolute paths, then
+// plain relative ones. The longest files take the earliest bands, one worker's
+// worth to each, so the run starts them in about longest-first order; the
+// shortest keep their plain paths. Reports name a file the same however it is
+// spelled. A run of no more files than two per worker starts them all at once
+// and keeps them as given.
+function startOrder(files, workers, durations = fileDurations(), cwd = process.cwd()) {
+  if (files.length <= 2 * workers) return files;
+  const dir = path.resolve(cwd);
+  const depth = path.relative(path.parse(dir).root, dir).split(path.sep).filter(Boolean).length;
+  const bands = [];
+  for (let up = depth; up >= 1; up--) {
+    const steps = Array(up).fill('..');
+    const ancestor = path.resolve(dir, ...steps);
+    bands.push((file) => path.join(...steps, path.relative(ancestor, file)));
+  }
+  bands.push((file) => file);
+  const band = new Map(longestFirst(files, durations).map((file, i) => [file, bands[Math.floor(i / workers)]]));
+  return files.map((file) => (band.get(file) ? band.get(file)(path.resolve(dir, file)) : file));
+}
+// Shard INDEX of TOTAL gets an equal share of the measured time: the longest file
+// goes to the shard with the least time so far. The runner owns the split and it
+// depends only on the file list and the table, so every Node version on a
+// platform runs the same files in each shard.
+function shardFiles(files, index, total, durations = fileDurations()) {
+  const cost = fileCost(durations);
+  const order = longestFirst(files, durations);
   const loads = Array(total).fill(0);
   const shards = Array.from({ length: total }, () => []);
   for (const file of order) {
@@ -46,7 +83,7 @@ function shardFiles(files, index, total, durations = fileDurations()) {
 // and stop time inside the 40-minute test step limit in .github/workflows/ci.yml.
 const SHARD_DEADLINE_MIN = 36;
 if (require.main !== module) {
-  module.exports = { testFiles, shardFiles, fileDurations, SHARD_DEADLINE_MIN };
+  module.exports = { testFiles, shardFiles, longestFirst, startOrder, fileDurations, SHARD_DEADLINE_MIN };
   return;
 }
 
@@ -66,7 +103,7 @@ for (let i = 0; i < given.length; i++) {
   } else if (arg.startsWith('--')) flags.push(arg);
   else files.push(arg);
 }
-const concurrency = Math.min(4, Math.max(1, os.availableParallelism() - 1), requested);
+const concurrency = Math.min(Math.max(1, os.availableParallelism() - 1), requested);
 const args = [
   '--test', `--test-concurrency=${concurrency}`,
   // The clean git seed every test repository copies, built once per run.
@@ -78,6 +115,8 @@ const args = [
   `--require=${path.join(__dirname, 'fixtures', 'user-config-guard.js')}`,
   // Every test file fails when its process ends before the runner has all its tests.
   `--require=${path.join(__dirname, 'fixtures', 'report-guard.js')}`,
+  // State a test file writes in its own process skips the flush to disk, as its CLIs do.
+  `--require=${path.join(__dirname, 'fixtures', 'no-fsync.js')}`,
   ...flags,
 ];
 let list = files.length ? files : testFiles();
@@ -123,7 +162,7 @@ if (shard && !flags.some((flag) => flag.startsWith('--test-reporter'))) {
   args.unshift('--test-reporter=spec', '--test-reporter-destination=stdout', progress, '--test-reporter-destination=stdout');
   if (logDir) args.unshift(progress, `--test-reporter-destination=${path.join(logDir, 'progress.log')}`);
 }
-args.push(...run);
+args.push(...startOrder(run, concurrency));
 
 let env = { ...process.env };
 // TC_TEST_COVERAGE_DIR builds the coverage map tests.map pins (scripts/tests-coverage-map.js): each
