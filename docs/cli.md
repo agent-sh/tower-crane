@@ -538,16 +538,21 @@ wait for the lock: a refill or a recovered climb that finds another dispatch
 holding it, or loses the one try, is deferred to the next pass, so events and
 signals keep reaching the host ([Dispatch lock](state.md#dispatch-lock)). Before counting
 capacity, the host clears verified dead reservations under the state lock,
-including reservations from cancelled tasks. Dispatch refusals
-are reported once on stderr per wait while dispatch inputs are unchanged.
+including reservations from cancelled tasks. A refused task leaves the free
+slots for the next dispatchable tasks in rank order. Lasting stack worktree
+refusals are recorded per task and skipped until task, dependency, brief,
+routing, project or local Git inputs change; status shows their reasons.
+Missing briefs are skipped before dispatch preparation. Other refusals
+are held for one minute per wait while dispatch inputs are unchanged.
 Changed task or brief data, routing, project settings or worker holders retry
 the batch. A refill the host governor defers is reported once each time the
 deferral starts and retried on every pass. A gate or suite reaction the
 governor defers or stops records its `automation` event with phase `deferred`
 and the governor's message as `error`, and the same wait runs it again once
 the governor would admit it ([state.md](state.md#host-resource-governor)). Progress notes and fallback ticks alone do not retry a refusal.
-After fixing external availability or filesystem conditions, use
-`spawn --ready` or restart the wait to retry.
+Local branch repairs clear matching lasting refusals on the next pass.
+After fixing other external availability or filesystem conditions, use
+`spawn --ready`, restart the wait, or let its one-minute retry run.
 Startup and the existing fallback tick also check capacity, recovering slots
 freed before the wait cursor. These capacity checks run only in a trusted
 wait without `--observe`.
