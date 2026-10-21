@@ -1,0 +1,1 @@
+- Check exact runtime entry names in live Codex probes, allowing the declared socket leaf while preserving bus, Docker and late-socket denials.
