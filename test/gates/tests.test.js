@@ -635,12 +635,13 @@ test('a failing test reruns once: one that then passes is flaky with both runs, 
       'test/add.test.js': ADD_TEST,
       'test/counted.test.js': `require('fs').appendFileSync(${JSON.stringify(counted)}, 'x');\n`,
       'test/flaky.test.js': `const { test } = require('node:test');
+const assert = require('node:assert');
 const fs = require('node:fs');
 test('sometimes fails', () => {
   // read-published: only this test writes the marker, and runs are sequential.
   const runs = fs.existsSync(${JSON.stringify(marker)}) ? fs.readFileSync(${JSON.stringify(marker)}, 'utf8').length : 0;
   fs.appendFileSync(${JSON.stringify(marker)}, 'x');
-  if (runs < ${times}) throw new Error('flaked on run ' + runs);
+  assert.ok(runs >= ${times}, 'flaked on run ' + runs);
 });
 `,
     });

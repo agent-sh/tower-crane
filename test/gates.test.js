@@ -267,12 +267,13 @@ test('a test flaky in two tasks within 7 days opens one task to fix it, and a th
   const marker = path.join(h.base, 'flaky-runs');
   // Each gate's first run of the test fails and its rerun passes: the runs alternate.
   const flaky = `const { test } = require('node:test');
+const assert = require('node:assert');
 const fs = require('node:fs');
 test('sometimes fails', () => {
   // read-published: only this test writes the marker, and gates run one at a time.
   const runs = fs.existsSync(${JSON.stringify(marker)}) ? fs.readFileSync(${JSON.stringify(marker)}, 'utf8').length : 0;
   fs.appendFileSync(${JSON.stringify(marker)}, 'x');
-  if (runs % 2 === 0) throw new Error('flaked on run ' + runs);
+  assert.ok(runs % 2 !== 0, 'flaked on run ' + runs);
 });
 `;
   const first = manifestTask(h, { submitted: { 'test/flaky.test.js': flaky } });
