@@ -178,8 +178,7 @@ for (const steer of [false, true]) {
     await waitUntil(() => h.task().status === 'submitted', { paths: [h.base], what: 'the owner submitted' });
     const signal = path.join(h.base, 'own-watch-ready');
     const ready = fileWritten(signal);
-    const waiting = h.runAsync(['wait', '--own', '--task', 'T1', '--agent', agent, '--timeout', '2'],
-      { hooks: { HOOK_WATCH_READY: signal } }); // wait-allow: ordinary messages must leave an ownership wait running until its deadline
+    const waiting = h.runAsync(['wait', '--own', '--task', 'T1', '--agent', agent, '--timeout', '2'], { hooks: { HOOK_WATCH_READY: signal } }); // wait-allow: ordinary messages must leave an ownership wait running until its deadline
     await Promise.race([ready, waiting.then((r) => { throw new Error(`ownership wait exited before watch setup: ${r.stdout} ${r.stderr}`); })]);
     h.ok(['msg', '--agent', 'orchestrator', '--to', agent, '--task', 'T1', ...(steer ? ['--steer'] : []), 'direct instruction']);
     const result = await waiting;
