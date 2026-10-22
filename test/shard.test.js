@@ -50,12 +50,13 @@ test('startOrder spells the longest files so that node --test sorts them first, 
   const files = ['f', 'e', 'd', 'c', 'b', 'a', 'new'];
   const named = (cwd, order) => order.map((f) => path.relative(cwd, path.resolve(cwd, f)));
   // Each `../` step up from the working directory is a band, then absolute paths, then plain ones.
+  // The file the table does not list takes the first band, whatever its median cost.
   for (const [depth, workers, sorted] of [
-    [3, 1, ['b', 'd', 'e', 'new', 'a', 'c', 'f']],
-    [2, 1, ['b', 'd', 'e', 'a', 'c', 'f', 'new']],
-    [1, 1, ['b', 'd', 'a', 'c', 'e', 'f', 'new']],
-    [2, 2, ['b', 'd', 'e', 'new', 'a', 'f', 'c']],
-    [1, 3, ['b', 'd', 'e', 'a', 'f', 'new', 'c']],
+    [3, 1, ['new', 'b', 'd', 'e', 'a', 'c', 'f']],
+    [2, 1, ['new', 'b', 'd', 'a', 'c', 'e', 'f']],
+    [1, 1, ['new', 'b', 'a', 'c', 'd', 'e', 'f']],
+    [2, 2, ['b', 'new', 'd', 'e', 'a', 'f', 'c']],
+    [1, 3, ['b', 'd', 'new', 'a', 'e', 'f', 'c']],
   ]) {
     const cwd = path.resolve('/', ...Array.from({ length: depth }, (_, i) => `dir${i}`));
     const order = startOrder(files, workers, durations, cwd);

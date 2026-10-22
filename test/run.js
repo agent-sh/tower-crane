@@ -47,10 +47,13 @@ function longestFirst(files, durations = fileDurations()) {
 // plain relative ones. The longest files take the earliest bands, one worker's
 // worth to each, so the run starts them in about longest-first order; the
 // shortest keep their plain paths. Reports name a file the same however it is
-// spelled. A run of no more files than two per worker starts them all at once
-// and keeps them as given.
+// spelled. A file the table does not list takes the first band: its median cost
+// says nothing of its real time, and a new file ten times the median started last
+// on Windows held its shard past the deadline. A run of no more files than two per
+// worker starts them all at once and keeps them as given.
 function startOrder(files, workers, durations = fileDurations(), cwd = process.cwd()) {
   if (files.length <= 2 * workers) return files;
+  const listed = (file) => Number.isFinite(durations[file]) && durations[file] >= 0;
   const dir = path.resolve(cwd);
   const depth = path.relative(path.parse(dir).root, dir).split(path.sep).filter(Boolean).length;
   const bands = [];
@@ -60,7 +63,8 @@ function startOrder(files, workers, durations = fileDurations(), cwd = process.c
     bands.push((file) => path.join(...steps, path.relative(ancestor, file)));
   }
   bands.push((file) => file);
-  const band = new Map(longestFirst(files, durations).map((file, i) => [file, bands[Math.floor(i / workers)]]));
+  const order = [...files.filter((file) => !listed(file)).sort(), ...longestFirst(files.filter(listed), durations)];
+  const band = new Map(order.map((file, i) => [file, bands[Math.floor(i / workers)]]));
   return files.map((file) => (band.get(file) ? band.get(file)(path.resolve(dir, file)) : file));
 }
 // Shard INDEX of TOTAL gets an equal share of the measured time: the longest file
