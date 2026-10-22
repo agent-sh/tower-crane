@@ -129,6 +129,17 @@ function runnerExited(record) {
   const now = runner(record.pid).start_ticks;
   return record.start_ticks != null && now != null && now !== record.start_ticks;
 }
+// The record a regular file of this user holds, checked and read through one
+// open file so a swap at its name between the two cannot change what is read.
+function readRecord(file, uid) {
+  const fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+  try {
+    const f = fs.fstatSync(fd);
+    return f.isFile() && f.uid === uid ? JSON.parse(fs.readFileSync(fd, 'utf8')) : null;
+  } finally {
+    fs.closeSync(fd);
+  }
+}
 // Removes the tct- directories in base whose runner has exited. One whose
 // record is missing, does not parse or names a runner that cannot be told
 // gone (another host or pid namespace) stays: inside an agent's sandbox a
@@ -149,10 +160,7 @@ function sweepRuns(base, keep) {
     try {
       const d = fs.lstatSync(dir);
       if (!d.isDirectory() || d.uid !== uid) continue;
-      const file = path.join(dir, RUNNER);
-      const f = fs.lstatSync(file);
-      if (!f.isFile() || f.uid !== uid) continue;
-      if (!runnerExited(JSON.parse(fs.readFileSync(file, 'utf8')))) continue;
+      if (!runnerExited(readRecord(path.join(dir, RUNNER), uid))) continue;
       fs.rmSync(dir, { recursive: true, force: true });
     } catch {
       // Gone already, or nothing proves its runner exited.

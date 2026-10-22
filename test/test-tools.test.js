@@ -257,6 +257,10 @@ test('each test run gets a private runtime directory for its sockets and removes
     fs.mkdirSync(path.join(real, name, 'tower-crane-abcdef'));
     if (record) fs.writeFileSync(path.join(real, name, 'runner.json'), JSON.stringify(record));
   }
+  // A record at a link is not the run's own, even when its target names an exited runner.
+  fs.mkdirSync(path.join(real, 'tct-linked'), { mode: 0o700 });
+  fs.writeFileSync(path.join(h.base, 'exited-runner.json'), JSON.stringify(runs['tct-exited']));
+  fs.symlinkSync(path.join(h.base, 'exited-runner.json'), path.join(real, 'tct-linked', 'runner.json'));
   const env = { ...h.env };
   delete env.TOWER_CRANE_SOCKET_DIR;
   delete env.TOWER_CRANE_HOST_RUNTIME_DIR;
@@ -279,7 +283,7 @@ test('each test run gets a private runtime directory for its sockets and removes
     assert.notEqual(seen[0], seen[1], `${label}: each run has its own`);
   }
   assert.deepEqual(fs.readdirSync(live), ['owner.json'], 'the real runtime directory\'s entries are untouched');
-  assert.deepEqual(fs.readdirSync(real).filter((name) => name.startsWith('tct-')).sort(), ['tct-living', 'tct-norec0', 'tct-otherN'],
+  assert.deepEqual(fs.readdirSync(real).filter((name) => name.startsWith('tct-')).sort(), ['tct-linked', 'tct-living', 'tct-norec0', 'tct-otherN'],
     'a later run removes only the directory of a runner that exited in this pid namespace');
 });
 
