@@ -7,6 +7,7 @@ const path = require('node:path');
 const cp = require('node:child_process');
 const { makeRepo, ROOT } = require('./helpers');
 const { HUNG_TEST_MS } = require('./signals');
+const { tempRoot } = require('./tmp-root');
 const { gitDenied } = require('../lib/shim');
 
 const MESSAGE = 'commit work in progress on the task branch instead';
@@ -72,16 +73,50 @@ test('the git shim refuses stash in a CLI task worktree and leaves shared stashe
   assert.equal(result.stdout.trim(), listing);
 });
 
-test('lib contains no stash use beyond the shim command recognition and refusal', () => {
-  const lib = path.join(ROOT, 'lib');
-  for (const entry of fs.readdirSync(lib, { recursive: true })) {
-    const file = path.join(lib, entry);
-    if (!fs.statSync(file).isFile()) continue;
+function assertNoEngineStash(lib) {
+  for (const entry of fs.readdirSync(lib, { recursive: true, withFileTypes: true })) {
+    if (!entry.isFile()) continue;
+    const file = path.join(entry.parentPath, entry.name);
+    const relative = path.relative(lib, file);
     let source = fs.readFileSync(file, 'utf8');
-    if (entry === 'shim.js') {
+    if (relative === 'shim.js') {
       source = source.replace('sparse-checkout stash status', 'sparse-checkout status')
         .replace("if (sub === 'stash' && args[i + 1] !== 'list') return 'git stash (commit work in progress on the task branch instead)';", '');
     }
-    assert.doesNotMatch(source, /\bstash\b/i, `stash invocation in lib/${entry}`);
+    assert.doesNotMatch(source, /\bstash\b/i, `stash invocation in lib/${relative}`);
+  }
+}
+
+test('lib contains no stash use beyond the shim command recognition and refusal', () => {
+  assertNoEngineStash(path.join(ROOT, 'lib'));
+});
+
+test('the engine stash scan reads files without a separate path stat', async (t) => {
+  fs.mkdirSync(tempRoot(), { recursive: true });
+  const base = fs.mkdtempSync(path.join(tempRoot(), 'stash-scan-'));
+  t.after(() => fs.rmSync(base, { recursive: true, force: true }));
+  const recognition = "sparse-checkout stash status\nif (sub === 'stash' && args[i + 1] !== 'list') return 'git stash (commit work in progress on the task branch instead)';";
+  const cases = [
+    { name: 'empty directories', files: {} },
+    { name: 'top-level file', files: { 'safe.js': 'const safe = true;' } },
+    { name: 'nested file', files: { 'gates/safe.js': 'const safe = true;' } },
+    { name: 'top-level stash call', files: { 'merge.js': "git(['stash', 'push']);" }, refused: true },
+    { name: 'nested stash call', files: { 'gates/merge.js': "git(['stash', 'pop']);" }, refused: true },
+    { name: 'shim recognition', files: { 'shim.js': recognition } },
+    { name: 'shim stash call', files: { 'shim.js': `${recognition}\ngit(['stash', 'drop']);` }, refused: true },
+  ];
+  for (const row of cases) {
+    await t.test(row.name, (s) => {
+      const lib = fs.mkdtempSync(path.join(base, 'lib-'));
+      fs.mkdirSync(path.join(lib, 'empty'));
+      for (const [name, source] of Object.entries(row.files)) {
+        const file = path.join(lib, name);
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, source);
+      }
+      s.mock.method(fs, 'statSync', () => { throw new Error('separate path stat before read'); });
+      if (row.refused) assert.throws(() => assertNoEngineStash(lib), /stash invocation/);
+      else assertNoEngineStash(lib);
+    });
   }
 });
