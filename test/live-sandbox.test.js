@@ -976,11 +976,13 @@ for (const where of ['beside the home', 'in /var/tmp']) {
 // a user in the docker group. Like claude's, the codex profile hides the
 // user's runtime directory and the docker and podman sockets. The probe uses
 // the host's real runtime directory; the command it tries only touches a
-// file in the test's directory.
+// file in the test's directory. test/run.js gives the run a private
+// XDG_RUNTIME_DIR and names the real one in TOWER_CRANE_HOST_RUNTIME_DIR.
+const hostRuntime = () => process.env.TOWER_CRANE_HOST_RUNTIME_DIR || process.env.XDG_RUNTIME_DIR || (uid === null ? null : `/run/user/${uid}`);
 function hostBus() {
   const skip = realCodexSandbox();
   if (skip) return skip;
-  const runtime = process.env.XDG_RUNTIME_DIR || (uid === null ? null : `/run/user/${uid}`);
+  const runtime = hostRuntime();
   if (!runtime || !fs.existsSync(path.join(runtime, 'bus'))) return 'needs a user session bus';
   if (cp.spawnSync('systemd-run', ['--version']).status !== 0) return 'needs systemd-run';
   return false;
@@ -999,7 +1001,7 @@ test('a real codex sandbox cannot reach the session bus or the docker socket, so
   h.init();
   h.ok(['task', 'add', '--title', 'Bus probe', '--acceptance', 'the host stays out of reach']);
   h.ok(['brief', 'set', 'T1', '-'], { input: 'bus probe\n' });
-  const runtime = fs.realpathSync(process.env.XDG_RUNTIME_DIR || `/run/user/${uid}`);
+  const runtime = fs.realpathSync(hostRuntime());
   const targets = { bus: path.join(runtime, 'bus') };
   for (const p of ['/run/docker.sock', '/var/run/docker.sock']) if (fs.existsSync(p)) targets[p] = p;
   const marker = path.join(h.base, 'host-command-ran');
