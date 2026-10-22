@@ -151,10 +151,10 @@ jobs:
     name: repeat (windows-latest, node 26)
     if: "!inputs.profile && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository))"
     runs-on: windows-latest
-    # About 45 to 60 minutes: ten passes of the authority files take about 16, twenty of the
-    # interrupt backoff and origin read tests about 8 and ten of the mutation tests about 15,
-    # within their 40-minute step limit.
-    timeout-minutes: 95
+    # About 60 to 75 minutes: ten passes of the authority files take about 16, twenty of state
+    # compatibility about 15, twenty of the interrupt backoff and origin read tests about 8 and
+    # ten of the mutation tests about 15, within their 40-minute step limit.
+    timeout-minutes: 110
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -189,6 +189,16 @@ jobs:
           foreach ($attempt in 1..30) {
             Write-Host "Lock-free reader and torn recovery: pass $attempt/30"
             npm test -- test/state-durability.test.js --test-name-pattern="keeps losing" --test-name-pattern="file ids pass" --test-name-pattern="torn"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+        env:
+          TOWER_CRANE_TEST_TMP: ${{ runner.temp }}/tower-crane-tests
+      - name: Repeat state compatibility twenty times
+        shell: pwsh
+        run: |
+          foreach ($attempt in 1..20) {
+            Write-Host "State compatibility: pass $attempt/20"
+            npm test -- test/state-compatibility.test.js
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
         env:
