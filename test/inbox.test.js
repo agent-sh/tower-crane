@@ -1501,3 +1501,23 @@ test('a red push or schedule run on the base shows in inbox and status until a l
   assert.doesNotMatch(h.ok(['status']), /ci red/);
   assert.deepEqual(red(), []);
 });
+
+// Main pushes run only the shared-files check, so the daily full run is where a regression shows.
+test('a red daily full run stays in inbox past newer green pushes of its workflow until a green full run', (t) => {
+  const h = setup(t);
+  const run = (id, number, event, conclusion) => ({ id, run_number: number, run_attempt: 1, workflow_id: 11, name: 'CI',
+    path: '.github/workflows/ci.yml', event, status: 'completed', conclusion, head_sha: h.sha, html_url: `https://github.com/acme/demo/actions/runs/${id}` });
+  const github = h.github();
+  github.jobs = { 2001: [] };
+  const red = (runs) => {
+    github.main_runs = runs;
+    h.save(github);
+    fs.rmSync(path.join(h.state, 'main-ci-cache.json'), { force: true });
+    return h.inbox().items.filter((i) => i.kind === 'main_ci_failed').map((i) => [i.id, i.run]);
+  };
+  const daily = run(2001, 60, 'schedule', 'failure');
+  assert.deepEqual(red([daily]), [['main_ci_failed:project:11', 2001]]);
+  assert.deepEqual(red([run(2002, 61, 'push', 'success'), daily]), [['main_ci_failed:project:11', 2001]]);
+  assert.match(h.ok(['status']), /main ci red: CI run 2001 attempt 1 \(schedule at /);
+  assert.deepEqual(red([run(2003, 62, 'workflow_dispatch', 'success'), run(2002, 61, 'push', 'success'), daily]), []);
+});
