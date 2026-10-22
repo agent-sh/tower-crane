@@ -14,8 +14,9 @@
 //   node scripts/measure-cpu-weight.js gate WEIGHT [--run N] [--summary]
 //     One run of the same tests gate command in a project's slice at WEIGHT,
 //     next to three agent scopes of the same project. Appends wall time and
-//     CPU-seconds to a results file in TMPDIR, which every probe of one gate
-//     run shares; --summary also prints the median of each weight's runs.
+//     CPU-seconds to a results file in the user's cache directory, which every
+//     probe of one gate run shares; --summary also prints the median of each
+//     weight's runs.
 
 const fs = require('node:fs');
 const os = require('node:os');
@@ -33,7 +34,10 @@ const WINDOW_MS = 20000;
 const GATE_DEADLINE_MS = 8 * 60000;
 // The longest any busy process lives, whatever happens to this probe.
 const BURN_LIMIT_S = 600;
-const RESULTS = path.join(os.tmpdir(), 'tower-crane-cpu-weight.jsonl');
+// A directory only this user can write, not the shared temp directory, where
+// another user could plant the predictable file names first.
+const CACHE = path.join(process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache'), 'tower-crane-cpu-weight');
+const RESULTS = path.join(CACHE, 'results.jsonl');
 
 const units = new Set();
 const children = new Set();
@@ -157,6 +161,7 @@ async function gate(weight, run, summary) {
     const result = JSON.parse(text.trim().split('\n').pop());
     row = { weight, ...(run ? { run } : {}), cpus: list, slice, ...result, exit: code, agents: AGENTS, agent_threads: AGENT_THREADS, agent_cpu_s: +agentCpu.toFixed(1), at: new Date().toISOString() };
   } finally { stop(); }
+  fs.mkdirSync(CACHE, { recursive: true, mode: 0o700 });
   fs.appendFileSync(RESULTS, JSON.stringify(row) + '\n');
   console.log(JSON.stringify(row));
   if (row.status !== 0) throw new Error(`the gate command failed with ${row.status}; its log is ${row.log}`);
@@ -173,11 +178,13 @@ async function gate(weight, run, summary) {
 
 // Inside the gate's scope: the tests gate command, then the scope's own CPU time.
 function gateChild(list) {
-  const log = path.join(os.tmpdir(), `tower-crane-cpu-weight-${process.pid}.log`);
+  fs.mkdirSync(CACHE, { recursive: true, mode: 0o700 });
+  const dir = fs.mkdtempSync(path.join(CACHE, 'gate-'));
+  const log = path.join(dir, 'gate.log');
   // The suite as the gate runs it, without the gate's own Tower Crane variables.
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('TOWER_CRANE_')));
-  env.TOWER_CRANE_TEST_TMP = path.join(os.tmpdir(), 'cpu-weight-tests');
-  fs.mkdirSync(env.TOWER_CRANE_TEST_TMP, { recursive: true });
+  env.TOWER_CRANE_TEST_TMP = path.join(dir, 'tests');
+  fs.mkdirSync(env.TOWER_CRANE_TEST_TMP);
   const fd = fs.openSync(log, 'w');
   const started = performance.now();
   const r = cp.spawnSync('taskset', ['-c', list, process.execPath, 'test/run.js', '--test-concurrency=3', ...GATE_FILES],
