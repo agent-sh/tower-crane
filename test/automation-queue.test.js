@@ -12,6 +12,9 @@ const { waitFor } = require('./canary');
 const { shellQuote } = require('../lib/gates/common');
 const { readPublished } = require('./atomic-file');
 const { setup, attach } = require('./automation-helpers');
+const { waitUntil } = require('./signals');
+const { identity } = require('../lib/processes');
+const { randomUUID } = require('node:crypto');
 
 // A second PR that touches other files, and a suite command that logs each
 // run with PR #7's state at that moment. Both PRs are submitted and through
@@ -108,6 +111,50 @@ test('main moves: a mergeable PR keeps its evidence and merges after one head-of
   assert.ok(checks[0].detail.commands.some((c) => c.args.includes('merge-tree')));
   h.consume();
   assert.equal(headChecks(h).length, 1, 'a repeated reaction does not run the suite again');
+});
+
+// Crucial mode (tests.crucial, tests.expensive and tests.map): the head of the line runs what the
+// tests gate selects for the change it brings onto main, never the full suite. A run-only task's
+// tests gate selects nothing, so its head check runs the full command as before.
+for (const [mode, crucial] of [['prove', true], ['run-only', false]]) test(`in crucial mode with tests.mode ${mode} the head check runs ${crucial ? 'the crucial and mapped suites of the change' : 'the full command'}`, (t) => {
+  const h = setup(t);
+  const log = path.join(h.base, 'suite-argv.jsonl');
+  const suite = path.join(h.base, 'suite.js');
+  fs.writeFileSync(suite, `const fs = require('node:fs'), path = require('node:path');
+const given = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify(given) + '\\n');
+const files = given.length ? given : fs.readdirSync('test').filter((f) => f.endsWith('.test.js')).map((f) => 'test/' + f);
+for (const f of files) require(path.resolve(f));
+`);
+  const node = `${shellQuote(process.execPath)} ${shellQuote(suite)}`;
+  h.ok(['project', 'set', '--tests-cmd', node, '--tests-proof-cmd', `${node} {tests}`, '--tests-expensive', 'true',
+    '--tests-map', JSON.stringify({ 'value.js': ['test/value.test.js'], '**/*.md': [] }), '--tests-crucial', '["test/value.test.js"]',
+    '--tests-mode', mode]);
+  h.submit();
+  h.consume();
+  assert.ok(h.json(['task', 'show', 'T1']).gates.gates.filter((g) => g.type !== 'review').every((g) => g.ok));
+  h.git(['switch', '-q', 'main']);
+  fs.appendFileSync(path.join(h.repo, 'README.md'), 'Independent base update.\n');
+  h.git(['add', 'README.md']);
+  h.git(['commit', '-qm', 'advance main']);
+  const runs = fs.readFileSync(log, 'utf8').trim().split('\n').length;
+  h.reviewer('T1', 'reviewer');
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha, '--ok', '--agent', 'reviewer']);
+  const result = h.consume();
+  assert.equal(h.github().prs['7'].state, 'MERGED', result.stderr || JSON.stringify(h.logs().slice(-4)));
+  const [check] = headChecks(h);
+  assert.equal(check.detail.ok, true, check.detail.summary);
+  if (!crucial) {
+    assert.equal(check.detail.head_mode, undefined);
+    assert.equal(check.detail.command, node);
+    assert.deepEqual(fs.readFileSync(log, 'utf8').trim().split('\n').slice(runs).map(JSON.parse), [[]], 'the full command names no suites');
+    return;
+  }
+  assert.equal(check.detail.head_mode, 'crucial');
+  assert.deepEqual(check.detail.head_tests, ['test/value.test.js']);
+  assert.equal(check.detail.command, `${node} ${shellQuote('test/value.test.js')}`);
+  assert.deepEqual(fs.readFileSync(log, 'utf8').trim().split('\n').slice(runs).map(JSON.parse), [['test/value.test.js']],
+    'the head check named its suites; a full run names none');
 });
 
 test('the head check runs the suite on a clean checkout of the merge', (t) => {
@@ -569,4 +616,38 @@ poll();
   assert.equal(passes.at(-1).detail.phase, 'done');
   assert.equal(passes.at(-1).detail.blocked, null);
   assert.deepEqual(passes.at(-1).detail.skipped, []);
+});
+
+test('merge --accepted waits for a free gate executor before its head check', async (t) => {
+  const h = queueFixture(t);
+  h.moveMain();
+  h.ok(['project', 'set', '--executors', '1', '--agent', 'orchestrator']);
+  h.reviewer('T1', 'reviewer');
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha, '--ok', '--agent', 'reviewer']);
+  h.ok(['accept', 'T1', '--agent', 'orchestrator']);
+  // Another process's suite holds the only executor; this live pid stands in for it.
+  const events = path.join(h.state, 'events.jsonl');
+  const lease = (detail) => fs.appendFileSync(events, `${JSON.stringify({ id: `E${randomUUID()}`, at: new Date().toISOString(),
+    agent: 'orchestrator', cmd: 'executor', task: 'T2', detail: { lease: 'cpu:held', ...detail } })}\n`);
+  lease({ phase: 'running', kind: 'tests', pid: process.pid, ...identity(process.pid) });
+  const suites = h.suites().length;
+  const start = h.logs().length;
+  let stderr = '';
+  let child;
+  const merging = h.runAsync(['merge', '--accepted', '--agent', 'orchestrator'],
+    { onSpawn: (c) => { child = c; c.stderr.on('data', (d) => { stderr += d; }); } });
+  try {
+    await waitUntil(() => /\[head check\] T1 waits for a free gate executor \(1 of 1 in use\)/.test(stderr),
+      { alive: child, what: () => `merge --accepted waits for the executor: ${stderr}` });
+    assert.equal(h.suites().length, suites, 'no head check runs while the slot is held');
+    assert.equal(headChecks(h).length, 0);
+  } finally {
+    lease({ phase: 'done' });
+  }
+  const r = await merging;
+  assert.equal(r.code, 0, r.stderr || r.stdout);
+  assert.deepEqual(headChecks(h).map((e) => [e.task, e.detail.ok]), [['T1', true]]);
+  assert.equal(h.github().prs['7'].state, 'MERGED');
+  assert.deepEqual(h.logs().slice(start).filter((e) => e.cmd === 'executor' && e.detail.phase === 'running')
+    .map((e) => [e.task, e.detail.kind]), [['T1', 'head check']]);
 });
