@@ -261,6 +261,9 @@ test('each test run gets a private runtime directory for its sockets and removes
   fs.mkdirSync(path.join(real, 'tct-linked'), { mode: 0o700 });
   fs.writeFileSync(path.join(h.base, 'exited-runner.json'), JSON.stringify(runs['tct-exited']));
   fs.symlinkSync(path.join(h.base, 'exited-runner.json'), path.join(real, 'tct-linked', 'runner.json'));
+  // A FIFO at the record's name is no record, and opening it never blocks the run.
+  fs.mkdirSync(path.join(real, 'tct-fifo00'), { mode: 0o700 });
+  assert.equal(cp.spawnSync('mkfifo', [path.join(real, 'tct-fifo00', 'runner.json')]).status, 0);
   const env = { ...h.env };
   delete env.TOWER_CRANE_SOCKET_DIR;
   delete env.TOWER_CRANE_HOST_RUNTIME_DIR;
@@ -270,7 +273,7 @@ test('each test run gets a private runtime directory for its sockets and removes
   ]) {
     const seen = [];
     for (let run = 0; run < 2; run++) {
-      const r = cp.spawnSync(process.execPath, ['--require', probe, runner, 'test/claim.test.js'], { env: { ...env, ...vars }, encoding: 'utf8' });
+      const r = cp.spawnSync(process.execPath, ['--require', probe, runner, 'test/claim.test.js'], { env: { ...env, ...vars }, encoding: 'utf8', timeout: 60000 });
       assert.equal(r.status, 0, r.stderr);
       const { dir, mode, host } = JSON.parse(r.stdout);
       assert.equal(path.dirname(dir), base, label);
@@ -283,7 +286,7 @@ test('each test run gets a private runtime directory for its sockets and removes
     assert.notEqual(seen[0], seen[1], `${label}: each run has its own`);
   }
   assert.deepEqual(fs.readdirSync(live), ['owner.json'], 'the real runtime directory\'s entries are untouched');
-  assert.deepEqual(fs.readdirSync(real).filter((name) => name.startsWith('tct-')).sort(), ['tct-linked', 'tct-living', 'tct-norec0', 'tct-otherN'],
+  assert.deepEqual(fs.readdirSync(real).filter((name) => name.startsWith('tct-')).sort(), ['tct-fifo00', 'tct-linked', 'tct-living', 'tct-norec0', 'tct-otherN'],
     'a later run removes only the directory of a runner that exited in this pid namespace');
 });
 

@@ -131,8 +131,9 @@ function runnerExited(record) {
 }
 // The record a regular file of this user holds, checked and read through one
 // open file so a swap at its name between the two cannot change what is read.
+// O_NONBLOCK keeps a FIFO at the name from blocking the open, and with it the run.
 function readRecord(file, uid) {
-  const fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+  const fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0) | (fs.constants.O_NONBLOCK || 0));
   try {
     const f = fs.fstatSync(fd);
     return f.isFile() && f.uid === uid ? JSON.parse(fs.readFileSync(fd, 'utf8')) : null;
