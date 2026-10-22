@@ -392,6 +392,31 @@ test('a spawned claude agent imports the user\'s global rules by path, loads non
   noSecretsCopied(h);
 });
 
+// /tmp holds the X11 and session bus sockets, and claude lets a command
+// connect to any socket it sees, so its sandbox hides /tmp, as codex never
+// mounts it. claude's own Read tools cannot connect to a socket, and a deny
+// rule for them would take no exception for a worktree in /tmp. An agent left
+// with a TMPDIR of /tmp keeps it: claude makes its proxy sockets there.
+test('a sandboxed claude command cannot see /tmp unless claude makes its proxy sockets there', { skip: (NO_STUBS || process.platform !== 'linux') && 'Linux only' }, (t) => {
+  const { h, u } = setup(t);
+  isolated(h, 'small', 'claude');
+  const tmp = fs.realpathSync('/tmp');
+  const caller = path.join(h.base, 'caller-tmp');
+  fs.mkdirSync(caller);
+  spawn(h, u, 'small', { TMPDIR: caller });
+  const seen = u.report();
+  assert.equal(seen.tmpdir, caller, 'the fixture\'s cache root is too deep for claude\'s own temp directory, so the agent keeps the caller\'s');
+  const box = seen.settings.sandbox.filesystem;
+  assert.ok(box.denyRead.includes(tmp), '/tmp is hidden whole');
+  for (const p of ['.X11-unix/X0', 'dbus-probe/socket']) assert.equal(commandsRead(seen, path.join(tmp, p)), false, p);
+  assert.ok(!box.allowRead.some((p) => p === tmp || p.startsWith(tmp + path.sep)), 'nothing in /tmp is allowed back: the agent needs nothing there');
+  assert.ok(!seen.settings.permissions.deny.some((rule) => rule.includes(`(/${tmp})`) || rule.includes(`(/${tmp}/**)`)), 'the Read tools keep /tmp');
+  spawn(h, u, 'small', { TMPDIR: tmp });
+  const kept = u.report();
+  assert.equal(kept.tmpdir, tmp);
+  assert.ok(!kept.settings.sandbox.filesystem.denyRead.includes(tmp), 'claude\'s proxy sockets in /tmp stay reachable');
+});
+
 test('a sandboxed claude removes its ignored cwd placeholders after exit', { skip: NO_STUBS }, (t) => {
   const { h, u, wt } = setup(t);
   const { xdg } = isolateGitEnvironment(h, u);
