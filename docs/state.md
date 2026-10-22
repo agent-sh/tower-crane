@@ -1041,6 +1041,14 @@ fleet. Weights compare siblings at each level, so raising one project's weight
 cannot override its ancestor's share. Optional `scope.CPUWeight` is replaced by
 the governor weight, with the same warning as other mandatory properties.
 
+When a cgroup has memory and pids controllers but no usable CPU controller,
+the launch keeps its kernel caps and uses nice for CPU scheduling. Missing
+delegation, permission failures and a CPU controller removed during setup do
+not turn a scheduling preference into a launch failure.
+`containment.cpu_weight_backend` reports `cgroup`, `nice` or `native`; `nice`
+records the applied process priority. If the host refuses both CPU weights
+and nice, the launch records a warning and retains its resource caps.
+
 Unix launches without a usable delegated systemd scope run through `nice`
 before executing the command. Native launch failures such as missing executables
 and denied execution remain distinct from the command's exit status. Nice approximates the weight relative to 100

@@ -101,7 +101,69 @@ test('nested runners write every configured weight inside the inherited fence', 
     assert.equal(fs.readFileSync(path.join(group, 'cpu.weight'), 'utf8'), String(weight));
     assert.equal(fs.readFileSync(path.join(group, 'pids.max'), 'utf8'), '64');
     assert.equal(fs.readFileSync(path.join(group, 'memory.max'), 'utf8'), '536870912');
-    assert.equal(fs.readFileSync(path.join(group, 'cgroup.subtree_control'), 'utf8'), '+pids +memory +cpu');
+    assert.deepEqual(fs.readFileSync(path.join(group, 'cgroup.subtree_control'), 'utf8').split(/\s+/).sort(), ['cpu', 'memory', 'pids']);
+  }
+});
+
+test('partial CPU delegation retains kernel caps and degrades scheduling to nice', { skip: process.platform !== 'linux' }, async (t) => {
+  const h = cachedFixture(t, 'cpu-weight-partial', (h) => h.init());
+  const fake = path.join(__dirname, 'fixtures', 'containment-systemd.js');
+  const runner = require.resolve('../lib/containment-runner');
+  const baselineNice = require('node:os').getPriority();
+  const rows = [
+    ['nested without CPU', 'nested', { TC_FAKE_CPU_CONTROLLERS: 'memory pids' }, 1, 'nice'],
+    ['D-Bus without CPU', 'dbus', { TC_FAKE_CPU_CONTROLLERS: 'memory pids' }, 1, 'nice'],
+    ['CLI without CPU', 'cli', { TC_FAKE_CPU_CONTROLLERS: 'memory pids' }, 1, 'nice'],
+    ['nested normal agent without CPU', 'nested', { TC_FAKE_CPU_CONTROLLERS: 'memory pids' }, 100, 'nice'],
+    ['nested configured agent without CPU', 'nested', { TC_FAKE_CPU_CONTROLLERS: 'memory pids' }, 10, 'nice'],
+    ['nested CPU disappears during enable', 'nested', { TC_FAKE_CPU_ENABLE_ERROR: 'ENOENT' }, 1, 'nice'],
+    ['nested CPU enable permission denied', 'nested', { TC_FAKE_CPU_ENABLE_ERROR: 'EACCES' }, 1, 'nice'],
+    ['nested CPU weight permission denied', 'nested', { TC_FAKE_CPU_WEIGHT_ERROR: 'EPERM' }, 1, 'nice'],
+    ['nested CPU weight disappears', 'nested', { TC_FAKE_CPU_WEIGHT_ERROR: 'ENOENT' }, 1, 'nice'],
+    ['nested CPU present', 'nested', {}, 1, 'cgroup'],
+    ['D-Bus CPU present', 'dbus', {}, 1, 'cgroup'],
+    ['CLI CPU present', 'cli', {}, 1, 'cgroup'],
+  ];
+  for (const [label, mode, extra, weight, backend] of rows) {
+    const parent = path.join(h.base, label.replaceAll(' ', '-'));
+    fs.mkdirSync(parent);
+    fs.writeFileSync(path.join(parent, 'memory.max'), '1073741824');
+    fs.writeFileSync(path.join(parent, 'pids.max'), '128');
+    fs.writeFileSync(path.join(parent, 'cgroup.subtree_control'), 'memory pids');
+    const unit = 'tower-crane-123-0123456789abcdef.scope';
+    const group = path.join(parent, mode === 'nested' ? `nested-${unit}` : unit);
+    if (mode !== 'nested') fs.mkdirSync(group);
+    const report = path.join(h.base, `${path.basename(parent)}.json`);
+    const limits = { tasks_max: 64, memory_max_bytes: 536870912 };
+    const args = [runner, JSON.stringify({ ...limits, cpuWeight: weight }),
+      mode === 'nested' ? parent : mode === 'dbus' ? `@${unit}:test-fence.slice` : '', unit,
+      process.execPath, '-e', 'console.log(JSON.stringify({ nice: require("node:os").getPriority(), scoped: process.env.TOWER_CRANE_SCOPED }))'];
+    const argv = mode === 'cli' ? [fake, ...C.scopeArguments(unit, 'test-fence.slice', limits, {}, weight), process.execPath, ...args]
+      : ['--require', fake, ...args];
+    const result = await gates.treeExec(process.execPath, argv, {
+      env: { ...h.env, TC_FAKE_CGROUP: mode === 'nested' ? parent : group, TC_FAKE_SYSTEMD_LOG: path.join(parent, 'manager.jsonl'),
+        TOWER_CRANE_CONTAINMENT_REPORT: report, ...extra },
+    });
+    assert.equal(result.status, 0, `${label}: ${result.stderr}`);
+    const metadata = JSON.parse(fs.readFileSync(report, 'utf8'));
+    const output = JSON.parse(result.stdout);
+    assert.equal(metadata.cpu_weight_backend, backend, label);
+    assert.equal(output.nice, backend === 'nice' ? Math.min(19, baselineNice + G.cpuNice(weight)) : baselineNice, label);
+    assert.equal(output.scoped, '1', label);
+    assert.equal(metadata.group, group, label);
+    if (mode === 'nested') {
+      assert.equal(fs.readFileSync(path.join(group, 'memory.max'), 'utf8'), String(limits.memory_max_bytes), label);
+      assert.equal(fs.readFileSync(path.join(group, 'pids.max'), 'utf8'), String(limits.tasks_max), label);
+      assert.equal(fs.readFileSync(path.join(parent, 'memory.max'), 'utf8'), '1073741824', label);
+      assert.equal(fs.readFileSync(path.join(parent, 'pids.max'), 'utf8'), '128', label);
+    } else {
+      const properties = JSON.parse(fs.readFileSync(path.join(parent, 'manager.jsonl'), 'utf8'));
+      assert.equal(properties.TasksMax, String(limits.tasks_max), label);
+      assert.equal(properties.MemoryMax, String(limits.memory_max_bytes), label);
+      assert.equal(properties.CPUWeight, String(weight), label);
+    }
+    const controllers = fs.readFileSync(path.join(group, 'cgroup.subtree_control'), 'utf8').split(/\s+/);
+    assert.ok(controllers.includes('memory') && controllers.includes('pids'), label);
   }
 });
 

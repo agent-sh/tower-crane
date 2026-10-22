@@ -14,6 +14,9 @@ function apply(properties) {
   if (properties.OOMPolicy !== 'continue') throw new Error('OOMPolicy must be continue');
   // systemd writes memory.oom.group=0 for OOMPolicy=continue; the runner sets it after.
   writeAtomic(path.join(group, 'memory.oom.group'), '0');
+  if ((process.env.TC_FAKE_CPU_CONTROLLERS ?? 'cpu memory pids').split(/\s+/).includes('cpu')) {
+    writeAtomic(path.join(group, 'cpu.weight'), String(properties.CPUWeight));
+  }
   fs.appendFileSync(log, JSON.stringify(properties) + '\n');
 }
 
@@ -21,6 +24,30 @@ if (require.main !== module) {
   // The bootstrap exercises real runner code against a private disk hierarchy.
   C.currentGroup = () => group;
   C.counters = () => ({ tasks: 0, memory: 0 });
+  const readControllers = fs.readFileSync;
+  fs.readFileSync = (file, ...args) => group && String(file).startsWith(group + path.sep)
+    && path.basename(String(file)) === 'cgroup.controllers'
+    ? process.env.TC_FAKE_CPU_CONTROLLERS ?? 'cpu memory pids' : readControllers(file, ...args);
+  const writeControl = fs.writeFileSync;
+  fs.writeFileSync = (file, data, ...args) => {
+    const inside = group && String(file).startsWith(group + path.sep);
+    const enable = inside && path.basename(String(file)) === 'cgroup.subtree_control' && String(data).split(/\s+/).includes('+cpu');
+    const weight = inside && path.basename(String(file)) === 'cpu.weight';
+    const unavailable = !(process.env.TC_FAKE_CPU_CONTROLLERS ?? 'cpu memory pids').split(/\s+/).includes('cpu');
+    const code = enable ? process.env.TC_FAKE_CPU_ENABLE_ERROR : weight ? process.env.TC_FAKE_CPU_WEIGHT_ERROR : null;
+    if ((enable || weight) && (code || unavailable)) throw Object.assign(new Error('CPU controller unavailable'), { code: code || 'ENOENT' });
+    if (inside && path.basename(String(file)) === 'cgroup.subtree_control') {
+      let previous = '';
+      try { previous = readControllers(file, 'utf8'); } catch { /* A new fake cgroup starts with no child controllers. */ }
+      const controllers = new Set(previous.trim().split(/\s+/).filter(Boolean));
+      for (const token of String(data).trim().split(/\s+/)) {
+        if (token.startsWith('+')) controllers.add(token.slice(1));
+        else if (token.startsWith('-')) controllers.delete(token.slice(1));
+      }
+      return writeControl(file, [...controllers].join(' '), ...args);
+    }
+    return writeControl(file, data, ...args);
+  };
   if (process.env.TC_FAKE_NO_MANAGER) {
     const readFileSync = fs.readFileSync;
     fs.readFileSync = (file, ...args) => file === '/proc/self/cgroup'
