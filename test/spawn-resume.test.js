@@ -821,7 +821,8 @@ test('a resume moves an earlier start\'s attempt log aside only once no recorded
 // that ran out of time, or a pid taken after the read). Rewriting the first
 // attempt's records stands in for that on any system: they name a live
 // process and carry no start time, so only its supervisor's end record says
-// it exited.
+// it exited. The spawn's record time moves past the live process's start, or
+// Windows reads it as created after the spawn and so as a reused pid.
 test('a resume moves an earlier start\'s attempt log aside when the recorded spawn\'s end is recorded, whoever now has its pids', (t) => {
   const { h } = setup(t);
   const first = h.json(['spawn', '--task', 'T1', '--wait']);
@@ -831,11 +832,13 @@ test('a resume moves an earlier start\'s attempt log aside when the recorded spa
   t.after(() => killPid(live.pid, 'SIGKILL'));
   const file = path.join(h.state, 'events.jsonl');
   const recorded = fs.readFileSync(file, 'utf8');
+  const started = new Date().toISOString();
   const rewrite = (ended) => fs.writeFileSync(file, recorded.split('\n').map((line) => {
     if (!line) return line;
     const event = JSON.parse(line);
     const d = event.detail;
     if (event.task !== 'T1' || d?.agent !== first.agent || d.attempt !== first.attempt) return line;
+    if (event.cmd === 'spawn') event.at = started;
     for (const key of ['pid', 'monitor_pid']) if (key in d) d[key] = live.pid;
     for (const key of ['start_ticks', 'monitor_start_ticks', 'monitor_start_time', 'pgid']) delete d[key];
     if (!ended && d.active === false) d.active = true;
