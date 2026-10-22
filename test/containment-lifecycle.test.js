@@ -15,7 +15,7 @@ process.env.TOWER_CRANE_TEST_CONTAINMENT = '1';
 // The fixture's times stretch on Windows, where a CIM snapshot and a stop take about a second each.
 const scale = process.platform === 'win32' ? 5 : 1;
 // The lifecycle fixture's work writes its marker once it sees go, which the test
-// creates after containment settled. Work left running polls go every 25 ms, so it
+// creates after awaiting containmentDone. Work left running polls go every 25 ms, so it
 // has written by the end of this window; a stopped process never does.
 const stoppedWindow = () => new Promise(resolve => setTimeout(resolve, 500 * scale)); // wait-allow: bound for a marker from work containment failed to stop
 
@@ -185,8 +185,18 @@ for (const [kind, ending, owner, late, survives] of cases) {
     let metadata;
     let reason;
     if (owner === 'gate-owner') {
+      // On Windows treeExec returns before containment's stop of the leftovers ends, so wait for it as the other rows do.
+      const launched = [];
+      const spawn = C.spawn;
+      t.mock.method(C, 'spawn', function (...rest) {
+        const child = spawn.apply(this, rest);
+        launched.push(child);
+        return child;
+      });
       const result = await G.treeExec(process.execPath, args, { resources: limits, env: h.env, timeout: 10000 });
       assert.equal(result.status, 0, result.stderr);
+      assert.equal(launched.length, 1);
+      await launched[0].containmentDone;
       metadata = result.containment;
     } else {
       // A keeper that took over the scope reads its Result first, so only the keeper settles it.
