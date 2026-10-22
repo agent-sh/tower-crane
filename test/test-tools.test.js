@@ -8,7 +8,7 @@ const path = require('node:path');
 const cp = require('node:child_process');
 const { makeRepo, ROOT, detachedAlive, pinLiveRung } = require('./helpers');
 const { tempRoot, liveRoot } = require('./tmp-root');
-const { killGroup } = require('./signals');
+const { HUNG_TEST_MS, killGroup } = require('./signals');
 const { socketDir } = require('./socket-dir');
 
 test('test temp roots prefer explicit overrides and otherwise use the user cache on each platform', () => {
@@ -273,7 +273,7 @@ test('each test run gets a private runtime directory for its sockets and removes
   ]) {
     const seen = [];
     for (let run = 0; run < 2; run++) {
-      const r = cp.spawnSync(process.execPath, ['--require', probe, runner, 'test/claim.test.js'], { env: { ...env, ...vars }, encoding: 'utf8', timeout: 60000 });
+      const r = cp.spawnSync(process.execPath, ['--require', probe, runner, 'test/claim.test.js'], { env: { ...env, ...vars }, encoding: 'utf8', timeout: HUNG_TEST_MS });
       assert.equal(r.status, 0, r.stderr);
       const { dir, mode, host } = JSON.parse(r.stdout);
       assert.equal(path.dirname(dir), base, label);
