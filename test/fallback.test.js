@@ -11,7 +11,8 @@ const { readPublished } = require('./atomic-file');
 const A = require('../lib/agents');
 const RouteGrants = require('../lib/route-grants');
 const { tempRoot } = require('./tmp-root');
-const windowsConcurrency = process.platform === 'win32' ? 2 : false;
+// Independent cases run two at a time on every platform: most of each one waits on its child processes.
+const caseConcurrency = 2;
 
 const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
 const supervision = { retries: 2, backoff_ms: 10, max_backoff_ms: 20, stall_ms: 60000 };
@@ -128,7 +129,7 @@ for (const explicit of [false, true]) {
   });
 }
 
-describe('independent fallback routes', { concurrency: windowsConcurrency }, () => {
+describe('independent fallback routes', { concurrency: caseConcurrency }, () => {
 for (const nextHarness of ['codex', 'claude']) {
   test(`outage exhausts same-route retries before a fresh ${nextHarness} fallback and records route spend`, async (t) => {
     const h = setup(t, { nextHarness });
@@ -307,7 +308,7 @@ test('rework during a live fallback refuses a second worker until the previous a
   assert.equal(preview.resumed, false);
 });
 
-describe('remaining fallback routes', { concurrency: windowsConcurrency }, () => {
+describe('remaining fallback routes', { concurrency: caseConcurrency }, () => {
 test('Codex profile and provider arguments change without carrying the old session or route flags', (t) => {
   const h = setup(t);
   h.ok(['ladder', 'set', 'easy', '--profile', 'first', '--clear', 'model',
