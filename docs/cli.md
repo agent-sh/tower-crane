@@ -554,6 +554,8 @@ Status also shows ordinary ready-worker refusal reasons for their one-minute
 retry window, ahead of worker-slot limits. Those refused tasks take no place
 in the free-slot order. Changed inputs, expiry or a later successful worker
 spawn clears the old reason; an explicit ready batch can retry it immediately.
+Refusal receipts do not wake default waits or harness notifications. Explicit
+`wait --types all` or `wait --types "spawn refused"` subscriptions can audit them.
 Missing briefs are skipped before dispatch preparation. Other ordinary dispatch
 refusals are remembered per task for one minute, without repeating preparation
 or the stderr diagnostic while that task's dispatch inputs are unchanged.

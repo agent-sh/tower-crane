@@ -319,3 +319,59 @@ for (const caller of ['batch', 'refill']) {
 }
 `);
 });
+
+test('refusal receipts stay out of default waits and harness pushes but remain auditable', () => {
+  const E = require('../lib/events');
+  for (const kind of ['ordinary', 'lasting']) {
+    for (const [agent, via, waiter] of [
+      ['orchestrator', 'automation', 'orchestrator'],
+      ['orchestrator', undefined, 'another-orchestrator'],
+      ['worker', undefined, 'orchestrator'],
+      ['owner', undefined, 'orchestrator'],
+    ]) {
+      const event = { cmd: 'spawn refused', type: 'spawn refused', task: 'T3', to: 'orchestrator',
+        agent, via, detail: { reason: 'cannot dispatch', ...(kind === 'ordinary' ? { until: Date.now() + 60000 } : {}) } };
+      const filter = { recipient: 'orchestrator', agent: waiter, task: 'T3' };
+      assert.equal(E.wakes(event, filter), false, `${kind}: ${agent}: default wake`);
+      for (const types of [new Set(['all']), new Set(['spawn refused'])]) {
+        assert.equal(E.wakes(event, { ...filter, types }), true, `${kind}: ${agent}: explicit audit`);
+      }
+    }
+  }
+});
+
+test('a non-follow wait does not wake on its own automatic refusal receipt', (t) => {
+  const f = fixture(t);
+  f.h.ok(['task', 'update', 'T2', '--status', 'cancelled']);
+  f.add('blocked by a file');
+  holdingWorkers(f);
+  const W = require('../lib/worktree');
+  const target = W.pathFor({ root: f.h.repo }, W.branchFor(f.h.json(['task', 'show', 'T3'])));
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.writeFileSync(target, 'not a directory\n');
+  const preload = path.join(f.h.base, 'only-refill.js');
+  fs.writeFileSync(preload, `
+const A = require(${JSON.stringify(path.resolve(__dirname, '../lib/automation'))});
+// Gate reactions have separate coverage; this probe drives the real refill.
+A.backlog = () => [];
+A.consume = async () => [];
+`);
+  const after = String(fs.statSync(path.join(f.h.state, 'events.jsonl')).size);
+  for (let pass = 0; pass < 2; pass++) {
+    const result = f.h.run(['wait', '--after', after, '--task', 'T3', '--timeout', '0.1', '--agent', 'orchestrator'],
+      { pre: ['--require', preload] }); // wait-allow: the probe must reach its short deadline instead of waking on the refusal it records
+    assert.equal(result.code, 2, result.stdout + result.stderr);
+    assert.equal(JSON.parse(result.stdout).type, 'timeout');
+    assert.match(f.h.json(['status']).not_dispatched.find(b => b.id === 'T3').reason, /ENOTDIR/);
+  }
+  probe(f, `
+const E = require(${JSON.stringify(path.resolve(__dirname, '../lib/events'))});
+const after = ${JSON.stringify(after)};
+assert.equal(E.pending(ctx.stateDir, after, { recipient: 'orchestrator', agent: 'orchestrator', task: 'T3' }).rows.length, 0,
+  'harness pending uses the same quiet wake filter');
+const audit = E.pending(ctx.stateDir, after, { recipient: 'orchestrator', agent: 'orchestrator', task: 'T3',
+  types: new Set(['spawn refused']) }).rows;
+assert.ok(audit.length > 0);
+assert.ok(audit.every(e => e.type === 'spawn refused'));
+`);
+});
