@@ -2,6 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const cp = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const { setup, upper, resubmit } = require('./stack-fixture');
@@ -336,6 +337,53 @@ for (const cycle of [false, true]) {
     }
   }
 }
+
+// Holding the parent tolerates a busy checkout, not a stopped Git operation.
+for (const operation of ['bisect', 'cherry-pick']) {
+  for (const busy of ['none', 'dirty', 'live']) {
+    test(`child whose branch holds the parent refuses refresh during a stopped ${operation} with ${busy} busy state`, (t) => {
+      const f = setup(t);
+      const top = upper(f);
+      const parent = resubmit(f, false);
+      if (busy === 'live') {
+        f.h.ok(['rework', 'T2', '--reason', 'child continues']);
+        f.h.ok(['claim', 'T2', '--agent', 'worker-T2']);
+        f.h.git(['merge', '--no-ff', '--no-edit', parent], top.wt.path);
+      } else submitWithParent(f, top, parent);
+      if (busy === 'dirty') fs.writeFileSync(path.join(top.wt.path, 'pr-body.md'), 'pending edits\n');
+      const git = (...args) => cp.spawnSync('git', args, { cwd: top.wt.path, env: f.h.env, encoding: 'utf8' });
+      if (operation === 'bisect') git('bisect', 'start', 'HEAD', 'HEAD~1');
+      else git('cherry-pick', f.h.git(['commit-tree', 'HEAD^{tree}', '-p', 'HEAD', '-m', 'same tree'], top.wt.path));
+      const before = f.h.json(['task', 'show', 'T2']);
+      const gate = f.h.run(['check', busy === 'live' ? 'ci' : 'clean', 'T2']);
+      assert.equal(gate.code, 1);
+      assert.ok(gate.stderr.includes(`T2: worktree ${top.wt.path} has a ${operation} in progress; finish or abort it there`), gate.stderr);
+      const task = f.h.json(['task', 'show', 'T2']);
+      assert.notEqual(task.stack.parent_sha, parent);
+      assert.equal(task.status, before.status);
+      assert.equal(task.revision, before.revision);
+      assert.deepEqual(task.gates, before.gates, 'no gate runs during the operation');
+      assert.equal(events(f).some((e) => e.task === 'T2' && e.cmd === 'stack sync'), false);
+    });
+  }
+}
+
+test('live child whose branch holds the parent records it without a deferral', (t) => {
+  const f = setup(t);
+  const top = upper(f);
+  const parent = resubmit(f, false);
+  f.h.ok(['rework', 'T2', '--reason', 'child continues']);
+  f.h.ok(['claim', 'T2', '--agent', 'worker-T2']);
+  f.h.git(['merge', '--no-ff', '--no-edit', parent], top.wt.path);
+  const head = f.h.git(['rev-parse', 'HEAD'], top.wt.path);
+  f.h.run(['check', 'ci', 'T2']);
+  const task = f.h.json(['task', 'show', 'T2']);
+  assert.equal(task.stack.parent_sha, parent);
+  assert.equal(task.status, 'in_progress');
+  assert.equal(f.h.git(['rev-parse', 'HEAD'], top.wt.path), head);
+  assert.equal(events(f).some((e) => e.task === 'T2' && e.cmd === 'stack sync deferred'), false);
+  assert.ok(events(f).some((e) => e.task === 'T2' && e.cmd === 'stack sync' && e.detail.ok));
+});
 
 for (const busy of ['live', 'dirty']) {
   for (const linked of [false, true]) {
