@@ -8,6 +8,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { makeRepo, makeProjectRepo, cachedFixture, pinRung, BIN, runPty, PTY_AVAILABLE } = require('./helpers');
 const { gateFixture, gateEvidence, changeKind } = require('./gate-helpers');
+const { harnessArgv } = require('./containment-plan');
 
 const prices = {
   'fixture-light': { input: 0.10, cache_write: 0.125, cache_read: 0.01, output: 0.50 },
@@ -101,8 +102,9 @@ function reviewPacket(h) {
 }
 
 function model(out) {
-  const flag = out.harness === 'claude' ? '--model' : out.argv.includes('-m') ? '-m' : out.argv.includes('-p') ? '-p' : '--model';
-  return out.argv[out.argv.indexOf(flag) + 1];
+  const argv = harnessArgv(out.argv);
+  const flag = out.harness === 'claude' ? '--model' : argv.includes('-m') ? '-m' : argv.includes('-p') ? '-p' : '--model';
+  return argv[argv.indexOf(flag) + 1];
 }
 
 function sample(h, name, input, cached, output, cacheWrite = 0) {
@@ -493,7 +495,8 @@ test('Codex review pricing follows the user origin from a private caller home', 
   assert.equal(choice(h, privateEnv).review_rung, 'hard');
   const dispatch = h.json(['spawn', '--task', 'T1', '--dry-run'], { env: { ...h.reviewEnv, ...privateEnv } });
   assert.equal(dispatch.harness, 'codex');
-  assert.equal(dispatch.argv[dispatch.argv.indexOf('-p') + 1], 'origin-review');
+  const argv = harnessArgv(dispatch.argv);
+  assert.equal(argv[argv.indexOf('-p') + 1], 'origin-review');
 });
 
 test('a stronger model wins only when its median priced review cost is no higher', (t) => {

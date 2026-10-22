@@ -42,7 +42,7 @@ function reply(type, serial, error, variant = false) {
 function fields(message) {
   const read = at => message[0] === 108 ? message.readUInt32LE(at) : message.readUInt32BE(at);
   const end = 16 + read(12);
-  const found = {};
+  const found = new Map();
   let at = 16;
   while (at < end) {
     at = Math.ceil(at / 8) * 8;
@@ -55,19 +55,19 @@ function fields(message) {
       at = Math.ceil(at / 4) * 4;
       const length = read(at);
       at += 4;
-      found[code] = message.toString('utf8', at, at + length);
+      found.set(code, message.toString('utf8', at, at + length));
       at += length + 1;
     } else if (sig === 'u') {
       at = Math.ceil(at / 4) * 4;
-      found[code] = read(at);
+      found.set(code, read(at));
       at += 4;
     } else if (sig === 'g') {
       const length = message[at++];
-      found[code] = message.toString('utf8', at, at + length);
+      found.set(code, message.toString('utf8', at, at + length));
       at += length + 1;
     } else throw new Error(`unexpected header type ${sig}`);
   }
-  return { ...found, serial: read(8) };
+  return { path: found.get(1), interface: found.get(2), member: found.get(3), destination: found.get(6), serial: read(8) };
 }
 
 async function start(t) {
@@ -108,9 +108,9 @@ async function start(t) {
         const f = fields(message);
         if (message[1] !== 1) continue;
         calls.push(f);
-        const variant = f[2] === 'org.freedesktop.DBus.Properties' && f[3] === 'Get';
-        const accepted = f[1] === '/org/freedesktop/systemd1' && (variant || f[3] === 'GetEnvironment');
-        socket.write(reply(accepted ? 2 : 3, f.serial, accepted ? null : `Unknown object '${f[1]}'`, variant));
+        const variant = f.interface === 'org.freedesktop.DBus.Properties' && f.member === 'Get';
+        const accepted = f.path === '/org/freedesktop/systemd1' && (variant || f.member === 'GetEnvironment');
+        socket.write(reply(accepted ? 2 : 3, f.serial, accepted ? null : `Unknown object '${f.path}'`, variant));
       }
     });
   });
@@ -126,4 +126,4 @@ async function start(t) {
   return { root, calls, auth };
 }
 
-module.exports = { start };
+module.exports = { start, fields };

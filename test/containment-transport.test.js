@@ -8,7 +8,39 @@ const cp = require('node:child_process');
 const C = require('../lib/containment');
 const G = require('../lib/gates/common');
 const { cachedFixture, BIN } = require('./helpers');
-const { start } = require('./fixtures/systemd-peer');
+const { start, fields } = require('./fixtures/systemd-peer');
+
+test('peer header decoding exposes fixed fields and ignores foreign codes', () => {
+  for (const type of ['s', 'u', 'g']) {
+    const chunks = [];
+    let size = 16;
+    const append = b => { chunks.push(b); size += b.length; };
+    const align = n => append(Buffer.alloc((n - size % n) % n));
+    const uint = n => { const b = Buffer.alloc(4); b.writeUInt32LE(n); append(b); };
+    const sig = s => append(Buffer.concat([Buffer.from([s.length]), Buffer.from(s), Buffer.from([0])]));
+    const field = (code, type, value) => {
+      align(8);
+      append(Buffer.from([code]));
+      sig(type);
+      if (type === 'u') { align(4); uint(value); }
+      else if (type === 's') { align(4); uint(Buffer.byteLength(value)); append(Buffer.from(value)); append(Buffer.from([0])); }
+      else sig(value);
+    };
+    field(1, 's', '/org/freedesktop/systemd1');
+    field(3, 's', 'Get');
+    field(255, type, type === 'u' ? 99 : type === 'g' ? 's' : '__proto__');
+    const headers = Buffer.concat(chunks);
+    const fixed = Buffer.alloc(16);
+    fixed[0] = 108;
+    fixed[1] = 1;
+    fixed[3] = 1;
+    fixed.writeUInt32LE(7, 8);
+    fixed.writeUInt32LE(headers.length, 12);
+    assert.deepEqual(fields(Buffer.concat([fixed, headers])), {
+      path: '/org/freedesktop/systemd1', interface: undefined, member: 'Get', destination: undefined, serial: 7,
+    }, type);
+  }
+});
 
 function freshContainment() {
   const file = require.resolve('../lib/containment');
@@ -71,7 +103,7 @@ fs.readFileSync = (file, ...args) => {
     }
   }
   assert.equal(peer.calls.length, 4);
-  assert.ok(peer.calls.every(call => call[3] === 'Get' || call[3] === 'GetEnvironment'), JSON.stringify(peer.calls));
+  assert.ok(peer.calls.every(call => call.member === 'Get' || call.member === 'GetEnvironment'), JSON.stringify(peer.calls));
 });
 
 test('manager probe results are cached per process for success and failure', {
