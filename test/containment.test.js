@@ -361,14 +361,14 @@ test('systemd CLI and D-Bus launches use supported OOM policy and retain caps', 
     fs.mkdirSync(group, { recursive: true });
     const log = path.join(h.base, `${label}.jsonl`);
     const report = path.join(h.base, `${label}-report.json`);
-    const args = [runner, JSON.stringify({ ...limits, ...(fleet ? { fleet } : {}) }),
+    const args = [runner, JSON.stringify({ ...limits, cpuWeight: 7, ...(fleet ? { fleet } : {}) }),
       mode === 'dbus' ? `@${unit}:test-fence.slice` : '', unit,
       process.execPath, '-e', 'console.log("scoped command ran", process.env.TOWER_CRANE_SCOPED)'];
     const command = mode === 'dbus' ? ['--require', fake, ...args]
       : [fake, ...C.scopeArguments(unit, 'test-fence.slice', limits, {
         CPUQuota: '200%', MemoryMax: '1', TasksMax: '999', Slice: 'app.slice',
         OOMPolicy: 'stop', MemorySwapMax: '9G', Delegate: 'no',
-      }),
+      }, 7),
         process.execPath, ...args];
     const result = await G.treeExec(process.execPath, command, {
       env: { ...h.env, TC_FAKE_CGROUP: group, TC_FAKE_SYSTEMD_LOG: log,
@@ -385,6 +385,7 @@ test('systemd CLI and D-Bus launches use supported OOM policy and retain caps', 
     assert.equal(properties.TasksMax, String(limits.tasks_max));
     assert.equal(properties.MemoryMax, String(limits.memory_max_bytes));
     assert.equal(properties.MemorySwapMax, '0');
+    assert.equal(properties.CPUWeight, '7');
     assert.ok(['true', 'yes'].includes(properties.Delegate));
   }
   }

@@ -38,7 +38,7 @@ const SPAWN_SETTINGS = {
   sandbox: str('JSON', 'owner-required: {write: extra writable paths, read: extra readable paths under the home}; project set accepts null to clear'),
   env: str('JSON', 'owner-required: extra environment variables; use env_file for secrets; project set accepts null to clear'),
   env_file: str('FILE', 'owner-required: systemd-quoted env file read only at spawn; project set accepts null to clear'),
-  scope: str('JSON', 'owner-required: systemd user scope properties, e.g. {CPUQuota: "200%", IOWeight: "50"}; {} clears optional properties, mandatory resource caps remain; TasksMax, MemoryMax, MemorySwapMax, OOMPolicy, Delegate and Slice are replaced by containment, with a warning; project set accepts null to clear'),
+  scope: str('JSON', 'owner-required: systemd user scope properties, e.g. {CPUQuota: "200%", IOWeight: "50"}; {} clears optional properties, mandatory resource caps remain; TasksMax, MemoryMax, MemorySwapMax, OOMPolicy, Delegate, Slice and CPUWeight are replaced by containment, with a warning; project set accepts null to clear'),
 };
 
 const GLOBAL = {
@@ -95,7 +95,7 @@ const SETTINGS = {
   'decision-delegation': str('JSON', 'owner only: JSON booleans orchestrator_technical and orchestrator_escalated_questions (both default true); false keeps those answers with the owner; null clears'),
   'publish-policy': str('JSON', 'owner-required, set once: {"conditions": [review_clean, full_suite, main_ci_green]} under which the orchestrator publishes without a per-release ask; null clears'),
   'review-policy': str('JSON', 'operational (orchestrator or owner): review diff limits, minimum reviewer rung, churn threshold and canonical model prices; null clears the policy'),
-  governor: str('JSON', 'operational (orchestrator or owner): host governor lines for this project\'s admissions {defer_at, stop_at, psi_memory_defer, psi_memory_stop, psi_cpu_defer, load_defer, others_window_min, growth_window_min, growth_samples_min, expected_mb}; null restores the defaults'),
+  governor: str('JSON', 'operational (orchestrator or owner): host governor lines for this project\'s admissions {defer_at, stop_at, psi_memory_defer, psi_memory_stop, psi_cpu_defer, cpu_weight, load_defer, others_window_min, growth_window_min, growth_samples_min, expected_mb}; cpu_weight holds agents and gates weights (1 to 10000); null restores the defaults'),
   'research-min-sources': int('N', 'owner-required: minimum distinct cited pages for research (default 10)'),
 };
 

@@ -46,7 +46,8 @@ test('the budget admits work only under every defer line, counting growth, other
     ['a unit in another scope grows no memory here', scoped, registry([unit('worker', 1, { expected: 4 * GiB, cgroup: '/agents.slice/w.scope' })]), true],
     ['a unit admitted in this scope grows here', scoped, registry([unit('worker', 1, { expected: 4 * GiB, admitted_in: '/agents.slice/orch.scope/runner' })]), false, /orch\.scope .*may grow 4\.0 GiB/],
     ['memory stall', reading({ some: 10 }), registry(), false, /memory pressure: some avg10 10% is at or over 10%/],
-    ['cpu stall', reading({ cpu: 60 }), registry(), false, /cpu pressure: some avg10 60% is at or over 60%/],
+    ['CPU contention yields below the backstop', reading({ cpu: 85 }), registry(), true],
+    ['cpu stall', reading({ cpu: 90 }), registry(), false, /cpu pressure: some avg10 90% is at or over 90%/],
     ['load', reading({ load: 16, cores: 8 }), registry(), false, /load: 16 on 8 cores is at or over 16/],
   ];
   for (const [name, r, reg, ok, reason] of cases) {

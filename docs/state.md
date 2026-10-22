@@ -450,7 +450,7 @@ Every use of `init --ci-local` or `project set --ci-local`, including setting th
 
 `review`, set through `project set --review-policy JSON` or `init --review-policy JSON` by the orchestrator or the owner, holds optional `small_lines`, `small_files`, `risk_paths`, `min_rung`, `churn_after` and `prices`. `churn_after` is a positive safe integer, defaulting to 3 failed reviews before the inbox surfaces review churn. The line and file limits are non-negative safe integers, defaulting to 100 changed lines and 5 files: a short patch across a handful of files fits a focused review. They raise an easy task to medium when exceeded; they never lower the task's tier. `risk_paths` is an array of repository-path globs with the tests gate's glob syntax, defaulting to empty. A matching old or new path, or a binary diff, raises review to at least hard. `min_rung` is `easy`, `medium`, `hard`, `research` or `review`, defaulting to none. A tier name raises review to at least that tier, so escalation never picks a lower tier. `review` starts the reviewer on the `review` rung itself, skipping the tiers; the rung's own fallbacks handle a weaker model. After a failed review at the current head and revision it stays on the `review` rung until the failure rules below reach hard or research. When the `review` rung cannot run, it takes the first runnable tier at hard or above. It never picks easy or medium. `prices` maps configured model IDs to non-negative dollar rates per million tokens: `{ "input", "cache_write", "cache_read", "output" }`. All four rates are required for each model. IDs compare with whitespace trimmed and case folded; provider prefixes remain distinct. `null` clears the policy and restores diff defaults without cost promotion.
 
-`governor`, set through `project set --governor JSON` or `init --governor JSON` by the orchestrator or the owner, holds the lines this project's admissions use: `defer_at`, `stop_at`, `psi_memory_defer`, `psi_memory_stop`, `psi_cpu_defer`, `load_defer`, `others_window_min`, `growth_window_min`, `growth_samples_min` and `expected_mb`. Unknown keys and out-of-range values are refused; `null` restores the defaults. [Host resource governor](#host-resource-governor) gives each one's meaning, default and reason.
+`governor`, set through `project set --governor JSON` or `init --governor JSON` by the orchestrator or the owner, holds the lines this project's admissions use: `defer_at`, `stop_at`, `psi_memory_defer`, `psi_memory_stop`, `psi_cpu_defer`, `cpu_weight`, `load_defer`, `others_window_min`, `growth_window_min`, `growth_samples_min` and `expected_mb`. Unknown keys and out-of-range values are refused; `null` restores the defaults. [Host resource governor](#host-resource-governor) gives each one's meaning, default and reason.
 
 Review selection starts at the task's tier, raised by the diff, `min_rung` or failed reviews at the current head and revision. A re-review runs at or above the failed review it follows up, at that review's `review_rung` and `review_level`, whether its diff is narrowed or falls back to a full review. One exception is deliberate: with `min_rung: "review"`, a re-review with no failed review at the current head and revision, such as one after rework, starts on the `review` rung even when the floor is hard or above. A light claim check ignores the PR diff's size and risk paths, since it reads only the claims and the changelog correction. Each failed independent review climbs one tier, capped at research. It takes the first runnable tier at that level or above, then promotes to a stronger tier when its measured median review cost is no higher. The `review` rung is the fallback when no tier rung can run. The reviewer may use the builder's model because it receives a clean context. Builder identity comes from the submitter's worker spawn route, not its reported spend; without a recorded route it uses the current task tier. Explicit model names take precedence over profiles; readable Codex profiles resolve to their model. Profiles resolve from the user's origin configuration, matching dispatch even when the caller's home is isolated: `<profile>.config.toml` or `[profiles.<profile>]` in `config.toml`. A readable standalone profile or a named profile table can inherit the base config's top-level model. Unknown profiles retain their profile identity, rather than inheriting the caller's default model. Spend entries and rung models use the same case-folded price identity before cost comparisons. A running reviewer's live entry is not a cost sample until exit collection finalizes it. `validate` warns per open task only when no reviewer rung can run.
 
@@ -542,7 +542,7 @@ Pi uses a generated config home and tool allowlist, with credential files linked
 | `sandbox` | `claude`, `codex`, `agy` | owner-required: `{ write: [paths], read: [paths], session_bus: true or false, domains: [host patterns] }`; `write` extends writable paths on Claude/Codex, `read` adds readable paths under the user's home, which Claude/Codex sandboxes otherwise hide ([home reads](ladder.md#home-reads)), `session_bus`, on claude and codex, reaches the session bus socket, and `domains` adds hosts claude's sandbox lets commands reach (a rung's list adds to the project's; [ladder.md](ladder.md) has the default list and the pattern rule); agy emits requested settings without a confinement guarantee. `session_bus` is also set alone with `project set --session-bus`, owner-required like the rest of `sandbox` |
 | `env` | all | owner-required: extra environment variables as an object of string values; kept in `project.json`, so `env_file` keeps secrets out of the state directory |
 | `env_file` | all | owner-required: path to a systemd-quoted environment file; its contents are read at real spawn and given only to the agent process |
-| `scope` | all | owner-required: systemd user scope properties as an object of non-blank string values, e.g. `{"CPUQuota":"200%"}`; `{}` clears optional properties; mandatory resource caps remain, and containment replaces `TasksMax`, `MemoryMax`, `MemorySwapMax`, `OOMPolicy`, `Delegate` and `Slice` with a `warning:` line when they are set |
+| `scope` | all | owner-required: systemd user scope properties as an object of non-blank string values, e.g. `{"CPUQuota":"200%"}`; `{}` clears optional properties; mandatory resource caps remain, and containment replaces `TasksMax`, `MemoryMax`, `MemorySwapMax`, `OOMPolicy`, `Delegate`, `Slice` and `CPUWeight` with a `warning:` line when they are set |
 
 `sandbox`, `env`, `env_file` and `scope` also apply at project level. They are owner-required ([Authority](#authority)): the owner may set, clear or repeat them through `init`, `project set` or `ladder set`; once state exists, an orchestrator may apply the identical request after owner approval. Rung environment variables override project variables with the same name; both override the environment file, which overrides the inherited process environment. A rung's `env_file` replaces the project file. Each specified rung sandbox field replaces that project field: `write: []` removes the project extra paths for that rung, and `read: []` the extra readable ones. A rung `scope` replaces the whole project scope, so `{}` clears its optional properties for that rung; the containment caps remain. Clearing the rung field restores the project default. Extra writes are added to the role's normal writable paths. Harnesses without a sandbox renderer receive environment settings but do not enforce `sandbox`.
 
@@ -742,7 +742,7 @@ not admission control across activities, sessions or projects.
 On Linux with cgroup v2 and a reachable systemd user manager, a launch uses a
 named transient user scope (registered through D-Bus, or `systemd-run` when
 optional scope properties are set) in the caller's slice with `TasksMax`, `MemoryMax`,
-`MemorySwapMax=0`, `OOMPolicy=continue` and delegated memory/pids controllers.
+`MemorySwapMax=0`, `OOMPolicy=continue`, `CPUWeight` and delegated memory/pids/CPU controllers.
 The runner sets `memory.oom.group=1` for attempts, so a cgroup OOM stops the
 whole attempt, and the supervisor reports `resource-memory-max` from local OOM
 events. Orchestrator fleet scopes use `memory.oom.group=0`; an OOM in an attempt does not group-kill its healthy
@@ -762,7 +762,7 @@ An optional `Slice` property cannot override the caller's slice. A caller
 outside its user manager, such as a hosted CI runner's system service, has no
 slice that manager can place a scope in; the scope goes into the user
 manager's slice of the same name and keeps its own caps. Setting
-`TasksMax`, `MemoryMax`, `MemorySwapMax`, `OOMPolicy`, `Delegate` or `Slice`
+`TasksMax`, `MemoryMax`, `MemorySwapMax`, `OOMPolicy`, `Delegate`, `Slice` or `CPUWeight`
 through `init`, `project set` or `ladder set` prints a `warning:` line naming
 the replaced keys; each command's JSON reply includes the same `warnings`
 array when nonempty. The launched command and its descendants get
@@ -1016,12 +1016,39 @@ Where it shows:
 | `stop_at` | 0.95 | the last 5% (1.8 GiB of 36 GiB) is the room a stopped unit has to exit in before the kernel throttles at `memory.high` or kills at `memory.max` |
 | `psi_memory_defer` | 10 | some task waited on memory 10% of the last 10 s: reclaim is already slowing work |
 | `psi_memory_stop` | 10 | every task stalled on memory 10% of the last 10 s: the thrashing that comes before an out-of-memory kill and freezes the desktop |
-| `psi_cpu_defer` | 60 | runnable tasks waited for a CPU 60% of the time; this host idles at 2 to 8% |
+| `psi_cpu_defer` | 90 | CPU weights let admitted work yield during contention; 90% stall remains an admission backstop above the 60 to 85% seen during all-core builds on 2026-10-22 |
+| `cpu_weight` | `agents` 100, `gates` 1 | agents keep systemd's normal weight; gates use its lowest weight so builds and interactive work get CPU first under contention |
 | `load_defer` | 2 | twice as many runnable or blocked tasks as cores; the fork storms of 2026-10-17 reached 16 to 24 times the cores |
 | `growth_window_min` | 60 | how long a growth window follows its units, and how long a crossed window's raise lasts: a tests gate, the unit most often deferred, ran a median 55 minutes (p90 78) from `gate run` `running` to `done` over the 65 runs that started in the day to 2026-10-20 07:30 UTC, so a set's growth is measured over about as long as the unit admitted beside it runs |
 | `growth_samples_min` | 20 | windows before measured growth replaces the sum: the count unit sizes learn from (the largest of a kind's last 20 peaks). Below 100 windows the ratio is the largest seen, so it is the worst of at least 20 minutes of running work |
 | `others_window_min` | 30 | other sessions' test runs and builds repeat within minutes; on 2026-10-17 two of them peaked near 11 GiB and came back |
 | `expected_mb` | `worker` 1536, `reviewer` 1024, `small` 1024, `orchestrator` 1024, `tests` 2560, `clean` 1024, `ci` 2048, `suite` 2560 | starting sizes, replaced by measured peaks once three exist: on 2026-10-17 the scope holding an orchestrator, two workers and their tools used 3.0 GiB (peak 3.5 GiB); on 2026-10-20 Tower Crane's own full suite at 12 file workers, the tests gate's planned setting on its 24-core host, peaked at 2.5 GiB (2458 MiB anonymous) over its scope's idle use |
+
+### CPU weights
+
+`governor.cpu_weight` accepts `agents` and `gates`, each a whole number from 1 to
+10000. Omitted entries keep their defaults. For example,
+`project set --governor '{"cpu_weight":{"agents":200,"gates":2}}'` gives this
+project twice the defaults. Higher weights get a larger share of CPU when
+sibling cgroups contend; they do not reserve CPU or cap idle-host throughput.
+The agent weight covers workers, reviewers, small agents and orchestrators.
+The gate weight covers tests, clean, local CI, host probes and merge-queue suites.
+
+Every new systemd scope carries `CPUWeight`; a delegated nested launch writes
+its own `cpu.weight` and keeps all ancestor caps and weights. A nested gate
+competes with siblings inside its parent, whose share still bounds the whole
+fleet. Weights compare siblings at each level, so raising one project's weight
+cannot override its ancestor's share. Optional `scope.CPUWeight` is replaced by
+the governor weight, with the same warning as other mandatory properties.
+
+Unix launches without a usable delegated systemd scope run through `nice`
+before executing the command. Nice approximates the weight relative to 100
+with `round(log(100 / weight) / log(1.25))`, clamped to 0 through 19: default
+agents use 0 and gates 19. It applies per process and descendants rather than
+per cgroup; inherited nice values still apply, and weights above 100 stay at
+nice 0 because raising priority needs privileges. Windows retains its native
+process priority and containment watchdog. Memory admission, load admission
+and the CPU pressure backstop still run before dispatch.
 
 ### Registry
 

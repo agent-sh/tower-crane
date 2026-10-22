@@ -8,7 +8,7 @@ const { writeAtomic } = require('../atomic-file');
 const group = process.env.TC_FAKE_CGROUP;
 const log = process.env.TC_FAKE_SYSTEMD_LOG;
 const types = { PIDs: 'au', Slice: 's', TasksMax: 't', MemoryMax: 't', MemorySwapMax: 't',
-  OOMPolicy: 's', Delegate: 'b' };
+  OOMPolicy: 's', Delegate: 'b', CPUWeight: 't' };
 
 function apply(properties) {
   if (properties.OOMPolicy !== 'continue') throw new Error('OOMPolicy must be continue');
