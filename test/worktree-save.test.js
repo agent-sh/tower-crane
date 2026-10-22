@@ -4,7 +4,9 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { cachedFixture } = require('./helpers');
+const cp = require('node:child_process');
+const { createHash } = require('node:crypto');
+const { cachedFixture, ROOT } = require('./helpers');
 const { saveFilePlan } = require('../lib/worktree');
 const SAVE_FILES_LIMIT = 100 * 1024 * 1024;
 
@@ -116,6 +118,78 @@ test('the copy limit records all file sizes and keeps the checkout and branch', 
   assert.equal(fs.readFileSync(path.join(wt.path, 'notes.txt'), 'utf8'), 'keep me\n');
   assert.ok(h.registers(wt.path));
   assert.ok(h.git(['show-ref', '--verify', `refs/heads/${wt.branch}`]));
+});
+
+test('worktree measurement replays recovery data and rejects incomplete or unsafe input', (t) => {
+  const h = fixture(t);
+  const wt = h.json(['worktree', 'T1']);
+  write(wt.path, '.gitignore', 'notes/\n');
+  write(wt.path, 'tracked.bin', Buffer.from([0]));
+  h.git(['add', '.gitignore', 'tracked.bin'], wt.path);
+  h.git(['commit', '-qm', 'measurement baseline'], wt.path);
+  write(wt.path, 'tracked.bin', Buffer.from([0, 255, 1]));
+  write(wt.path, 'source.js', 'source\n');
+  write(wt.path, 'notes/draft.txt', 'handwritten\n');
+  write(wt.path, 'data.bin', Buffer.from([0, 255, 1]));
+  h.ok(['task', 'update', 'T1', '--status', 'cancelled']);
+  const saved = outcome(h).detail.saved;
+  const manifest = JSON.parse(fs.readFileSync(path.join(saved, 'manifest.json')));
+  assert.ok(manifest.bundle);
+  assert.ok(fs.statSync(path.join(saved, 'tracked.patch')).size > 0);
+  const baseline = h.git(['rev-parse', 'HEAD'], ROOT);
+  const command = path.join(__dirname, 'worktree-save-measure.js');
+  function snapshot(dir) {
+    const rows = [];
+    function visit(relative) {
+      const file = path.join(dir, relative);
+      const stat = fs.lstatSync(file);
+      if (stat.isDirectory()) {
+        for (const name of fs.readdirSync(file).sort()) visit(path.join(relative, name));
+      } else rows.push({ path: relative, bytes: stat.size,
+        digest: createHash('sha256').update(fs.readFileSync(file)).digest('hex') });
+    }
+    visit('');
+    return rows;
+  }
+  const original = snapshot(saved);
+  for (const row of [
+    { name: 'valid', valid: true },
+    { name: 'arguments', noArgs: true, error: /usage: node test\/worktree-save-measure.js/ },
+    { name: 'bundle', field: 'bundle', error: /needs a save with a commit bundle and head/ },
+    { name: 'head', field: 'head', error: /needs a save with a commit bundle and head/ },
+    { name: 'unsafe', unsafe: true, error: /unsafe path in input manifest/ },
+  ]) {
+    const input = row.valid ? saved : path.join(h.base, `measurement-${row.name}`);
+    if (!row.valid && !row.noArgs) {
+      fs.cpSync(saved, input, { recursive: true });
+      const changed = { ...manifest, files: [...manifest.files] };
+      if (row.field) changed[row.field] = null;
+      if (row.unsafe) changed.files.push('../outside');
+      fs.writeFileSync(path.join(input, 'manifest.json'), JSON.stringify(changed));
+    }
+    const result = cp.spawnSync(process.execPath, [command, ...(row.noArgs ? [] : [input, baseline])],
+      { cwd: ROOT, env: h.env, encoding: 'utf8', timeout: 300000 });
+    assert.ifError(result.error);
+    assert.equal(result.status, row.valid ? 0 : 1, `${row.name}: ${result.stderr}`);
+    if (row.valid) {
+      const report = JSON.parse(result.stdout);
+      assert.equal(report.original, saved);
+      assert.equal(report.baseline_ref, baseline);
+      assert.deepEqual(report.original_size,
+        { files: original.length, bytes: original.reduce((sum, file) => sum + file.bytes, 0) });
+      assert.equal(report.runs.length, 3);
+      for (const sample of report.runs) {
+        assert.equal(sample.before.files, original.length);
+        assert.equal(sample.after.files, original.length);
+        assert.ok(sample.before.bytes > 0);
+        assert.ok(sample.after.bytes > 0);
+        assert.deepEqual(sample.before_local_files, { files: 3, bytes: 22 });
+        assert.deepEqual(sample.after_local_files, { files: 3, bytes: 22 });
+        assert.deepEqual(sample, report.runs[0], 'replaying the same checkout must give stable counts');
+      }
+    } else assert.match(result.stderr, row.error, row.name);
+    assert.deepEqual(snapshot(saved), original, `${row.name} must leave the source recovery directory intact`);
+  }
 });
 
 test('save file planning distinguishes ignored directories from source and never follows links', (t) => {
