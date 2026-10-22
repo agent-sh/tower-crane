@@ -418,3 +418,15 @@ const { fakeAgentEnv } = require(${JSON.stringify(path.join(__dirname, 'agent-en
   assert.equal(run.phase, 'blocked');
   assert.match(run.reason, /tokens budget crossed/);
 });
+
+// The stress round runs this file, so its own test stops before a round
+// starts: a copy count that is not a positive integer runs nothing.
+test('the live-spend stress round refuses a copy count that is not a positive integer', () => {
+  const round = path.join(__dirname, 'fixtures', 'live-spend-round.js');
+  for (const copies of ['0', '-2', '1.5', 'many']) {
+    const r = cp.spawnSync(process.execPath, [round, '--round', '1', '--copies', copies], { encoding: 'utf8', windowsHide: true, timeout: 60000 }); // wait-allow: the refusal comes before any run
+    assert.equal(r.status, 1, copies);
+    assert.equal(r.stderr.trim(), '--copies requires a positive integer', copies);
+    assert.equal(r.stdout, '', copies);
+  }
+});

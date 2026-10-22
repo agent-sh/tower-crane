@@ -182,6 +182,27 @@ test('a Windows contained tree leaves out the orphan of an earlier holder of its
   } finally { if (running(orphan, born)) killPid(orphan, 'SIGKILL'); }
 });
 
+// The snapshot test above runs only on Windows, so its pid taker's request and
+// reading of the PowerShell result run here on every system.
+test('the pid taker asks PowerShell for one pid and reads only its last line', (t) => {
+  const { takePid } = require('./windows-pid-reuse');
+  for (const [name, reply, expected] of [
+    ['taken after type noise', { status: 0, stdout: 'warning: compiled\r\ntaken 7\r\n' }, { taken: true, tries: 7, detail: 'taken 7' }],
+    ['missed', { status: 0, stdout: 'missed 40\n' }, { taken: false, tries: 40, detail: 'missed 40' }],
+    ['creation refused', { status: 0, stdout: 'error 5 3\n' }, { taken: false, tries: 3, detail: 'error 5 3' }],
+    ['PowerShell missing', { status: null, stdout: null, stderr: '', error: { code: 'ENOENT' } }, { taken: false, tries: 0, detail: 'null ENOENT ' }],
+  ]) {
+    const calls = [];
+    t.mock.method(cp, 'spawnSync', (file, args, opts) => { calls.push({ file, args, opts }); return reply; });
+    assert.deepEqual(takePid(1234, { ms: 500 }), expected, name);
+    assert.equal(calls.length, 1, name);
+    assert.equal(calls[0].file, 'powershell.exe', name);
+    assert.match(Buffer.from(calls[0].args.at(-1), 'base64').toString('utf16le'), /\[PidReuse\]::Take\(1234, 500, /, name);
+    assert.equal(calls[0].opts.timeout, 500 + 120000, name);
+    cp.spawnSync.mock.restore();
+  }
+});
+
 const cases = [
   ['supervisor', 'zero', 'caller', 'none', true],
   // Windows' identity query outlasts the owner's 400 ms; elsewhere a delay stands in for it.
