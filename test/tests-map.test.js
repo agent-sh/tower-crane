@@ -698,6 +698,76 @@ test('repository seed maps docs contract checks from docs paths', () => {
   assert.deepEqual(seed['docs/**'], ['test/ci-required.test.js', 'test/shared-files.test.js']);
 });
 
+test('incremental seed selects directory readers for every delta status and nested path', () => {
+  const { select } = require('../lib/tests-incremental');
+  const { globToRegExp, isTestFile, isSupportFile } = require('../lib/gates/tests');
+  const seed = require('../tools/tests-map.json');
+  const isTest = file => isTestFile(file) && !isSupportFile(file);
+  const available = new Set(['test/shared-files.test.js', 'test/package.test.js', 'test/model-config.test.js',
+    'test/epipe.test.js', 'test/new.test.js', 'test/gates/new.test.js']);
+  const uncovered = [];
+  for (const [changes, reader] of [
+    [[['changelog.d/T427.md', 'M']], 'test/shared-files.test.js'],
+    [[['changelog.d/new.md', 'A']], 'test/shared-files.test.js'],
+    [[['changelog.d/old.md', 'D']], 'test/shared-files.test.js'],
+    [[['changelog.d/old.md', 'D'], ['changelog.d/new.md', 'A']], 'test/shared-files.test.js'],
+    [[['changelog.d/invalid.txt', 'A']], 'test/shared-files.test.js'],
+    [[['test/epipe.test.js', 'M']], 'test/shared-files.test.js'],
+    [[['test/new.test.js', 'A']], 'test/shared-files.test.js'],
+    [[['test/old.test.js', 'D']], 'test/shared-files.test.js'],
+    [[['test/old.test.js', 'D'], ['test/new.test.js', 'A']], 'test/shared-files.test.js'],
+    [[['test/gates/new.test.js', 'A']], 'test/shared-files.test.js'],
+    [[['test/fixtures/nested/input.js', 'M']], 'test/shared-files.test.js'],
+    [[['test/fixtures/nested/input.json', 'M']], 'test/model-config.test.js'],
+    [[['test/fixtures/npm-pack/string.json', 'M']], 'test/package.test.js'],
+    [[['research/new.json', 'A']], 'test/model-config.test.js'],
+  ]) {
+    const result = select(seed, changes.map(([path, status]) => ({ path, status })), isTest, available,
+      globToRegExp, 'node test/run.js {tests}');
+    if (result.mode !== 'incremental' || !result.tests.includes(reader)) uncovered.push({ changes, reader, result });
+  }
+  assert.deepEqual(uncovered, []);
+});
+
+test('incremental CLI rejects fragment-only and test-only defects through directory readers', async (t) => {
+  const seed = require('../tools/tests-map.json');
+  for (const [file, content, error] of [
+    ['changelog.d/probe.md', '- Broken fragment ' + String.fromCodePoint(0x2014) + '.\n', /nonempty Markdown bullet without em dashes/],
+    ['test/probe.test.js', [
+      "require('node:test')('probe wait', async () => {",
+      '  await new Promise((resolve) => setTimeout(resolve, 5));', // wait-allow: generate an unannotated timer for the mapped lint reader to reject
+      '});\n',
+    ].join('\n'), /timer wait needs a signal or a wait-allow reason/],
+  ]) {
+    await t.test(file, () => {
+      const h = incrementalFixture(t, seed, [], h => {
+        h.git(['switch', 'main']);
+        fs.mkdirSync(path.join(h.repo, 'changelog.d'), { recursive: true });
+        fs.writeFileSync(path.join(h.repo, 'changelog.d/probe.md'), '- Valid fragment.\n');
+        fs.writeFileSync(path.join(h.repo, 'test/probe.test.js'), "require('node:test')('probe', () => {});\n");
+        fs.writeFileSync(path.join(h.repo, 'test/package.test.js'), "console.log('package suite');\n");
+        fs.writeFileSync(path.join(h.repo, 'test/shared-files.test.js'), `const { fragments } = require(${JSON.stringify(path.join(ROOT, 'scripts/changelog.js'))});
+const { checkTestWaits } = require(${JSON.stringify(path.join(ROOT, 'scripts/test-waits.js'))});
+fragments(process.cwd());
+checkTestWaits(process.cwd());
+`);
+        h.git(['add', '.']);
+        h.git(['commit', '-qm', 'directory reader contracts']);
+        h.git(['switch', 'fixture-change']);
+        h.git(['merge', '--no-edit', 'main']);
+      });
+      resubmit(h, file, content);
+      const run = h.run(['check', 'tests', 'T1', '--agent', 'worker', '--json']);
+      const result = JSON.parse(run.stdout);
+      assert.equal(run.code, 1, `${file}: ${run.stderr}\n${run.stdout}`);
+      assert.equal(result.receipt.head_mode, 'incremental');
+      assert.equal(result.receipt.incremental_from, h.fullSha);
+      assert.ok(result.receipt.head_tests.includes('test/shared-files.test.js'), file);
+      assert.match(result.summary, error);
+    });
+  }
+});
+
 test('repository seed declares suites consuming JSON data that V8 cannot measure', () => {
   const seed = require('../tools/tests-map.json');
   for (const [file, suite] of [
