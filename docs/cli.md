@@ -199,7 +199,7 @@ This is the measured seed for Tower Crane's own project. Globs use the `tests.pa
 
 Dispatched workers claiming their own reservation resume past passive holders too. Overlapping reservations claim in their recorded dispatch order; a granted live lease blocks every overlapping claim.
 
-Hot-path snapshots are prepared for readiness transactions, including expired renewals and rework handoffs, rather than for notes, spend, evidence or live renewals. Views reuse parsed scopes and a CLI-managed committed diff cache keyed by base/head SHA; dirty worktree paths are read freshly. Base selection follows the local/origin ancestry rule, so an outdated local base cannot attribute upstream changes to every task.
+Hot-path snapshots are prepared for readiness transactions, including expired renewals and rework handoffs, rather than before note, spend, evidence or live-renewal mutations. Rendering after a commit uses the read-only cached index. Views reuse parsed scopes and a CLI-managed committed diff cache keyed by base/head SHA; dirty worktree paths are read freshly. Base selection follows the local/origin ancestry rule, so an outdated local base cannot attribute upstream changes to every task.
 
 ## Already-merged hotfixes
 
