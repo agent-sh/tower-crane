@@ -8,6 +8,11 @@ const data = JSON.parse(fs.readFileSync(file, 'utf8'));
 data.calls.push(args);
 fs.writeFileSync(file, JSON.stringify(data));
 if (data.fail) {
+  if (data.supersedingPoll) {
+    const { file, receipt } = data.supersedingPoll;
+    fs.writeFileSync(file, JSON.stringify(receipt));
+    fs.writeFileSync(process.env.HOOK_CLOCK_FILE, String(Date.parse(receipt.read_at)));
+  }
   console.error('GitHub unavailable');
   process.exit(1);
 }

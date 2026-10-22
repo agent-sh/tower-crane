@@ -126,6 +126,46 @@ test('concurrent wait hosts reserve only one coverage poll', async (t) => {
   assert.equal(h.refreshes().length, 2);
 });
 
+for (const [name, delay, reserved, polls] of [
+  ['a newer host reservation', 2, 1, 0],
+  ['an equal-time host reservation', 2, 2, 0],
+  ['a reservation expiring during the wait', HOUR + 2, 0, 1],
+  ['no competing host after a delay', 2, null, 1],
+]) {
+  test(`locked coverage polling uses current time with ${name}`, (t) => {
+    const h = setup(t);
+    h.save({ ...h.github(), runs: [] });
+    const start = h.now();
+    h.env.TC_MAP_POLL_DELAY = JSON.stringify({ now: start + delay,
+      read_at: reserved == null ? null : new Date(start + reserved).toISOString() });
+    h.env.NODE_OPTIONS += ` --require=${JSON.stringify(path.join(__dirname, 'fixtures', 'tests-map-poll-delay.js'))}`;
+    h.pass();
+    assert.equal(h.github().calls.filter((a) => a[1]?.includes('/actions/runs?')).length, polls);
+    const receipt = h.readState('tests-map-cache.json');
+    assert.equal(Date.parse(receipt.read_at), start + (polls ? delay : reserved));
+    delete h.env.TC_MAP_POLL_DELAY;
+    fs.writeFileSync(h.env.HOOK_CLOCK_FILE, String(Date.parse(receipt.read_at) + HOUR - 1));
+    h.pass();
+    assert.equal(h.github().calls.length, polls, 'the locked reservation owns the full hourly interval');
+  });
+}
+
+for (const [name, offset] of [['the current reservation', 0], ['a newer host reservation', HOUR]]) {
+  test(`a failed coverage read preserves ${name}`, (t) => {
+    const h = setup(t);
+    const receipt = { repo: 'acme/demo', base: 'main', read_at: new Date(h.now() + offset).toISOString() };
+    h.save({ ...h.github(), fail: true,
+      supersedingPoll: { file: path.join(h.state, 'tests-map-cache.json'), receipt } });
+    assert.match(h.pass().stderr, /GitHub unavailable/);
+    const cached = h.readState('tests-map-cache.json');
+    assert.equal(cached.read_at, receipt.read_at);
+    assert.equal(Object.hasOwn(cached, 'error'), offset === 0, 'a failed read belongs only to its own reservation');
+    h.advance(HOUR - 1);
+    h.pass();
+    assert.equal(h.github().calls.length, 1, 'a delayed failure cannot reopen the hourly interval');
+  });
+}
+
 test('a coverage map past three days has one offline inbox item and one notification until refreshed', (t) => {
   const h = setup(t);
   h.save({ ...h.github(), runs: [] });
