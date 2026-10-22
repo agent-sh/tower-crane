@@ -627,9 +627,11 @@ test('gate executors across several watchers stay within gates.executors and que
     assert.notEqual(await fileWritten(path.join(h.base, 'suite-started-2')), null, 'two executors start');
     // Keep both slots occupied until a watcher has queued the third suite.
     // Fresh reactions race for the slots, so any of the three can be the one waiting.
-    await waitUntil(() => h.logs().some((e) => e.cmd === 'automation queued' && e.detail.executors === 2),
-      { paths: [h.state], what: 'a third suite queues for an executor' });
-    const queued = h.logs().filter((e) => e.cmd === 'automation queued' && e.detail.executors === 2);
+    // Its receipt marks the wait: a source records `automation queued` once,
+    // so one that first queued behind another reaction records no executors.
+    const waiting = () => h.logs().filter((e) => e.cmd === 'automation' && e.detail.phase === 'executor');
+    await waitUntil(() => waiting().length, { paths: [h.state], what: 'a third suite queues for an executor' });
+    const queued = waiting();
     assert.equal(new Set(queued.map((e) => e.task)).size, 1, JSON.stringify(queued));
     waiter = queued[0].task;
     fs.writeFileSync(release, '');
