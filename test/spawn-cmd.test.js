@@ -8,6 +8,7 @@ const cp = require('node:child_process');
 const Spawn = require('../lib/spawn');
 const { makeRepo, dispatch, ACCOUNT_HOME } = require('./helpers');
 const { readPublished } = require('./atomic-file');
+const { scopeEnv, harnessArgv } = require('./containment-plan');
 
 function npmShim(dir, prefix = '%dp0%') {
   const script = path.join(dir, 'node_modules', '@fixture', 'harness', 'bin', 'echo.cjs');
@@ -62,7 +63,7 @@ test('CLI spawn preserves the full multiline prompt, using an npm .cmd harness o
     '--command', JSON.stringify([...command, '{prompt}', prompt]),
     '--clear', 'model', '--clear', 'profile', '--clear', 'provider', '--clear', 'effort', '--clear', 'args']);
   const env = { PATH: `${dir}${path.delimiter}${h.env.PATH || h.env.Path || ''}` };
-  const expected = h.json(['spawn', '--task', 'T1', '--dry-run'], { env }).argv.slice(command.length);
+  const expected = harnessArgv(h.json(['spawn', '--task', 'T1', '--dry-run'], { env: { ...env, ...scopeEnv(h) } }).argv).slice(command.length);
   const result = h.run(['spawn', '--task', 'T1', '--wait'], { env });
   assert.equal(result.code, 0, result.stderr);
   const echoed = result.stdout.split('\n').find((line) => line.startsWith('{"argv":'));

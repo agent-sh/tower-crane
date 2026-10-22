@@ -69,45 +69,60 @@ function github(t) {
 
 const POLICY = JSON.stringify({ conditions: ['review_clean', 'full_suite', 'main_ci_green'] });
 
-test('publish keeps the completed failed verdict while its run is being rerun', (t) => {
-  const h = github(t);
-  h.mainCI('success');
-  const id = h.release();
-  h.ok(['accept', id]);
-  h.ok(['project', 'set', '--publish-policy', '{"conditions":[]}']);
-  h.mainCI('failure');
-  h.json(['inbox', '--agent', 'orchestrator'], orchestrator);
-  const data = JSON.parse(fs.readFileSync(h.env.INBOX_GITHUB, 'utf8'));
-  const failed = { ...data.main_runs[0] };
-  data.main_runs = [
-    { ...failed, status: 'in_progress', conclusion: null, run_attempt: 2 },
-    { ...failed, id: 1000, run_number: 49, conclusion: 'success' },
-  ];
-  fs.writeFileSync(h.env.INBOX_GITHUB, JSON.stringify(data));
-  const publish = ['ask', '--setting', 'publish', '--change', JSON.stringify({ task: id }), '--agent', 'orchestrator'];
-  const waiting = h.run(publish, orchestrator);
-  assert.equal(waiting.code, 1);
-  assert.match(waiting.stderr, /run 1001: failure/);
-  data.main_runs[0] = { ...failed, status: 'completed', conclusion: 'success', run_attempt: 2 };
-  fs.writeFileSync(h.env.INBOX_GITHUB, JSON.stringify(data));
-  assert.match(h.ok(publish, orchestrator), /go ahead/);
+test('publish keeps completed nongreen verdicts while their runs are being rerun', (t) => {
+  for (const conclusion of ['failure', 'cancelled', 'timed_out']) {
+    const h = github(t);
+    h.mainCI('success');
+    const id = h.release();
+    h.ok(['accept', id]);
+    h.ok(['project', 'set', '--publish-policy', '{"conditions":[]}']);
+    h.mainCI(conclusion);
+    const refresh = h.run(['wait', '--inbox', '--observe', '--after', 'now', '--timeout', '0.01', '--agent', 'orchestrator'], orchestrator); // wait-allow: record one completed CI observation through the host follower before simulating a rerun
+    assert.ok([0, 2].includes(refresh.code), refresh.stderr);
+    const observed = events(h).findLast((e) => e.cmd === 'main ci').detail.push;
+    assert.ok(observed.some((run) => run.id === 1001 && run.attempt === 1 && run.conclusion === conclusion),
+      'the follower records the completed verdict before the run leaves the listing');
+    const data = JSON.parse(fs.readFileSync(h.env.INBOX_GITHUB, 'utf8'));
+    const failed = { ...data.main_runs[0] };
+    data.main_runs = [
+      { ...failed, status: 'in_progress', conclusion: null, run_attempt: 2 },
+      { ...failed, id: 1000, run_number: 49, conclusion: 'success' },
+    ];
+    fs.writeFileSync(h.env.INBOX_GITHUB, JSON.stringify(data));
+    const publish = ['ask', '--setting', 'publish', '--change', JSON.stringify({ task: id }), '--agent', 'orchestrator'];
+    const waiting = h.run(publish, orchestrator);
+    assert.equal(waiting.code, 1, conclusion);
+    assert.match(waiting.stderr, new RegExp(`run 1001: ${conclusion}`));
+    data.main_runs[0] = { ...failed, status: 'completed', conclusion: 'success', run_attempt: 2 };
+    fs.writeFileSync(h.env.INBOX_GITHUB, JSON.stringify(data));
+    assert.match(h.ok(publish, orchestrator), /go ahead/);
+  }
 });
 
-test('publish gates only completed base push history, including managed workflows beyond the run window', (t) => {
+test('publish gates on the newest full run at or after the base head, else on completed base push history', (t) => {
   const h = github(t);
   h.mainCI('success');
   const id = h.release();
   h.ok(['accept', id]);
   h.ok(['project', 'set', '--publish-policy', '{"conditions":[]}']);
   const publish = ['ask', '--setting', 'publish', '--change', JSON.stringify({ task: id }), '--agent', 'orchestrator'];
-  const run = (event, branch, conclusion = 'failure') => ({ id: 99, workflow_id: 11, run_number: 49, name: 'CI',
-    event, head_branch: branch, head_sha: h.sha, status: 'completed', conclusion });
+  const run = (event, branch, conclusion = 'failure', sha = h.sha) => ({ id: 99, workflow_id: 11, run_number: 49, name: 'CI',
+    event, head_branch: branch, head_sha: sha, status: 'completed', conclusion });
+  const [behind, ahead] = ['e'.repeat(40), 'f'.repeat(40)];
+  // Main pushes run no test matrix, so a schedule or manual run is the release's full suite.
   for (const [name, state, history, allowed] of [
     ['tag only', 'active', [run('push', 'v0.1.6')], true],
     ['no Actions', 'absent', [], true],
     ['PR only', 'active', [run('pull_request', 'main')], true],
-    ['scheduled', 'active', [run('schedule', 'main')], true],
-    ['manual', 'active', [run('workflow_dispatch', 'main')], true],
+    ['scheduled red', 'active', [run('schedule', 'main')], false],
+    ['manual red', 'active', [run('workflow_dispatch', 'main')], false],
+    ['scheduled green at the head', 'active', [run('schedule', 'main', 'success')], true],
+    ['manual green after the head', 'active', [run('workflow_dispatch', 'main', 'success', ahead)], true],
+    ['manual green before the head', 'active', [run('workflow_dispatch', 'main', 'success', behind)], false],
+    ['green full run over a red push', 'active', [run('push', 'main'), { ...run('schedule', 'main', 'success'), id: 100, run_number: 50 }], true],
+    ['newer red full run over a green one', 'active', [run('schedule', 'main', 'success'), { ...run('workflow_dispatch', 'main'), id: 100, run_number: 50 }], false],
+    ['cancelled full run over a green one', 'active', [run('schedule', 'main', 'success'), { ...run('workflow_dispatch', 'main', 'cancelled'), id: 100, run_number: 50 }], true],
+    ['scheduled green on another branch', 'active', [run('schedule', 'develop', 'success')], true],
     ['other branch', 'active', [run('push', 'develop')], true],
     ['no history', 'active', [], true],
     ['pending first push', 'active', [{ ...run('push', 'main'), status: 'queued', conclusion: null }], true],
@@ -122,10 +137,12 @@ test('publish gates only completed base push history, including managed workflow
     data.main_runs = [];
     data.workflow_runs = { 11: history };
     data.failWorkflowRuns = name === 'unreadable history';
+    data.compare = { [`${h.sha}...${ahead}`]: 'ahead', [`${h.sha}...${behind}`]: 'behind' };
     fs.writeFileSync(h.env.INBOX_GITHUB, JSON.stringify(data));
     const result = h.run(publish, orchestrator);
     assert.equal(result.code, allowed ? 0 : 1, `${name}: ${result.stdout} ${result.stderr}`);
-    if (!allowed && history.length) assert.match(result.stderr, /run 99/);
+    if (!allowed && history.length) assert.match(result.stderr, /run 99|run 100/);
+    if (name === 'manual green before the head') assert.match(result.stderr, /full CI has no green run at or after .*run 99 is at eeeeeeeeee, before main head/);
   }
 });
 

@@ -581,6 +581,23 @@ if (env.HOOK_FETCH_ERROR) {
   };
 }
 
+// HOOK_ORIGIN_READ_FAIL=once|always: git remote get-url origin fails as a
+// config read Windows refuses while a scanner holds the file; once fails the
+// first call only.
+if (env.HOOK_ORIGIN_READ_FAIL) {
+  const orig = cp.execFileSync;
+  cp.execFileSync = function originReadError(file, args, options) {
+    const read = file === 'git' && args[0] === 'remote' && args[1] === 'get-url' && args[2] === 'origin';
+    if (read && (env.HOOK_ORIGIN_READ_FAIL === 'always' || first('origin-read'))) {
+      const e = new Error('git remote get-url origin failed');
+      e.stderr = "warning: unable to access '.git/config': Permission denied\nfatal: unable to access '.git/config': Permission denied\n";
+      e.status = 128;
+      throw e;
+    }
+    return orig.call(this, file, args, options);
+  };
+}
+
 // Refuse overlapping worktree adds, as Git does when it reads another
 // worktree's partially written metadata. Pause before the real add to force it.
 if (env.HOOK_WORKTREE_ADD_ACTIVE) {

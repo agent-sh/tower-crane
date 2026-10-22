@@ -338,7 +338,8 @@ test('rolling a 0.1 commit forward syncs the log before it renames the staged fi
   assert.deepEqual(noted(h, 'crashed note'), { task: true, event: true });
 });
 
-const SHORT_WAIT = path.join(__dirname, 'fixtures', 'lock-wait.js');
+// Timeout tests use the real CLI with a one-second lock wait (lib/intervals.js).
+const SHORT_WAIT = JSON.stringify({ lock_wait: 1000 });
 
 test('a recovery rename another process holds open reports the busy code, and a later command finishes it', (t) => {
   const h = setup(t);
@@ -346,7 +347,7 @@ test('a recovery rename another process holds open reports the busy code, and a 
   // Every rename onto tasks.json is refused past the 2 s retry, as Windows
   // refuses one while a scanner holds the file.
   const r = h.run(['task', 'note', 'T1', 'blocked note'], {
-    env: { NODE_OPTIONS: `--require=${JSON.stringify(SHORT_WAIT)}` },
+    env: { TOWER_CRANE_INTERVALS: SHORT_WAIT },
     hooks: { HOOK_BUSY_RENAME: '^tasks\\.json$', HOOK_BUSY_RENAME_TIMES: '0', HOOK_SHARING_BUSY: '1' },
   });
   assert.equal(r.code, 3, r.stderr);

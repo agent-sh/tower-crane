@@ -9,6 +9,7 @@ const { makeRepo, fixtureLadder, pluginRoot, ROOT, TMP_ROOT } = require('./helpe
 const A = require('../lib/agents');
 const L = require('../lib/ladder');
 const { findReal } = require('../lib/shim');
+const { scopeEnv, harnessArgv } = require('./containment-plan');
 
 test('every ladder harness declares its sandbox capabilities', () => {
   assert.deepEqual(Object.keys(A.CAPABILITIES).sort(), [...L.HARNESSES].sort());
@@ -253,8 +254,8 @@ test('ladder harness moves every rung without its own harness, and spawn runs ea
   for (const id of ['T1', 'T2', 'T3', 'T4']) h.ok(['brief', 'set', id, '-'], { input: `brief ${id}\n` });
   const empty = path.join(h.base, 'no-plugin');
   pluginRoot(empty);
-  const spawn = (id, role) => h.json(['spawn', '--task', id, ...(role ? ['--role', role] : []), '--dry-run'], { env: { TOWER_CRANE_PLUGIN_ROOT: empty } });
-  const flags = (argv) => argv.filter((a) => !a.includes('## Task'));
+  const spawn = (id, role) => h.json(['spawn', '--task', id, ...(role ? ['--role', role] : []), '--dry-run'], { env: { ...scopeEnv(h), TOWER_CRANE_PLUGIN_ROOT: empty } });
+  const flags = (argv) => harnessArgv(argv).filter((a) => !a.includes('## Task'));
   const piExtension = (agent) => [
     '--no-approve', '--no-extensions', '--no-skills', '--no-prompt-templates', '--no-themes', '--no-context-files',
     '--tools', agent.startsWith('worker') ? 'bash,read,edit,write,grep,find' : 'bash,read,grep,find',
@@ -380,7 +381,7 @@ test('a ladder broken by a changed user file still loads, and ladder set repairs
   assert.match(h.ok(['ladder', 'show']), /^cannot run: ladder medium \(pi/m);
 
   h.ok(['ladder', 'set', 'easy', '--model', 'p/easy', '--clear', 'profile']);
-  assert.equal(h.json(['spawn', '--task', 'T1', '--dry-run']).argv[0], 'pi', 'the repaired rung runs while others are still broken');
+  assert.equal(harnessArgv(h.json(['spawn', '--task', 'T1', '--dry-run'], { env: scopeEnv(h) }).argv)[0], 'pi', 'the repaired rung runs while others are still broken');
   const worse = h.run(['ladder', 'set', 'orchestrator', '--effort', 'ultra']);
   assert.equal(worse.code, 1, 'a change that breaks a working rung is still refused');
   assert.match(worse.stderr, /^tower-crane: ladder orchestrator \(claude\): effort must be one of/);
@@ -633,8 +634,9 @@ test('a harness move drops tools the new harness does not know and names the per
 test('a move to a codex profile with a custom provider keeps a Claude model it can serve', (t) => {
   const h = makeRepo(t);
   h.init();
-  fs.mkdirSync(path.join(h.env.HOME, '.codex'), { recursive: true });
-  fs.writeFileSync(path.join(h.env.HOME, '.codex', 'config.toml'), '[profiles.router]\nmodel_provider = "openrouter"\n');
+  h.env.CODEX_HOME = path.join(h.env.HOME, '.codex');
+  fs.mkdirSync(h.env.CODEX_HOME, { recursive: true });
+  fs.writeFileSync(path.join(h.env.CODEX_HOME, 'config.toml'), '[profiles.router]\nmodel_provider = "openrouter"\n');
   h.ok(['ladder', 'set', 'hard', '--model', 'anthropic/claude-fixture-large']);
   const kept = h.json(['ladder', 'set', 'hard', '--harness', 'codex', '--profile', 'router']);
   assert.equal(kept.dropped, undefined);

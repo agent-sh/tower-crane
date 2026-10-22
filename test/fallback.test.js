@@ -12,7 +12,8 @@ const { readPublished } = require('./atomic-file');
 const A = require('../lib/agents');
 const RouteGrants = require('../lib/route-grants');
 const { tempRoot } = require('./tmp-root');
-const windowsConcurrency = process.platform === 'win32' ? 2 : false;
+// Independent cases run two at a time on every platform: most of each one waits on its child processes.
+const caseConcurrency = 2;
 
 const events = (h) => StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
 const supervision = { retries: 2, backoff_ms: 10, max_backoff_ms: 20, stall_ms: 60000 };
@@ -75,6 +76,28 @@ function setup(t, { reason = 'outage', primaryHarness = 'codex', nextHarness = '
   return h;
 }
 
+for (const [route, reason] of [['retry', 'outage'], ['fallback', 'refusal']]) {
+  test(`a synchronous containment throw on ${route} is recorded without a supervisor rejection`, async t => {
+    const h = setup(t, { reason });
+    h.spawnEnv.TC_CONTAINMENT_RELAUNCH_PROBE = 'throw';
+    const result = h.spawn();
+    assert.notEqual(result.code, 0);
+    const blocked = events(h).find(e => e.cmd === 'spawn phase' && e.detail.reason === 'resource-scope-failed' && e.detail.error);
+    assert.ok(blocked, result.stdout + result.stderr);
+    assert.match(blocked.detail.error, /scope setup failed synchronously/);
+    assert.doesNotMatch(result.stderr, /supervisor failed|UnhandledPromiseRejection/);
+  });
+}
+
+test('a late cap event from an exited attempt does not stop its retry', async t => {
+  const h = setup(t);
+  h.spawnEnv.TC_CONTAINMENT_RELAUNCH_PROBE = 'late';
+  const result = h.spawn();
+  assert.equal(result.code, 0, result.stdout + result.stderr);
+  assert.equal(events(h).some(e => e.cmd === 'spawn phase' && e.detail.reason === 'resource-memory-max'), false);
+  assert.deepEqual(h.attempts().map(a => a.model), ['first', 'first', 'first', 'second']);
+});
+
 for (const explicit of [false, true]) {
   test(`research Claude fallback ${explicit ? 'sets' : 'inherits'} web MCP tools and worker confinement on Bedrock`, async (t) => {
     const server = { name: 'harness-web', command: 'node', args: ['/web/server.mjs'] };
@@ -107,7 +130,7 @@ for (const explicit of [false, true]) {
   });
 }
 
-describe('independent fallback routes', { concurrency: windowsConcurrency }, () => {
+describe('independent fallback routes', { concurrency: caseConcurrency }, () => {
 for (const nextHarness of ['codex', 'claude']) {
   test(`outage exhausts same-route retries before a fresh ${nextHarness} fallback and records route spend`, async (t) => {
     const h = setup(t, { nextHarness });
@@ -286,7 +309,7 @@ test('rework during a live fallback refuses a second worker until the previous a
   assert.equal(preview.resumed, false);
 });
 
-describe('remaining fallback routes', { concurrency: windowsConcurrency }, () => {
+describe('remaining fallback routes', { concurrency: caseConcurrency }, () => {
 test('Codex profile and provider arguments change without carrying the old session or route flags', (t) => {
   const h = setup(t);
   h.ok(['ladder', 'set', 'easy', '--profile', 'first', '--clear', 'model',

@@ -20,8 +20,9 @@ function setup(t) {
   });
 }
 
-// The dispatch's startup window (lib/spawn.js STARTUP_MS).
-const STARTUP_MS = 10000;
+// The production startup window (lib/intervals.js), which these tests run on
+// the real clock; other files shorten it through TOWER_CRANE_INTERVALS.
+const STARTUP_MS = require('../lib/intervals').DEFAULTS.startup;
 
 const commandRung = (h) => pinRung(h, 'small', { harness: 'command', command: [process.execPath, '-e', 'process.exit(0)', '{prompt}'] });
 

@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 const gate = require('../../lib/gates/tests');
-const { scratch, isolateGit, isolateUserFile, git, commit, initRepo, worktrees, quote } = require('./helpers');
+const { scratch, isolateGit, isolateUserFile, git, commit, initRepo, worktrees, quote, nativeCrashTest } = require('./helpers');
 const { detachedAlive } = require('../helpers');
 const { shellQuote, treeExec, withWorktree, createRedactor, redactJoined } = require('../../lib/gates/common');
 const { waitUntil, killPid } = require('../signals');
@@ -543,6 +543,76 @@ test('a file the task added is removed for the run without the change', async ()
   const r = await gate.run(ctx(sha));
   assert.equal(r.ok, true, r.summary);
   assertCleanedUp();
+});
+
+test('a native child crash reruns only the failing file once: a one-off passes with a native_crash note and its core read, a repeat or mixed failure fails', { skip: process.platform === 'win32' && 'POSIX signals' }, async () => {
+  const dir = path.join(tmp, 'coredump');
+  const keep = path.join(tmp, 'native-cores');
+  fs.mkdirSync(dir);
+  const uid = process.getuid();
+  const boot = 'ea9acc2f-d3d5-4667-91e9-317bd68c61d5';
+  // A core from before the run is another crash's and stays as it is.
+  const stale = path.join(dir, `core._old_bin_node.${uid}.${boot}.1.1`);
+  fs.writeFileSync(stale, 'old core');
+  fs.utimesSync(stale, new Date(Date.now() - 3600000), new Date(Date.now() - 3600000));
+  const gdbArgs = path.join(tmp, 'gdb-args');
+  const readable = path.join(tmp, 'gdb-ok');
+  fs.writeFileSync(readable, `#!/bin/sh\nprintf '%s\\n' "$@" > ${quote(gdbArgs)}\nprintf '%s\\n' 'Program terminated with signal SIGSEGV, Segmentation fault.' '#0  0x0000000001 in v8::internal::Heap::Scavenge() ()' '#1  0x0000000002 in node::Start(int, char**) ()'\n`, { mode: 0o755 });
+  const unreadable = path.join(tmp, 'gdb-bad');
+  fs.writeFileSync(unreadable, "#!/bin/sh\necho 'not a core dump: file format not recognized' >&2\nexit 1\n", { mode: 0o755 });
+  const spec = `${NODE} --test --test-reporter=spec`;
+  const project = { gates: { tests_cmd: `${spec} test/counted.test.js test/crash.test.js`, tests_proof_cmd: `${spec} {tests}` } };
+  const rerun = (ok) => ({ step: 'head', files: ['test/crash.test.js'], ok });
+  for (const [name, options, want] of [
+    ['one-off', { times: 1, exe: process.execPath, gdb: readable }, { ok: true, crashes: 1, runs: 2, rerun: rerun(true), stack: true, note: /Reran test\/crash\.test\.js once in the same checkout: exit 0/ }],
+    ['one-off in a describe', { times: 1, nest: 'describe', gdb: readable }, { ok: true, crashes: 1, runs: 2, rerun: rerun(true), stack: true, note: /exit 0, so the crash is not the change's/ }],
+    ['one-off in a subtest', { times: 1, nest: 'subtest', gdb: readable }, { ok: true, crashes: 1, runs: 2, rerun: rerun(true), stack: true, note: /exit 0, so the crash is not the change's/ }],
+    ['every time', { times: Infinity, gdb: unreadable }, { ok: false, crashes: 2, runs: 2, rerun: rerun(false), stack: false, note: /Reran test\/crash\.test\.js once in the same checkout: exit 1, native crash again: .*the failure stands/ }],
+    ['beside an ordinary failure', { times: 1, ordinary: true, gdb: readable }, { ok: false, crashes: 1, runs: 1, rerun: undefined, stack: true, note: /Other tests in the run failed without one, so it was not rerun/ }],
+  ]) {
+    fs.rmSync(gdbArgs, { force: true });
+    const marker = path.join(tmp, `crash-${branches}`);
+    const counted = path.join(tmp, `counted-${branches}`);
+    const exe = options.exe ? options.exe.replace(/[/.]/g, '_') : '_fixture_bin_node';
+    const core = path.join(dir, `core.${exe}.${uid}.${boot}.PID.${branches}`);
+    // A core of another process in the run's window has no crash to pair with and is emptied.
+    const other = path.join(dir, `core._fixture_bin_other.${uid}.${boot}.999999.${branches}`);
+    const sha = task({
+      'test/crash.test.js': nativeCrashTest({ marker, core, ...options }),
+      'test/counted.test.js': `require('fs').appendFileSync(${JSON.stringify(counted)}, 'x');\nrequire('fs').writeFileSync(${JSON.stringify(other)}, 'other core');\n`,
+    });
+    const r = await gate.run({ ...ctx(sha, { args: { cmd: project.gates.tests_cmd }, project }), cores: { dir, keep, gdb: options.gdb } });
+    assert.equal(r.ok, want.ok, `${name}: ${r.summary}`);
+    assert.match(r.summary, want.note, name);
+    assert.equal(r.native_crash.length, want.crashes, name);
+    assert.deepEqual(r.receipt?.native_rerun, want.rerun, name);
+    for (const crash of r.native_crash) {
+      assert.equal(crash.test, 'child crashes natively', name);
+      assert.equal(crash.signal, 'SIGSEGV', name);
+      assert.ok(Number.isInteger(crash.pid), name);
+      const original = core.replace('PID', String(crash.pid));
+      assert.equal(fs.statSync(original).size, 0, `${name}: the shared core is emptied`);
+      assert.equal(crash.core_file, path.join(keep, path.basename(original)), name);
+      assert.equal(fs.statSync(keep).mode & 0o777, 0o700, name);
+      if (want.stack) {
+        assert.deepEqual(crash.stack, ['#0  0x0000000001 in v8::internal::Heap::Scavenge() ()', '#1  0x0000000002 in node::Start(int, char**) ()'], name);
+        assert.equal(fs.existsSync(crash.core_file), false, `${name}: the read core is deleted`);
+        const args = readPublished(gdbArgs, 'utf8').trim().split('\n');
+        assert.deepEqual(args.slice(-2), ['-c', crash.core_file], name);
+        assert.equal(args.includes(process.execPath), !!options.exe, `${name}: the executable gdb reads`);
+      } else {
+        assert.equal(crash.core_error, 'not a core dump: file format not recognized', name);
+        assert.equal(fs.statSync(crash.core_file).mode & 0o777, 0o600, `${name}: an unread core stays private`);
+        assert.equal(readPublished(crash.core_file, 'utf8'), `core of ${crash.pid}`, name);
+      }
+    }
+    assert.equal(fs.statSync(other).size, 0, `${name}: an unpaired core is emptied`);
+    assert.equal(readPublished(stale, 'utf8'), 'old core', name);
+    assert.equal(readPublished(marker, 'utf8').length, want.runs, `${name}: crash test runs`);
+    assert.equal(readPublished(counted, 'utf8').length, 1, `${name}: the passing file is not rerun`);
+    assert.equal(!!r.confirmed_failure, !want.ok, name);
+    assertCleanedUp();
+  }
 });
 
 test('a code task that changes no test: not ok', async () => {

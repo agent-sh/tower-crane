@@ -11,6 +11,7 @@ const { makeRepo, cachedFixture, ROOT, real, HOOKS } = require('./helpers');
 const { waitFor } = require('./canary');
 const { gateFixture, gateEvidence } = require('./gate-helpers');
 const { shellQuote } = require('../lib/gates/common');
+const { nativeCrashTest } = require('./gates/helpers');
 
 // The gate variants run in process in test/gates/tests.test.js; these tests
 // cover what the CLI adds: audited evidence, policy at accept and merge, and
@@ -230,6 +231,36 @@ test('named regression failure', () => {
       .trim().split('\n').map(JSON.parse);
     assert.deepEqual(events.at(-1).detail.test_failure, evidence.test_failure);
   }
+});
+
+test('a one-off native child crash records native_crash in the evidence and its event, the recovered evidence counts, and status counts the crash', { skip: process.platform === 'win32' && 'POSIX signals' }, (t) => {
+  const h = makeRepo(t);
+  const marker = path.join(h.base, 'crash-runs');
+  const sha = manifestTask(h, { submitted: { 'test/crash.test.js': nativeCrashTest({ marker }) } });
+  submitTestsFixture(h, sha);
+  for (const key of Object.keys(h.env)) {
+    if (key.startsWith('NODE_TEST_')) delete h.env[key];
+  }
+  const spec = `${shellQuote(process.execPath)} --test --test-reporter=spec`;
+  h.ok(['project', 'set', '--tests-mode', 'run-only', '--tests-cmd', `${spec} test/crash.test.js test/value.test.js`, '--tests-proof-cmd', `${spec} {tests}`]);
+  assert.doesNotMatch(h.ok(['status']), /native crashes/);
+  const result = h.run(['check', 'tests', 'T1', '--agent', 'checker']);
+  assert.equal(result.code, 0, result.stdout + result.stderr);
+  assert.equal(fs.readFileSync(marker, 'utf8'), 'xx');
+  const evidence = h.readState('tasks.json').tasks[0].evidence.at(-1);
+  assert.equal(evidence.ok, true);
+  assert.deepEqual(evidence.native_crash.map((c) => [c.test, c.signal, Number.isInteger(c.pid)]), [['child crashes natively', 'SIGSEGV', true]]);
+  assert.match(evidence.summary, /Native crash: child crashes natively \(SIGSEGV, pid \d+\)\..*Reran test\/crash\.test\.js once/);
+  assert.deepEqual(evidence.receipt.native_rerun, { step: 'head', files: ['test/crash.test.js'], ok: true });
+  assert.deepEqual(evidence.commands.filter((c) => c.command !== 'git').map((c) => [c.command, c.status]),
+    [[`${spec} test/crash.test.js test/value.test.js`, 1], [`${spec} test/crash.test.js`, 0]]);
+  const testsGate = h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'tests');
+  assert.equal(testsGate.ok, true, testsGate.reason);
+  const events = StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
+  const event = events.findLast((e) => e.cmd === 'check tests');
+  assert.deepEqual(event.detail.native_crash, evidence.native_crash);
+  assert.match(h.ok(['status']), new RegExp(`native crashes: 1 in the last 7 days, last T1 at ${event.at}`));
+  assert.deepEqual(h.json(['status']).native_crashes, { days: 7, count: 1, last: { at: event.at, task: 'T1' } });
 });
 
 test('failed tests evidence names the failing tests when the spec reporter is colored', (t) => {

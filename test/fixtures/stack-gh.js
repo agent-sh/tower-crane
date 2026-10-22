@@ -48,7 +48,8 @@ cp.spawnSync = function stackGh(command, args, opts) {
   const file = process.env.TEST_STACK_DATA;
   const read = readPublished(file, 'utf8');
   const data = JSON.parse(read);
-  data.calls.push({ args, cwd: opts.cwd });
+  // pid names the CLI process making the call, as {pid} does below.
+  data.calls.push({ args, cwd: opts.cwd, pid: process.pid });
   const finish = (value = '', status = 0, stderr = '') => {
     // data.delayMs models a slow GitHub: every call takes that long to answer.
     if (data.delayMs) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, data.delayMs); // wait-allow: models GitHub's response time, not a readiness wait
@@ -68,8 +69,19 @@ cp.spawnSync = function stackGh(command, args, opts) {
   // The CLI drops TOWER_CRANE_OWNER_KEY before it runs gh, so these commands
   // present the owner's key from its file, as the owner would.
   const key = /\/merge-async$/.test(args[1] || '') ? 'merge-async' : args.slice(0, 2).join(' ');
-  const racing = !data.duringWhile?.[key] || fs.existsSync(data.duringWhile[key]);
-  for (const cli of (racing && data.during?.[key]) || []) {
+  // Observers link concurrently, so two calls can both read a once-only race
+  // before either writes the file back; the call that removes it under the
+  // file's lock is the one that runs it.
+  const whileFile = data.duringWhile?.[key];
+  let racing = whileFile && fs.existsSync(whileFile) ? data.during?.[key] || [] : [];
+  if (!whileFile && data.during?.[key]) {
+    updateJson(file, (current) => {
+      racing = current.during?.[key] || [];
+      if (current.during) delete current.during[key];
+      return current;
+    });
+  }
+  for (const cli of racing) {
     const project = ownerProject(path.join(data.repo, '.tower-crane'));
     const env = { ...process.env, TOWER_CRANE_OWNER_KEY: fs.readFileSync(ownerKeyFile(project), 'utf8').trim() };
     // {pid} names the CLI process making this gh call, so a test can count each observer's attempts;
@@ -78,7 +90,7 @@ cp.spawnSync = function stackGh(command, args, opts) {
     const r = original(process.execPath, [BIN, ...cli.map(fill)], { cwd: data.repo, env, encoding: 'utf8' });
     if (r.status !== 0) throw new Error(`tower-crane ${cli.join(' ')} failed: ${r.stderr}`);
   }
-  if (data.during && !(data.duringWhile?.[key] && fs.existsSync(data.duringWhile[key]))) delete data.during[key];
+  if (data.during && !(whileFile && fs.existsSync(whileFile))) delete data.during[key];
   if (key === 'pr view' && args[2] === process.env.TEST_STACK_PAUSE_VIEW) {
     pause(process.env.TEST_STACK_PAUSE_READY, process.env.TEST_STACK_PAUSE_RELEASE);
   }
@@ -295,8 +307,8 @@ cp.spawnSync = function stackGh(command, args, opts) {
   }
   if (args[1] === 'sync') {
     if (process.env.TEST_STACK_SYNC_READY) {
-      // write-atomic: existence is the signal; no test reads the text.
-      fs.writeFileSync(process.env.TEST_STACK_SYNC_READY, 'ready');
+      require('../atomic-file').writeAtomic(process.env.TEST_STACK_SYNC_READY,
+        JSON.stringify({ pid: process.pid, phase: 'sync' }));
       const deadline = performance.now() + 300000;
       while (!fs.existsSync(process.env.TEST_STACK_SYNC_RELEASE)) {
         if (performance.now() > deadline) throw new Error('slow gh fixture was not released');
