@@ -74,6 +74,8 @@ test('policy paths, owner-only classes and narrowing, as a variant table', { ski
     [{ field: 'write', value: '.tower-crane/tasks.json' }, `spawn refuses a write path inside or holding the state directory ${state}`],
     [{ field: 'write', value: project }, `spawn refuses a path that holds ${state}/homes, which the sandbox hides`],
     [{ field: 'write', value: `${project}-worktrees` }, `spawn refuses a write path that holds the worktrees root ${project}-worktrees`],
+    [{ field: 'read', value: '~' }, `spawn refuses a read path that is or holds the user's home ${home}`],
+    [{ field: 'read', value: '/' }, `spawn refuses a read path that is or holds the user's home ${home}`],
     // A read of the state directory, or of what holds a store, is spawn's to allow.
     [{ field: 'read', value: path.join(state, 'project.json') }, 'outside the sandbox policy'],
     [{ field: 'read', value: project }, 'credentials stays owner-only'],
@@ -346,6 +348,7 @@ test('a path spawn refuses is refused at every grant and ask, whoever makes it, 
     [{ write: [repo] }, `that holds ${state}/homes`],
     [{ write: [worktrees] }, 'that holds the worktrees root'],
     [{ read: [path.join(state, 'brokers', 'token')] }, `inside ${state}/brokers`],
+    [{ read: ['~'] }, 'that is or holds the user\'s home'],
   ]) {
     for (const [args, opts] of [
       [['task', 'update', 'T1', '--sandbox', JSON.stringify(sandbox)], as('orchestrator')],
@@ -357,7 +360,7 @@ test('a path spawn refuses is refused at every grant and ask, whoever makes it, 
       const label = `${args.slice(0, 2).join(' ')} as ${opts.env?.TOWER_CRANE_AGENT || 'owner'}: ${JSON.stringify(sandbox)}`;
       const r = h.run(args, opts);
       assert.equal(r.code, 1, `${label}: ${r.stderr}`);
-      assert.match(r.stderr, new RegExp(`spawn refuses a (write )?path ${why.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}.*no grant makes spawn take it`), label);
+      assert.match(r.stderr, new RegExp(`spawn refuses a ((write|read) )?path ${why.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}.*no grant makes spawn take it`), label);
     }
   }
   assert.equal(decisions(), opened, 'nobody is asked to approve what spawn refuses');
