@@ -170,6 +170,49 @@ test('the supervisor stops a cancelled worker and then removes its worktree', { 
   gone(h, wt);
 });
 
+// This plays Windows, which refuses to remove a directory that is any
+// process's current directory: the supervisor started in the worktree and
+// its retire child removes it.
+test('the supervisor leaves the worktree before its retire child removes it', { skip: process.platform !== 'linux' && 'reads /proc', timeout: 300000 }, async (t) => {
+  const h = setup(t);
+  const ready = path.join(h.base, 'worker-ready');
+  const script = path.join(h.base, 'worker.js');
+  fs.writeFileSync(script, `require('node:fs').writeFileSync(${JSON.stringify(ready)}, ''); setInterval(() => {}, 1000);`);
+  const preload = path.join(h.base, 'busy-cwd.js');
+  fs.writeFileSync(preload, `
+const cp = require('node:child_process');
+const fs = require('node:fs');
+const path = require('node:path');
+const original = cp.execFileSync;
+cp.execFileSync = function(command, args, ...rest) {
+  if (command === 'git' && args[0] === 'worktree' && args[1] === 'remove') {
+    const target = fs.realpathSync(args.at(-1));
+    for (let pid = process.pid; pid > 1;) {
+      let cwd;
+      try { cwd = fs.readlinkSync('/proc/' + pid + '/cwd'); } catch { break; }
+      if (cwd === target || cwd.startsWith(target + path.sep)) {
+        const error = new Error('Permission denied');
+        error.stderr = 'process ' + pid + ' stands in ' + target;
+        throw error;
+      }
+      pid = Number(fs.readFileSync('/proc/' + pid + '/stat', 'utf8').replace(/^.*\\) /s, '').split(' ')[1]);
+    }
+  }
+  return original.call(this, command, args, ...rest);
+};
+`);
+  h.ok(['brief', 'set', 'T1', '-'], { input: 'wait for cancellation\n' });
+  h.ok(['ladder', 'set', 'medium', '--harness', 'command', '--command', JSON.stringify([process.execPath, script, '{prompt}']), '--clear', 'profile', '--clear', 'effort']);
+  const wt = h.json(['worktree', 'T1']);
+  const run = h.runAsync(['spawn', '--task', 'T1', '--wait'], { env: { NODE_OPTIONS: `--require=${JSON.stringify(preload)}` } });
+  await fileWritten(ready);
+  h.ok(['task', 'update', 'T1', '--status', 'cancelled']);
+  const result = await run;
+  assert.match(result.stderr, /stale/);
+  assert.equal(h.json(['task', 'show', 'T1']).worktree.reason, undefined);
+  gone(h, wt);
+});
+
 test('prune adopts a legacy merged-task branch record and removes it without touching live work', (t) => {
   const h = setup(t, true);
   const wt = h.json(['worktree', 'T1']);
