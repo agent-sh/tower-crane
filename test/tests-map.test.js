@@ -57,7 +57,6 @@ test('mapped head suites preserve scoped proof and policy-bound evidence through
   assert.equal(receipt.receipt.head_mode, 'mapped');
   assert.deepEqual(receipt.receipt.head_tests, ['test/mapped.test.js', 'test/value.test.js']);
   assert.deepEqual(receipt.receipt.proof_tests, ['test/value.test.js']);
-  // The scoped proof runs beside the head and may finish first; the reverted proof runs alone, last.
   assert.equal(runs.length, 3);
   assert.ok(runs.every((c) => !c.command.includes('*.test.js')));
   assert.equal(runs[0].status, 0);
@@ -70,8 +69,7 @@ test('mapped head suites preserve scoped proof and policy-bound evidence through
   const fallback = check(h);
   assert.equal(fallback.receipt.head_mode, 'full');
   assert.match(fallback.summary, /unmapped.*value.js/);
-  // The scoped proof runs beside the head, so either can come first.
-  assert.deepEqual(fallback.commands.filter((c) => c.command !== 'git' && !c.command.endsWith(' test/value.test.js')).map((c) => c.command), [fullCommand]);
+  assert.equal(fallback.commands.find((c) => c.command !== 'git').command, fullCommand);
   assert.deepEqual(fallback.receipt.proof_tests, receipt.receipt.proof_tests);
   h.ok(['project', 'set', '--tests-map', JSON.stringify(map)]);
   check(h);
@@ -159,8 +157,7 @@ test('a task without a PR runs the full head suite because hosted CI is not requ
   const result = check(h);
   assert.equal(result.receipt.head_mode, 'full');
   assert.match(result.receipt.head_reason, /no PR/);
-  // The scoped proof runs beside the head, so either can come first.
-  assert.deepEqual(result.commands.filter((c) => c.command !== 'git' && !c.command.endsWith(' test/value.test.js')).map((c) => c.command), [fullCommand]);
+  assert.equal(result.commands.find((c) => c.command !== 'git').command, fullCommand);
 });
 
 test('a change only to test/browser.js runs the full head suite with run-only semantics', (t) => {
@@ -209,9 +206,7 @@ setTimeout(() => process.exit(0), 10000); // wait-allow: mapping diagnostics mus
   assert.deepEqual(result.timeout.running_files, ['test/mapped.test.js']);
   assert.match(result.summary, /timed out after 0\.05 min/);
   assert.doesNotMatch(result.summary, /Failing tests|Make the tests pass|Promise resolution/);
-  // The scoped proof beside the head is stopped once the head fails, and counts for nothing.
-  const proofCommand = `node ${shellQuote(script)} test/value.test.js`;
-  const commands = result.commands.filter((c) => c.command !== 'git' && c.command !== proofCommand);
+  const commands = result.commands.filter((c) => c.command !== 'git');
   assert.equal(commands.length, 1);
   const selectedTests = ['test/mapped.test.js', 'test/value.test.js'];
   assert.deepEqual(result.receipt.head_tests, selectedTests);

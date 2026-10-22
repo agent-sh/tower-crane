@@ -75,13 +75,16 @@ test('with tests.crucial and a map pinned, a change runs crucial plus the suites
   assert.deepEqual(result.receipt.head_tests, head);
   assert.deepEqual(result.receipt.proof_tests, ['test/value.test.js']);
   assert.equal(result.receipt.coverage_gaps, undefined);
-  // The scoped proof runs beside the head and may finish first; the reverted proof runs alone, last.
-  assert.deepEqual(runs.slice(0, 2).map((c) => [c.command, c.status === 0]).sort(), [[selected(head), true], [selected(['test/value.test.js']), true]].sort(),
-    'head and scoped proof pass');
-  assert.deepEqual([runs[2].command, runs[2].status === 0], [selected(['test/value.test.js']), false], 'the reverted proof fails');
-  assert.match(result.summary, /Scoped proof at \w+: `.*test\/value\.test\.js`: exit 0, beside the head in a worktree of its own/);
+  assert.deepEqual(runs.map((c) => c.command), [selected(head), selected(['test/value.test.js']), selected(['test/value.test.js'])]);
+  assert.deepEqual(runs.map((c) => c.status === 0), [true, true, false], 'head and scoped proof pass; the reverted proof fails');
   assert.ok(runs.every((c) => c.command !== fullCommand && !c.command.includes('other.test.js')));
   assert.match(result.summary, /Head suite mode crucial: tests\.crucial plus the changed tests and the tests\.map suites covering the change/);
+  // The evidence and its audit event time each step, so the gate's time can be read from receipts.
+  assert.deepEqual(Object.keys(result.receipt.phases).sort(), ['head', 'proof', 'reverted', 'total']);
+  // read-published: the check above has ended, so nothing appends to the event log.
+  const audited = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)
+    .findLast((e) => e.cmd === 'check tests').detail.receipt.phases;
+  assert.deepEqual(audited, result.receipt.phases);
   assert.equal(counts(h), true);
   // The map changes after every daily run; the receipt names what it ran, so it still counts.
   h.ok(['project', 'set', '--tests-map', JSON.stringify({ ...map, 'value.js': ['test/other.test.js'] })]);
@@ -94,19 +97,18 @@ test('with tests.crucial and a map pinned, a change runs crucial plus the suites
   const today = check(h);
   assert.equal(today.receipt.head_mode, 'full');
   assert.match(today.receipt.head_reason, /no PR/);
-  // The scoped proof runs beside the head, so either can come first.
-  assert.deepEqual(today.commands.filter((c) => c.command !== 'git' && c.command !== selected(['test/value.test.js'])).map((c) => c.command), [fullCommand]);
+  assert.equal(today.commands.find((c) => c.command !== 'git').command, fullCommand);
   assert.equal(counts(h), true);
 });
 
-// With the scoped proof beside the head, a change whose test also passes at the base still fails the gate.
+// Every task of a project in crucial mode takes this path: a changed test that also passes at the
+// base still fails the gate.
 test('in crucial mode a changed test that passes without the change does not prove it', (t) => {
   const h = fixture(t, map, "console.log('asserts nothing');\n");
   const result = check(h, 1);
   assert.equal(result.ok, false);
   assert.match(result.summary, /tests pass without the change; they do not prove it\./);
-  assert.match(result.summary, /beside the head in a worktree of its own\n2\. `.*test\/value\.test\.js` with 2 non-test files reverted to \w+ .*: exit 0/);
-  assert.deepEqual(result.commands.filter((c) => c.command !== 'git').map((c) => c.status), [0, 0, 0]);
+  assert.match(result.summary, /2\. `.*test\/value\.test\.js` with 2 non-test files reverted to \w+ .*: exit 0/);
   assert.equal(counts(h), false);
 });
 
