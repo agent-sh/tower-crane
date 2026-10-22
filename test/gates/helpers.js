@@ -91,4 +91,37 @@ function fakeExec(handler) {
   return { exec, calls };
 }
 
-module.exports = { scratch, isolateGit, isolateUserFile, git, commit, initRepo, worktrees, quote, result, fakeExec };
+// A node:test file whose test starts a child that ends itself with SIGSEGV on its first `times`
+// runs, counted in `marker`, and otherwise prints `calm`. After a crash it writes `core` with PID
+// replaced by the child's pid, as apport would. RLIMIT_CORE 1 makes apport drop the deliberate
+// crash's core, so no real one is left behind. `nest` puts the test in a describe() or under a
+// parent test; `ordinary` adds a failure of another kind.
+function nativeCrashTest({ marker, times = 1, core = null, nest = null, ordinary = false }) {
+  const [open, close] = { describe: ["describe('crash suite', () => {\n", '});'],
+    subtest: ["test('crash parent', async (t) => {\nawait t.", '});'] }[nest] ?? ['', ''];
+  return `const { test, describe } = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const cp = require('node:child_process');
+const marker = ${JSON.stringify(marker)};
+const core = ${JSON.stringify(core)};
+${open}test('child crashes natively', () => {
+  // read-published: only this test writes the marker, and runs are sequential.
+  const runs = fs.existsSync(marker) ? fs.readFileSync(marker, 'utf8').length : 0;
+  fs.appendFileSync(marker, 'x');
+  const child = "if (process.argv[1] === 'crash') process.kill(process.pid, 'SIGSEGV'); console.log('calm')";
+  let out;
+  try {
+    out = cp.execFileSync('sh', ['-c', 'ulimit -c 1; exec "$0" -e "$1" "$2"', process.execPath, child, runs < ${times} ? 'crash' : 'calm']);
+  } catch (error) {
+    if (core) fs.writeFileSync(core.replace('PID', String(error.pid)), 'core of ' + error.pid);
+    throw error;
+  }
+  assert.equal(String(out).trim(), 'calm');
+});
+${close}
+${ordinary ? "test('ordinary failure', () => assert.fail('plain assertion'));" : ''}
+`;
+}
+
+module.exports = { scratch, isolateGit, isolateUserFile, git, commit, initRepo, worktrees, quote, result, fakeExec, nativeCrashTest };

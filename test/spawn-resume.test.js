@@ -11,11 +11,12 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { makeRepo, makeTaskRepo, BIN, detachedAlive, TMP_ROOT } = require('./helpers');
 const Sessions = require('../lib/spawn-session');
-const windowsConcurrency = process.platform === 'win32' ? 2 : false;
+// Independent cases run two at a time on every platform: most of each one waits on its child processes.
+const caseConcurrency = 2;
 
 const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
 
-describe('spawn resume integration cases', { concurrency: windowsConcurrency }, () => {
+describe('spawn resume integration cases', { concurrency: caseConcurrency }, () => {
 test('isolated Codex session lookup matches the recorded rollout id', (t) => {
   const h = makeRepo(t);
   const codexHome = path.join(h.base, 'homes', '.codex');
@@ -723,6 +724,8 @@ test('an earlier attempt exit cannot collect or resume a live attempt with a reu
   fs.appendFileSync(script, `\nfs.writeFileSync(${JSON.stringify(ready)}, String(process.pid));\nsetInterval(() => {}, 1000);\n`);
   const live = h.json(['spawn', '--task', 'T1']);
   await waitOnRepo(h, () => fs.existsSync(ready) && readPublished(ready, 'utf8') === String(live.pid));
+  // The rework goes the respawn path checked here, not back to the live worker as the PR's owner.
+  h.ok(['project', 'set', '--owners', '0']);
   h.ok(['submit', 'T1', '--sha', 'cfed4d76efd3afe887bbbfc7f62c7d94158e3255', '--agent', live.agent]);
   h.ok(['rework', 'T1', '--reason', 'Finish next attempt']);
   const hook = path.join(h.base, 'reused-spawn.js');

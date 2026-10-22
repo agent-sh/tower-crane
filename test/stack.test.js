@@ -49,6 +49,21 @@ const linkedByObserver = (f) => {
 
 const RACE = [['task', 'note', 'T2', 'racing note from {pid}', '--agent', 'worker-T2'], ['project', 'set', '--goal', 'racing goal {nonce}']];
 
+// The race tests count attempts per observer, and observers link concurrently:
+// two link calls in flight at once run a once-only race once between them.
+test('two link calls in flight at once run a once-only race once', async (t) => {
+  const f = setup(t);
+  // The delay keeps the first call in flight while the second reads the race.
+  f.write((d) => { d.during = { 'stack link': [RACE[0]] }; d.delayMs = 1500; });
+  const call = () => new Promise((resolve) => {
+    const gh = "const r = require('node:child_process').spawnSync('gh', ['stack', 'link', '11', '12'], { cwd: process.cwd() }); process.exit(r.status)";
+    require('node:child_process').spawn(process.execPath, ['-e', gh], { env: f.h.env, cwd: f.h.repo, stdio: 'inherit' }).on('exit', resolve);
+  });
+  assert.deepEqual(await Promise.all([call(), call()]), [0, 0]);
+  assert.equal(f.read().calls.filter((c) => c.args[1] === 'link').length, 2);
+  assert.equal([...racingNotes(f).values()].reduce((a, b) => a + b, 0), 1, JSON.stringify([...racingNotes(f)]));
+});
+
 test('a settings change during the link\'s GitHub call is retried from fresh state and links the PR in the same pass', (t) => {
   const f = setup(t);
   worker(f);
@@ -65,11 +80,15 @@ test('a settings change during the link\'s GitHub call is retried from fresh sta
 test('a chain member\'s rework during the link\'s GitHub call refuses the first apply, and the retry links the PR', (t) => {
   const f = setup(t);
   worker(f);
-  f.write((d) => { d.during = { 'stack link': [['rework', 'T1', '--reason', 'racing rework {nonce}']] }; });
+  f.write((d) => { d.during = { 'stack link': [['rework', 'T1', '--reason', 'racing rework from {pid}']] }; });
   f.h.ok(['spawn', '--task', 'T2', '--wait']);
   assert.equal(linkedByObserver(f), true);
   assert.equal(f.h.json(['task', 'show', 'T1']).status, 'rework');
-  const links = f.read().calls.filter((c) => c.args[0] === 'stack' && c.args[1] === 'link');
+  // Another observer may link at the same time; the racing one's own calls show its retry.
+  const reworks = fs.readFileSync(path.join(f.h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)
+    .map((e) => e.cmd === 'rework' && /^racing rework from (\d+)$/.exec(e.detail?.reason)?.[1]).filter(Boolean);
+  assert.equal(reworks.length, 1, 'one link attempt raced the rework');
+  const links = f.read().calls.filter((c) => c.args[0] === 'stack' && c.args[1] === 'link' && String(c.pid) === reworks[0]);
   assert.equal(links.length, 2, 'the refused first link is retried once');
   assert.deepEqual(linkFailures(f), []);
 });
@@ -193,11 +212,11 @@ test('worktree replaces a rewritten dependency head under an untouched prepared 
   assert.equal(f.h.json(['task', 'show', 'T2']).stack.parent_sha, sha);
 });
 
-test('a prepared dependent with its own work refuses a resubmitted dependency until it merges the new head', (t) => {
+test('dispatch merges a resubmitted dependency into a prepared dependent with its own work', (t) => {
   const f = setup(t);
   const wt = f.h.json(['worktree', 'T2']);
-  fs.writeFileSync(path.join(wt.path, 'T2.txt'), 'T2\n');
-  f.h.git(['add', 'T2.txt'], wt.path);
+  fs.writeFileSync(path.join(wt.path, 'early.txt'), 'T2\n');
+  f.h.git(['add', 'early.txt'], wt.path);
   f.h.git(['commit', '-qm', 'early T2'], wt.path);
   const head = f.h.git(['rev-parse', 'HEAD'], wt.path);
   const sha = resubmit(f, false);
@@ -206,11 +225,11 @@ test('a prepared dependent with its own work refuses a resubmitted dependency un
   assert.match(r.stderr, /holds its own changes on T1 .* resubmitted/);
   assert.equal(f.h.git(['rev-parse', 'HEAD'], wt.path), head);
   worker(f);
-  assert.notEqual(f.h.run(['spawn', '--task', 'T2', '--wait']).code, 0);
-  assert.equal(f.h.json(['task', 'show', 'T2']).status, 'todo');
-  f.h.git(['merge', '-q', '--no-edit', sha], wt.path);
-  f.h.json(['worktree', 'T2']);
-  assert.equal(f.h.git(['rev-parse', 'HEAD^2'], wt.path), sha);
+  f.h.ok(['spawn', '--task', 'T2', '--wait']);
+  const task = f.h.json(['task', 'show', 'T2']);
+  assert.equal(task.status, 'submitted');
+  assert.equal(task.stack.parent_sha, sha);
+  assert.equal(f.h.git(['rev-parse', 'HEAD^^2'], wt.path), sha);
 });
 
 test('concurrent sibling dispatch on one submitted dependency records a single stack child', async (t) => {
