@@ -141,15 +141,31 @@ for (const baseRef of ['main', 'origin/main']) for (const signed of [false, true
   }
 });
 
-test('a crucial file missing on both head and base is the orchestrator\'s setting to fix', (t) => {
+for (const baseRef of ['main', 'origin/main']) for (const removal of ['missing on both', 'deleted at head', 'renamed at head']) test(`a crucial file ${removal} with base ${baseRef} is the orchestrator's setting to fix`, (t) => {
   const h = fixture(t);
-  const setting = h.run(['project', 'set', '--tests-crucial', '["test/missing.test.js"]', '--json']);
+  if (baseRef === 'origin/main') {
+    h.git(['switch', 'main']);
+    h.git(['commit', '--allow-empty', '-qm', 'newer remote base']);
+    h.git(['update-ref', 'refs/remotes/origin/main', h.git(['rev-parse', 'HEAD'])]);
+    h.git(['reset', '--hard', 'HEAD^']);
+    h.git(['switch', 'fixture-change']);
+  }
+  const missing = removal === 'missing on both';
+  const file = missing ? 'test/missing.test.js' : 'test/crucial.test.js';
+  if (!missing) {
+    h.git(removal === 'deleted at head' ? ['rm', '-q', file] : ['mv', file, 'test/renamed.test.js']);
+    h.git(['commit', '-qm', removal]);
+    h.ok(['submit', 'T1', '--sha', h.git(['rev-parse', 'HEAD']), '--agent', 'worker']);
+  }
+  const paths = JSON.stringify([file]);
+  const setting = h.run(['project', 'set', '--tests-crucial', paths, '--json']);
   assert.equal(setting.code, 0, setting.stderr);
-  assert.deepEqual(JSON.parse(setting.stdout).warnings, ['tests.crucial path missing at base tip: test/missing.test.js']);
-  assert.match(h.ok(['project', 'set', '--tests-crucial', '["test/missing.test.js"]']), /warning: tests\.crucial path missing at base tip: test\/missing\.test\.js/);
+  assert.deepEqual(JSON.parse(setting.stdout).warnings, missing ? [`tests.crucial path missing at base tip: ${file}`] : undefined);
+  if (missing) assert.match(h.ok(['project', 'set', '--tests-crucial', paths]), /warning: tests\.crucial path missing at base tip: test\/missing\.test\.js/);
   const result = check(h, 1);
   assert.deepEqual(result.config_failure, { key: 'tests_crucial' });
-  assert.match(result.summary, /tests\.crucial names paths that are not test files at head: test\/missing\.test\.js/);
+  assert.ok(result.summary.includes(`tests.crucial names paths that are not test files at head: ${file}`), result.summary);
+  assert.equal(result.receipt?.crucial_skipped, undefined, 'an inherited or nonexistent path is never a base addition');
   assert.equal(result.commands.filter((c) => c.command !== 'git').length, 0, 'nothing runs');
   const item = h.json(['inbox', '--agent', 'orchestrator']).items.find((i) => i.kind === 'gate_config');
   assert.equal(item.setting, 'tests.crucial');
