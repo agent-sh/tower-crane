@@ -40,7 +40,7 @@ test('hook polls, writes and waits read only their own events, not the whole log
   const read = (label, args) => {
     const r = h.run(args, { env: { EVENT_ROWS: meter, NODE_OPTIONS: `--require "${ROWS}"` } });
     assert.ok([0, 2].includes(r.code), `${label}: ${r.stderr}`);
-    return { label, ...JSON.parse(fs.readFileSync(meter, 'utf8')) };
+    return { label, stdout: r.stdout, ...JSON.parse(fs.readFileSync(meter, 'utf8')) };
   };
   const cursor = String(StateFiles.logEnd(h.state));
   const runs = [
@@ -81,15 +81,20 @@ function viewFixture(t) {
     StateFiles.withDb(h.state, () => S.mutate({ stateDir: h.state, agent: 'owner' }, 'accept', (st) => {
       st.tasks.tasks.find((task) => task.id === 'T4').status = 'accepted';
     }));
+    // The closed task finished a month ago; one of its gate runs crashed then.
+    const old = new Date(Date.now() - 30 * 86400000).toISOString();
     const events = Array.from({ length: OTHER }, (_, i) => {
       const cmd = CLOSED_CMDS[i % CLOSED_CMDS.length];
       const id = `E${crypto.randomUUID()}`;
       const detail = cmd === 'automation' ? { source: id, phase: 'done', error: null }
         : cmd === 'automation queued' ? { source: id }
           : ['spawn', 'spawn exit'].includes(cmd) ? { agent: 'worker-T2-1', role: 'worker', pid: 1, code: 0 }
-            : { agent: 'worker-T2-1', tokens: i, until: new Date().toISOString(), ok: true, type: 'tests', summary: 'ran' };
-      return { id, at: new Date().toISOString(), agent: 'worker-T2-1', cmd, task: 'T2', detail, type: cmd, to: 'orchestrator' };
+            : { agent: 'worker-T2-1', tokens: i, until: old, ok: true, type: 'tests', summary: 'ran', ...(i === 0 ? { native_crash: [{ test: 'old', signal: 'SIGSEGV' }] } : {}) };
+      return { id, at: old, agent: 'worker-T2-1', cmd, task: 'T2', detail, type: cmd, to: 'orchestrator' };
     });
+    // A crash this week, which status counts.
+    events.push({ id: `E${crypto.randomUUID()}`, at: new Date().toISOString(), agent: 'orchestrator', cmd: 'check tests', task: 'T3',
+      detail: { ok: false, type: 'tests', summary: 'crashed', native_crash: [{ test: 'new', signal: 'SIGSEGV' }] }, type: 'check tests', to: 'orchestrator' });
     StateFiles.withDb(h.state, () => S.withLock(h.state, () => Db.commit(h.state, { events })));
   });
 }
@@ -103,7 +108,7 @@ test('status, inbox and an observing wait read only indexed rows, not the whole 
   const read = (label, args) => {
     const r = h.run(args, { env: { EVENT_ROWS: meter, NODE_OPTIONS: `--require "${ROWS}"` } });
     assert.ok([0, 2].includes(r.code), `${label}: ${r.stderr}`);
-    return { label, ...JSON.parse(fs.readFileSync(meter, 'utf8')) };
+    return { label, stdout: r.stdout, ...JSON.parse(fs.readFileSync(meter, 'utf8')) };
   };
   const runs = [
     read('status', ['status', '--json']),
@@ -112,7 +117,32 @@ test('status, inbox and an observing wait read only indexed rows, not the whole 
     // An observer refreshes the inbox at startup and records its snapshot.
     read('observer', ['wait', '--observe', '--inbox', '--timeout', '1', '--agent', 'orchestrator']), // wait-allow: the startup pass is what is measured; the bound ends the wait after it
   ];
-  for (const run of runs) assert.ok(run.rows < OTHER / 10, `${run.label} read ${run.rows} event rows of a ${OTHER}-event log`);
+  for (const run of runs) assert.ok(run.rows < OTHER / 100, `${run.label} read ${run.rows} event rows of a ${OTHER}-event log`);
+  // Only this week's gate runs are read for the crash count.
+  assert.match(runs[1].stdout, /^native crashes: 1 in the last 7 days, last T3 at /m);
+});
+
+// A select over every event (a long-lived reader's) and one by index pick the same events.
+test('an indexed select and a select over every event agree', (t) => {
+  const h = viewFixture(t);
+  const T = require('../lib/tasks');
+  StateFiles.withDb(h.state, () => {
+    const all = S.loadState(h.state).events;
+    const week = new Date(Date.now() - 7 * 86400000).toISOString();
+    const specs = [
+      { cmds: ['check tests'] },
+      { cmds: ['check tests'], since: week },
+      { tasks: ['T2'], taskCmds: ['spawn', 'spawn exit'], since: week },
+      { tasks: ['T3', 'T4'], taskCmds: ['submit', 'claim'] },
+      { tasks: ['T3'] },
+      { ids: [all[0].id, all.at(-1).id], cmds: ['accept'] },
+    ];
+    for (const spec of specs) {
+      const ids = (events) => events.map((e) => e.id);
+      assert.deepEqual(ids(T.select(S.loadState(h.state).log, spec)), ids(T.select(all, spec)), JSON.stringify(spec));
+    }
+    assert.equal(T.select(all, { cmds: ['check tests'], since: week }).length, 1, 'the week holds one gate run');
+  });
 });
 
 // The gate queue folds a working set read by index. A merged task's merge
