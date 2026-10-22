@@ -223,10 +223,12 @@ test('scope probes ignore missing or stale session buses and use the resolved la
     const calls = [];
     t.mock.method(cp, 'spawnSync', (file, args, opts) => {
       calls.push({ file, args, opts });
+      if (file === 'systemd-run') return { status: 0, stdout: 'systemd 259 (259.5)\n' };
       return { status: file === 'systemctl' && available ? 0 : 1 };
     });
     assert.equal(F.canScope(env), available, JSON.stringify(env));
-    assert.equal(calls.length, 1);
+    // The systemd-run version is read only once the manager answers.
+    assert.deepEqual(calls.slice(1).map(call => [call.file, ...call.args]), available ? [['systemd-run', '--version']] : []);
     assert.equal(calls[0].file, 'systemctl');
     assert.deepEqual(calls[0].args, ['--user', 'show-environment']);
     assert.equal(calls[0].opts.env.XDG_RUNTIME_DIR, runtime || '/run/user/1000');
@@ -254,7 +256,7 @@ test('new user scopes require the caller user manager or confirmed linger', {
     const calls = [];
     t.mock.method(cp, 'spawnSync', (file, args, opts) => {
       calls.push({ file, args, opts });
-      return file === 'loginctl' ? { status, stdout: `${linger}\n` } : { status: 0 };
+      return file === 'loginctl' ? { status, stdout: `${linger}\n` } : { status: 0, stdout: 'systemd 259\n' };
     });
     const env = { TOWER_CRANE_TEST_CONTAINMENT: '1' };
     assert.equal(C.canScope(env), expected, `${group}: linger=${linger}, status=${status}`);
@@ -551,6 +553,59 @@ test('all outer scopes share the probe runtime directory and preserve the comman
       assert.equal(fs.readFileSync(path.join(group, 'memory.oom.group'), 'utf8'), fleet ? '0' : '1');
     }
   }
+  }
+});
+
+test('outer scopes pass --expand-environment=no only where systemd-run has it and keep argv literal', {
+  skip: process.platform !== 'linux',
+}, async (t) => {
+  const h = fixture(t);
+  const cp = require('node:child_process');
+  const fake = path.join(__dirname, 'fixtures', 'containment-systemd.js');
+  const unit = 'tower-crane-123-0123456789abcdef.scope';
+  const limits = { tasks_max: 64, memory_max_bytes: memory };
+  for (const version of ['252', '253', '254', '259', 'none']) {
+    for (const configured of [false, true]) {
+      const label = `systemd ${version}${configured ? ' configured' : ''}`;
+      const group = path.join(h.base, 'versions', label, unit);
+      fs.mkdirSync(group, { recursive: true });
+      const report = path.join(h.base, 'versions', `${label}.json`);
+      const env = { ...h.env, XDG_RUNTIME_DIR: path.join(h.base, 'runtime'), TC_FAKE_CGROUP: group,
+        TC_FAKE_SYSTEMD_LOG: path.join(h.base, 'versions', `${label}.jsonl`), TC_FAKE_SYSTEMD_VERSION: version,
+        TOWER_CRANE_CONTAINMENT_REPORT: report };
+      // The version is cached per PATH, so each row loads the module afresh.
+      const file = require.resolve('../lib/containment');
+      const cached = require.cache[file];
+      delete require.cache[file];
+      const F = require(file);
+      require.cache[file] = cached;
+      scopeHost(t, '/user.slice/user-1000.slice/user@1000.service/test-fence.slice/session.scope');
+      t.mock.method(cp, 'spawnSync', (file, args) => {
+        if (file === 'systemd-run') return version === 'none' ? { status: 1, stdout: '' } : { status: 0, stdout: `systemd ${version} (${version}-1)\n` };
+        return { status: file === 'systemctl' ? 0 : 1 };
+      });
+      const plan = () => F.launchPlan(process.execPath, ['-e', 'console.log(process.argv[1])', '${HOME} $HOME'],
+        { env, resources: limits, scope: configured ? { CPUQuota: '200%' } : {} }, unit);
+      let planned;
+      try {
+        if (version === 'none' && configured) {
+          assert.throws(plan, /resource-scope-failed: configured outer scope requires/, label);
+          continue;
+        }
+        planned = plan();
+      } finally { t.mock.restoreAll(); }
+      if (version === 'none') {
+        assert.equal(planned.kernel, false, label);
+        assert.equal(planned.argv[0], process.execPath, label);
+        continue;
+      }
+      assert.equal(planned.argv[0], 'systemd-run', label);
+      assert.equal(planned.argv.includes('--expand-environment=no'), Number(version) >= 254, label);
+      const result = await G.treeExec(process.execPath, [fake, ...planned.argv.slice(1)], { env: { ...env, ...planned.scopeEnv } });
+      const registration = fs.existsSync(report) ? JSON.parse(readPublished(report, 'utf8')) : {};
+      assert.equal(result.status, 0, `${label}: ${result.stderr}${registration.error || ''}`);
+      assert.equal(result.stdout, '${HOME} $HOME\n', label);
+    }
   }
 });
 

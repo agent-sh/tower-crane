@@ -130,6 +130,93 @@ test('the host transport probe passes on a private peer and fails without one', 
   assert.match(failed.stderr, /runtime unset, stale bus: real user manager must retain kernel scopes/);
 });
 
+test('every systemctl call of a launch and its cleanup dials the probe runtime', {
+  skip: process.platform !== 'linux',
+}, async t => {
+  const h = cachedFixture(t, 'manager-calls', h => h.init(['--tasks-max', '64', '--memory-max-bytes', String(512 * 1024 ** 2)]));
+  const manager = path.join(__dirname, 'fixtures', 'containment-manager.js');
+  const bin = path.join(h.base, 'killed-systemd-run');
+  fs.mkdirSync(bin, { recursive: true });
+  // The scope dies before its runner reports, so the launch reads Result, kills the unit and settles it.
+  fs.writeFileSync(path.join(bin, 'systemd-run'), '#!/bin/sh\nexit 137\n', { mode: 0o755 });
+  const dead = cp.spawnSync(process.execPath, ['-e', '']).pid;
+  const failed = `tower-crane-${dead}-0123456789abcdef.scope`;
+  const script = `
+const C = require(${JSON.stringify(require.resolve('../lib/containment'))});
+const child = C.spawn(process.execPath, ['-e', ''], { resources: { tasks_max: 64, memory_max_bytes: ${512 * 1024 ** 2} }, stdio: 'ignore' });
+child.on('close', () => child.containmentDone.then(() => console.log(JSON.stringify({ unit: child.containment.unit, reason: child.resourceReason }))));`;
+  for (const [name, runtime, expected] of [
+    ['runtime unset', undefined, `/run/user/${process.getuid()}`],
+    ['runtime empty', '', `/run/user/${process.getuid()}`],
+    ['custom runtime', path.join(h.base, 'custom-runtime'), path.join(h.base, 'custom-runtime')],
+  ]) {
+    const log = path.join(h.base, `${name}.jsonl`);
+    const runtimes = path.join(h.base, `${name}-runtime.jsonl`);
+    const env = { ...h.env, PATH: bin, XDG_CACHE_HOME: path.join(h.base, `${name}-cache`), TC_FAKE_MANAGER_LOG: log,
+      TC_FAKE_MANAGER_RUNTIME_LOG: runtimes, TC_FAKE_FAILED_UNITS: `${failed} loaded failed failed\n`,
+      TOWER_CRANE_TEST_CONTAINMENT: '1', [C.MARK]: '' };
+    delete env.DBUS_SESSION_BUS_ADDRESS;
+    if (runtime === undefined) delete env.XDG_RUNTIME_DIR;
+    else env.XDG_RUNTIME_DIR = runtime;
+    const result = await G.treeExec(process.execPath, ['--require', manager, '-e', script], { env, timeout: 30000 });
+    assert.equal(result.status, 0, `${name}: ${result.stderr}`);
+    const { unit, reason } = JSON.parse(result.stdout);
+    assert.equal(reason, 'resource-scope-failed', name);
+    const calls = fs.readFileSync(runtimes, 'utf8').trim().split('\n').map(JSON.parse);
+    const seen = calls.map(call => call.args.join(' '));
+    for (const call of [
+      '--user show-environment',
+      '--user list-units --all --state=failed --plain --no-legend tower-crane-*.scope',
+      `--user reset-failed ${failed}`,
+      `--user show ${unit} -p Result --value`,
+      `--user kill --kill-whom=all --signal=SIGKILL ${unit}`,
+      `--user show ${unit} -p ActiveState --value`,
+      `--user reset-failed ${unit}`,
+    ]) assert.ok(seen.includes(call), `${name}: ${call} in ${JSON.stringify(seen)}`);
+    assert.deepEqual(calls.filter(call => call.runtime !== expected), [], name);
+  }
+});
+
+test('a keeper reads Result and settles its scope through its launch runtime', {
+  skip: process.platform !== 'linux',
+}, async t => {
+  const unit = 'tower-crane-1-0123456789abcdef.scope';
+  const exitCode = process.exitCode;
+  const saved = process.env.XDG_RUNTIME_DIR;
+  t.after(() => {
+    process.exitCode = exitCode;
+    if (saved === undefined) delete process.env.XDG_RUNTIME_DIR;
+    else process.env.XDG_RUNTIME_DIR = saved;
+  });
+  const spawnSync = cp.spawnSync;
+  for (const [name, inherited, launch, expected] of [
+    ['both unset', undefined, undefined, `/run/user/${process.getuid()}`],
+    ['inherited empty', '', undefined, `/run/user/${process.getuid()}`],
+    ['launch runtime differs', '/keeper/inherited', '/launch/runtime', '/launch/runtime'],
+    ['launch runtime only', undefined, '/launch/runtime', '/launch/runtime'],
+  ]) {
+    if (inherited === undefined) delete process.env.XDG_RUNTIME_DIR;
+    else process.env.XDG_RUNTIME_DIR = inherited;
+    const calls = [];
+    t.mock.method(cp, 'spawnSync', (file, args, opts) => {
+      if (file !== 'systemctl') return spawnSync(file, args, opts);
+      calls.push({ args, runtime: opts.env?.XDG_RUNTIME_DIR ?? null });
+      return { status: 0, stdout: 'oom-kill\n', stderr: '' };
+    });
+    const reset = new Promise(resolve => t.mock.method(cp, 'execFile', (file, args, opts, callback) => {
+      calls.push({ args, runtime: opts.env?.XDG_RUNTIME_DIR ?? null });
+      if (args[1] === 'reset-failed') return resolve();
+      process.nextTick(callback, null, 'failed\n', '');
+    }));
+    await C.guardRemaining({ rows: [], group: path.join('/sys/fs/cgroup', 'missing', unit), unit, runtime: launch,
+      limits: { tasks_max: 64, memory_max_bytes: 512 * 1024 ** 2 }, baseline: { tasks: 0, memory: 0 } });
+    await reset;
+    assert.deepEqual(calls.map(call => call.args[1]), ['show', 'show', 'reset-failed'], name);
+    assert.deepEqual(calls.map(call => call.runtime), Array(3).fill(expected), name);
+    t.mock.restoreAll();
+  }
+});
+
 test('manager probe results are cached per process for success and failure', {
   skip: process.platform !== 'linux',
 }, t => {
@@ -139,6 +226,7 @@ test('manager probe results are cached per process for success and failure', {
     let available = initial;
     const calls = [];
     t.mock.method(cp, 'spawnSync', (file, args, opts) => {
+      if (file === 'systemd-run') return { status: 0, stdout: 'systemd 259\n' };
       calls.push({ file, args, opts });
       return { status: available ? 0 : 1 };
     });
