@@ -751,8 +751,13 @@ test('pending CI on a PR closed without merging stalls at the next recheck', (t)
   const github = h.github();
   github.prs['7'].state = 'CLOSED';
   h.saveGithub(github);
-  h.consume();
-  assert.equal(latest().stalled, true);
+  const closedAt = h.logs().length;
+  const recheck = h.consume();
+  // This failed once in a loaded tests gate and never locally; the gate keeps
+  // only the output tail, so the message carries what the recheck did.
+  const did = () => JSON.stringify({ code: recheck.code, stderr: recheck.stderr.slice(-1500),
+    events: h.logs().slice(closedAt).map((e) => [e.cmd, e.detail.phase, e.detail.type, e.detail.ok, e.detail.error].filter((x) => x != null).join(' ')) });
+  assert.equal(latest().stalled, true, did());
   assert.match(latest().summary, /closed without merging/);
   assert.equal(h.readState('tasks.json').tasks[0].status, 'submitted');
   const checks = () => h.logs().filter((e) => e.cmd === 'check ci').length;
