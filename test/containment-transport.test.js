@@ -106,6 +106,30 @@ fs.readFileSync = (file, ...args) => {
   assert.ok(peer.calls.every(call => call.member === 'Get' || call.member === 'GetEnvironment'), JSON.stringify(peer.calls));
 });
 
+test('the host transport probe passes on a private peer and fails without one', {
+  skip: process.platform !== 'linux',
+}, async t => {
+  const peer = await start(t);
+  const missing = fs.mkdtempSync(path.join(path.dirname(peer.root), 't423-missing-'));
+  t.after(() => fs.rmSync(missing, { recursive: true, force: true }));
+  const script = path.join(__dirname, '..', 'scripts', 'probe-containment-transport.js');
+  const hook = path.join(__dirname, 'fixtures', 'probe-transport-host.js');
+  // The peer answers on this process's event loop, so the probe runs asynchronously.
+  const run = runtime => G.treeExec(process.execPath, ['--require', hook, script], {
+    env: { ...process.env, [C.MARK]: '', XDG_RUNTIME_DIR: runtime, TOWER_CRANE_TEST_PEER_RUNTIME: runtime }, timeout: 30000,
+  });
+  const ok = await run(peer.root);
+  assert.equal(ok.status, 0, ok.stderr);
+  for (const name of ['runtime unset, stale bus', 'runtime empty, stale bus', 'runtime present, no session bus', 'custom runtime, stale bus']) {
+    assert.match(ok.stdout, new RegExp(`${name}: canScope=true, systemd-run scope planned`));
+  }
+  assert.ok(peer.calls.length >= 4, JSON.stringify(peer.calls));
+  assert.ok(peer.calls.every(call => call.member === 'Get' || call.member === 'GetEnvironment'), JSON.stringify(peer.calls));
+  const failed = await run(missing);
+  assert.notEqual(failed.status, 0, failed.stdout);
+  assert.match(failed.stderr, /runtime unset, stale bus: real user manager must retain kernel scopes/);
+});
+
 test('manager probe results are cached per process for success and failure', {
   skip: process.platform !== 'linux',
 }, t => {
