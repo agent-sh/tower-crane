@@ -18,6 +18,7 @@ Arguments: `$ARGUMENTS`. Use `TOWER_CRANE_TASK` and `TOWER_CRANE_AGENT` when set
    - for a research task on any tier, read `research/<id>.json` at the submitted sha and the sources receipt. Check each claim maps to a cited source, its quote supports the claim, and no factual claim in the deliverable lacks a citation. Successful fetching and quote matching do not establish that a source is credible or that the claim follows from the quote;
    - claims in the PR body, docs, comments and changelog are true of the code (current models most often leave stale or overstated text, not broken syntax);
    - copies and contracts the change touched elsewhere still agree (docs, configs, other callers, other locales);
+   - each suite named by an added or changed `tests-map.declared.json` entry really exercises the mapped file; a passing tests gate validates paths, not that relationship. Check every file the entry covers, including glob matches. An empty array is a deliberate exemption that needs a reason;
    - edge cases, error paths that fail silently, wrong conditions, races, and security boundaries the change crosses;
    - anything added that nothing uses, and anything the standards rule out;
    - files the packet's `## Scope` lists outside the paths the task names: each needs a reason in the task, or it is a finding.

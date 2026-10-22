@@ -77,6 +77,20 @@ test('mapped head suites preserve scoped proof and policy-bound evidence through
   assert.equal(h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'tests').ok, false);
 });
 
+test('mapped selection overlays declarations at submitted head and keeps policy-bound evidence', (t) => {
+  const h = fixture(t, { '**/*.md': [] });
+  const before = h.readState('project.json');
+  fs.writeFileSync(path.join(h.repo, 'tests-map.declared.json'), '{"value.js":["test/value.test.js"]}\n');
+  h.git(['add', '.']);
+  h.git(['commit', '-qm', 'declare new source']);
+  h.ok(['submit', 'T1', '--sha', h.git(['rev-parse', 'HEAD']), '--agent', 'worker']);
+  const result = check(h);
+  assert.equal(result.receipt.head_mode, 'mapped', result.summary);
+  assert.deepEqual(result.receipt.head_tests, ['test/value.test.js']);
+  assert.deepEqual(h.readState('project.json'), before);
+  assert.equal(h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'tests').ok, true);
+});
+
 for (const [reason, settings, flags] of [
   ['missing mapped test', { 'value.js': ['test/missing.test.js'], '**/*.md': [] }, []],
   ['outside tests.paths', { 'value.js': ['value.js'], '**/*.md': [] }, []],

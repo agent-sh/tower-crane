@@ -115,7 +115,7 @@ for (const [name, settings, valueTest, ok, pattern] of [
   ['the task\'s test does not run the file no entry covers', { '**/*.md': [] }, "console.log('value is not loaded');\n", false,
     /coverage gap: no tests\.map entry covers value\.js, and the task's changed tests \(test\/value\.test\.js\) do not run it\./],
   ['a documentation file has no entry', { 'value.js': ['test/mapped.test.js'] }, undefined, false,
-    /coverage gap: no tests\.map entry covers README\.md, .*needs a declared entry instead: the orchestrator adds it with tower-crane project set --tests-map\./],
+    /coverage gap: no tests\.map entry covers README\.md, .*tests-map\.declared\.json/],
 ]) {
   test(`a changed file without a map entry: ${name}`, (t) => {
     const h = fixture(t, settings, valueTest);
@@ -134,6 +134,72 @@ for (const [name, settings, valueTest, ok, pattern] of [
     if (settings['value.js']?.[0] === 'test/gone.test.js') assert.deepEqual(result.receipt.mapped_missing, ['test/gone.test.js']);
   });
 }
+
+test('a task declares its new data file at submitted head without changing project settings', (t) => {
+  const h = fixture(t);
+  const before = h.readState('project.json');
+  fs.writeFileSync(path.join(h.repo, 'payload.json'), '{"value":1}\n');
+  fs.writeFileSync(path.join(h.repo, 'tests-map.declared.json'), JSON.stringify({
+    'payload.json': ['test/value.test.js'],
+    'value.js': ['test/value.test.js'],
+  }));
+  fs.appendFileSync(path.join(h.repo, 'test/value.test.js'),
+    "require('node:assert/strict').equal(JSON.parse(require('node:fs').readFileSync('payload.json', 'utf8')).value, 1);\n");
+  h.git(['add', '.']);
+  h.git(['commit', '-qm', 'declare data coverage']);
+  const sha = h.git(['rev-parse', 'HEAD']);
+  h.ok(['submit', 'T1', '--sha', sha, '--agent', 'worker']);
+  // Neither the base declaration nor an uncommitted edit is the submitted declaration.
+  fs.writeFileSync(path.join(h.repo, 'tests-map.declared.json'), '{"payload.json":["test/missing.test.js"]}');
+  const result = check(h);
+  assert.equal(result.ok, true, result.summary);
+  assert.equal(result.receipt.coverage_gaps, undefined);
+  assert.ok(!result.receipt.head_tests.includes('test/mapped.test.js'), 'the declaration overrides the measured entry');
+  assert.deepEqual(h.readState('project.json'), before, 'the worker changes no project setting');
+  assert.equal(counts(h), true);
+  const selection = cp.spawnSync(process.execPath, ['-e', `
+    require(${JSON.stringify(path.join(ROOT, 'lib/gates/tests'))}).queueSelection({}, ${JSON.stringify(h.repo)},
+      ${JSON.stringify(before)}, 'main', ${JSON.stringify(sha)}, 'code').then(s => console.log(JSON.stringify(s)));
+  `], { cwd: h.repo, env: h.env, encoding: 'utf8' });
+  assert.equal(selection.status, 0, selection.stderr);
+  assert.deepEqual(JSON.parse(selection.stdout).tests, result.receipt.head_tests, 'the merge queue reads the same head declaration');
+});
+
+for (const [name, text] of [
+  ['invalid JSON', '{'],
+  ['null', 'null'],
+  ['escaping source', '{"../payload.json":["test/value.test.js"]}'],
+  ['missing suite', '{"payload.json":["test/missing.test.js"]}'],
+  ['support file', '{"payload.json":["test/helpers.js"]}'],
+]) {
+  test(`a bad declaration belongs to the task: ${name}`, (t) => {
+    const h = fixture(t);
+    fs.writeFileSync(path.join(h.repo, 'tests-map.declared.json'), text);
+    fs.writeFileSync(path.join(h.repo, 'test/helpers.js'), 'module.exports = 1;\n');
+    h.git(['add', '.']);
+    h.git(['commit', '-qm', 'bad declaration']);
+    h.ok(['submit', 'T1', '--sha', h.git(['rev-parse', 'HEAD']), '--agent', 'worker']);
+    const result = check(h, 1);
+    assert.match(result.summary, /tests-map\.declared\.json/);
+    assert.equal(result.worker_failure, true);
+    assert.equal(result.config_failure, undefined);
+    assert.equal(result.commands.filter((c) => c.command !== 'git').length, 0);
+  });
+}
+
+test('the coverage gap run measures a new JSON file read by the changed test', (t) => {
+  const h = fixture(t);
+  fs.writeFileSync(path.join(h.repo, 'payload.json'), '{"value":1}\n');
+  fs.appendFileSync(path.join(h.repo, 'test/value.test.js'),
+    "require('node:assert/strict').equal(JSON.parse(require('node:fs').readFileSync('payload.json', 'utf8')).value, 1);\n");
+  h.git(['add', '.']);
+  h.git(['commit', '-qm', 'test data read']);
+  h.ok(['submit', 'T1', '--sha', h.git(['rev-parse', 'HEAD']), '--agent', 'worker']);
+  const result = check(h);
+  assert.equal(result.ok, true, result.summary);
+  assert.deepEqual(result.receipt.coverage_gaps, ['payload.json']);
+  assert.match(result.summary, /Coverage: the changed tests ran payload\.json/);
+});
 
 // The coverage run expands the proof template on the changed tests, so a native crash it reruns is
 // recorded as the proof step, never as the head command.
@@ -218,13 +284,70 @@ fs.copyFileSync(${JSON.stringify(file)}, path.join(args[args.indexOf('-D') + 1],
 `);
   const pinned = p.json(['tests', 'map', 'refresh', '--from-run', '4242', '--agent', 'orchestrator']);
   assert.deepEqual(JSON.parse(fs.readFileSync(calls, 'utf8').trim()).slice(0, 7), ['run', 'download', '4242', '-R', 'acme/demo', '-n', 'tests-coverage-map']);
-  assert.deepEqual({ run: pinned.run, sha: pinned.sha, declared: pinned.declared }, { run: 4242, sha: head, declared: 2 });
-  // Measured entries replace the pinned ones; the globs and files coverage cannot see stay as declared.
-  assert.deepEqual(p.readState('project.json').tests.map, {
-    '**/*.md': [], 'docs/cli.md': ['test/other.test.js'], 'lib/merge.js': ['test/cli.test.js'], 'tool/runner.js': ['test/cli.test.js'],
-  });
+  assert.deepEqual({ run: pinned.run, sha: pinned.sha, measured: pinned.measured }, { run: 4242, sha: head, measured: 2 });
+  assert.equal(pinned.declared, undefined);
+  assert.deepEqual(p.readState('project.json').tests.map, artifact.map, 'refresh retains only measured entries');
   const events = fs.readFileSync(path.join(p.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   assert.equal(events.filter((e) => e.cmd === 'tests map refresh').at(-1).detail.authority, 'orchestrator');
+});
+
+test('coverage maps successful repository data reads to their test, including children and fs API variants', (t) => {
+  const h = makeRepo(t);
+  fs.mkdirSync(path.join(h.repo, 'test'), { recursive: true });
+  const cases = ['sync', 'callback', 'promise', 'open-sync', 'open-callback', 'open-promise', 'open-numeric', 'child', 'child-esm', '..inside'];
+  for (const name of cases) fs.writeFileSync(path.join(h.repo, `${name}.json`), '{"value":1}\n');
+  fs.mkdirSync(path.join(h.repo, 'node_modules'), { recursive: true });
+  fs.writeFileSync(path.join(h.repo, 'node_modules/ignored.json'), '{}');
+  const outside = path.join(h.base, 'outside.json');
+  fs.writeFileSync(outside, '{}');
+  if (process.platform !== 'win32') fs.symlinkSync(outside, path.join(h.repo, 'external-link.json'));
+  fs.writeFileSync(path.join(h.repo, 'test/data.test.js'), `
+const test = require('node:test'), assert = require('node:assert/strict'), fs = require('node:fs');
+test('reads data', async () => {
+  assert.equal(JSON.parse(fs.readFileSync(require('node:url').pathToFileURL(require('node:path').resolve('sync.json')), 'utf8')).value, 1);
+  await new Promise((resolve, reject) => fs.readFile(Buffer.from('callback.json'), (err, data) => {
+    if (err) return reject(err); assert.equal(JSON.parse(data).value, 1); resolve();
+  }));
+  assert.equal(JSON.parse(await fs.promises.readFile('promise.json', 'utf8')).value, 1);
+  fs.closeSync(fs.openSync('open-sync.json', 'r'));
+  await new Promise((resolve, reject) => fs.open('open-callback.json', 'r', (err, fd) => {
+    if (err) return reject(err); fs.closeSync(fd); resolve();
+  }));
+  await (await fs.promises.open('open-promise.json', 'r')).close();
+  fs.closeSync(fs.openSync('open-numeric.json', fs.constants.O_RDONLY));
+  require('node:child_process').execFileSync(process.execPath, ['-e',
+    "require('node:assert/strict').equal(JSON.parse(require('node:fs').readFileSync('child.json', 'utf8')).value, 1)"]);
+  require('node:child_process').execFileSync(process.execPath, ['--input-type=module', '-e',
+    "import { readFileSync } from 'node:fs'; import assert from 'node:assert/strict'; assert.equal(JSON.parse(readFileSync('child-esm.json', 'utf8')).value, 1)"]);
+  fs.readFileSync('..inside.json');
+  assert.throws(() => fs.readFileSync('missing.json'));
+  await assert.rejects(fs.promises.readFile('missing-promise.json'));
+  fs.writeFileSync('write-only.json', '{}'); fs.closeSync(fs.openSync('write-only.json', 'w'));
+  fs.closeSync(fs.openSync('numeric-write-only.json', fs.constants.O_WRONLY | fs.constants.O_CREAT));
+  fs.readFileSync('node_modules/ignored.json');
+  fs.readFileSync(${JSON.stringify(outside)});
+  if (process.platform !== 'win32') {
+    fs.readFileSync('external-link.json');
+    fs.closeSync(fs.openSync('test', 'r'));
+  }
+});
+`);
+  fs.writeFileSync(path.join(h.repo, 'test/other.test.js'),
+    "require('node:test')('other', () => { require('node:fs').readFileSync('sync.json'); });\n");
+  h.git(['add', '.']);
+  h.git(['commit', '-qm', 'data read fixture']);
+  const dir = path.join(h.base, 'coverage');
+  const built = cp.spawnSync(process.execPath, [path.join(ROOT, 'scripts/tests-coverage-map.js'), 'run', '--dir', dir, '--',
+    process.execPath, '--test', 'test/data.test.js', 'test/other.test.js'], { cwd: h.repo, env: h.env, encoding: 'utf8' });
+  assert.equal(built.status, 0, built.stderr + built.stdout);
+  const artifact = JSON.parse(fs.readFileSync(path.join(dir, 'tests-coverage-map.json'), 'utf8'));
+  for (const name of cases) assert.deepEqual(artifact.map[`${name}.json`],
+    name === 'sync' ? ['test/data.test.js', 'test/other.test.js'] : ['test/data.test.js'], name);
+  for (const name of ['missing.json', 'missing-promise.json', 'write-only.json', 'numeric-write-only.json',
+    'node_modules/ignored.json', '../outside.json', 'external-link.json', 'test']) {
+    assert.equal(artifact.map[name], undefined, name);
+  }
+  assert.deepEqual(fs.readdirSync(path.join(dir, 'raw')).flatMap((slug) => fs.readdirSync(path.join(dir, 'raw', slug))), []);
 });
 
 test('test/run.js with TC_TEST_COVERAGE_DIR writes the coverage map of the files it ran', (t) => {
