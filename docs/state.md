@@ -104,3 +104,7 @@ Existing links use these anchors. Follow the link to the contract in its area.
 <a id="command-environment"></a>[command-environment](state/tasks.md#command-environment)
 
 <a id="host-tmp"></a>[host-tmp](state/tasks.md#host-tmp)
+
+<a id="credentials"></a>[credentials](state/tasks.md#credentials)
+
+<a id="broker-verbs"></a>[broker-verbs](state/containment.md#broker-verbs)

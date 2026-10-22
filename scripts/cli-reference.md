@@ -338,6 +338,17 @@ tower-crane ladder set hard --env_file '~/.config/claude-code/bedrock.env' --age
 tower-crane ladder set review --sandbox '{"write":[]}' --scope '{}' --agent owner
 ```
 
+A provider token belongs in the OS store, not in an env file. The owner stores it once and names it on each rung; spawn reads it before launch, and the harness gets it through a broker or an auth command, never its environment ([credentials](state.md#credentials)):
+
+```sh
+tower-crane credentials import --env-file ~/.config/claude-code/bedrock.env --var AWS_BEARER_TOKEN_BEDROCK --name bedrock-bearer
+tower-crane ladder set hard --credential bedrock-bearer --clear env_file --agent owner
+tower-crane credentials check
+tower-crane credentials set bedrock-bearer < new-token-file
+```
+
+`credentials set` reads the value from stdin (without echo at a terminal), never from argv. With no `--store`, it writes the user file's store for the name, else the Secret Service, then systemd-creds, on Linux. `credentials check` exits 1 when a credential cannot be read and says why. None of the four commands needs a state directory, and a task process cannot run one that writes.
+
 `init` accepts the same `--sandbox JSON`, `--env JSON`, `--env_file FILE` and `--scope JSON` flags. `project set` replaces the named project field; `null` removes it. `ladder set --clear sandbox`, `--clear env`, `--clear env_file` or `--clear scope` restores the project default for that rung. Setting, repeating and clearing are owner-required. Rung `env` merges over project `env`; these override the env file, which overrides the spawning environment. A rung file replaces the project file. Each rung sandbox field replaces the corresponding project field. A rung `scope` replaces the entire project scope; `{}` clears its optional properties for that rung, and the containment caps remain.
 
 Agent launches strip inherited Node injection variables, including `NODE_OPTIONS` and `NODE_PATH`, before applying `env` and `env_file`. Set them there when a harness needs them explicitly. Retries and fallback routes follow the same rule ([agent environment](state.md#ladder)).
@@ -687,12 +698,18 @@ command or tests policy, reruns in the next reaction without one.
 Automatic failures are recorded in `automation` events. Concurrent
 consumers serialize per task and reuse completed event receipts; commands
 execute outside the state lock. Deferred or errored reactions remain
-retryable at watcher startup. Accepted PRs already merged remotely are
-confirmed through the merge gate, preserving the accepted head check.
-`merge ID` holds the same task reservation as reactions. It waits while
-an observable reaction runs on the task, then merges or, when the reaction
-already merged, confirms the accepted head through the merge gate. A
-reaction that starts during a manual merge queues; the merge drains it
+retryable at watcher startup. Accepted PRs already merged remotely without
+a local merge receipt are confirmed through the merge gate, preserving the
+accepted head check.
+For an accepted task with an audited, successful, non-waived merge receipt
+at its current head and revision, `merge ID` prints `already merged at <ref>`
+and returns the recorded result locally. It makes no GitHub lookup, validates
+no merge text or method, takes no reservation and adds no evidence or events.
+Otherwise `merge ID` holds the same task reservation as reactions. It waits
+while an observable reaction runs on the task, then merges or returns the
+recorded result if the reaction recorded the merge while it waited. That
+wait still records its reservation and release. A reaction that starts
+during a manual merge queues; the merge drains it
 after releasing the task, and it finds the task merged. A reservation
 held by an unobservable executor refuses the merge.
 The merge queue takes the same reservation for the head of the line

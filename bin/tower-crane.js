@@ -251,6 +251,14 @@ async function main(argv) {
     for (const r of cmd.required || []) {
       if (own[r] === undefined) throw usage(`${cmd.name} needs --${r}; usage: tower-crane ${cmd.name} ${cmd.usage}`);
     }
+    // The machine's credential store is no project's state: these commands
+    // need no state directory and no identity, and refuse a task process.
+    if (cmd.stateless) {
+      const res = await cmd.run({ cwd: process.cwd(), env: process.env, json: !!globals.json, flags: own, pos: parsed.pos });
+      if (globals.json) out(JSON.stringify(res.data, null, 2));
+      else out(res.text);
+      return res.code || 0;
+    }
     let agent = globals.agent ?? process.env.TOWER_CRANE_AGENT;
     // Inspect descriptors without initializing stdin and changing pipe flags.
     const ownerTerminal = isatty(0) && isatty(1);
