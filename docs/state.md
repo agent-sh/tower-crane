@@ -772,7 +772,8 @@ Full containment cleanup without retained identities still uses `taskkill /T /F`
 Retention requires recorded dispatch or controller pid/start identities.
 Verified orchestrator CLI commands register `{pid, start, host, role, command}`
 under `controllers/<pid>-<nonce>.json` in their state directory and remove the
-record when they return. A command started before its spawn is recorded registers
+record when they return. A `wait --follow` that runs reactions (not `--observe`)
+adds `reactions: true`; spawn supervisors hand their reactions to it. A command started before its spawn is recorded registers
 once the record appears ([agent identity](#agent-identity)), before the command
 runs. Linux uses process start ticks; macOS and Windows use
 the process snapshot's start time. A background orchestrator `wait --inbox`
@@ -848,7 +849,7 @@ A unit is one piece of work the governor admits and measures:
 
 | Kind | Admitted by | Held by | Stopped how |
 | --- | --- | --- | --- |
-| `worker`, `reviewer`, `small`, `orchestrator` | `spawn` (also `spawn --ready`, automatic refill, review dispatch), before the supervisor starts | the agent's supervisor, from its launch until its harness has exited; the supervisor then removes the unit before it records the exit and runs the gate reactions, which take places of their own | SIGTERM to the supervisor, which stops its harness and records the exit; the orchestrator is never stopped |
+| `worker`, `reviewer`, `small`, `orchestrator` | `spawn` (also `spawn --ready`, automatic refill, review dispatch), before the supervisor starts | the agent's supervisor, from its launch until its harness has exited; the supervisor then removes the unit before it records the exit and runs the gate reactions or hands them to the wait host, and reactions take places of their own | SIGTERM to the supervisor, which stops its harness and records the exit; the orchestrator is never stopped |
 | `tests`, `clean`, `ci` (local CI only) | `check tests`, `check clean`, `check ci` with `ci.local`, and the reactions and `accept` that run them | the process running the gate | its own process aborts the gate on its next probe; SIGTERM to the gate's command groups when it has not ended ten seconds after the stop and the stop line is still crossed |
 | `suite` | the merge queue's merged-head suite, once the suite will run | the process running the queue | as a gate |
 
@@ -1537,7 +1538,7 @@ The orchestrator's technical rule takes precedence over `answerers`, including f
 
 ## events.jsonl
 
-Long-lived wait hosts, spawn supervisors and board servers retain parsed history and a byte offset. They read only appended bytes, buffer incomplete lines until a newline arrives, go back to where a recorded cut left the log ([Durability and write order](#durability-and-write-order)), and reset on any other truncation or on file replacement. Reset rebuilds retained history from the beginning. A restore that also brings back a shorter `events.cuts.jsonl` makes a saved `OFFSET:CUTS` cursor whose `CUTS` is past the restored file's length exit 2 from `wait` and 400 from `GET /api/messages`, as an offset past a restored log does; restart those clients with a fresh cursor. A live reader whose log was replaced starts over with the restored length; one whose log was rewritten in place ignores cut records until `events.cuts.jsonl` grows past the length it had read. Active waits and board SSE do not wake for restored records, across as many reads as the restore takes. They keep the ids of the records they read since they started: after a reset a record with one of those ids is history, and so is history from before a reader's start cursor up to the line that ended at that cursor. Any other record wakes, whatever its writer's clock. A restore that lacks the start line, an older backup, leaves only time: records whose `at` is no later than the reader's start are history. Project, task and decision snapshots whose files are unchanged and whose event log has had nothing appended since they were read retain their validation and parsed values; mutations always load fresh writable copies. Directory watches wake readers promptly; bounded fallback checks also cover lost notifications. The broker handles requests through command subprocesses and does not poll the log.
+Long-lived wait hosts and board servers retain parsed history and a byte offset. A spawn supervisor retains only its own task's events and offsets, and takes its task out of `tasks.json` without parsing the other tasks (every task when a project budget needs their totals); its state writes run in a short-lived child process that reads the whole history, so the supervisor stays near the size of a bare process for its agent's life. A process that once held a large parsed history keeps that memory resident after freeing it. Lookups a reader derives from the whole history, such as each task's latest reaction receipt, the queued reactions or the agents a spawn started, are built once per history and reused until something is appended; the clock and process probes still apply on every pass. They read only appended bytes, buffer incomplete lines until a newline arrives, go back to where a recorded cut left the log ([Durability and write order](#durability-and-write-order)), and reset on any other truncation or on file replacement. Reset rebuilds retained history from the beginning. A restore that also brings back a shorter `events.cuts.jsonl` makes a saved `OFFSET:CUTS` cursor whose `CUTS` is past the restored file's length exit 2 from `wait` and 400 from `GET /api/messages`, as an offset past a restored log does; restart those clients with a fresh cursor. A live reader whose log was replaced starts over with the restored length; one whose log was rewritten in place ignores cut records until `events.cuts.jsonl` grows past the length it had read. Active waits and board SSE do not wake for restored records, across as many reads as the restore takes. They keep the ids of the records they read since they started: after a reset a record with one of those ids is history, and so is history from before a reader's start cursor up to the line that ended at that cursor. Any other record wakes, whatever its writer's clock. A restore that lacks the start line, an older backup, leaves only time: records whose `at` is no later than the reader's start are history. Project, task and decision snapshots whose files are unchanged and whose event log has had nothing appended since they were read retain their validation and parsed values; mutations always load fresh writable copies. Directory watches wake readers promptly; bounded fallback checks also cover lost notifications. The broker handles requests through command subprocesses and does not poll the log.
 
 Trusted watchers and dispatch supervisors consume lifecycle events as
 software reactions. They run submission gates, dispatch review after the
@@ -1546,6 +1547,14 @@ PRs with green gates, and detect conflicting outstanding PRs after merges.
 Conflict rework names the hand-written files. Generated-file repair can
 advance the worker branch or leave a mixed merge prepared. Native
 workers without an exit record need explicit review dispatch.
+A supervisor whose agent exited and whose exit is recorded leaves its own
+reactions (its agent's `submit`, review evidence and `spawn exit`) to a live
+`wait --follow` on the same host that runs reactions, found by its controller
+record: it queues each one still owed as `automation queued` with
+`handed_to`, the host's pid, and exits. The queue entry wakes that host and
+outlives both processes, so any later trusted `wait` drains it. With no such
+host the supervisor drains them itself, in a child process in the
+dispatcher's environment, and exits when the drain ends.
 A reviewer whose `spawn exit` receipt shows code 0, no signal and no
 availability failure, with no review evidence at the current head and
 revision, holds automatic review dispatch there: the next reviewer would read

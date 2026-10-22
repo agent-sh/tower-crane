@@ -478,7 +478,7 @@ test('a supervisor whose agent exited hands its reactions to the live wait host 
   const release = path.join(h.base, 'release');
   fs.writeFileSync(suite, `const fs = require('node:fs');
 fs.appendFileSync(${JSON.stringify(path.join(h.base, 'suites'))}, 'run\\n');
-const end = Date.now() + 120000;
+const end = Date.now() + 120000; // wait-allow: a gate the test never releases ends after two minutes and fails the run
 const poll = () => (fs.existsSync(${JSON.stringify(release)}) || Date.now() >= end ? process.exit(0) : setTimeout(poll, 50)); // wait-allow: probe cadence only; the release signal and its two minutes bound this fixture
 poll();
 `);
@@ -492,8 +492,8 @@ const run = (args) => cp.execFileSync(process.execPath, [${JSON.stringify(requir
 run(['claim', task]);
 const file = path.join(process.env.AUTOMATION_CONTEXT_DIR, task);
 fs.writeFileSync(file, '');
-const poll = () => { // wait-allow: probe cadence only; the go file releases the worker
-  if (!fs.existsSync(file + '.go')) return setTimeout(poll, 25);
+const poll = () => {
+  if (!fs.existsSync(file + '.go')) return setTimeout(poll, 25); // wait-allow: probe cadence only; the go file releases the worker
   run(['submit', task, '--sha', ${JSON.stringify(h.sha)}, '--pr', '8']);
   fs.writeFileSync(file + '.exited', '');
 };
@@ -517,14 +517,12 @@ poll();
     h.saveGithub(state);
     fs.writeFileSync(`${h.marker('T3')}.go`, '');
     await waitFor(`${h.marker('T3')}.exited`, { alive: child, what: 'the T3 worker submits and exits' });
-    const exited = performance.now();
     const BOUND_MS = 30000;
     const gone = await Promise.race([
       waitUntil(() => !require('./helpers').detachedAlive({ pid: spawn.monitor_pid }), { what: 'the T3 supervisor exits' }).then(() => true),
       new Promise((resolve) => { setTimeout(resolve, BOUND_MS, false); }), // wait-allow: the exit bound under test
     ]);
     assert.ok(gone, `the T3 supervisor still runs ${BOUND_MS / 1000} s after its agent exited`);
-    assert.ok(performance.now() - exited < BOUND_MS);
     assert.equal(suites(), 1, 'the supervisor ran no gate of its own');
     const queued = h.logs().filter((e) => e.cmd === 'automation queued' && e.task === 'T3');
     assert.ok(queued.some((e) => e.detail.handed_to === child.pid), JSON.stringify(queued));

@@ -6,10 +6,13 @@
 // three one-minute windows with no event appended. Then the agent exits and
 // the probe times how long its monitor takes to exit.
 //
-//   node scripts/bench-supervision.js [--compare REF] [--windows N] [--window-s S]
+//   node scripts/bench-supervision.js [--compare REF] [--targets] [--windows N] [--window-s S] [--profile DIR]
 //
 // --compare REF runs the same load on REF's tree first (git archive of the
 // merge base of HEAD and REF), so both columns come from one host and load.
+// --targets exits 1 when this tree misses the lines T507 set: an idle monitor
+// under 1% of a core and 150 MB, the follow loop under 5% of a core, and the
+// monitor gone within two minutes of its agent's exit.
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -199,13 +202,29 @@ async function compare(ref) {
       console.log(JSON.stringify({ [name]: rows[name], commit: name === 'before' ? base : head }));
     }
     console.log(JSON.stringify({ before: summary(rows.before), after: summary(rows.after) }));
+    return rows.after;
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+}
+
+function missed(result) {
+  const s = summary(result);
+  return [
+    s.monitor_cpu_s_per_min >= 0.6 && `idle monitor ${s.monitor_cpu_s_per_min.toFixed(2)} CPU-s/min is not under 0.6 (1% of a core)`,
+    s.monitor_rss_mb >= 150 && `idle monitor ${s.monitor_rss_mb.toFixed(0)} MB is not under 150 MB`,
+    s.follow_cpu_s_per_min >= 3 && `follow loop ${s.follow_cpu_s_per_min.toFixed(2)} CPU-s/min is not under 3 (5% of a core)`,
+    s.monitor_exit_s === null && 'the monitor still ran two minutes after its agent exited',
+  ].filter(Boolean);
 }
 
 const ref = flag('--compare');
 (ref ? compare(ref) : measure().then((result) => {
   console.error(JSON.stringify(summary(result)));
   console.log(JSON.stringify(result));
-})).catch((e) => { console.error(e); process.exitCode = 1; });
+  return result;
+})).then((result) => {
+  const misses = args.includes('--targets') ? missed(result) : [];
+  for (const miss of misses) console.error(`missed: ${miss}`);
+  if (misses.length) process.exitCode = 1;
+}).catch((e) => { console.error(e); process.exitCode = 1; });
