@@ -69,7 +69,7 @@ test('a spawned codex agent is pointed at the user\'s global rules, loads none o
   assert.ok(!seen.rules.join('\n').includes('planted-rule'), 'no approved-command rules');
   assert.match(seen.rules.join('\n'), /pattern = \["gh", "pr", "merge"\],\n {4}decision = "forbidden"/, 'the role denies gh writes');
   assert.equal(seen.auth, `{"token":"${SECRET}-CRED"}`, 'auth.json reaches the agent');
-  assert.equal(seen.env, `AWS_BEARER_TOKEN_BEDROCK=${SECRET}-ENV\nexport BEDROCK_PLAIN_SETTING=plain\n`, '.env reaches codex\'s own process');
+  assert.equal(seen.env, null, 'the user\'s .env, which holds a bearer token, stays out of the home; a credential in the OS store replaces it');
   // ...but not the commands codex runs: codex hands them its environment
   // through this policy, which takes out credential-shaped names and every
   // name .env sets, and keeps what Tower Crane gave the agent.
@@ -93,7 +93,7 @@ test('a spawned codex agent is pointed at the user\'s global rules, loads none o
   assert.ok(!seen.config.notify.includes('planted-notify'));
   assert.deepEqual(Object.keys(seen.config.hooks).sort(), ['PostToolUse', 'Stop', 'UserPromptSubmit']);
   const home = path.join(h.state, 'homes', started.agent);
-  for (const f of ['auth.json', '.env']) assert.ok(fs.lstatSync(path.join(home, f)).isSymbolicLink(), `${f} is linked`);
+  assert.ok(fs.lstatSync(path.join(home, 'auth.json')).isSymbolicLink(), 'auth.json is linked');
   assert.equal(fs.readFileSync(path.join(home, 'fixture-main.config.toml'), 'utf8'), 'model = "s"\n\n[model_providers.r]\nname = "R"\n', 'the profile without its tokens or instructions');
   assert.equal(fs.statSync(path.join(home, 'config.toml')).mode & 0o777, 0o600);
   assert.equal(seen.home, path.join(home, 'home'), 'HOME is the agent\'s own');
