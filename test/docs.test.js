@@ -19,6 +19,8 @@ test('documentation anchors and links handle Markdown variants in process', () =
     ['## <script', ['script']],
     ['## <scr<a>ipt>', ['ipt']],
     ['## <<script>script>', ['script']],
+    ['## >A<span>B</span><', ['ab']],
+    ['## A😀É́', ['aé́']],
   ];
   for (const [text, expected] of variants) assert.deepEqual([...anchors(text)], expected);
   assert.deepEqual(links('`[ignored](missing)`\n[valid](area.md#topic)\n[ref]: <other.md#anchor>\n'),

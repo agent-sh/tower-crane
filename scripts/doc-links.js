@@ -18,7 +18,23 @@ function withoutFences(text) {
 }
 
 function slug(text) {
-  return text.toLowerCase().replace(/<[^>]*>|[<>]|[^\p{L}\p{N}\p{M}_\s-]/gu, '').replace(/\s/g, '-');
+  const heading = text.toLowerCase();
+  const allowed = /^[\p{L}\p{N}\p{M}_-]$/u;
+  let result = '';
+  let close = heading.indexOf('>');
+  for (let at = 0; at < heading.length;) {
+    const char = String.fromCodePoint(heading.codePointAt(at));
+    if (char === '<' && close > at) {
+      at = close + 1;
+      close = heading.indexOf('>', at);
+      continue;
+    }
+    if (char === '>') close = heading.indexOf('>', at + 1);
+    if (/\s/u.test(char)) result += '-';
+    else if (allowed.test(char)) result += char;
+    at += char.length;
+  }
+  return result;
 }
 
 function anchors(text) {
