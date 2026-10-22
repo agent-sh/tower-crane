@@ -39,12 +39,12 @@ test('the budget admits work only under every defer line, counting growth, other
     ['other sessions may return to their recent peak', reading({ used: 4 }), registry([], [recent(8, 3)]), false, /other sessions 3\.6 GiB toward their peak of the last 30 minutes/],
     ['a peak\'s claim fades over the window', reading({ used: 4 }), registry([], [recent(8, 25)]), true],
     ['a peak past the window no longer counts', reading({ used: 4 }), registry([], [recent(9, 31)]), true],
-    // The other-sessions peak term: a session takes back only what the level gave back.
-    ['a peak the level gave back is room', reading({ used: 4 }), registry([], [{ ...recent(8, 3), used: 8 * GiB }]), false, /other sessions 3\.6 GiB toward their peak/],
-    // 5 GiB in use, 3 of them a unit's; a minute ago the level held the same 5 GiB, all of it outside any unit.
-    ['a peak that was Tower Crane memory now in a unit is no room', reading({ used: 5 }), registry([unit('worker', 1, { expected: 3 * GiB, measured: 3 * GiB })], [{ ...recent(5, 1), used: 5 * GiB }]), true],
-    ['nor the part of a peak the level did not give back', reading({ used: 5 }), registry([unit('worker', 1, { expected: 3 * GiB, measured: 3 * GiB })], [{ ...recent(6, 0), used: 6 * GiB }]), true],
-    ['while the part it gave back stays room', reading({ used: 5 }), registry([unit('worker', 1, { expected: 3 * GiB, measured: 3 * GiB })], [{ ...recent(8, 0), used: 8 * GiB }]), false, /other sessions 3\.0 GiB toward their peak/],
+    // The other-sessions peak term. A minute ago the level held 6 GiB: a
+    // worker's 2 and other sessions' 4. They let go of 3 and the worker grew 3
+    // into it, so the level holds the same 6 GiB; they may take the 3 back
+    // while the worker still grows 1 toward its 6.
+    ['a peak the units grew into is still room', reading({ used: 6 }), registry([unit('worker', 1, { expected: 6 * GiB, measured: 5 * GiB })], [recent(4, 1)]), false, /grow 1\.0 GiB and other sessions 2\.9 GiB toward their peak/],
+    ['as is one the level gave back', reading({ used: 3 }), registry([unit('worker', 1, { expected: 6 * GiB, measured: 2 * GiB })], [recent(4, 1)]), false, /other sessions 2\.9 GiB toward their peak/],
     ['a sample from before samples named their level counts nowhere', reading({ used: 4 }), registry([], [{ ...recent(8, 3), level: undefined }]), true],
     // A host wait in another scope saw 14 GiB of other sessions on the host, which they still use.
     ['a sample of another level keeps no room in this one', scoped, registry([], [recent(14, 1, 'host')]), true],
@@ -798,7 +798,7 @@ test('a dispatch from an orchestrator\'s own scope is not deferred by room a wai
   host.view('/agents.slice/orch.scope/runner');
   worker();
   assert.deepEqual(G.read(host.env).deferred, [], 'nothing was deferred');
-  assert.deepEqual(G.read(host.env).others.map((o) => [o.level, o.bytes, o.used]), [['host', 14 * GiB, 14 * GiB]], 'the sample names its level and keeps its use');
+  assert.deepEqual(G.read(host.env).others.map((o) => [o.level, o.bytes]), [['host', 14 * GiB]], 'the sample names its level');
 });
 
 test('other sessions are sampled at the level\'s use once the units were measured', (t) => {
@@ -815,8 +815,27 @@ test('other sessions are sampled at the level\'s use once the units were measure
     const reg = { ...registry(), windows: [], growth: [], raised: null };
     const now = Date.now();
     G.observeAll(reg, host.env, reading({ limit: 36, used: before }), s, now);
-    assert.deepEqual(reg.others.filter((o) => o.level === '/tests.slice').map((o) => [o.bytes / GiB, o.used / GiB]), [[others, Math.min(before, after)]], name);
+    assert.deepEqual(reg.others.filter((o) => o.level === '/tests.slice').map((o) => o.bytes / GiB), [others], name);
   }
+});
+
+test('room is kept for memory other sessions let go of while a unit grew into it', { skip: linuxOnly }, (t) => {
+  // A minute ago the slice held 6 GiB: a worker's scope 2 and other sessions
+  // 4. Now the sessions hold 1 and the worker 5 of its expected 6, so the slice
+  // still holds 6. They may take the 3 back while the worker grows 1 more:
+  // 11 GiB on a 10 GiB slice if a 1 GiB unit were admitted.
+  const host = fakeHost(t, { limit: 10, used: 6 });
+  const scope = (gib) => host.write('sys/fs/cgroup/tests.slice/w.scope/memory.current', `${gib * GiB}\n`);
+  const reg = { ...registry([unit('worker', 1, { expected: 6 * GiB, cgroup: '/tests.slice/w.scope', roots: [] })]), windows: [], growth: [], raised: null };
+  const now = Date.now();
+  scope(2);
+  G.observeAll(reg, host.env, reading({ used: 6 }), s, now - 60000);
+  scope(5);
+  G.observeAll(reg, host.env, reading({ used: 6 }), s, now);
+  assert.deepEqual(reg.others.filter((o) => o.level === '/tests.slice').map((o) => o.bytes / GiB), [4, 1]);
+  const verdict = G.assess(reading({ used: 6 }), reg, s, GiB, 'worker', now);
+  assert.equal(verdict.ok, false);
+  assert.match(verdict.reasons.join('; '), /grow 1\.0 GiB and other sessions 2\.9 GiB toward their peak/);
 });
 
 // A worker unit whose holder is a live stand-in supervisor, past the stop line.
