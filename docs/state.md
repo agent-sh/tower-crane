@@ -2013,7 +2013,9 @@ task has no queued notification. `gates prioritize ID --clear` records
 `clear: true` and `authority`, removing priority even during rework with no
 queued work. It needs no reason and refuses `--reason` or `--rank`.
 Acceptance and cancellation retire earlier requests, so reopening a task
-does not restore them. A notification queued
+does not restore them. Hotfix cancellation (`hotfix rework`) and cancellation
+of a superseded hotfix follow-up (`hotfix supersede`) also retire its priority.
+A notification queued
 behind the task's own running reaction counts, but the running reaction does
 not: its receipt is running and its process is live, so it is no longer
 queued. A dead reaction's notification stays queued for its retry. `status`

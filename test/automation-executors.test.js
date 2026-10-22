@@ -979,6 +979,11 @@ test('task gate priority lifecycle and legacy requests', () => {
     { name: 'clear', cmd: 'gates prioritize', detail: { clear: true }, priority: false },
     { name: 'accepted then reopened', cmd: 'accept', detail: {}, priority: false },
     { name: 'cancelled then reopened', cmd: 'task update', detail: { status: 'cancelled' }, priority: false },
+    { name: 'hotfix cancelled then re-recorded', cmd: 'hotfix rework', detail: {}, reopen: 'hotfix', priority: false },
+    ...['rework', 'ci', 'review'].map(gate => ({
+      name: `hotfix ${gate} cancellation then re-recorded`, cmd: 'hotfix rework', detail: { gate }, reopen: 'hotfix', priority: false,
+    })),
+    { name: 'hotfix follow-up superseded then reopened', cmd: 'hotfix supersede', detail: { status: 'cancelled' }, priority: false },
     { name: 'unrelated update', cmd: 'task update', detail: { title: 'updated' }, priority: true },
   ]) {
     const event = (id, cmd, task, detail = {}) => ({ id, cmd, task, detail, at: '2026-10-22T00:00:00Z', agent: 'orchestrator' });
@@ -989,7 +994,7 @@ test('task gate priority lifecycle and legacy requests', () => {
         event('transition', row.cmd, 'T3', row.detail),
         event('plain', 'submit', 'T2'),
         event('plain-queued', 'automation queued', 'T2', { source: 'plain' }),
-        event('new-head', 'submit', 'T3'),
+        event('new-head', row.reopen || 'submit', 'T3'),
         event('new-queued', 'automation queued', 'T3', { source: 'new-head' }),
       ],
     };
