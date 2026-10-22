@@ -358,8 +358,8 @@ A.consume = async () => [];
 `);
   const after = String(fs.statSync(path.join(f.h.state, 'events.jsonl')).size);
   for (let pass = 0; pass < 2; pass++) {
-    const result = f.h.run(['wait', '--after', after, '--task', 'T3', '--timeout', '0.1', '--agent', 'orchestrator'],
-      { pre: ['--require', preload] }); // wait-allow: the probe must reach its short deadline instead of waking on the refusal it records
+    const result = f.h.run(['wait', '--after', after, '--task', 'T3', '--timeout', '0.1', '--agent', 'orchestrator'], // wait-allow: the probe must reach its deadline instead of waking on its own refusal
+      { pre: ['--require', preload] });
     assert.equal(result.code, 2, result.stdout + result.stderr);
     assert.equal(JSON.parse(result.stdout).type, 'timeout');
     assert.match(f.h.json(['status']).not_dispatched.find(b => b.id === 'T3').reason, /ENOTDIR/);
