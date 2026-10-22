@@ -556,7 +556,7 @@ test('the prompt is the role skill, brief, task, then how to use tower-crane', (
   assert.deepEqual(json, { id: 'T1', title: 'Idempotency key on retries', acceptance: ['processed once', 'test proves it'], kind: 'code', needs: [], locks: ['lab/rdma'], environment: 'lab' });
   assert.match(p, /TOWER_CRANE_STATE, TOWER_CRANE_TASK and TOWER_CRANE_AGENT are set/);
   assert.ok(p.includes('you are not the owner; never pass --agent owner'));
-  assert.ok(p.endsWith('run tower-crane with --agent worker-T1-1 if TOWER_CRANE_AGENT is missing.'));
+  assert.ok(p.endsWith("run tower-crane with --agent worker-T1-1 if TOWER_CRANE_AGENT is missing. After submit you own T1's PR until it is green: stay in this session, run tower-crane wait --own --task T1 --timeout 540, fix what it hands back, submit again and wait again, and exit only when it says your ownership ended."));
 });
 
 test('prompts name role skills in the state directory\'s skill store, since a user worktree has no skills directory', (t) => {
