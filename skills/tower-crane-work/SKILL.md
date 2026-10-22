@@ -10,6 +10,8 @@ You build one task. The brief is your context; the acceptance is your definition
 
 Arguments: `$ARGUMENTS`. Use `TOWER_CRANE_TASK` and `TOWER_CRANE_AGENT` when set; otherwise use the task id and agent name passed by the orchestrator. Pass `--agent <name>` on every tower-crane call. If `TOWER_CRANE_STATE` is absent, also pass `--state <dir>` with the supplied state directory.
 
+Never use `git stash` except `git stash list`: every worktree shares the stash; commit work in progress on the task branch instead.
+
 1. `tower-crane task show <id> --agent <name>`, `tower-crane brief get <id> --agent <name>` and `tower-crane project show --agent <name>`. If not claimed by you, `tower-crane claim <id> --agent <name> --lease MIN`, sized for expected work and waits using `limits.lease_minutes` as the default; if refused, stop and report why. If work needs longer, renew before expiry with `tower-crane renew <id> --agent <name> --lease MIN` when reporting progress.
    Your first message restates the project goal and this task's target in one or two sentences. Read the rule files the prompt's `## House rules` marks "read it" (the user's and the repository's AGENTS.md and CLAUDE.md files) before changing anything.
 2. Work in the task's worktree (`tower-crane worktree <id> --agent <name>` prints it). Native workers use absolute paths under that worktree for every edit and command. Read only what the brief points to, plus what you discover you need.
