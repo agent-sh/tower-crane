@@ -75,11 +75,11 @@ test('with tests.crucial and a map pinned, a change runs crucial plus the suites
   assert.deepEqual(result.receipt.head_tests, head);
   assert.deepEqual(result.receipt.proof_tests, ['test/value.test.js']);
   assert.equal(result.receipt.coverage_gaps, undefined);
-  // The head ran the changed test through the proof template, so no scoped proof runs again at head;
-  // the reverted proof runs beside the head and may finish first.
-  assert.deepEqual(runs.map((c) => [c.command, c.status === 0]).sort(), [[selected(head), true], [selected(['test/value.test.js']), false]].sort(),
-    'the head passes and the reverted proof fails');
-  assert.match(result.summary, /Scoped proof at \w+: the head command ran test\/value\.test\.js through the pinned proof command, so it did not run again\./);
+  // The scoped proof runs beside the head and may finish first; the reverted proof runs alone, last.
+  assert.deepEqual(runs.slice(0, 2).map((c) => [c.command, c.status === 0]).sort(), [[selected(head), true], [selected(['test/value.test.js']), true]].sort(),
+    'head and scoped proof pass');
+  assert.deepEqual([runs[2].command, runs[2].status === 0], [selected(['test/value.test.js']), false], 'the reverted proof fails');
+  assert.match(result.summary, /Scoped proof at \w+: `.*test\/value\.test\.js`: exit 0, beside the head in a worktree of its own/);
   assert.ok(runs.every((c) => c.command !== fullCommand && !c.command.includes('other.test.js')));
   assert.match(result.summary, /Head suite mode crucial: tests\.crucial plus the changed tests and the tests\.map suites covering the change/);
   assert.equal(counts(h), true);
@@ -94,20 +94,19 @@ test('with tests.crucial and a map pinned, a change runs crucial plus the suites
   const today = check(h);
   assert.equal(today.receipt.head_mode, 'full');
   assert.match(today.receipt.head_reason, /no PR/);
-  // The reverted proof runs beside the head, so either can come first.
+  // The scoped proof runs beside the head, so either can come first.
   assert.deepEqual(today.commands.filter((c) => c.command !== 'git' && c.command !== selected(['test/value.test.js'])).map((c) => c.command), [fullCommand]);
   assert.equal(counts(h), true);
 });
 
-// The head stands in for the scoped proof at head, and the reverted run goes beside it: a change
-// whose test also passes at the base still fails the gate.
+// With the scoped proof beside the head, a change whose test also passes at the base still fails the gate.
 test('in crucial mode a changed test that passes without the change does not prove it', (t) => {
   const h = fixture(t, map, "console.log('asserts nothing');\n");
   const result = check(h, 1);
   assert.equal(result.ok, false);
   assert.match(result.summary, /tests pass without the change; they do not prove it\./);
-  assert.match(result.summary, /2\. `.*test\/value\.test\.js` with 2 non-test files reverted to \w+ .*\(beside the head, in a worktree of its own\): exit 0/);
-  assert.deepEqual(result.commands.filter((c) => c.command !== 'git').map((c) => c.status).sort(), [0, 0]);
+  assert.match(result.summary, /beside the head in a worktree of its own\n2\. `.*test\/value\.test\.js` with 2 non-test files reverted to \w+ .*: exit 0/);
+  assert.deepEqual(result.commands.filter((c) => c.command !== 'git').map((c) => c.status), [0, 0, 0]);
   assert.equal(counts(h), false);
 });
 
