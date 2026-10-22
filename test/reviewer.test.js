@@ -15,7 +15,8 @@ const prices = {
   'fixture-main': { input: 2, cache_write: 2.50, cache_read: 0.10, output: 10 },
   'fixture-large': { input: 4, cache_write: 5, cache_read: 0.20, output: 20 },
 };
-const windowsConcurrency = process.platform === 'win32' ? 2 : false;
+// Independent cases run two at a time on every platform: most of each one waits on its child processes.
+const caseConcurrency = 2;
 
 function rung(h, name, model) {
   pinRung(h, name, { harness: 'opencode', model });
@@ -160,7 +161,7 @@ test('opencode reviewer Bash denies unlisted interpreter and absolute-path comma
   assert.throws(() => fs.readFileSync(canary, 'utf8'), { code: 'ENOENT' });
 });
 
-describe('reviewer integration cases', { concurrency: windowsConcurrency }, () => {
+describe('reviewer integration cases', { concurrency: caseConcurrency }, () => {
 test('reviewers share static system instructions and receive audited gates in the user prompt', (t) => {
   const h = setup(t);
   h.ok(['submit', 'T1', '--agent', h.builder, '--sha', h.sha, '--pr', '42']);
@@ -1058,7 +1059,7 @@ test('accept runs tests, clean and CI before dispatch, then automation accepts a
   assert.ok(accepted.evidence.some((e) => e.type === 'review' && e.ok));
 });
 
-describe('remaining reviewer integration cases', { concurrency: windowsConcurrency }, () => {
+describe('remaining reviewer integration cases', { concurrency: caseConcurrency }, () => {
 test('a failed automatic gate never starts a reviewer', (t) => {
   const h = setup(t);
   const out = path.join(h.base, 'review-context.txt');
