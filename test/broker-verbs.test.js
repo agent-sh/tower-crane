@@ -26,6 +26,7 @@ console.log('pinned', campaign, rounds, process.env.TOWER_CRANE_VERB);
 const SLEEP_JS = `
 const mode = process.argv[2];
 if (mode === 'trap') process.on('SIGTERM', () => process.exit(143));
+if (mode === 'trap0') process.on('SIGTERM', () => process.exit(0));
 if (mode === 'selfkill') process.kill(process.pid, 'SIGKILL');
 if (mode === 'exit3') process.exit(3);
 console.log('sleeping', process.pid);
@@ -43,6 +44,7 @@ function verbs(sha) {
     private: { argv: [NODE, 'tools/verb.js', 'private', '1', '{out}'], source: commit, timeout_sec: 60 },
     sleepy: { argv: [NODE, 'tools/sleep.js'], source: commit, timeout_sec: 1, delegate: true },
     trap: { argv: [NODE, 'tools/sleep.js', 'trap'], source: commit, timeout_sec: 1, delegate: true },
+    trap0: { argv: [NODE, 'tools/sleep.js', 'trap0'], source: commit, timeout_sec: 1, delegate: true },
     selfkill: { argv: [NODE, 'tools/sleep.js', 'selfkill'], source: commit, timeout_sec: 60, delegate: true },
     exit3: { argv: [NODE, 'tools/sleep.js', 'exit3'], source: commit, timeout_sec: 60, delegate: true },
     pathy: {
@@ -326,6 +328,7 @@ test('project set refuses verbs that a worker could steer', (t) => {
 for (const row of [
   { verb: 'sleepy', title: 'the timeout stops a runaway verb', check: (e) => assert.equal(e.verb.timed_out, true), summary: /timed out after 1 s/ },
   { verb: 'trap', title: 'the timeout stops a verb that traps SIGTERM and exits 143', check: (e) => assert.equal(e.verb.timed_out, true), summary: /timed out after 1 s/ },
+  { verb: 'trap0', title: 'the timeout stops a verb that traps SIGTERM and exits 0', check: (e) => assert.equal(e.verb.timed_out, true), summary: /timed out after 1 s/ },
   { verb: 'selfkill', title: 'a verb killed by a signal exits 1', check: (e) => assert.equal(e.verb.timed_out, false), summary: /killed by SIGKILL|exit [1-9]/ },
   { verb: 'exit3', title: 'a verb that fails exits with its own code', code: 3, check: (e) => assert.equal(e.verb.exit_code, 3), summary: /exit 3/ },
   { verb: 'storm', title: 'the storm cap stops a runaway verb', check: (e) => assert.equal(e.verb.resource_reason, 'resource-tasks-max'), summary: /resource-tasks-max/ },
