@@ -12,6 +12,7 @@ const { waitFor } = require('./canary');
 const { shellQuote } = require('../lib/gates/common');
 const { readPublished } = require('./atomic-file');
 const { setup, attach } = require('./automation-helpers');
+const StateFiles = require('./state-files');
 
 // A second PR that touches other files, and a suite command that logs each
 // run with PR #7's state at that moment. Both PRs are submitted and through

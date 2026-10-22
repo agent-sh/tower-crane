@@ -14,6 +14,7 @@ const { makeRepo, ROOT, BIN, detachedAlive } = require('./helpers');
 const A = require('../lib/agents');
 const TOML = require('../lib/toml');
 const { NO_STUBS, SECRET, setup, noSecretsCopied, releaseExited, spawn, ALLOW, decide, isolated, commandsRead, commandsWrite } = require('./isolation-helpers');
+const StateFiles = require('./state-files');
 
 test('a sandboxed agent changes the state only through its spawn\'s broker: as itself, on its own task, with its role\'s commands', { skip: NO_STUBS }, (t) => {
   const { h, u } = setup(t);
@@ -45,7 +46,6 @@ const cp=require("node:child_process");const r=cp.spawnSync(process.execPath,${J
     // with the agent's own binding and no other.
     [[process.execPath, '-e', `
 const { fakeAgentEnv } = require(${JSON.stringify(path.join(__dirname, 'agent-env.js'))});
-const StateFiles = require('./state-files');
 require("child_process").execFileSync(process.execPath, [${JSON.stringify(BIN)}, "hook", "report", "--binding", require("path").join(process.env.TOWER_CRANE_STATE, "homes", process.env.TOWER_CRANE_AGENT, "hook.json"), "--payload", "-"], { env: fakeAgentEnv(process.env), input: JSON.stringify({ report: "hooked" }), stdio: ["pipe", "ignore", "inherit"] })`], 0],
     [cli('hook', 'report', '--binding', path.join(h.state, 'homes', 'worker-T1-1', 'hook.json'), '--payload', '{"report":"as another"}'), 1],
     [envOwner, 1],

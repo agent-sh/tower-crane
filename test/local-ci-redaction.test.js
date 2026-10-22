@@ -13,6 +13,7 @@ const crypto = require('node:crypto');
 const { makeRepo } = require('./helpers');
 const { changeKind } = require('./gate-helpers');
 const { fixture, mergeFixture } = require('./local-ci-helpers');
+const StateFiles = require('./state-files');
 
 test('captured GitHub CI logs keep the redaction output from before the text budget', () => {
   const { createRedactor, redactJoined } = require('../lib/gates/common');
@@ -33,7 +34,6 @@ test('local CI saves only a notice for unscannable logs and text artifacts', (t)
   // Each start of the value explores hundreds of escape readings, past the work its length allows.
   const h = fixture(t, `
 const fs = require('node:fs');
-const StateFiles = require('./state-files');
 const text = ('a\\x1b[' + '1'.repeat(1024) + 'm ').repeat(1024);
 fs.writeFileSync('dense.txt', text);
 process.stdout.write(text);

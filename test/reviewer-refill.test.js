@@ -11,6 +11,7 @@ const { waitOnRepo } = require('./signals');
 const S = require('../lib/state');
 const Body = require('../lib/review-body');
 const { readPublished, writeAtomic, updateJson } = require('./atomic-file');
+const StateFiles = require('./state-files');
 
 function fixture(t) {
   const h = cachedFixture(t, 'reviewer-refill', (repo) => {
@@ -55,7 +56,6 @@ for (const [name, reviewPriority, workerPriority, late, full, first] of [
     fs.writeFileSync(preload, `const fs = require('node:fs');
 const G = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'governor.js'))});
 const { TowerCraneError } = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'util.js'))});
-const StateFiles = require('./state-files');
 const held = ${JSON.stringify(held)};
 const error = (task) => Object.assign(new TowerCraneError(3, task + ': reviewer deferred by the host governor: fixture pressure'),
   { governorDeferred: true, task, kind: 'reviewer', reason: 'fixture pressure' });
