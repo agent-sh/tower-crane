@@ -573,7 +573,7 @@ test('a supervisor is known by its command line in every shape Windows shows it'
 test('a launch keeps an outer gate run marker and drops an outer spawn run marker', () => {
   const { cleanAgentEnv } = require('../lib/spawn-settings');
   assert.deepEqual(cleanAgentEnv({ TOWERCRANE_SPAWN_RUN_1_ab: '1', TOWERCRANE_GATE_RUN_2_cd: '1', KEEP: 'x' }),
-    { TOWERCRANE_GATE_RUN_2_cd: '1', KEEP: 'x' });
+    { TOWERCRANE_GATE_RUN_2_cd: '1', KEEP: 'x', NODE_V8_COVERAGE: '' });
 });
 
 test('a missing log does not hide an exited claimant', async (t) => {

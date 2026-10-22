@@ -376,6 +376,8 @@ test('for every harness the first git and gh on the agent\'s PATH are its shims,
   const injected = path.join(h.base, 'injected');
   const evil = path.join(h.base, 'evil.cjs');
   fs.writeFileSync(evil, `require('node:fs').writeFileSync(${JSON.stringify(injected)}, process.argv.join(' '));\n`);
+  const blockedCoverage = path.join(h.base, 'blocked-coverage');
+  fs.writeFileSync(blockedCoverage, 'coverage output cannot be written here');
   const probe = path.join(h.base, 'probe');
   fs.mkdirSync(probe);
   const script = path.join(probe, 'probe.js');
@@ -416,11 +418,16 @@ if (path.basename(process.argv[1]) === 'codex') process.stdout.write(JSON.string
     }
     assert.equal(path.dirname(seen.git), path.dirname(seen.gh));
     const bin = path.dirname(seen.git);
-    for (const tool of ['git', 'gh']) {
-      const ran = cp.spawnSync(path.join(bin, tool), tool === 'git' ? ['version'] : ['auth', 'status'], { cwd: h.repo, encoding: 'utf8',
-        env: { ...env, NODE_OPTIONS: `--require=${evil}`, NODE_PATH: path.join(h.base, 'planted-modules') } });
+    for (const [tool, args] of [['git', ['version']], ['git', ['push', '--force', 'origin', 'HEAD:refs/heads/tower-crane/T2-other']], ['gh', ['auth', 'status']]]) {
+      const ran = cp.spawnSync(path.join(bin, tool), args, { cwd: h.repo, encoding: 'utf8',
+        env: { ...env, NODE_OPTIONS: `--require=${evil}`, NODE_PATH: path.join(h.base, 'planted-modules'), NODE_V8_COVERAGE: blockedCoverage } });
       assert.doesNotMatch(String(ran.stderr), /require is not defined|ERR_REQUIRE|ES module/, `${harness}: ${tool} runs as CommonJS`);
-      if (tool === 'git') assert.equal(ran.status, 0, `${harness}: git version through the shim: ${ran.stderr}`);
+      assert.doesNotMatch(String(ran.stderr), /coverage-|Failed to write file|EEXIST|ENOTDIR/, `${harness}: ${tool} inherits no host coverage output`);
+      if (tool === 'git' && args[0] === 'version') assert.equal(ran.status, 0, `${harness}: git version through the shim: ${ran.stderr}`);
+      if (tool === 'git' && args[0] === 'push') {
+        assert.equal(ran.status, 126, `${harness}: forbidden push through the shim`);
+        assert.match(ran.stderr.trim(), /^tower-crane: git push.* is not allowed by this agent's agent file$/, `${harness}: coverage does not obscure the denial`);
+      }
       assert.equal(fs.existsSync(injected), false, `${harness}: ${tool} loaded NODE_OPTIONS's file`);
     }
     if (harness === 'codex') {

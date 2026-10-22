@@ -1,0 +1,1 @@
+- Agents and git/gh shims clear inherited `NODE_V8_COVERAGE` so sandboxed Node processes do not write profiles into a host gate's coverage directory. Host CLI coverage collection stays enabled; configured agent environment values still apply after launch filtering.
