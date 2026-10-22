@@ -101,6 +101,9 @@ test('custom gate proofs retain their caller host readings across admission stat
   const h = fixture(t);
   const variants = [
     { name: 'available', readings: {}, exit: 0 },
+    { name: 'former CPU backstop', readings: { cpuSome: 60 }, exit: 0 },
+    { name: 'CPU contention', readings: { cpuSome: 85 }, exit: 0 },
+    { name: 'below CPU backstop', readings: { cpuSome: 89.99 }, exit: 0 },
     { name: 'memory limit', readings: { used: 63 }, exit: 3, reason: /memory|line/ },
     { name: 'memory pressure', readings: { memorySome: 50 }, exit: 3, reason: /memory pressure/ },
     { name: 'CPU pressure', readings: { cpuSome: 90 }, exit: 3, reason: /cpu pressure/ },
@@ -231,11 +234,11 @@ test('human-bench fixtures give the nested CLI an idle fake host', (t) => {
 
 test('a deferred nested gate reports its exit code and stderr and cleans the probe', (t) => {
   const h = fixture(t);
-  const busyHost = writeHost(path.join(h.base, 'busy-host'), { cpuSome: 80, load: 10000 });
+  const busyHost = writeHost(path.join(h.base, 'busy-host'), { cpuSome: 90, load: 10000 });
   const cache = path.join(h.base, 'probe');
   assert.throws(() => probe({ root: h.repo, cache, command: 'node scratch.js',
     environment: { ...h.env, TOWER_CRANE_HOST_ROOT: busyHost } }),
-  /check tests T1 returned no JSON \(exit code 3\):[\s\S]*deferred by the host governor[\s\S]*cpu pressure/);
+  /check tests T1 returned no JSON \(exit code 3\):[\s\S]*deferred by the host governor[\s\S]*cpu pressure: some avg10 90% is at or over 90%[\s\S]*load: /);
   assert.deepEqual(fs.readdirSync(cache), []);
 });
 
@@ -278,7 +281,8 @@ test('the gate proof reports receipt-free governor deferrals from the supplied h
   const cases = [
     ['memory capacity', { limit: 10, used: 8 }, /memory: tests\.slice/],
     ['memory pressure', { memorySome: 10 }, /memory pressure: some avg10 10%/],
-    ['CPU pressure', { cpuSome: 60 }, /cpu pressure: some avg10 60%/],
+    ['CPU pressure at backstop', { cpuSome: 90 }, /cpu pressure: some avg10 90% is at or over 90%/],
+    ['CPU pressure above backstop', { cpuSome: 95 }, /cpu pressure: some avg10 95% is at or over 90%/],
     ['load', { load: os.availableParallelism() * 2 }, /load: /],
   ];
   for (const [name, host, reason] of cases) {
