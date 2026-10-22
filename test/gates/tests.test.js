@@ -128,6 +128,50 @@ process.exit(files.length ? cp.spawnSync(process.execPath, ['--test', ...files],
   assertCleanedUp();
 });
 
+// Each file waits for the other's marker, which only a run side by side gives both: a host-only
+// command that started after the ordinary one ended would leave the ordinary file waiting alone.
+test('host-only commands run beside the ordinary command, and its failure still decides the head', async () => {
+  const dir = path.join(tmp, 'side-by-side');
+  fs.mkdirSync(dir);
+  const meet = (own, other) => `const fs = require('node:fs');
+const path = require('node:path');
+require('node:test')('${own} meets ${other}', async () => {
+  fs.writeFileSync(path.join(${JSON.stringify(dir)}, '${own}'), 'here');
+  const deadline = Date.now() + 30000;
+  while (!fs.existsSync(path.join(${JSON.stringify(dir)}, '${other}')) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20)); // wait-allow: the other file's marker is the event under test
+  require('node:assert/strict').ok(fs.existsSync(path.join(${JSON.stringify(dir)}, '${other}')), '${other} ran at the same time');
+});
+`;
+  const runner = path.join(tmp, 'side-by-side-runner.cjs');
+  fs.writeFileSync(runner, `const cp = require('node:child_process');
+const excluded = JSON.parse(process.env.TOWER_CRANE_TEST_EXCLUDE || '[]');
+const files = process.argv.slice(2).filter(f => !excluded.includes(f));
+process.exit(files.length ? cp.spawnSync(process.execPath, ['--test', ...files], { stdio: 'inherit' }).status : 0);
+`);
+  const suite = `${NODE} ${quote(runner)} test/host.test.js test/plain.test.js`;
+  const project = {
+    tests: { mode: 'run-only', host_only: ['test/host.test.js'] },
+    gates: { tests_cmd: suite, tests_proof_cmd: `${NODE} --test {tests}` },
+  };
+  const sha = task({ 'test/host.test.js': meet('host', 'plain'), 'test/plain.test.js': meet('plain', 'host') });
+  const met = await gate.run(ctx(sha, { args: { cmd: suite }, project }));
+  assert.equal(met.ok, true, met.summary);
+  assert.deepEqual(fs.readdirSync(dir).sort(), ['host', 'plain']);
+  assert.deepEqual(met.receipt.host_only.run, ['test/host.test.js']);
+
+  // The ordinary command's failure is the head's verdict even when the host-only command passed beside it.
+  const broken = task({
+    'test/host.test.js': "require('node:test')('host passes', () => {});\n",
+    'test/plain.test.js': "require('node:test')('plain fails', () => { throw new Error('plain broke'); });\n",
+  });
+  const failed = await gate.run(ctx(broken, { args: { cmd: suite }, project }));
+  assert.equal(failed.ok, false, failed.summary);
+  assert.deepEqual(failed.test_failure.names, ['plain fails']);
+  assert.ok(failed.summary.startsWith(`\`${suite}\``), failed.summary);
+  assert.deepEqual(failed.receipt.host_only.run, ['test/host.test.js']);
+  assertCleanedUp();
+});
+
 // Claude Code's sandbox bridge socket, measured on 2.1.296: <TMPDIR>/claude-socks-<16 hex>.sock, at most 108 bytes.
 const HARNESS_SOCKET = 'claude-socks-0123456789abcdef.sock';
 const socketFits = (dir) => Buffer.byteLength(path.join(dir, HARNESS_SOCKET)) <= 108;

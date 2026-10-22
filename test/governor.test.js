@@ -483,6 +483,38 @@ test('a gate that joins a run already going takes no place in the budget', { ski
   assert.match(b.stdout, /joined the run by/);
 });
 
+// A unit measures one scope. The tests gate runs its host-only commands beside its suite, so a
+// command that starts while another runs attaches without its scope, and the unit sums both
+// process trees until a command runs alone again.
+test('a gate command started beside another attaches without its scope', async () => {
+  const { gateExec } = require('../lib/check');
+  const attached = [];
+  const held = { unit: { attach: (pid, scope) => attached.push([pid, scope?.group ?? null]) } };
+  const running = new Map();
+  let pid = 100;
+  const run = (command, args, opts) => new Promise((resolve) => {
+    const own = ++pid;
+    const scope = { group: `/sys/fs/cgroup/${command}.scope` };
+    opts.onSpawn(own, scope);
+    running.set(command, { ready: () => opts.onSpawn(own, scope), end: () => resolve({ status: 0, signal: null, stdout: '', stderr: '' }) });
+  });
+  const commands = [];
+  const exec = gateExec({}, held, commands, () => undefined, run);
+  const suite = exec('suite', [], { shell: true });
+  const host = exec('host', [], { shell: true });
+  // The suite's scope reports ready while the host-only command runs beside it.
+  running.get('suite').ready();
+  running.get('suite').end();
+  await suite;
+  running.get('host').end();
+  await host;
+  const alone = exec('reverted', [], { shell: true });
+  running.get('reverted').end();
+  await alone;
+  assert.deepEqual(attached, [[101, '/sys/fs/cgroup/suite.scope'], [102, null], [101, null], [103, '/sys/fs/cgroup/reverted.scope']]);
+  assert.deepEqual(commands.map((c) => c.command), ['suite', 'host', 'reverted'], 'every command is still recorded');
+});
+
 test('a wait defers a gate reaction under pressure and runs it once there is room', { skip: linuxOnly }, async (t) => {
   const h = makeRepo(t);
   heldGate(h, { submit: false });
