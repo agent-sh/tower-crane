@@ -1,7 +1,7 @@
 'use strict';
 
 // Keeps GitHub offline while `submit --pr` and `check ci` read a PR's head, check runs and suites,
-// its revuto inline comments and the logs of failing jobs. TEST_GITHUB names a JSON file with that data.
+// its revuto inline comments, base runs and the logs of failing jobs. TEST_GITHUB names a JSON file with that data.
 const fs = require('node:fs');
 const cp = require('node:child_process');
 const original = cp.spawnSync;
@@ -25,8 +25,23 @@ cp.spawnSync = function github(file, args, ...rest) {
     const log = data.logs?.[args[args.indexOf('--job') + 1]];
     return log === undefined ? { status: 1, stdout: '', stderr: 'no log for this job' } : { status: 0, stdout: log, stderr: '' };
   }
+  if (args[0] === 'api' && /^repos\/acme\/app\/actions\/jobs\/\d+\/logs$/.test(args[1])) {
+    const id = /jobs\/(\d+)/.exec(args[1])[1];
+    const log = data.apiLogs?.[id];
+    return log == null ? { status: 1, stdout: '', stderr: 'no raw log for this job' }
+      : { status: 0, stdout: log, stderr: '' };
+  }
   if (args[0] === 'api' && args.includes('--paginate')) {
     const endpoint = args[1];
+    if (/^repos\/acme\/app\/actions\/runs\?branch=main&created=[^&]+&per_page=100$/.test(endpoint)) {
+      return data.baseRuns === null ? { status: 1, stdout: '', stderr: 'base runs unavailable' }
+        : lines(data.baseRuns || []);
+    }
+    const jobs = /^repos\/acme\/app\/actions\/runs\/(\d+)\/jobs\?filter=latest&per_page=100$/.exec(endpoint);
+    if (jobs) {
+      const found = data.baseJobs?.[jobs[1]];
+      return found === null ? { status: 1, stdout: '', stderr: 'base jobs unavailable' } : lines(found || []);
+    }
     if (endpoint === `repos/acme/app/commits/${data.sha}/check-runs?per_page=100`) return lines(data.runs);
     if (endpoint === `repos/acme/app/commits/${data.sha}/check-suites?per_page=100`) return lines(data.suites);
     if (endpoint === `repos/acme/app/actions/runs?head_sha=${data.sha}&per_page=100`) return lines(data.workflows || []);

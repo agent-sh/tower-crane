@@ -321,3 +321,72 @@ test('a failing refusal prints the logs of the first three failing jobs and the 
   assert.match(r.stderr, /test \(d\) log not shown; read it with gh run view --job 459 --log-failed -R acme\/app/);
   assert.equal(status(h), 'in_progress');
 });
+
+test('submit and CI compare base evidence without losing new-failure diagnostics', (t) => {
+  const name = 'checkout fails';
+  const error = 'Error: repository unavailable';
+  const rawLog = (testName = name, firstError = error) => `✖ ${testName} (1ms)\n  ${firstError}\n`;
+  const cases = [
+    ['no recorded base', { baseRuns: [] }, false],
+    ['base listing unavailable', { baseRuns: null }, false],
+    ['matching base failure', {}, true],
+    ['matching daily failure', { event: 'schedule' }, true],
+    ['stale daily failure', { event: 'schedule', stale: true }, false],
+    ['different test', { testName: 'another test' }, false],
+    ['different error', { firstError: 'Error: new cause' }, false],
+    ['another workflow', { workflow_id: 6 }, false],
+    ['another matrix', { jobName: 'test (ubuntu-latest)' }, false],
+    ['unfinished base run', { runStatus: 'in_progress' }, false],
+    ['unfinished base job', { jobStatus: 'in_progress' }, false],
+    ['green base run', { conclusion: 'success' }, false],
+    ['base jobs unavailable', { baseJobs: null }, false],
+    ['base log unavailable', { baseLog: null }, false],
+    ['head log unavailable', { headLog: null }, false],
+  ];
+  for (const [label, variant, explained] of cases) {
+    const h = fixture(t);
+    const created = new Date(Date.parse(h.git(['show', '-s', '--format=%cI', h.sha])) + 1000).toISOString();
+    const jobName = 'test (windows-latest)';
+    const logs = rawLog().trimEnd().split('\n')
+      .map((line) => `${jobName}\tRun tests\t2026-10-09T10:00:00Z ${line}`).join('\n');
+    const data = {
+      runs: [checkRun(jobName, { id: 456, conclusion: 'failure', url: JOB_LOG })],
+      suites: [suite(1, { runs: 1, conclusion: 'failure' })],
+      workflows: [{ id: 9, workflow_id: 5, name: 'CI', path: '.github/workflows/ci.yml',
+        event: 'pull_request', head_sha: h.sha, check_suite_id: 1, created_at: created,
+        status: 'completed', conclusion: 'failure' }],
+      logs: { 456: logs },
+      baseRuns: [{ id: 200, workflow_id: variant.workflow_id ?? 5, head_branch: 'main', head_sha: h.sha,
+        event: variant.event || 'push', status: variant.runStatus || 'completed', conclusion: variant.conclusion || 'failure',
+        created_at: variant.stale ? new Date(Date.parse(created) - 2000).toISOString() : created }],
+      baseJobs: { 200: [{ id: 201, name: variant.jobName || jobName,
+        status: variant.jobStatus || 'completed', conclusion: variant.conclusion || 'failure' }] },
+      apiLogs: { 201: rawLog(variant.testName, variant.firstError), 456: rawLog() },
+    };
+    if ('baseRuns' in variant) data.baseRuns = variant.baseRuns;
+    if ('baseJobs' in variant) data.baseJobs[200] = variant.baseJobs;
+    if ('baseLog' in variant) data.apiLogs[201] = variant.baseLog;
+    if ('headLog' in variant) data.apiLogs[456] = variant.headLog;
+    const submitted = submitPr(h, data);
+    assert.equal(submitted.status, explained ? 0 : 1, `${label}: ${submitted.stderr}`);
+    assert.doesNotMatch(submitted.stderr, /unexpected gh call/, label);
+    if (explained) {
+      assert.match(submitted.stdout, /checkout fails: base_failure in run 200/, label);
+    } else {
+      assert.match(submitted.stderr, /test \(windows-latest\) log:\n {2}✖ checkout fails/, label);
+      // Submit while pending to test the same failure through the actual CI gate.
+      assert.equal(submitPr(h, PENDING).status, 0, label);
+    }
+    const checked = checkCi(h, data);
+    assert.equal(checked.status, explained ? 0 : 1, `${label}: ${checked.stderr}`);
+    const entry = ciEvidence(h).at(-1);
+    if (explained) {
+      assert.equal(entry.base_failure[0].base_run.id, 200, label);
+      assert.equal(entry.base_failure[0].error, error, label);
+      assert.ok(entry.base_failure[0].fix_task, label);
+    } else {
+      assert.equal(entry.confirmed_failure, true, label);
+      assert.match(entry.summary, /test \(windows-latest\) log:\n {2}✖ checkout fails/, label);
+    }
+  }
+});
