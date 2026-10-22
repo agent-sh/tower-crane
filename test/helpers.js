@@ -318,7 +318,6 @@ function getRepoSeed() {
     repoSeed = { base: path.dirname(SHARED_REPO_SEED), repo: SHARED_REPO_SEED };
   } else {
     repoSeed = createRepoSeed(TMP_ROOT);
-    markFixtureOwner(repoSeed.base);
     process.once('exit', () => cleanupRepoSeed(repoSeed));
   }
   return repoSeed;

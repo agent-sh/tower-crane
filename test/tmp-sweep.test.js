@@ -230,3 +230,57 @@ test('sweep retains fixtures when ownership markers change while being opened', 
     });
   }
 });
+
+test('repository seeds record ownership for direct, fallback and runner creation', async (t) => {
+  const h = makeRepo(t);
+  for (const mode of ['direct', 'helper-fallback', 'runner', 'setup-failure']) {
+    await t.test(mode, (row) => {
+      const root = path.join(h.base, mode);
+      if (mode === 'setup-failure') {
+        const { createRepoSeed } = require('./repo-seed');
+        const write = fs.writeFileSync;
+        row.mock.method(fs, 'writeFileSync', (file, ...args) => {
+          if (path.basename(file) === OWNER_FILE) throw Object.assign(new Error('marker denied'), { code: 'EACCES' });
+          return write(file, ...args);
+        });
+        assert.throws(() => createRepoSeed(root), { code: 'EACCES' });
+        assert.deepEqual(fs.readdirSync(root), []);
+        return;
+      }
+      if (mode === 'direct') {
+        const { createRepoSeed, cleanupRepoSeed } = require('./repo-seed');
+        const seed = createRepoSeed(root);
+        row.after(() => cleanupRepoSeed(seed));
+        const record = JSON.parse(fs.readFileSync(path.join(seed.base, OWNER_FILE), 'utf8'));
+        assert.equal(record.pid, process.pid);
+        return;
+      }
+      const script = mode === 'runner' ? `
+        const fs = require('node:fs');
+        const path = require('node:path');
+        const assert = require('node:assert/strict');
+        require('node:test')('shared seed has its creator', () => {
+          const base = path.dirname(process.env.TC_TEST_REPO_SEED);
+          const record = JSON.parse(fs.readFileSync(path.join(base, '${OWNER_FILE}'), 'utf8'));
+          assert.equal(record.pid, process.ppid);
+        });
+      ` : `
+        const fs = require('node:fs');
+        const path = require('node:path');
+        const assert = require('node:assert/strict');
+        const { makeRepo, TMP_ROOT } = require('./test/helpers');
+        makeRepo();
+        const name = fs.readdirSync(TMP_ROOT).find((entry) => entry.startsWith('tower-crane-seed-'));
+        const record = JSON.parse(fs.readFileSync(path.join(TMP_ROOT, name, '${OWNER_FILE}'), 'utf8'));
+        assert.equal(record.pid, process.pid);
+      `;
+      const probe = path.join(h.base, `${mode}.test.js`);
+      fs.writeFileSync(probe, script);
+      const args = mode === 'runner' ? [path.join(ROOT, 'test/run.js'), probe] : ['-e', script];
+      const result = cp.spawnSync(process.execPath, args, {
+        cwd: ROOT, env: { ...h.env, TOWER_CRANE_TEST_TMP: root }, encoding: 'utf8', timeout: HUNG_TEST_MS,
+      });
+      assert.equal(result.status, 0, result.stderr + result.stdout);
+    });
+  }
+});
