@@ -1009,3 +1009,37 @@ test('concurrent task dispatches reserve repository capacity under the state loc
   assert.equal(status.ci_dispatch.in_flight.length, 1);
   assert.equal(status.ci_dispatch.queued.length, 2);
 });
+
+
+test('a queued branch returning to an active head waits for that run even when capacity increases', (t) => {
+  for (const phase of ['original', 'rerun']) {
+    const h = fixture(t);
+    dispatchable(h);
+    h.ok(['project', 'set', '--ci-max-dispatches', '1']);
+    h.ok(['ci', 'dispatch', 'T1', '--agent', 'worker']);
+    let data = JSON.parse(readPublished(h.env.CI_FEEDBACK_GH, 'utf8'));
+    data.refs[`heads/${BRANCH}`].object.sha = 'b'.repeat(40);
+    writeAtomic(h.env.CI_FEEDBACK_GH, JSON.stringify(data));
+    assert.equal(h.json(['ci', 'dispatch', 'T1', '--agent', 'worker']).queued, true);
+    if (phase === 'rerun') {
+      const state = h.readState('tasks.json');
+      state.tasks[0].ci_dispatches[0].status = 'completed';
+      h.writeState('tasks.json', state);
+    }
+    h.ok(['project', 'set', '--ci-max-dispatches', '2']);
+    data = JSON.parse(readPublished(h.env.CI_FEEDBACK_GH, 'utf8'));
+    data.refs[`heads/${BRANCH}`].object.sha = h.sha;
+    writeAtomic(h.env.CI_FEEDBACK_GH, JSON.stringify(data));
+    const payload = path.join(h.base, 'completed.json');
+    fs.writeFileSync(payload, JSON.stringify({ action: 'completed', repository: { full_name: 'acme/app' },
+      workflow_run: { head_sha: 'c'.repeat(40), status: 'completed' } }));
+    h.ok(['ci', 'webhook', payload]);
+    assert.equal(dispatches(h).length, 1, 'the same active head cannot start twice');
+    assert.equal(h.readState('tasks.json').tasks[0].ci_dispatch_queue.sha, h.sha);
+    data.runs[500].status = 'completed';
+    writeAtomic(h.env.CI_FEEDBACK_GH, JSON.stringify(data));
+    h.ok(['ci', 'webhook', payload]);
+    assert.equal(dispatches(h).length, 2);
+    assert.equal(h.readState('tasks.json').tasks[0].ci_dispatch_queue, undefined);
+  }
+});
