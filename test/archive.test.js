@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { cachedFixture } = require('./helpers');
+const { cachedFixture, useFixtureUserFile } = require('./helpers');
 const { gateFixture, gateEvidence } = require('./gate-helpers');
 const Archive = require('../lib/archive');
 const S = require('../lib/state');
@@ -305,6 +305,57 @@ test('archived text passes through the gate log redaction', (t) => {
   assert.equal(manifest(h, 'T1').files.find((f) => f.path === 'probe/stderr.log').redacted, true);
   assert.ok(!stored(h, 'T1', 'raw.bin').includes(token));
   assert.equal(manifest(h, 'T1').files.find((f) => f.path === 'raw.bin').binary, true);
+});
+
+// Swaps the scratch's d for .d-link, a link to a host directory, at the nth open, list or chdir that
+// names a path in d, as a worker still running in its sandbox could while the save runs.
+function swapAt(h, n) {
+  const dirs = [path.join(h.scratch, 'd'), path.join(fs.realpathSync.native(h.scratch), 'd')];
+  let seen = 0;
+  const touch = (p) => {
+    if (typeof p !== 'string' || !dirs.some((d) => p === d || p.startsWith(d + path.sep)) || ++seen !== n) return;
+    fs.renameSync(path.join(h.scratch, 'd'), path.join(h.scratch, '.d-real'));
+    fs.renameSync(path.join(h.scratch, '.d-link'), path.join(h.scratch, 'd'));
+  };
+  const hooks = [[fs, 'openSync'], [fs, 'readdirSync'], [process, 'chdir']].map(([obj, name]) => {
+    const orig = obj[name];
+    obj[name] = function hooked(p, ...rest) { touch(p); return orig.call(this, p, ...rest); };
+    return () => { obj[name] = orig; };
+  });
+  return () => { for (const undo of hooks) undo(); };
+}
+
+test('a scratch directory swapped for a link while the save runs archives nothing from the link target', { skip: !POSIX }, async (t) => {
+  const pinning = Archive.pinning;
+  t.after(() => { Archive.pinning = pinning; });
+  const rows = [
+    ['before it is listed', 1, (m) => assert.match(m.omitted.find((o) => o.path === 'd').reason, /^unreadable: (ELOOP|ENOTDIR|outside the scratch)$/)],
+    ['before its first file opens', 2, (m) => assert.deepEqual(m.omitted.filter((o) => o.path.startsWith('d/')).map((o) => [o.path, o.reason]),
+      ['f0', 'f1', 'f2'].map((f) => [`d/${f}`, 'outside the scratch']))],
+  ];
+  for (const mode of pinning === 'fd' ? ['fd', 'cwd'] : ['cwd']) {
+    for (const [when, n, check] of rows) {
+      await t.test(`${mode}, swapped ${when}`, (st) => {
+        const h = ready(st);
+        useFixtureUserFile(st, h);
+        const host = path.join(h.base, 'swap-target');
+        fs.mkdirSync(path.join(h.scratch, 'd'));
+        fs.mkdirSync(host);
+        for (const f of ['f0', 'f1', 'f2']) {
+          fs.writeFileSync(path.join(h.scratch, 'd', f), 'scratch content\n');
+          fs.writeFileSync(path.join(host, f), 'HOST-ONLY-CONTENT\n');
+        }
+        fs.symlinkSync(host, path.join(h.scratch, '.d-link'));
+        Archive.pinning = mode;
+        const undo = swapAt(h, n);
+        try { Archive.save({ stateDir: h.state, cwd: h.repo }, S.loadState(h.state), task(h, 'T1'), { reason: 'cancel' }); } finally { undo(); }
+        const m = manifest(h, 'T1');
+        assert.deepEqual(m.files.map((f) => f.path), ['probe/stderr.log']);
+        assert.ok(!m.files.some((f) => stored(h, 'T1', f.path).includes('HOST-ONLY')));
+        check(m);
+      });
+    }
+  }
 });
 
 test('cancel archives the scratch before retirement removes it', (t) => {
