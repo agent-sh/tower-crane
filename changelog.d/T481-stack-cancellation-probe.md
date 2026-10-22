@@ -1,0 +1,1 @@
+- Stack merge cancellation probes hold queries and backoffs until cancellation, wait for the actual drain message, and leave ordinary cleanup timers unchanged. The shutdown assertion no longer depends on a three-second wall-clock race under suite load.

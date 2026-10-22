@@ -20,7 +20,7 @@ if (process.env.TEST_STACK_DEFER_OBSERVE) {
 function pause(ready, release) {
   // write-atomic: existence is the signal; no test reads the text.
   fs.writeFileSync(ready, 'ready');
-  const deadline = performance.now() + 300000;
+  const deadline = performance.now() + Number(process.env.TEST_STACK_POLL_HOLD_MS || 300000);
   while (!fs.existsSync(release)) {
     if (performance.now() > deadline) throw new Error('paused gh fixture was not released');
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
