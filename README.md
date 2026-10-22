@@ -52,7 +52,7 @@ tower-crane merge T1
 
 What each step does:
 
-1. `init` writes `.tower-crane/project.json` with the default ladder and adds the directory to `.git/info/exclude`.
+1. `init` creates `.tower-crane/state.db` with the default ladder and adds the directory to `.git/info/exclude`.
 2. `task add` prints `T1`. Its kind defaults to `code`, so it runs on the `medium` rung even at size `S`. Only an `S` `docs` task goes to `easy`.
 3. `brief set` stores the context the worker gets.
 4. `spawn --dry-run` prints the agent file, the house rules and the exact command it would run. `spawn` runs it: a worker in a new worktree, which claims the task, commits, opens a PR and submits its head.
@@ -172,7 +172,7 @@ Not covered yet:
 
 ## Configuration
 
-`project.json` holds the project: name, goal, repository, base branch, default harness and ladder, worker and lease limits, budgets, pinned gate commands, tests and CI policy, merge options and review policy. Change it with `tower-crane project set` and `tower-crane ladder set`; read it with `tower-crane project show`.
+The project settings in `state.db` hold its name, goal, repository, base branch, default harness and ladder, worker and lease limits, budgets, pinned gate commands, tests and CI policy, merge options and review policy. Change it with `tower-crane project set` and `tower-crane ladder set`; read it with `tower-crane project show`.
 
 `~/.config/tower-crane/config.json` (or `TOWER_CRANE_CONFIG`) is yours across projects: the ladder new projects start from (`tower-crane ladder save-user`), personal fallback routes, and the browser kit for UI tasks. The full shape and precedence are in [docs/state.md](docs/state.md#projectjson).
 
