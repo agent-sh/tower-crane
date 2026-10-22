@@ -6,9 +6,11 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const cp = require('node:child_process');
 const TOML = require('../lib/toml');
+const { makeRepo, pinRung } = require('./helpers');
 const { STUB, NO_STUBS, SECRET, setup, noSecretsCopied, releaseExited, spawn, isolated, commandsRead } = require('./isolation-helpers');
 
 test('unbound projects spawn workers and reviewers with owner-key denials but still refuse headless owner access', { skip: NO_STUBS }, (t) => {
@@ -149,6 +151,100 @@ process.exit(r.status ?? 1);
   const given = seen.outside.filter((n) => /^(TOWER_CRANE_|GIT_|XDG_)/.test(n) || ['HOME', 'TMPDIR', 'GH_CONFIG_DIR', 'TC_FILE_PLAIN'].includes(n));
   assert.ok(given.includes('TOWER_CRANE_BROKER') && given.includes('TC_FILE_PLAIN'), given.join(' '));
   for (const name of given) assert.ok(seen.inside.includes(name), `${name} reaches the command`);
+});
+
+// Why the real claude cannot run here, or false. The agent below calls no
+// model, but it is the real claude, which only a live opt-in runs.
+function claudeSandboxSkip() {
+  if (process.env.TOWER_CRANE_LIVE_CLAUDE !== '1') return 'set TOWER_CRANE_LIVE_CLAUDE=1 to run the real claude sandbox';
+  if (process.platform !== 'linux') return 'the probe covers the Linux sandbox';
+  const r = cp.spawnSync('claude', ['--version'], { encoding: 'utf8', timeout: 60000 }); // wait-allow: backstop for a claude that never answers
+  if (r.error?.code === 'ENOENT') return 'claude is not on PATH';
+  return r.status === 0 ? false : `claude does not start here: ${String(r.stderr).trim().split('\n').pop()}`;
+}
+
+// The real claude runs a worker against a local stand-in for the model API
+// (test/fixtures/fake-messages-api.js): it edits a file, then runs one
+// command that lists the credential-shaped variables it holds and every
+// process whose environment holds a credential value, commits with git and
+// runs the tower-crane CLI. Every value here is fake.
+test('in the real claude sandbox an agent\'s command gets no credential-shaped variable while claude keeps them, and edits, git and the CLI work', { skip: NO_STUBS, timeout: 300000 }, async (t) => {
+  const why = claudeSandboxSkip();
+  if (why) {
+    t.skip(why);
+    return;
+  }
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Probe', '--acceptance', 'probe']);
+  h.ok(['brief', 'set', 'T1', '-'], { input: 'probe\n' });
+  pinRung(h, 'easy', { harness: 'claude', model: 'claude-fake-model' });
+  const dir = path.join(h.base, 'results');
+  fs.mkdirSync(dir);
+  h.ok(['project', 'set', '--sandbox', JSON.stringify({ write: [dir] })]);
+  const fake = { TC_PROBE_FAKE_API_KEY: `fake-api-${process.pid}`, AWS_BEARER_TOKEN_BEDROCK: `fake-bedrock-${process.pid}`, TC_FILE_TOKEN: `fake-file-${process.pid}` };
+  const envFile = path.join(h.base, 'private.env');
+  fs.writeFileSync(envFile, `TC_FILE_TOKEN=${fake.TC_FILE_TOKEN}\nTC_FILE_PLAIN=fake-plain\n`, { mode: 0o600 });
+  h.ok(['project', 'set', '--env_file', envFile]);
+  const probe = path.join(dir, 'probe.js');
+  fs.writeFileSync(probe, `const fs = require('fs'), cp = require('child_process');
+const values = ${JSON.stringify(Object.values(fake))};
+const run = (c, a) => { const r = cp.spawnSync(c, a, { encoding: 'utf8' }); return { status: r.status, out: String(r.stdout) + String(r.stderr) }; };
+const o = { names: Object.keys(process.env).filter((k) => ${JSON.stringify(Object.keys(fake))}.includes(k) || values.includes(process.env[k])), plain: process.env.TC_FILE_PLAIN, tc: process.env.TOWER_CRANE_SANDBOX, holders: [] };
+for (const pid of fs.readdirSync('/proc').filter((p) => /^\\d+$/.test(p))) {
+  try { if (values.some((v) => fs.readFileSync('/proc/' + pid + '/environ', 'latin1').includes(v))) o.holders.push(fs.readFileSync('/proc/' + pid + '/cmdline', 'latin1').split('\\0')[0]); } catch {}
+}
+o.add = run('git', ['add', '-A']);
+o.commit = run('git', ['commit', '-q', '-m', 'probe']);
+o.status = run('git', ['status', '--porcelain', '--untracked-files=all']);
+o.cli = run('tower-crane', ['task', 'show', 'T1']);
+console.log('PROBE ' + JSON.stringify(o));
+`);
+  const steps = [
+    () => ({ name: 'Bash', input: { command: 'pwd', description: 'where' } }),
+    (r) => ({ name: 'Write', input: { file_path: path.join(r[0].text.trim(), 'edited.txt'), content: 'one\n' } }),
+    (r) => ({ name: 'Read', input: { file_path: path.join(r[0].text.trim(), 'edited.txt') } }),
+    (r) => ({ name: 'Edit', input: { file_path: path.join(r[0].text.trim(), 'edited.txt'), old_string: 'one', new_string: 'two' } }),
+    () => ({ name: 'Bash', input: { command: `${JSON.stringify(process.execPath)} ${JSON.stringify(probe)}`, description: 'probe' } }),
+  ];
+  const api = await require('./fixtures/fake-messages-api').start(steps);
+  t.after(api.close);
+  // The stand-in records what claude itself starts with, then runs the real
+  // claude against the local API.
+  const bin = path.join(h.base, 'claude-bin');
+  fs.mkdirSync(bin);
+  const outside = path.join(h.base, 'claude-env.json');
+  fs.writeFileSync(path.join(bin, 'claude'), `#!${process.execPath}
+const cp = require('node:child_process'), fs = require('node:fs'), path = require('node:path');
+fs.writeFileSync(${JSON.stringify(outside)}, JSON.stringify(Object.keys(process.env).filter((k) => process.env[k] === ${JSON.stringify(fake)}[k])));
+const PATH = process.env.PATH.split(path.delimiter).filter((d) => path.resolve(d) !== ${JSON.stringify(bin)}).join(path.delimiter);
+const env = { ...process.env, PATH, ANTHROPIC_BASE_URL: ${JSON.stringify(api.url)}, ANTHROPIC_API_KEY: 'fake-key', CLAUDE_CODE_USE_BEDROCK: '', DISABLE_TELEMETRY: '1', CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1' };
+const r = cp.spawnSync('claude', process.argv.slice(2), { env, stdio: 'inherit' });
+process.exit(r.status ?? 1);
+`, { mode: 0o755 });
+  const config = path.join(h.base, 'claude-config');
+  fs.mkdirSync(config);
+  const cache = fs.mkdtempSync(path.join(os.homedir(), '.cache', 'tcl-'));
+  t.after(() => fs.rmSync(cache, { recursive: true, force: true }));
+  const env = { ...h.env, HOME: os.homedir(), USERPROFILE: os.homedir(), CLAUDE_CONFIG_DIR: config, XDG_CACHE_HOME: cache,
+    PATH: `${bin}${path.delimiter}${h.env.PATH || process.env.PATH}`, TC_PROBE_FAKE_API_KEY: fake.TC_PROBE_FAKE_API_KEY, AWS_BEARER_TOKEN_BEDROCK: fake.AWS_BEARER_TOKEN_BEDROCK };
+  const r = await h.runAsync(['spawn', '--role', 'easy', '--task', 'T1', '--wait'], { env });
+  const said = api.results.map((x, i) => `${i}: ${x.error ? 'error ' : ''}${x.text.slice(0, 400)}`).join('\n');
+  assert.equal(api.results.length, steps.length, `every step ran (exit ${r.code})\n${said}\n${r.stderr}`);
+  assert.deepEqual(JSON.parse(fs.readFileSync(outside, 'utf8')).sort(), Object.keys(fake).sort(), 'claude itself starts with every credential');
+  assert.deepEqual(api.results.slice(1, 4).map((x) => x.error), [false, false, false], `the agent writes and edits its worktree\n${said}`);
+  const seen = JSON.parse(/PROBE (.*)/.exec(api.results[4].text)[1]);
+  assert.deepEqual(seen.names, [], 'no credential-shaped variable reaches the command');
+  // claude's sandbox starts its commands under bwrap, which keeps the
+  // environment claude gave it; nothing the command starts holds a value.
+  assert.deepEqual(seen.holders.filter((c) => !/(^|\/)bwrap$/.test(c)), [], 'no process but the sandbox itself holds a credential');
+  assert.equal(seen.plain, 'fake-plain', 'an env_file name that is not credential-shaped still reaches the command');
+  assert.equal(seen.tc, '1', 'Tower Crane\'s own variables reach the command');
+  assert.equal(seen.add.status, 0, seen.add.out);
+  assert.equal(seen.commit.status, 0, seen.commit.out);
+  assert.equal(seen.status.out, '', 'the commit took the edit, and nothing else is left in the worktree');
+  assert.equal(seen.cli.status, 0, seen.cli.out);
+  assert.match(seen.cli.out, /branch: tower-crane\/T1/);
 });
 
 // Automation dispatches from inside a worker's monitor, so its package root is
