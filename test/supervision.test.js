@@ -321,8 +321,11 @@ test('default retry budget waits beyond the observed ten-minute outage and remai
     await waitOnRepo(h, () => log(h).filter((e) => e.cmd === 'spawn phase' && e.detail.phase === 'retrying').length === index + 1,
       `retry ${index + 1} was not recorded`);
     if (index === 0) {
-      // Renew during held backoff on every platform, without waiting half a lease.
-      fs.writeFileSync(clockFile, String(now + 40000));
+      // Cross half of the actual grant even when startup extends its duration.
+      const grant = log(h).findLast((e) => e.cmd === 'claim' && e.agent === spawned.agent);
+      const until = Date.parse(grant.detail.until);
+      const duration = until - Date.parse(grant.at);
+      fs.writeFileSync(clockFile, String(until - duration / 2 + 1));
       await waitOnRepo(h, () => log(h).some((e) => e.cmd === 'renew'), 'the held retry did not renew its claim');
     }
     elapsed += delay;
