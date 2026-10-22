@@ -214,13 +214,21 @@ console.log('# tests 1\\n# pass 1\\n# fail 0\\n# skipped 0');
 
 const testLeases = (h) => logs(h).filter((e) => e.cmd === 'gate run' && e.detail.type === 'tests');
 
-test('the repo head with a 75-minute tests timeout has a lease within seven hours', () => {
+test('the repo head lease at 75 minutes sums sequential commands and one shared base budget', () => {
   const root = path.resolve(__dirname, '..');
   const head = cp.spawnSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' });
   assert.equal(head.status, 0, head.stderr);
-  const project = { gates: { tests_timeout_min: 75 }, tests: { expensive: true } };
-  const budget = require('../lib/gate-runs').budgetMs({}, project, root, { kind: 'code', sha: head.stdout.trim() }, 'tests');
-  assert.ok(budget <= 7 * 60 * 60000, `${budget / 60000} minutes at the repo head`);
+  const cases = [
+    [['test/live-git-sandbox.test.js', 'test/live-sandbox.test.js'], 11],
+    [[], 5],
+  ];
+  for (const [hosts, budgets] of cases) {
+    const project = { gates: { tests_timeout_min: 75 }, tests: { expensive: true, host_only: hosts } };
+    const budget = require('../lib/gate-runs').budgetMs({}, project, root, { kind: 'code', sha: head.stdout.trim() }, 'tests');
+    // Head, scoped proof and revert each run ordinary and host-only commands;
+    // the native retry and the shared base step add one budget each.
+    assert.equal(budget, budgets * (75 + 1) * 60000, JSON.stringify(hosts));
+  }
 });
 
 test('an unobservable tests holder expires at the deadline its planner recorded', (t) => {
@@ -233,7 +241,7 @@ test('an unobservable tests holder expires at the deadline its planner recorded'
   fs.writeFileSync(preload, 'Date.now = () => Number(process.env.TC_DEADLINE_NOW);\n');
   const source = 'gate:unobservable-tests';
   fs.appendFileSync(path.join(h.state, 'events.jsonl'), `${JSON.stringify({
-    ...first, detail: { ...first.detail, source, host: 'another-host', pid: 1 },
+    ...first, detail: { ...first.detail, source, host: 'another-host' },
   })}\n`);
   const r = h.run(['check', 'tests', 'T1'], { env: {
     NODE_OPTIONS: `--require=${preload}`,
