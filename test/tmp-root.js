@@ -36,23 +36,53 @@ function fileBytes(file) {
   return fs.readdirSync(file).reduce((sum, name) => sum + fileBytes(path.join(file, name)), 0);
 }
 
+function sameDirectory(dir, stat) {
+  const current = fs.lstatSync(dir, { bigint: true });
+  return current.isDirectory() && current.dev === stat.dev && current.ino === stat.ino;
+}
+
+function sameMarker(marker, stat) {
+  const current = fs.lstatSync(marker, { bigint: true });
+  return current.isFile() && current.dev === stat.dev && current.ino === stat.ino
+    && current.size === stat.size && current.mtimeNs === stat.mtimeNs && current.ctimeNs === stat.ctimeNs;
+}
+
+function readOwner(marker, validDirectories) {
+  // No-follow refuses a substituted link; nonblocking avoids waiting on a substituted FIFO.
+  const fd = fs.openSync(marker, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0) | (fs.constants.O_NONBLOCK || 0));
+  try {
+    const stat = fs.fstatSync(fd, { bigint: true });
+    // Windows lacks no-follow, so check the opened handle against the current name before reading.
+    if (!stat.isFile() || !validDirectories() || !sameMarker(marker, stat)) return null;
+    const owner = JSON.parse(fs.readFileSync(fd, 'utf8'));
+    if (!validDirectories() || !sameMarker(marker, stat)) return null;
+    return { owner, stat };
+  } finally { fs.closeSync(fd); }
+}
+
 function sweepTempRoot(root = tempRoot(), now = Date.now()) {
   const result = { count: 0, bytes: 0 };
   let entries;
+  let rootStat;
   try {
     // An explicitly linked root stays untouched, as do links among its entries.
-    if (!fs.lstatSync(root).isDirectory()) return result;
+    rootStat = fs.lstatSync(root, { bigint: true });
+    if (!rootStat.isDirectory()) return result;
     entries = fs.readdirSync(root);
   } catch { return result; }
   for (const name of entries) {
     const dir = path.join(root, name);
     try {
-      if (!fs.lstatSync(dir).isDirectory()) continue;
+      const dirStat = fs.lstatSync(dir, { bigint: true });
+      if (!dirStat.isDirectory()) continue;
+      const validDirectories = () => sameDirectory(root, rootStat) && sameDirectory(dir, dirStat);
       const marker = path.join(dir, OWNER_FILE);
-      if (!fs.lstatSync(marker).isFile()) continue;
-      const owner = JSON.parse(fs.readFileSync(marker, 'utf8'));
+      const record = readOwner(marker, validDirectories);
+      if (!record) continue;
+      const { owner, stat } = record;
       if (!owner || !Number.isFinite(owner.at) || owner.at <= 0 || now - owner.at <= SWEEP_AGE_MS || !ownerGone(owner)) continue;
       const bytes = fileBytes(dir);
+      if (!validDirectories() || !sameMarker(marker, stat)) continue;
       // rm removes symlinks themselves; lstat-based accounting also avoids their targets.
       fs.rmSync(dir, { recursive: true, force: true });
       result.count++;

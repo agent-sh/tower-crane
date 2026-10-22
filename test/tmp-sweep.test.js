@@ -89,6 +89,8 @@ test('sweep retains unmarked, malformed and unverifiable owners', (t) => {
   ]) plant(root, name, record);
   const malformed = plant(root, 'malformed');
   fs.writeFileSync(path.join(malformed, OWNER_FILE), '{');
+  const nonregular = plant(root, 'nonregular');
+  fs.mkdirSync(path.join(nonregular, OWNER_FILE));
   const before = fs.readdirSync(root).sort();
   assert.deepEqual(tmp.sweepTempRoot(root), { count: 0, bytes: 0 });
   assert.deepEqual(fs.readdirSync(root).sort(), before);
@@ -133,4 +135,98 @@ test('sweep never follows directory or owner symlinks outside its root', (t) => 
   assert.deepEqual(fs.readdirSync(outside).map((file) => [file, fs.readFileSync(path.join(outside, file), 'utf8')]), snapshot);
   assert.deepEqual(tmp.sweepTempRoot(top), { count: 0, bytes: 0 });
   assert.deepEqual(tmp.sweepTempRoot(path.join(h.base, 'absent')), { count: 0, bytes: 0 });
+});
+
+test('sweep retains fixtures when ownership markers change while being opened', async (t) => {
+  const h = makeRepo(t);
+  const pid = deadPid();
+  const outside = plant(h.base, 'race-outside', owner(pid));
+  const outsideMarker = path.join(outside, OWNER_FILE);
+  const snapshot = fs.readFileSync(outsideMarker, 'utf8');
+  let fileSymlinks = true;
+  try { fs.symlinkSync(outsideMarker, path.join(h.base, 'link-probe'), 'file'); }
+  catch (error) {
+    if (process.platform !== 'win32' || error.code !== 'EPERM') throw error;
+    fileSymlinks = false;
+  }
+  for (const [when, replacement] of [
+    ['before-open', 'symlink'],
+    ['after-open', 'symlink'],
+    ['after-open', 'live-owner'],
+    ['after-open', 'removed'],
+    ['after-read', 'live-owner-in-place'],
+    ['before-open', 'directory-link'],
+    ['before-open', 'root-link'],
+  ]) {
+    await t.test(`${when}: ${replacement}`, (row) => {
+      if (replacement === 'symlink' && !fileSymlinks) {
+        row.skip('Windows file symlinks require privilege on this runner');
+        return;
+      }
+      const root = path.join(h.base, `${when}-${replacement}`);
+      const dir = plant(root, 'fixture', owner(pid));
+      const marker = path.join(dir, OWNER_FILE);
+      const otherRoot = path.join(h.base, `${when}-${replacement}-outside`);
+      const otherDir = plant(otherRoot, 'fixture', owner(pid));
+      const otherSnapshot = fs.readFileSync(path.join(otherDir, OWNER_FILE), 'utf8');
+      const open = fs.openSync;
+      const read = fs.readFileSync;
+      let swapped = false;
+      let opened;
+      const swap = () => {
+        swapped = true;
+        if (replacement === 'live-owner-in-place') {
+          fs.writeFileSync(marker, JSON.stringify({ ...owner(process.pid), note: 'new live owner' }));
+          return;
+        }
+        if (replacement === 'directory-link' || replacement === 'root-link') {
+          const from = replacement === 'root-link' ? root : dir;
+          const to = replacement === 'root-link' ? otherRoot : otherDir;
+          fs.renameSync(from, `${from}-before`);
+          fs.symlinkSync(to, from, process.platform === 'win32' ? 'junction' : 'dir');
+          return;
+        }
+        fs.unlinkSync(marker);
+        if (replacement === 'symlink') fs.symlinkSync(outsideMarker, marker, 'file');
+        else if (replacement === 'live-owner') fs.writeFileSync(marker, JSON.stringify(owner(process.pid)));
+      };
+      row.mock.method(fs, 'openSync', (file, ...args) => {
+        if (file !== marker || swapped) return open(file, ...args);
+        if (when === 'before-open') swap();
+        const fd = open(file, ...args);
+        opened = fd;
+        try {
+          if (when === 'after-open') swap();
+          return fd;
+        } catch (error) { fs.closeSync(fd); throw error; }
+      });
+      // The pathname reader's native fast path bypasses JavaScript openSync.
+      row.mock.method(fs, 'readFileSync', (file, ...args) => {
+        if (when === 'after-read' && file === opened && !swapped) {
+          const text = read(file, ...args);
+          swap();
+          return text;
+        }
+        if (file !== marker || swapped) return read(file, ...args);
+        if (when === 'before-open') {
+          swap();
+          return read(file, ...args);
+        }
+        const fd = open(file, fs.constants.O_RDONLY);
+        try {
+          if (when === 'after-open') swap();
+          const text = read(fd, ...args);
+          if (when === 'after-read') swap();
+          return text;
+        }
+        finally { fs.closeSync(fd); }
+      });
+      assert.deepEqual(tmp.sweepTempRoot(root), { count: 0, bytes: 0 });
+      assert.equal(swapped, true, 'the marker must change at the intended race point');
+      assert.equal(fs.existsSync(dir), true);
+      if (opened !== undefined) assert.throws(() => fs.fstatSync(opened), { code: 'EBADF' });
+      assert.equal(fs.readFileSync(outsideMarker, 'utf8'), snapshot);
+      assert.equal(fs.readFileSync(path.join(otherDir, OWNER_FILE), 'utf8'), otherSnapshot);
+    });
+  }
 });
