@@ -418,7 +418,7 @@ If an expired pre-claim already belongs to the generated worker, dispatch renews
 
 `gates.clean_paths` is an optional JSON array of absolute or `~/` paths, set by the orchestrator or owner with `init --clean-paths JSON` or `project set --clean-paths JSON`; `[]` removes the extra paths and `null` clears the setting. At dispatch, sandboxed Claude and Codex agents can read existing absolute executable paths and direct script arguments to Node, Python, shell, Ruby or Perl in `gates.clean_cmd` and `gates.tests_proof_cmd` commands, their containing directories, and declared dependency files or directories outside the task worktree. Paths resolve on the host, and `~/` declarations use the spawning user's home. These tool paths are read-only so workers cannot change the cleanup or proof implementation. Automatic detection covers executable files and the first argument of a recognized interpreter before any shell expansion when the script has its language suffix or a shebang. Non-executable command prefixes and unrecognized data arguments are excluded. Script paths after interpreter options, expanded paths and wrapper dependencies require declarations. Command pins and dependency declarations share operational authority because they select the code gates run on the host; workers and reviewers cannot change them. Wrapper scripts must declare any dependencies outside their own directory; spawn does not execute wrappers to discover dependencies. Missing declared paths, hidden credential stores, directories holding the user's home or worktree, and writable paths inside tool directories refuse dispatch. Use dedicated tool directories and separate writable caches. Worktree tools retain the task's normal permissions.
 
-`gates.executors` is a positive integer, default 2, that caps automation executors running at once on this host ([events.jsonl](#eventsjsonl)). The default fits one full suite at tests concurrency 3, about 6 processes, so two keep tests under half the cores of a 24-core box. The orchestrator or the owner raises it with `project set --executors N` on a larger machine.
+`gates.executors` is a positive integer, default 2, that caps the CPU work automation runs at once on this host ([events.jsonl](#eventsjsonl)). Only work that runs the project's commands here takes an executor: the tests gate with its host probes, the clean gate, local CI (`ci.local`) and the merge line's head check. Review dispatch, a reaction waiting on a reviewer, hosted CI reads and the ci gate's waits for GitHub take none and never wait for one. A tests gate in mode `none` runs nothing and takes none. The default fits one full suite at tests concurrency 3, about 6 processes, so two keep tests under half the cores of a 24-core box. The orchestrator or the owner raises it with `project set --executors N` on a larger machine.
 
 `gates.tests_timeout_min` and `gates.clean_timeout_min` set positive minutes per test or cleanup shell invocation. Fractions are allowed; the rounded duration must be at least 1 ms and the duration cannot exceed Node's 2147483647 ms timer range. Each defaults to 20 minutes when absent or null, preserving the original gate budget for existing projects. Set a budget that fits the project's measured suite under local load. `init` and `project set` accept `--tests-timeout-min MIN` and `--clean-timeout-min MIN`; `null` clears either setting. Both are operational, and `project show` prints their effective values. Tests uses its budget separately for the full suite, scoped head proof and reverted proof. Automation uses these same settings for gate executors and the merged-head suite. A budget change applies to the next invocation and does not invalidate successful command evidence.
 
@@ -1735,8 +1735,11 @@ rechecked once a minute by the trusted `wait` watcher, as described below.
 
 `automation` events record `{source, phase}` keyed by the triggering event
 ID, or a stable digest for older records without IDs.
-`running` adds executor `pid`, `host` and Linux `start_ticks`. `done`
-deduplicates completed work. `deferred` keeps unknown or moved heads,
+`running` adds the reaction's `pid`, `host` and Linux `start_ticks`. `done`
+deduplicates completed work. `executor` records a reaction that reached CPU
+work while every executor was busy, or while an older reaction already waited
+for one, with the gate as `kind` and the wait as `error`; its source stays
+owed. `deferred` keeps unknown or moved heads,
 unknown mergeability and failed merge attempts retryable; `error` records
 an exception. Terminal receipts include `error`, null without an exception.
 Startup can retry deferred or errored work without a new lifecycle event.
@@ -1769,13 +1772,40 @@ in the owed queue but does not hold an executor or block later reactions whose
 work can run. Once admissible, it takes its original turn among runnable sources.
 Other kinds of deferral
 still rely on startup reconciliation or a new lifecycle event.
-A task has at most one observable executor.
-An exited executor's start can be retried, while an unobservable executor
-remains busy. At most `gates.executors` executors run on one host across
-every watcher and supervisor. The running receipt in the event log is the
-executor's lease: its terminal receipt releases it on exit, and its PID
-identity releases it when the process dies. Running receipts from other
-hosts do not count against this host's cap.
+A task has at most one observable reaction. Its running receipt holds the
+task, not an executor: an exited reaction's start can be retried, while an
+unobservable one remains busy. A reaction starts at once and takes an
+executor only when it reaches CPU work: the tests gate with its host probes,
+the clean gate, local CI, or the merge line's head check. It keeps that
+executor across tests and clean and releases it before its next GitHub read
+and at its end, so review dispatch, accept, CI reads and the merge itself
+hold none. At most `gates.executors` executors are in use on one host across
+every watcher and supervisor. `executor` events are their leases:
+`{lease, phase: "running", kind, source, pid, host, start_ticks}` with `kind`
+one of `tests`, `clean`, `ci` or `head check`, then `{lease, phase: "done"}`.
+A lease that moves from tests to clean, or from one head check to the next,
+records another `running` with its new `kind` and task. The done event releases
+it, and its PID identity releases it when the process dies. Leases from other
+hosts do not count against this host's cap. A reaction that finds the cap full,
+or an older waiter ahead of it, still runs its hosted CI read, so a CI failure
+sends the task back before its suite runs, then ends with `phase: "executor"`
+and stays owed. One such waiter keeps a task's place: a later notification for
+the same task that reaches the same CPU work ends `done`, since the waiting
+reaction advances the task from its current state. A waiter is retried only
+once a slot is free and no older waiter ranks ahead, so retries read nothing
+from GitHub while the cap is full. A command run by hand (`merge --accepted`,
+`gates retry --from-rework`) that reaches this CPU work waits for a free
+executor instead; `check` and `gates retry` run their gate at once and take
+none. Reactions in one process still run one after another; concurrency comes
+from separate watchers, supervisors and CLI calls.
+Rechecks of pending CI share one GitHub checks read per task per minute
+across every process. `ci poll` events `{sha, revision, scheduled}` record
+each read automation makes, with `scheduled` the time of the event that
+scheduled it (the reconcile or notification), not the read. A recheck of
+pending CI at the same head scheduled within a minute of the last read's
+schedule skips its read, so one watcher's minute-apart rechecks always read
+however late each reaction reaches its ci gate. A first read at a head and a
+`ci completed` notification read at once.
 SIGTERM or SIGINT to `wait` stops new reservations and gates while its active
 gate finishes and records evidence. The interrupted reaction records
 `phase: "deferred"` with an interruption reason, releasing its executor lease
@@ -1808,8 +1838,8 @@ no further stack step or task; the second kills it. A `gh stack sync` that
 ran records its outcome either way, so moved heads still go to rework.
 Stopped steps record no deferral; the next refresh retries them.
 `automation queued` records a blocked notification's source, with
-`executors` set to the cap when the cap blocked it rather than another
-executor of the same task. Queued notifications for accepted, unmerged PR
+`executors` set to the cap when it waits for an executor rather than for
+another reaction of the same task. Queued notifications for accepted, unmerged PR
 tasks run first, in the order of their current `accept` events. This includes
 older notifications that now run a merge and any merged-tree test the merge
 needs. Running reactions are never preempted.
@@ -1817,8 +1847,8 @@ Submitted tasks follow in submission order, except that the queued
 notifications a `gates prioritize` event names run first among submitted
 work, the most recent request first. An explicit request cannot move
 submitted work ahead of accepted merges or change acceptance order.
-While higher-ranked work waits, a later notification queues behind it even
-if a slot is free. A notification queued after a priority request keeps
+While a higher-ranked reaction waits for an executor, a later one that reaches
+CPU work waits behind it even if a slot is free. A notification queued after a priority request keeps
 submission order unless its task becomes accepted.
 `gates prioritize ID --reason R` is operational ([Authority](#authority)); it
 records a `gates prioritize` event with `reason`, `sources` (the sources of
@@ -1827,16 +1857,22 @@ the task's queued notifications at that moment), `queued` (their count) and
 an accepted, unmerged PR task, whose merge already runs first, and when the
 task has no queued notification, since either would change nothing. A notification queued
 behind the task's own running reaction counts, but the running reaction does
-not: its receipt is running and its executor is live, so it is no longer
-queued. A dead executor's notification stays queued for its retry. `status`
-lists the gate queue: running tasks, then the queued tasks in the order a free
-executor takes them, then the tasks whose notification waits behind their own
-running reaction, marked as blocked. `--json` carries it as `gate_queue` with
+not: its receipt is running and its process is live, so it is no longer
+queued. A dead reaction's notification stays queued for its retry. `status`
+lists `gate executors: N of CAP in use: TASK KIND, ...` for this host's CPU
+executors, then the gate queue: running tasks, then the queued tasks in the
+order a free executor takes them, then the tasks whose notification waits
+behind their own running reaction, marked as blocked. It lists apart the tasks
+that hold no executor while they wait: `waiting on GitHub checks: TASKS` for
+pending, unstalled CI at the head and revision, and `waiting on review: TASKS`
+for submitted tasks whose software gates pass and whose review is missing.
+`--json` carries these as `gate_executors: {cap, in_use: [{task, kind}]}` and
+`waiting_on: {github, review}`. `--json` carries it as `gate_queue` with
 `running`, `queued`, `blocked` and `deferred`, each queued, blocked or deferred task with its
 `prioritized` request or `null`. An accepted task shows `null`, since its
 acceptance sets its place. `deferred` lists the owed tasks held by the governor,
 including those still in their retry interval; the text gate queue line appends
-`deferred by the governor: TASKS`. `inbox` carries the same `gate_queue`. Each executor drains the queue after releasing its slot; watchers
+`deferred by the governor: TASKS`. `inbox` carries the same `gate_queue`. Each reaction drains the queue when it ends, after releasing its executor; watchers
 also retry their pending notifications on their next check. State locks cover only
 reservation and receipts, never Git, GitHub, gates or model calls.
 Changing the resolved tests or cleanup gate policy, an affected task's
@@ -1917,7 +1953,9 @@ over pending runs and over unknown mergeability. Pending CI with no run queued
 or in progress also records `not_running: true`. The trusted `wait` host
 schedules reconciliation of pending CI once per minute without a completion
 notification, reusing current tests and cleanup passes. It skips a task whose
-executor is running or whose earlier reconcile is still queued. A recheck whose
+reaction is running or whose earlier reconcile is still queued, unless that
+reconcile only waits for an executor, since it already read GitHub. Rechecks
+share the poll budget of one checks read per task per minute. A recheck whose
 pending result has the same summary, flags, ref and CI policy at the same head
 and revision records no evidence and no `check ci` event; the earlier entry
 stays the receipt. Pending CI with nothing queued or running for 30 minutes at
@@ -2118,7 +2156,7 @@ Agy homes place native settings and the rendered `agents/gishra-<job>.md` below 
 
 ## Orchestrator inbox
 
-`inbox` derives a snapshot from one state read and cached GitHub observations. It does not change tasks or consume messages. JSON has `items`, live gate `executors` and `gate_queue`, the same queue `status` shows; text ends with the executor count and a `gate queue` line. Each item has a stable `id`, `kind`, nullable `task`, finding data, and `action: {command, argv}`. Text output includes the same findings and command. A ready or rework task without a brief gets `brief_missing` instead of `ready` or `rework_ready`; `brief set` clears it. A `rework_ready` item for a task automation sent back for a failed gate, unchanged and untaken since, also has `gate` and `restore`, the `gates retry ID --from-rework` command that undoes the rework once the cause is fixed, and `hold_until` while automatic refill holds it (`gates.rework_hold_min`). A task held for its waiting PR owner also has `owner`, and its action is the restore, since the owner takes the task when the hold ends. When the PR is not open, or its head or the local branch moved, `restore` is left out and `restore_blocked` says why. Kinds include `gate_failed`, `ci_stalled`, `review_failed`, `review_body_stuck`, `review_held`, `review_exit_missing`, `review_churn`, `rework_ready`, `ready`, `dead_claim`, `decision`, `accepted_unmerged`, `revuto_failed`, `codeql_alert`, `head_changed`, `main_ci_failed`, `main_ci_flaky`, `message`, `stall`, `decision_answer`, `owner_comment`, `governor_deferred`, `governor_stopped`, `github_pending` and `github_error`. `governor_deferred` (id `governor_deferred:TASK:UNIT`) and `governor_stopped` carry the unit kind, its reason and its times, with `status` as their action; they clear on their own ([Host resource governor](#host-resource-governor)). Open decisions carry their question and options. A technical decision is answered by the orchestrator under the existing answer authority; an owner-only decision (see the decision rules above: an approval request, an escalated question with delegation disabled, an `owner_required` reason, a spend, credential, setting or crisis kind the owner has not lifted, or a technical decision the owner unmarked) needs the owner's supplied choice. A decision's action argv ends in `<answer>` when the orchestrator answers it and `<owner answer>` when only the owner does. Answered decisions retain their choice, note, author and blocked tasks until acknowledged or expired from the view under the closed-task rule below. Owner task and decision comments retain their text and target until acknowledged; a later comment creates a new item.
+`inbox` derives a snapshot from one state read and cached GitHub observations. It does not change tasks or consume messages. JSON has `items`, the live CPU executor leases as `executors` and `gate_queue`, the same queue `status` shows; text ends with the executor count and a `gate queue` line. Each item has a stable `id`, `kind`, nullable `task`, finding data, and `action: {command, argv}`. Text output includes the same findings and command. A ready or rework task without a brief gets `brief_missing` instead of `ready` or `rework_ready`; `brief set` clears it. A `rework_ready` item for a task automation sent back for a failed gate, unchanged and untaken since, also has `gate` and `restore`, the `gates retry ID --from-rework` command that undoes the rework once the cause is fixed, and `hold_until` while automatic refill holds it (`gates.rework_hold_min`). A task held for its waiting PR owner also has `owner`, and its action is the restore, since the owner takes the task when the hold ends. When the PR is not open, or its head or the local branch moved, `restore` is left out and `restore_blocked` says why. Kinds include `gate_failed`, `ci_stalled`, `review_failed`, `review_body_stuck`, `review_held`, `review_exit_missing`, `review_churn`, `rework_ready`, `ready`, `dead_claim`, `decision`, `accepted_unmerged`, `revuto_failed`, `codeql_alert`, `head_changed`, `main_ci_failed`, `main_ci_flaky`, `message`, `stall`, `decision_answer`, `owner_comment`, `governor_deferred`, `governor_stopped`, `github_pending` and `github_error`. `governor_deferred` (id `governor_deferred:TASK:UNIT`) and `governor_stopped` carry the unit kind, its reason and its times, with `status` as their action; they clear on their own ([Host resource governor](#host-resource-governor)). Open decisions carry their question and options. A technical decision is answered by the orchestrator under the existing answer authority; an owner-only decision (see the decision rules above: an approval request, an escalated question with delegation disabled, an `owner_required` reason, a spend, credential, setting or crisis kind the owner has not lifted, or a technical decision the owner unmarked) needs the owner's supplied choice. A decision's action argv ends in `<answer>` when the orchestrator answers it and `<owner answer>` when only the owner does. Answered decisions retain their choice, note, author and blocked tasks until acknowledged or expired from the view under the closed-task rule below. Owner task and decision comments retain their text and target until acknowledged; a later comment creates a new item.
 
 `gate_failed` items report the latest audited failure for each software gate (`tests`, `clean`, `sources`, `ci`) at the current head and revision of an unmerged submitted or accepted task. They include the gate name, summary, ref, audited `confirmed_failure` flag and any `test_failure` names and output tail. Confirmed code failures resolve through rework carrying the failure summary and its test names. A change the worker must fix (`worker_failure`) offers rework with the gate summary. Pending checks, observation failures and infrastructure failures offer `check GATE ID`; infrastructure findings also retain their timeout metadata, and a failure the base shares carries its `main_failure: {base, names}`. Stalled CI is not a `gate_failed` item: it is a `ci_stalled` item addressed to the orchestrator with the gate summary and `since`, offering `check ci ID`. A missing or uninstalled pinned command is not a `gate_failed` item: it is a `gate_config` item addressed to the orchestrator, naming `gates.KEY` and offering `project set` with the pinned command, and `gates retry` follows once it is set. A hotfix whose changed host-only tests only skipped gets the same item naming `tests.host_env` and offering `project set --tests-host-env <JSON>`. A later pass, rework, a new head or revision, or a confirmed merge clears the finding. Failed gates cannot be acknowledged away. On an open mergeable accepted PR, a stale or unconfirmed failed required software gate offers its check command instead of `merge --accepted`; confirmed code failures offer rework instead; after that rerun passes, the inbox advances to the next blocker or merge. Review blockers still require rework.
 
