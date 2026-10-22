@@ -46,6 +46,24 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
       return readResult.apply(this, args);
     };
   }
+  // LIVE_PID_REUSED: once the harness exits another process holds its pid, as
+  // Windows hands a freed pid to a new process within seconds.
+  if (path.basename(process.argv[1] || '') === 'spawn-monitor.js' && process.env.LIVE_PID_REUSED) {
+    const P = require(path.join(path.dirname(process.argv[1]), 'processes.js'));
+    const processState = P.processState;
+    P.processState = function (spawn, ...rest) { return spawn?.agent ? 'running' : processState.call(this, spawn, ...rest); };
+  }
+  // LIVE_TASKKILL_TIMEOUT: taskkill outlasts its timeout and stops nothing, as
+  // on a loaded Windows runner.
+  if (path.basename(process.argv[1] || '') === 'spawn-monitor.js' && process.env.LIVE_TASKKILL_TIMEOUT) {
+    const spawnSync = cp.spawnSync;
+    cp.spawnSync = function (file, ...rest) {
+      if (file !== 'taskkill') return spawnSync.call(this, file, ...rest);
+      fs.appendFileSync(process.env.LIVE_TASKKILL_TIMEOUT, `${rest[0].join(' ')}\n`);
+      return { pid: 0, output: [null, null, null], stdout: null, stderr: null, status: null, signal: 'SIGTERM',
+        error: Object.assign(new Error('spawnSync taskkill ETIMEDOUT'), { code: 'ETIMEDOUT' }) };
+    };
+  }
   if (path.basename(process.argv[1] || '') === 'spawn-monitor.js' && process.env.LIVE_READS) {
     const read = fs.readFileSync;
     let delayed = false;
@@ -91,6 +109,9 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
   if (file) fs.mkdirSync(path.dirname(file), { recursive: true });
   if (env.LIVE_FILE) writeAtomic(env.LIVE_FILE, file);
   let step = 0;
+  // Exit once both streams have flushed: a pipe write can still be pending,
+  // and process.exit would drop the final usage the supervisor reads.
+  const exit = (code) => process.stderr.write('', () => process.stdout.write('', () => process.exit(code)));
   const write = (final = false) => {
     step += 1;
     const output = Math.floor(per / 10);
@@ -119,7 +140,8 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
       writeAtomic(env.LIVE_DONE, String(step));
       // A held harness leaves its final record to the periodic sampler.
       if (env.LIVE_FINAL_HOLD) return;
-      process.exit(70);
+      exit(70);
+      return;
     }
     if (step === 1 && env.LIVE_CONTINUE) {
       const resume = setInterval(() => {
@@ -129,13 +151,16 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
       }, 25);
     } else if (step < steps) setTimeout(write, Number(env.LIVE_EVERY || 100)); // wait-allow: model periodic telemetry samples while the harness is live
     else {
+      let finished = false;
       const finish = () => {
+        if (finished) return;
+        finished = true;
         if (env.LIVE_RESULT && harness === 'claude') console.log(JSON.stringify({
           type: 'result', usage: { input_tokens: step * (per - output), output_tokens: step * output },
         }));
         if (env.LIVE_OUTAGE) console.error('HTTP 503 service unavailable');
         writeAtomic(env.LIVE_DONE, String(step));
-        process.exit(Number(env.LIVE_EXIT || 0));
+        exit(Number(env.LIVE_EXIT || 0));
       };
       if (env.LIVE_COMPLETE) {
         setInterval(() => { if (fs.existsSync(env.LIVE_COMPLETE)) finish(); }, 25);
