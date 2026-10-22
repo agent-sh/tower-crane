@@ -123,8 +123,24 @@ if (released.status !== 0) throw new Error(released.stderr);
     assert.equal(fs.readFileSync(path.join(h.base, task + '-version.txt'), 'utf8').trim(),
       `${version} (commit ${sha})`, task);
   }
-  const contract = fs.readFileSync(path.join(ROOT, 'docs', 'state.md'), 'utf8');
-  assert.match(contract, /A spawned orchestrator keeps its pinned tool for child dispatches until it is respawned from an upgraded CLI\./);
+  for (const [file, patterns] of [
+    ['docs/state.md', [
+      /dispatch pins the runtime of the CLI that starts it/,
+      /A spawned orchestrator keeps its pinned tool for child dispatches until it is respawned from an upgraded CLI\./,
+    ]],
+    ['docs/cli.md', [
+      /dispatch pins the runtime of the CLI that starts it/,
+      /A spawned orchestrator keeps its pinned tool for child dispatches until it is respawned from an upgraded CLI\./,
+    ]],
+    ['changelog.d/T506.md', [
+      /Child dispatches from a spawned orchestrator use its snapshot/,
+      /respawn the orchestrator from an upgraded CLI to use the new version/,
+    ]],
+  ]) {
+    const contract = fs.readFileSync(path.join(ROOT, file), 'utf8');
+    for (const pattern of patterns) assert.ok(pattern.test(contract), `${file}: missing ${pattern}`);
+    assert.doesNotMatch(contract, /Moving or upgrading the tool checkout affects the next dispatch/);
+  }
 });
 
 for (const [operation, launcher] of [['writeFileSync', 'tower-crane'], ['writeFileSync', 'tower-crane.cmd'], ['accessSync', 'tower-crane.js']]) {
