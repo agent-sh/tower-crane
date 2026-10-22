@@ -148,7 +148,7 @@ test('the matrix is all ten shards, beside the proofs and the repeat job', () =>
   assert.match(checks, /- run: npm run check:shared\n {8}env:\n {10}TOWER_CRANE_CHANGE_BASE: \$\{\{ github\.event\.pull_request\.base\.sha \|\| github\.event\.before \}\}/);
   assert.doesNotMatch(checks, /npm test/, 'the PR check does not run the suite');
   assert.match(testJob, /- run: npm run check:shared/);
-  assert.match(testJob, /- run: npm test\n[\s\S]*TC_TEST_SHARD: \$\{\{ matrix\.shard \}\}/);
+  assert.match(testJob, /- name: npm test\n {8}run: [^\n]*'npm test'[^\n]*\n[\s\S]*TC_TEST_SHARD: \$\{\{ matrix\.shard \}\}/);
   for (const id of ['gate-scratch', 'model-swap']) assert.match(jobBlock(workflow, id), /- run: node scripts\/probe-/);
   // Flake repeat loops cost hosted Windows time on every PR; they run after merge and daily, in
   // their own job so the shards keep the share of the suite test/run.js measured for them.
@@ -167,8 +167,9 @@ test('the matrix is all ten shards, beside the proofs and the repeat job', () =>
   assert.match(repeatJob, /^ {4}runs-on: windows-latest$/m);
   const repeats = [...repeatJob.matchAll(/- name: (Repeat [^\n]+)/g)].map((m) => m[1]);
   assert.deepEqual(repeats, ['Repeat Claude Code mod wakeup twenty times', 'Repeat Claude interrupted native worker ten times',
-    'Repeat lock-free reader and torn recovery tests thirty times', 'Repeat owner authority and board approval files ten times',
-    'Repeat interrupt during backoff and origin read tests twenty times', 'Repeat mutation containment tests ten times'],
+    'Repeat lock-free reader and torn recovery tests thirty times', 'Repeat state compatibility twenty times',
+    'Repeat owner authority and board approval files ten times', 'Repeat interrupt during backoff and origin read tests twenty times',
+    'Repeat mutation containment tests ten times'],
   'the wakeup loop runs first, on a fresh runner');
   // GitHub keeps one running and one pending run per group, and a newer run replaces the pending one.
   // Main pushes share a group so only the newest pending head waits; tag, scheduled and manual runs stay unique.
@@ -177,14 +178,33 @@ test('the matrix is all ten shards, beside the proofs and the repeat job', () =>
 });
 
 test('a shard reaches its deadline, and leaves a log, before the test step and job limits cancel it without one', () => {
-  const workflow = readWorkflow(path.resolve(__dirname, '..'));
+  const root = path.resolve(__dirname, '..');
+  const workflow = readWorkflow(root);
   const testJob = workflow.split('\n  test:\n')[1].split(/\n {2}[\w-]+:\n/)[0];
   const limit = Number(/^ {4}timeout-minutes: (\d+)$/m.exec(testJob)?.[1]);
-  const step = testJob.split('- run: npm test\n')[1].split(/\n {6}- /)[0];
+  const step = testJob.split('- name: npm test\n')[1].split(/\n {6}- /)[0];
   const stepLimit = Number(/^ {8}timeout-minutes: (\d+)$/m.exec(step)?.[1]);
   const { SHARD_DEADLINE_MIN } = require('./run');
   // The watchdog's process dump and stop take up to two minutes.
   assert.ok(SHARD_DEADLINE_MIN <= stepLimit - 4, `shard deadline ${SHARD_DEADLINE_MIN} min against a ${stepLimit} min test step limit`);
+  // On Windows a process outside node runs the tests and stops them when node's own watchdog could not.
+  assert.match(step, /^ {8}run: \$\{\{ runner\.os == 'Windows' && 'pwsh -NoProfile -File scripts\/shard-guard\.ps1 npm test' \|\| 'npm test' \}\}$/m);
+  const guard = /^ {10}TC_SHARD_GUARD_DEADLINE_MIN: \$\{\{ inputs\.hang && '2' \|\| '(\d+)' \}\}$/m.exec(step);
+  assert.ok(guard, 'the workflow sets the guard deadline, 2 minutes for a hang run');
+  const guardMin = Number(guard[1]);
+  assert.match(fs.readFileSync(path.join(root, 'scripts', 'shard-guard.ps1'), 'utf8'), new RegExp(`TC_SHARD_GUARD_DEADLINE_MIN : ${guardMin}\\)`), 'the script default matches CI');
+  // The guard's dump, bounded CIM query and stop take about a minute.
+  assert.ok(SHARD_DEADLINE_MIN < guardMin && guardMin <= stepLimit - 2, `guard deadline ${guardMin} min between the ${SHARD_DEADLINE_MIN} min shard deadline and the ${stepLimit} min step limit`);
+  // A hang run blocks node, and on Windows node's watchdog waits past the guard, so the guard is what stops it.
+  assert.match(step, /^ {10}TC_TEST_SHARD_DEADLINE_MIN: \$\{\{ inputs\.hang && \(runner\.os == 'Windows' && '(\d+)' \|\| '2'\) \|\| '' \}\}$/m);
+  assert.ok(Number(/runner\.os == 'Windows' && '(\d+)' \|\| '2'/.exec(step)[1]) > 2, 'node waits past the guard in a hang run');
+  for (const name of ['TC_SHARD_GUARD_MAX_PROCESSES', 'TC_SHARD_GUARD_MAX_MEMORY_MB']) {
+    assert.ok(Number(new RegExp(`^ {10}${name}: (\\d+)$`, 'm').exec(step)?.[1]) > 0, `${name} bounds the job`);
+  }
+  // Progress leaves the VM as a check run while the shard runs; only Windows gets the token, and the tests never see it.
+  assert.match(testJob, /^ {4}permissions:\n {6}contents: read\n {6}checks: write\n/m);
+  assert.match(step, /^ {10}TC_SHARD_PROGRESS_CHECK: shard progress \(\$\{\{ matrix\.os \}\}, node \$\{\{ matrix\.node \}\}, shard \$\{\{ matrix\.shard \}\}\)$/m);
+  assert.match(step, /^ {10}TC_SHARD_PROGRESS_TOKEN: \$\{\{ runner\.os == 'Windows' && github\.token \|\| '' \}\}$/m);
   // Checkout, Node setup and check:shared run before the step, and the upload after it.
   assert.ok(stepLimit <= limit - 4, `test step limit ${stepLimit} min against a ${limit} min job limit`);
   assert.match(step, /^ {10}TC_TEST_SHARD_LOG_DIR: \$\{\{ runner\.temp \}\}\/shard-log$/m);

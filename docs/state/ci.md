@@ -50,7 +50,9 @@ over pending runs and over unknown mergeability. Pending CI with no run queued
 or in progress also records `not_running: true`. The trusted `wait` host
 schedules reconciliation of pending CI once per minute without a completion
 notification, reusing current tests and cleanup passes. It skips a task whose
-executor is running or whose earlier reconcile is still queued. A recheck whose
+reaction is running or whose earlier reconcile is still queued, unless that
+reconcile only waits for an executor, since it already read GitHub. Rechecks
+share the poll budget of one checks read per task per minute. A recheck whose
 pending result has the same summary, flags, ref and CI policy at the same head
 and revision records no evidence and no `check ci` event; the earlier entry
 stays the receipt. Pending CI with nothing queued or running for 30 minutes at

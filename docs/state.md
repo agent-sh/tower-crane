@@ -98,3 +98,5 @@ Existing links use these anchors. Follow the link to the contract in its area.
 <a id="final-review"></a>[final-review](state/gates.md#final-review)
 
 <a id="pr-owners"></a>[pr-owners](state/tasks.md#pr-owners)
+
+<a id="live-window-replay-2026-10-21-t451"></a>[live-window-replay-2026-10-21-t451](state/containment.md#live-window-replay-2026-10-21-t451)
