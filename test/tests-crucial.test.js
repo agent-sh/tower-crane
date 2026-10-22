@@ -136,12 +136,16 @@ for (const [name, settings, valueTest, ok, pattern] of [
 }
 
 // The coverage run expands the proof template on the changed tests, so a native crash it reruns is
-// recorded as the proof step, never as the head command.
+// recorded as the proof step, never as the head command. A gate that runs this file under its own
+// coverage run leaves NODE_V8_COVERAGE set for every process below it, the fixture's head run
+// included, so the crash keys on the coverage directory the fixture's gate sets, not on the
+// variable being set.
 test('a native crash in the coverage run is rerun as the proof step', { skip: process.platform === 'win32' && 'POSIX signals' }, (t) => {
   const marker = path.join(fs.mkdtempSync(path.join(process.env.TOWER_CRANE_TEST_TMP || require('node:os').tmpdir(), 'crucial-crash-')), 'runs');
   t.after(() => fs.rmSync(path.dirname(marker), { recursive: true, force: true }));
+  const inherited = JSON.stringify(process.env.NODE_V8_COVERAGE ?? null);
   const crashOnce = `require('node:assert/strict').equal(require('../value'), 1);
-if (process.env.NODE_V8_COVERAGE) {
+if (process.env.NODE_V8_COVERAGE && process.env.NODE_V8_COVERAGE !== ${inherited}) {
 ${nativeCrashTest({ marker })}}
 `;
   const h = fixture(t, { '**/*.md': [] }, crashOnce);
