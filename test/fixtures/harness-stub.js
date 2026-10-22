@@ -97,6 +97,9 @@ module.exports = function stub(harness) {
     report.settings = settings;
     // claude makes its proxy bridge sockets in the TMPDIR it starts with.
     report.tmpdir = process.env.TMPDIR || null;
+    // Names only: what claude would hand its commands, before its sandbox.
+    report.envNames = Object.keys(process.env).sort();
+    report.flagSettings = after('--settings') ? JSON.parse(after('--settings')) : null;
     if (!args.includes('--strict-mcp-config')) Object.assign(report.mcp, json(global).mcpServers || {});
     if (after('--mcp-config')) Object.assign(report.mcp, json(after('--mcp-config')).mcpServers || {});
     report.auth = read(path.join(dir, '.credentials.json'));
