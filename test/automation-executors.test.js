@@ -765,6 +765,34 @@ poll();
   }
 });
 
+// A drain can pass over T1 while its reaction is alive and reach T2 after it
+// died, so the dead reaction must still rank ahead of T2 for the freed slot.
+test('an owed older reaction outranks a newer executor waiter only while it waits or died running', () => {
+  const A = require('../lib/automation');
+  const P = require('../lib/processes');
+  const sha = 'a'.repeat(40);
+  const tasks = ['T1', 'T2'].map((id) => ({ id, status: 'submitted', sha, revision: 1, evidence: [] }));
+  const submits = tasks.map((task) => ({ id: `submit-${task.id}`, task: task.id, cmd: 'submit', detail: { sha, revision: 1 } }));
+  const governor = { task: 'T1', kind: 'tests', until: Date.now() + 5000, reason: 'pressure' };
+  for (const [name, receipt, outranks] of [
+    ['waits for an executor', { phase: 'executor', kind: 'tests' }, true],
+    ['died running', { phase: 'running', pid: 2147483647 }, true],
+    ['running', { phase: 'running', pid: process.pid, ...P.identity(process.pid) }, false],
+    ['running unobservably on another host', { phase: 'running', pid: process.pid, host: 'another-host' }, false],
+    ['deferred by the governor', { phase: 'deferred', governor }, false],
+    ['done', { phase: 'done' }, false],
+    ['failed', { phase: 'error' }, false],
+  ]) {
+    const events = [...submits,
+      ...submits.map((e) => ({ cmd: 'automation queued', task: e.task, detail: { source: e.id } })),
+      { cmd: 'automation', task: 'T1', at: new Date().toISOString(), detail: { source: 'submit-T1', ...receipt } },
+      { cmd: 'automation', task: 'T2', at: new Date().toISOString(), detail: { source: 'submit-T2', phase: 'executor', kind: 'tests' } }];
+    const st = { project: {}, tasks: { tasks }, events };
+    assert.equal(A.outranked(st, submits[1])?.task ?? null, outranks ? 'T1' : null, `T2 behind T1 ${name}`);
+    assert.equal(A.outranked(st, submits[0]), null, `T1 ${name} is never behind the newer T2`);
+  }
+});
+
 test('accepted merges take the next executor in acceptance order before queued submitted gates', async (t) => {
   const h = setup(t);
   const events = path.join(h.state, 'events.jsonl');

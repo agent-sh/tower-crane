@@ -2010,7 +2010,9 @@ notifications a `gates prioritize` event names run first among submitted
 work, the most recent request first. An explicit request cannot move
 submitted work ahead of accepted merges or change acceptance order.
 While a higher-ranked reaction waits for an executor, a later one that reaches
-CPU work waits behind it even if a slot is free. A notification queued after a priority request keeps
+CPU work waits behind it even if a slot is free. A queued reaction that died
+running counts as waiting, so the slot it freed goes to its retry before later
+work, even when a drain passed over it while it was alive. A notification queued after a priority request keeps
 submission order unless its task becomes accepted.
 `gates prioritize ID --reason R` is operational ([Authority](#authority)); it
 records a `gates prioritize` event with `reason`, `sources` (the sources of
