@@ -425,24 +425,25 @@ test('a read-only claude worktree under the home hides the home whole and binds 
   }
 });
 
-test('an agent of another project reads the Tower Crane code in the checkout, never its state, brokers or homes', { skip: NO_STUBS }, t => {
+test('an agent of another project reads the Tower Crane code in its own snapshot, never the checkout, its state, brokers or homes', { skip: NO_STUBS }, t => {
   // The checkout the CLI runs from can hold its own project's state, whose
-  // brokers/ holds tokens and homes/ links to the user's credentials. The
-  // home here holds the checkout, as ~ holds ~/projects/<checkout>.
+  // brokers/ holds tokens and homes/ links to the user's credentials, and it
+  // can be retired while the agent runs. The home here holds the checkout, as
+  // ~ holds ~/projects/<checkout>.
   const { h, u } = setup(t);
   const home = fs.realpathSync(path.dirname(ROOT));
   const checkout = fs.realpathSync(ROOT);
-  const hidden = ['.tower-crane/brokers/orchestrator/broker.json', '.tower-crane/homes/worker-T1-1/.credentials.json', '.tower-crane/tasks.json', '.git/config']
-    .map((p) => path.join(checkout, ...p.split('/')));
-  const open = ['bin/tower-crane.js', 'lib/agents.js', 'skills/tower-crane-work/SKILL.md', 'agents/tower-crane-small.md', 'standards/default.md', 'package.json']
+  const code = ['bin/tower-crane.js', 'lib/agents.js', 'skills/tower-crane-work/SKILL.md', 'agents/tower-crane-small.md', 'standards/default.md', 'package.json'];
+  const hidden = ['.tower-crane/brokers/orchestrator/broker.json', '.tower-crane/homes/worker-T1-1/.credentials.json', '.tower-crane/tasks.json', '.git/config', ...code]
     .map((p) => path.join(checkout, ...p.split('/')));
   for (const harness of ['claude', 'codex']) {
     for (const rung of ['small', 'hard']) {
       isolated(h, rung, harness);
-      spawn(h, u, rung, { HOME: home, USERPROFILE: home });
+      const started = spawn(h, u, rung, { HOME: home, USERPROFILE: home });
       const seen = u.report();
+      const own = path.join(fs.realpathSync(path.join(h.state, 'homes', started.agent)), ...(harness === 'codex' ? ['home', '.tower-crane-shims'] : []), 'tool');
       for (const p of hidden) assert.equal(commandsRead(seen, p), false, `${harness} ${rung}: ${path.relative(checkout, p)} is hidden`);
-      for (const p of open) assert.equal(commandsRead(seen, p), true, `${harness} ${rung}: ${path.relative(checkout, p)} is readable`);
+      for (const p of code) assert.equal(commandsRead(seen, path.join(own, ...p.split('/'))), true, `${harness} ${rung}: its own ${p} is readable`);
     }
   }
 });

@@ -11,7 +11,7 @@ const cp = require('node:child_process');
 const { makeRepo, ROOT, BIN } = require('./helpers');
 const S = require('../lib/state');
 const TOML = require('../lib/toml');
-const { NO_STUBS, setup, walk, releaseExited, spawn, ALLOW, decide, isolated } = require('./isolation-helpers');
+const { NO_STUBS, setup, walk, releaseExited, spawn, ALLOW, decide, isolated, commandsRead } = require('./isolation-helpers');
 
 test('a spawn from a supervisor running in another agent\'s env gets a cache of its own under the user cache root, never nested in the inherited one', { skip: NO_STUBS }, (t) => {
   const { h, u } = setup(t);
@@ -166,14 +166,14 @@ for (const [command, args, opts] of calls) {
     'push', '--progress', '--no-verify', '--no-follow-tags', '--recurse-submodules=no', 'https://github.com/acme/app.git', `${h.git(['rev-parse', 'HEAD'], wt)}:refs/heads/${branch}`,
   ]);
   // A sandboxed codex agent runs the shims in its HOME, with a copy of the
-  // snapshot's lib; its sandbox hides hook.json, so they record no hook event.
+  // snapshot; its sandbox hides hook.json, so they record no hook event.
   const shims = path.join(home, 'home', '.tower-crane-shims');
   const policy = JSON.parse(fs.readFileSync(path.join(shims, 'policy.json'), 'utf8'));
   assert.equal(policy.branch, branch);
   assert.equal(policy.repo, 'acme/app');
   assert.equal(policy.hook, null);
-  assert.ok(fs.readFileSync(path.join(shims, 'bin', 'git'), 'utf8').includes(path.join(shims, 'lib', 'shim.js')), 'the git shim runs the copy');
-  assert.equal(fs.readFileSync(path.join(shims, 'lib', 'shim.js'), 'utf8'), fs.readFileSync(path.join(ROOT, 'lib', 'shim.js'), 'utf8'));
+  assert.ok(fs.readFileSync(path.join(shims, 'bin', 'git'), 'utf8').includes(path.join(shims, 'tool', 'lib', 'shim.js')), 'the git shim runs the copy');
+  assert.equal(fs.readFileSync(path.join(shims, 'tool', 'lib', 'shim.js'), 'utf8'), fs.readFileSync(path.join(ROOT, 'lib', 'shim.js'), 'utf8'));
   const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   assert.equal(events.find((e) => e.cmd === 'spawn').detail.tool.sha, toolSha);
   assert.ok(events.some((e) => e.cmd === 'hook report' && e.agent === started.agent), 'hook report');
@@ -181,6 +181,77 @@ for (const [command, args, opts] of calls) {
     assert.ok(!events.some((e) => e.cmd === cmd && e.agent === started.agent), cmd);
   }
   assert.match(fs.readFileSync(S.progressFile(h.state, started.agent), 'utf8'), /"cmd":"hook progress"/);
+});
+
+// Seen 2026-10-20: a codex worker's sandbox bound the dispatching checkout's
+// code, and retiring that checkout emptied the live agent's view of it. The
+// user's tower-crane on PATH runs that checkout here, as an npm link would.
+for (const harness of ['claude', 'codex']) {
+  test(`a sandboxed ${harness} agent's policy and tower-crane use its own tool copy, so retiring the dispatching checkout leaves its CLI working`, { skip: NO_STUBS }, (t) => {
+    const { h, u } = setup(t);
+    isolated(h, 'medium', harness);
+    const checkout = path.join(u.home, '.cache', 'tower-crane-tool');
+    for (const name of ['bin', 'lib', 'agents', 'skills', 'standards', 'package.json']) {
+      fs.cpSync(path.join(ROOT, name), path.join(checkout, name), { recursive: true });
+    }
+    h.git(['init', '-q', checkout]);
+    h.git(['add', '.'], checkout);
+    h.git(['commit', '-qm', 'engine checkout'], checkout);
+    fs.writeFileSync(path.join(h.base, 'bin', 'tower-crane'), `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(path.join(checkout, 'bin', 'tower-crane.js'))} "$@"\n`, { mode: 0o755 });
+    const shown = path.join(h.base, 'shown.json');
+    const show = `
+const fs = require('node:fs');
+const cp = require('node:child_process');
+const { fakeAgentEnv } = require(${JSON.stringify(path.join(__dirname, 'agent-env.js'))});
+const r = cp.spawnSync('tower-crane', ['task', 'show', 'T1', '--json'], { env: fakeAgentEnv(process.env), encoding: 'utf8' });
+fs.writeFileSync(${JSON.stringify(shown)}, r.stdout);
+process.stderr.write(r.stderr);
+process.exit(r.status ?? 1);
+`;
+    const result = cp.spawnSync(process.execPath, [path.join(checkout, 'bin', 'tower-crane.js'), 'spawn', '--task', 'T1', '--wait', '--json'], {
+      cwd: h.repo, encoding: 'utf8', timeout: 300000,
+      env: { ...u.env, STUB_RUN: JSON.stringify([
+        [process.execPath, '-e', `require('node:fs').renameSync(${JSON.stringify(checkout)}, ${JSON.stringify(`${checkout}-retired`)})`],
+        [process.execPath, '-e', show],
+        ['tower-crane', 'task', 'note', 'T1', 'through-the-broker'],
+      ]) },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const seen = u.report();
+    assert.deepEqual(seen.ran.map((r) => [r.code, r.stderr]), [[0, ''], [0, ''], [0, '']]);
+    assert.equal(JSON.parse(fs.readFileSync(shown, 'utf8')).id, 'T1', 'tower-crane answers after the checkout is gone');
+    const started = JSON.parse(result.stdout);
+    const note = h.readState('tasks.json').tasks[0].notes.find((n) => n.text === 'through-the-broker');
+    assert.equal(note?.agent, started.agent, 'the broker writes the note after the checkout is gone');
+    const home = fs.realpathSync(path.join(h.state, 'homes', started.agent));
+    // The policy names no path of the checkout: not the sandbox, the hooks or
+    // the credential helper.
+    const policy = harness === 'claude' ? JSON.stringify(seen.settings) : fs.readFileSync(path.join(home, 'config.toml'), 'utf8');
+    assert.ok(!policy.includes(fs.realpathSync(u.home) + path.sep + path.join('.cache', 'tower-crane-tool')), `${harness}: the policy names the checkout`);
+    const own = harness === 'claude' ? path.join(home, 'tool') : path.join(home, 'home', '.tower-crane-shims', 'tool');
+    assert.equal(commandsRead(seen, path.join(own, 'bin', 'tower-crane.js')), true, `${harness}: the agent's tool copy is readable`);
+    assert.equal(commandsRead(seen, path.join(fs.realpathSync(u.home), '.cache', 'tower-crane-tool', 'lib', 'agents.js')), false, `${harness}: the checkout is hidden`);
+  });
+}
+
+// The agent's socket directory removed outside its sandbox, which still holds
+// the old one: the broker cannot listen where the agent looks, so the
+// supervisor stops the agent and records why.
+test('a sandboxed worker whose broker lost its socket directory is stopped blocked with the broker loss as the reason', { skip: NO_STUBS || (process.platform === 'win32' && 'Windows uses a named pipe') }, (t) => {
+  const { h, u } = setup(t);
+  isolated(h, 'medium', 'claude');
+  const remove = "const dir = process.env.TOWER_CRANE_SOCKET_DIR; require('node:fs').renameSync(dir, `${dir}.gone`); process.stdout.write(dir);";
+  // Work the supervisor, which checks the broker every second, stops long before it ends.
+  const work = 'setTimeout(() => {}, 60000);'; // wait-allow: agent work the supervisor stops, never a wait of this test
+  const r = h.run(['spawn', '--role', 'medium', '--task', 'T1', '--wait', '--json'], { env: { ...u.env, STUB_RUN: JSON.stringify([[process.execPath, '-e', remove], [process.execPath, '-e', work]]) } });
+  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const spawned = events.find((e) => e.cmd === 'spawn' && e.task === 'T1').detail.agent;
+  const phase = events.findLast((e) => e.cmd === 'spawn phase' && e.detail.agent === spawned);
+  assert.equal(phase?.detail.phase, 'blocked', `${r.stdout}\n${r.stderr}`);
+  assert.match(phase.detail.reason, /^state broker lost: its socket directory \/\S+ is gone$/);
+  const dir = phase.detail.reason.match(/directory (\S+) is gone/)[1];
+  t.after(() => fs.rmSync(`${dir}.gone`, { recursive: true, force: true }));
+  assert.match(path.basename(dir), /^tc-[0-9a-f]{12}$/, 'the leaf the spawn granted');
 });
 
 test('a claude sandboxed worker has policy masks, so its shim plumbs merges of the paths the sandbox masks', { skip: NO_STUBS }, (t) => {
@@ -432,7 +503,8 @@ if (path.basename(process.argv[1]) === 'codex') process.stdout.write(JSON.string
     }
     if (harness === 'codex') {
       const rules = TOML.parse(fs.readFileSync(path.join(seen.home, 'config.toml'), 'utf8')).permissions['tower-crane'].filesystem;
-      for (const p of [bin, path.join(bin, 'git'), path.join(path.dirname(bin), 'policy.json'), path.join(path.dirname(bin), 'lib', 'shim.js')]) {
+      const tool = path.join(path.dirname(bin), 'tool');
+      for (const p of [bin, path.join(bin, 'git'), path.join(bin, 'tower-crane'), path.join(path.dirname(bin), 'policy.json'), path.join(tool, 'lib', 'shim.js'), path.join(tool, 'bin', 'tower-crane.js')]) {
         assert.ok(codexShows(rules, fs.realpathSync(p)), `codex shows ${p}`);
       }
       assert.ok(!codexShows(rules, fs.realpathSync(path.join(h.state, 'homes'))), 'codex hides homes/');

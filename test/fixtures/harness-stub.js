@@ -98,6 +98,9 @@ module.exports = function stub(harness) {
     // claude makes its proxy bridge sockets in the TMPDIR it starts with.
     report.tmpdir = process.env.TMPDIR || null;
     report.ownTmpdir = process.env.CLAUDE_CODE_TMPDIR || null;
+    // Names only: what claude would hand its commands, before its sandbox.
+    report.envNames = Object.keys(process.env).sort();
+    report.flagSettings = after('--settings') ? JSON.parse(after('--settings')) : null;
     if (!args.includes('--strict-mcp-config')) Object.assign(report.mcp, json(global).mcpServers || {});
     if (after('--mcp-config')) Object.assign(report.mcp, json(after('--mcp-config')).mcpServers || {});
     report.auth = read(path.join(dir, '.credentials.json'));
@@ -164,6 +167,8 @@ module.exports = function stub(harness) {
     report.mcp = Object.fromEntries(Object.keys(config.mcp_servers || {}).map((k) => [k, true]));
     report.auth = read(path.join(dir, 'auth.json'));
     report.env = read(path.join(dir, '.env'));
+    // Names only: what codex would hand its commands, before its policy.
+    report.envNames = Object.keys(process.env).sort();
     // codex resolves :tmpdir from the TMPDIR it starts with.
     report.tmpdir = process.env.TMPDIR || null;
     report.tmpEnv = { TMP: process.env.TMP || null, TEMP: process.env.TEMP || null, JAVA_TOOL_OPTIONS: process.env.JAVA_TOOL_OPTIONS || null };

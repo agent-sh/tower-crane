@@ -1,0 +1,1 @@
+- Keep Claude's host temp socket protections with private scratch roots: dispatcher, project env and env_file temp settings do not reopen the host temp directory, even under a deep cache root.

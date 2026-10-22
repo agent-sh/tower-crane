@@ -401,6 +401,65 @@ test('a spawned claude agent imports the user\'s global rules by path, loads non
   noSecretsCopied(h);
 });
 
+// Claude's commands can connect to any socket they see. A private TMPDIR
+// keeps the host sockets hidden even when the cache path is deep.
+test('a sandboxed claude keeps private temp and hides host sockets across dispatcher and project temp settings', { skip: (NO_STUBS || process.platform !== 'linux') && 'Linux only' }, (t) => {
+  for (const source of ['dispatcher', 'env', 'env_file']) {
+    for (const hostTemp of [false, true]) {
+      const { h, u } = setup(t);
+      isolated(h, 'small', 'claude');
+      const tmp = fs.realpathSync('/tmp');
+      const caller = path.join(h.base, 'caller-tmp');
+      fs.mkdirSync(caller);
+      const selected = hostTemp ? tmp : caller;
+      if (source === 'env_file') {
+        const envFile = path.join(h.base, 'private.env');
+        fs.writeFileSync(envFile, `TMPDIR=${selected}\n`, { mode: 0o600 });
+        h.ok(['project', 'set', '--env_file', envFile]);
+      } else if (source === 'env') {
+        h.ok(['project', 'set', '--env', JSON.stringify({ TMPDIR: selected })]);
+      }
+      spawn(h, u, 'small', { TMPDIR: source === 'dispatcher' ? selected : hostTemp ? caller : tmp });
+      const seen = u.report();
+      const label = `${source}, host temp ${hostTemp}`;
+      assert.ok(seen.tmpdir && seen.tmpdir !== tmp && seen.tmpdir !== caller, `${label}: private temp replaces inherited settings`);
+      assert.ok(seen.tmpdir.startsWith(u.home + path.sep), `${label}: private temp stays in the user cache`);
+      const box = seen.settings.sandbox.filesystem;
+      assert.ok(box.denyRead.includes(tmp), `${label}: host temp is hidden whole`);
+      for (const p of ['.X11-unix/X0', 'dbus-probe/socket']) assert.equal(commandsRead(seen, path.join(tmp, p)), false, `${label}: ${p}`);
+      assert.ok(!box.allowRead.some((p) => p === tmp || p.startsWith(tmp + path.sep)), `${label}: no host temp socket is allowed back`);
+      assert.ok(!seen.settings.permissions.deny.some((rule) => rule.includes(`(/${tmp})`) || rule.includes(`(/${tmp}/**)`)), `${label}: file tools keep host temp`);
+      assert.deepEqual(fs.readdirSync(caller), [], `${label}: caller sentinel stays empty`);
+    }
+  }
+});
+
+// claude gives its commands its own environment, so its sandbox unsets every
+// credential-shaped name claude starts with, which the monitor passes on
+// claude's argv; test/isolation-skills.test.js runs the real claude sandbox.
+// Every value here is fake.
+test('a sandboxed claude denies its commands every credential-shaped name it starts with, and nothing Tower Crane gives them', { skip: NO_STUBS }, (t) => {
+  const { h, u } = setup(t);
+  isolated(h, 'small', 'claude');
+  const fake = `tc-fake-value-${process.pid}`;
+  const envFile = path.join(h.base, 'private.env');
+  fs.writeFileSync(envFile, `TC_FILE_TOKEN=${fake}\nTC_FILE_PLAIN=${fake}\n`, { mode: 0o600 });
+  h.ok(['project', 'set', '--env_file', envFile, '--env', JSON.stringify({ TC_ENV_PASSWORD: fake, TC_ENV_PLAIN: fake })]);
+  spawn(h, u, 'small', { PROBE_FAKE_API_KEY: fake, AWS_BEARER_TOKEN_BEDROCK: fake, AWS_SECRET_ACCESS_KEY: fake, MY_PASSPHRASE: fake, GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.fake', GIT_CONFIG_VALUE_0: fake });
+  const seen = u.report();
+  const denied = (seen.flagSettings?.sandbox?.credentials?.envVars || []).map((v) => { assert.equal(v.mode, 'deny', v.name); return v.name; });
+  for (const name of ['PROBE_FAKE_API_KEY', 'AWS_BEARER_TOKEN_BEDROCK', 'AWS_SECRET_ACCESS_KEY', 'MY_PASSPHRASE', 'TC_FILE_TOKEN', 'TC_ENV_PASSWORD']) {
+    assert.ok(seen.envNames.includes(name), `${name} reaches claude itself`);
+    assert.ok(denied.includes(name), `${name} is denied to its commands`);
+  }
+  const shaped = seen.envNames.filter((n) => /(?:^AWS_)|(?:SECRET|TOKEN|PASSWORD|PASSWD|PASSPHRASE|CREDENTIAL|KEY(?!_\d))/i.test(n) && !/^(TOWER_CRANE_|GIT_|XDG_)/i.test(n));
+  assert.deepEqual(shaped.filter((n) => !denied.includes(n)), [], 'every credential-shaped name claude starts with is denied');
+  const kept = denied.filter((n) => /^(TOWER_CRANE_|GIT_|XDG_|PATH$|HOME$|TMPDIR$|GH_CONFIG_DIR$)/i.test(n) || ['TC_FILE_PLAIN', 'TC_ENV_PLAIN'].includes(n));
+  assert.deepEqual(kept, [], 'Tower Crane\'s own, git\'s and plain names reach the commands');
+  assert.ok(!JSON.stringify(seen.flagSettings).includes(fake), 'names only, never values');
+  assert.ok(!seen.settings.sandbox.credentials, 'the names stay out of settings.json, as env_file names stay out of every file');
+});
+
 test('a sandboxed claude removes its ignored cwd placeholders after exit', { skip: NO_STUBS }, (t) => {
   const { h, u, wt } = setup(t);
   const { xdg } = isolateGitEnvironment(h, u);
