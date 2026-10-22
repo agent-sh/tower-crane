@@ -1417,6 +1417,25 @@ A worker that `spawn` started owns its PR once it submits: it stays in its sessi
 - A failed review whose findings are all PR-body claims keeps its light path: a body fixer edits the PR body without a new revision while the owner waits. It starts as a fresh agent beside the owner, since it cannot resume a session that is still running.
 - The reviewer stays a separate clean-context agent: review evidence counts only from the owner or a reviewer spawn, never from the submitter.
 
+#### Live upgrade check
+
+Running spawn monitors retain their tool snapshots when the wait host upgrades. Finish or stop monitors whose tool snapshot predates owning-worker support before validating this lifecycle.
+
+On 2026-10-22, T455 observed T507's owner, `worker-T507-7`, lose ownership after a failed tests gate and get replaced. Wait host 11 ran `905555e2`, which includes T453 (`b29d66ee`), but the gate ran inside a resident monitor using `a90b254e`, which predates T453. Its rework recorded neither `owner_held` nor a handover. The owner exited before the replacement spawn. T477 tracks stale-executor prevention.
+
+| T507 transition | Event ID |
+| --- | --- |
+| Original worker spawn | `Ebb55d000-db86-4f5d-b225-a93ed1c07a79` |
+| Submit takes ownership (`own: true`) | `E5d96c61d-891f-4d32-86e1-0f1491d86b54` |
+| Tests gate starts in the older monitor | `E7b2bad88-d5b2-4f91-b2a6-886d54584870` |
+| Orchestrator verifies the gate's live pid and `a90b254e` snapshot | `E88393b2f-ad09-4f31-9942-357f7d813ca1` |
+| Failed tests rework without handback | `Eee76499f-5589-401d-8bf4-7130b68c856f` |
+| Owner reports ownership ended | `E043c8e68-de91-46f9-aff1-f3f32c6725d1` |
+| Original owner exits | `E620aca2c-ed94-48d4-b9e7-ae2502f0a031` |
+| Replacement worker spawn (`worker-T507-8`) | `E30ac89b2-0eb8-40fe-a577-980fe3803a7b` |
+
+The orchestrator stopped both pre-T453 monitors, using `a90b254e` and `429b8f81`, as recorded in message `Ee0c32939-86f3-4176-9794-813efe7d19e2`. These events document ownership loss during an upgrade with older monitors still running. Read each receipt with `tower-crane event EVENT_ID --agent NAME` in this project's state.
+
 ### Spawned process exits
 
 On Windows, an npm `.cmd` harness runs as a direct Node process with the shim's script and the original arguments. Spawn events retain the configured harness and route; the recorded pid belongs to the Node process. The supervisor uses the same resolution for retries and fallback routes.
