@@ -20,8 +20,9 @@ const write = (h, file, text) => {
 // Gated green at head A: tests, clean and an independent review pass. The own
 // change holds shared.txt, whose second line upstream's later edit touches.
 // running leaves tests and review to start at A later, as runs still going there.
-function gated(t, { running = false } = {}) {
-  const h = cachedFixture(t, `base-only-head:gated:${running}`, (repo) => {
+// probes declares those host probes at A.
+function gated(t, { running = false, probes = [] } = {}) {
+  const h = cachedFixture(t, `base-only-head:gated:${running}:${JSON.stringify(probes)}`, (repo) => {
     const h = setup(null, { repo });
     h.git(['switch', '-q', 'main']);
     write(h, 'shared.txt', 'one\ntwo\nthree\n');
@@ -40,6 +41,7 @@ function gated(t, { running = false } = {}) {
     h.ok(['project', 'set', '--tests-proof-cmd', 'node {tests}', '--tests-expensive', 'true', '--ci-required', '["test"]',
       '--tests-map', JSON.stringify({ 'value.js': ['test/value.test.js'], 'shared.txt': ['test/shared.test.js'] })]);
     h.submit();
+    if (probes.length) h.ok(['submit', 'T1', '--sha', h.sha, '--pr', '7', '--agent', 'worker', ...probes.flatMap((cmd) => ['--host-probe', cmd])]);
     for (const gate of running ? ['clean'] : ['tests', 'clean']) h.ok(['check', gate, 'T1']);
     h.reviewer('T1', 'reviewer');
     if (!running) h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha, '--ok', '--agent', 'reviewer']);
@@ -59,7 +61,7 @@ function upstream(h, conflict) {
 }
 
 // The worker merges main into A, resolving the conflict upstream() made, and submits the new head.
-function mergeAndSubmit(h, { conflict = false, extra = null, agent = 'worker' } = {}) {
+function mergeAndSubmit(h, { conflict = false, extra = null, agent = 'worker', probes = [] } = {}) {
   let merge = true;
   try { h.git(['merge', '-q', '--no-ff', '-m', 'merge the base', 'main']); } catch { merge = false; }
   assert.equal(merge, !conflict, conflict ? 'the base edit must conflict with the own change' : 'the merge must be automatic');
@@ -78,7 +80,7 @@ function mergeAndSubmit(h, { conflict = false, extra = null, agent = 'worker' } 
   Object.assign(github.prs['7'], { headRefOid: head, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' });
   github.ci[head] = 'success';
   h.saveGithub(github);
-  h.ok(['submit', 'T1', '--sha', head, '--pr', '7', '--agent', agent]);
+  h.ok(['submit', 'T1', '--sha', head, '--pr', '7', '--agent', agent, ...probes.flatMap((cmd) => ['--host-probe', cmd])]);
   return head;
 }
 
@@ -116,25 +118,33 @@ test('a base-only head keeps tests, clean and review at the same revision and qu
 });
 
 // The worker resolves the conflict on its own, or after automation's conflict
-// rework sent the task back; the rework's revision bump keeps the link.
-for (const path_ of ['resubmit', 'conflict rework']) test(`a conflict-resolving head (${path_}) is reviewed on the resolved hunks and tests only the resolved file`, (t) => {
-  const h = gated(t);
+// rework sent the task back; the rework's revision bump keeps the link. The
+// project is paused for that round, so no refill worker's supervisor gates the
+// head and dispatches reviewers beside the test's own dispatch. A
+// declared host probe runs again at the resolved head, whose receipt must hold it.
+const PROBE = 'node -e "process.exit(0)"';
+for (const [path_, probes] of [['resubmit', []], ['conflict rework', []], ['resubmit', [PROBE]]]) test(`a conflict-resolving head (${path_}${probes.length ? ', host probe' : ''}) is reviewed on the resolved hunks and tests only the resolved file`, (t) => {
+  const h = gated(t, { probes });
+  const revision = Number(h.revision('T1'));
   const reviewed = h.readState('tasks.json').tasks[0].sha;
   upstream(h, true);
   if (path_ === 'conflict rework') {
     const github = h.github();
     Object.assign(github.prs['7'], { mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY' });
     h.saveGithub(github);
+    h.ok(['project', 'set', '--paused', 'the test claims the rework']);
     h.consume();
     const rework = h.logs().findLast((e) => e.cmd === 'rework');
     assert.equal(rework?.detail.conflict, true, 'automation sends a conflicting PR back as a conflict rework');
+    assert.ok(!h.logs().some((e) => e.cmd === 'spawn' && e.detail.role === 'worker'), 'the paused round refills no worker');
+    h.ok(['project', 'set', '--paused', '']);
+    h.ok(['claim', 'T1', '--agent', 'worker']);
   }
-  // Refill hands the rework to a fresh worker, whose claim the submit uses.
-  const head = mergeAndSubmit(h, { conflict: true, agent: h.readState('tasks.json').tasks[0].claim?.agent || 'worker' });
+  const head = mergeAndSubmit(h, { conflict: true, probes });
   const task = h.readState('tasks.json').tasks[0];
   assert.equal(task.carry.kind, 'resolved');
   assert.deepEqual(task.carry.files, ['shared.txt']);
-  assert.deepEqual([task.carry.from_revision, task.carry.revision], path_ === 'resubmit' ? [1, 1] : [1, 2]);
+  assert.deepEqual([task.carry.from_revision, task.carry.revision], path_ === 'resubmit' ? [revision, revision] : [revision, revision + 1]);
   for (const type of ['tests', 'clean', 'review']) assert.equal(gate(h, type).ok, false, type);
   h.ok(['check', 'tests', 'T1']);
   const tests = h.readState('tasks.json').tasks[0].evidence.findLast((e) => e.type === 'tests');
@@ -142,7 +152,8 @@ for (const path_ of ['resubmit', 'conflict rework']) test(`a conflict-resolving 
   assert.equal(tests.sha, head);
   assert.equal(tests.receipt.mode, 'resolved');
   assert.deepEqual(tests.receipt.head_tests, ['test/shared.test.js']);
-  const ran = tests.commands.filter((c) => c.command !== 'git').map((c) => c.command);
+  assert.deepEqual((tests.receipt.host_probes ?? []).map((r) => [r.command, r.status]), probes.map((cmd) => [cmd, 0]));
+  const ran = tests.commands.filter((c) => c.command !== 'git' && !probes.includes(c.command)).map((c) => c.command);
   assert.equal(ran.length, 1, ran.join('\n'));
   assert.match(ran[0], /test\/shared\.test\.js/);
   assert.doesNotMatch(ran[0], /value\.test\.js/);
