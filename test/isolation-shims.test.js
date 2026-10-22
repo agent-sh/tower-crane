@@ -235,6 +235,26 @@ process.exit(r.status ?? 1);
   });
 }
 
+// The agent's socket directory removed outside its sandbox, which still holds
+// the old one: the broker cannot listen where the agent looks, so the
+// supervisor stops the agent and records why.
+test('a sandboxed worker whose broker lost its socket directory is stopped blocked with the broker loss as the reason', { skip: NO_STUBS || (process.platform === 'win32' && 'Windows uses a named pipe') }, (t) => {
+  const { h, u } = setup(t);
+  isolated(h, 'medium', 'claude');
+  const remove = "const dir = process.env.TOWER_CRANE_SOCKET_DIR; require('node:fs').renameSync(dir, `${dir}.gone`); process.stdout.write(dir);";
+  // Work the supervisor, which checks the broker every second, stops long before it ends.
+  const work = 'setTimeout(() => {}, 60000);'; // wait-allow: agent work the supervisor stops, never a wait of this test
+  const r = h.run(['spawn', '--role', 'medium', '--task', 'T1', '--wait', '--json'], { env: { ...u.env, STUB_RUN: JSON.stringify([[process.execPath, '-e', remove], [process.execPath, '-e', work]]) } });
+  const events = StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
+  const spawned = events.find((e) => e.cmd === 'spawn' && e.task === 'T1').detail.agent;
+  const phase = events.findLast((e) => e.cmd === 'spawn phase' && e.detail.agent === spawned);
+  assert.equal(phase?.detail.phase, 'blocked', `${r.stdout}\n${r.stderr}`);
+  assert.match(phase.detail.reason, /^state broker lost: its socket directory \/\S+ is gone$/);
+  const dir = phase.detail.reason.match(/directory (\S+) is gone/)[1];
+  t.after(() => fs.rmSync(`${dir}.gone`, { recursive: true, force: true }));
+  assert.match(path.basename(dir), /^tc-[0-9a-f]{12}$/, 'the leaf the spawn granted');
+});
+
 test('a claude sandboxed worker has policy masks, so its shim plumbs merges of the paths the sandbox masks', { skip: NO_STUBS }, (t) => {
   const { h, u } = setup(t);
   isolated(h, 'medium', 'claude');

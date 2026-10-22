@@ -11,17 +11,18 @@ const { cachedFixture, BIN } = require('./helpers');
 const S = require('../lib/state');
 const Db = require('../lib/db');
 const T = require('../lib/tasks');
-const { windowsFileIds } = require('./fixtures/windows-file-ids');
+const { windowsFileIds, INJECTED } = require('./fixtures/windows-file-ids');
 const { runReleased } = require('./released-tool');
 
 const RELEASED = 'v0.1.3';
 
 // Simulated Windows file ids, past 2^53, in this process for the rest of the
-// test and in each CLI the returned options run.
+// test and in each CLI the returned options run. `ids` names a set of injected
+// ids (fixtures/windows-file-ids.js INJECTED); without it the real ids shift.
 const WINDOWS_IDS = path.join(__dirname, 'fixtures', 'windows-file-ids.js');
-function windowsIds(t) {
-  t.after(windowsFileIds());
-  return { pre: ['--require', WINDOWS_IDS], env: { TOWER_CRANE_TEST_WINDOWS_IDS: '1' } };
+function windowsIds(t, ids) {
+  t.after(windowsFileIds(INJECTED[ids]));
+  return { pre: ['--require', WINDOWS_IDS], env: { TOWER_CRANE_TEST_WINDOWS_IDS: ids || '1' } };
 }
 
 function migrated(t) {
@@ -226,9 +227,9 @@ test('a 0.1 commit whose log sync failed after its lines were written keeps its 
   assertConsistent(h);
 });
 
-function tornMultiEvent(t, { windows = false } = {}) {
+function tornMultiEvent(t, { fileIds } = {}) {
   const h = setup(t);
-  const cli = windows ? windowsIds(t) : {};
+  const cli = fileIds ? windowsIds(t, fileIds) : {};
   const log = path.join(h.state, 'events.jsonl');
   // One descriptor for the stat and the torn append, so the file measured is the file written.
   const fd = fs.openSync(log, 'a');
@@ -264,9 +265,25 @@ test('recovery before migration cuts a torn multi-event append off the log, incl
 
 // A tool through 0.1.2 wrote the inode as a Number only, rounded past 2^53.
 test('recovery before migration cuts a torn append that a 0.1.2 manifest describes when file ids pass 2^53, as on Windows', (t) => {
-  const run = tornMultiEvent(t, { windows: true });
+  const run = tornMultiEvent(t, { fileIds: 'rounds' });
   assert.equal(run.torn.length, 2);
   assertCut(run);
+});
+
+// A Windows runner's real ids already pass 2^53, so Node rounded them once
+// before any shift. The inner layer plays that runner, with ids whose low bits
+// round apart when rounded twice: a tie at 2^55 that rounds down, then a tie
+// at 2^63 that rounds down again, where the exact value rounds up.
+test('simulated Windows ids round a Number ino once, from the exact id, when the real id already passed 2^53', (t) => {
+  const h = setup(t);
+  const log = path.join(h.state, 'events.jsonl');
+  const runner = windowsFileIds((ino) => 2n ** 55n + (ino % 2n ** 40n) * 2n ** 12n + 1028n);
+  const shifted = windowsFileIds();
+  t.after(() => { shifted(); runner(); });
+  for (const stat of [fs.statSync, fs.lstatSync]) assert.equal(stat(log).ino, Number(stat(log, { bigint: true }).ino), stat.name);
+  const fd = fs.openSync(log, 'r');
+  try { assert.equal(fs.fstatSync(fd).ino, Number(fs.fstatSync(fd, { bigint: true }).ino), 'fstatSync'); }
+  finally { fs.closeSync(fd); }
 });
 
 test('an add that failed after its commit keeps its brief, and only then', (t) => {
