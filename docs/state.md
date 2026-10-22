@@ -100,3 +100,7 @@ Existing links use these anchors. Follow the link to the contract in its area.
 <a id="pr-owners"></a>[pr-owners](state/tasks.md#pr-owners)
 
 <a id="live-window-replay-2026-10-21-t451"></a>[live-window-replay-2026-10-21-t451](state/containment.md#live-window-replay-2026-10-21-t451)
+
+<a id="command-environment"></a>[command-environment](state/tasks.md#command-environment)
+
+<a id="host-tmp"></a>[host-tmp](state/tasks.md#host-tmp)
