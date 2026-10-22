@@ -89,7 +89,7 @@ const c = JSON.parse(fs.readFileSync(path.join(__dirname, 'probe.json'), 'utf8')
 const url = fs.readFileSync(c.urlFile, 'utf8');
 const nonce = url.split('/').pop();
 const seen = (s) => c.values.some((v) => String(s).includes(v));
-const run = (cmd, args) => { const r = cp.spawnSync(cmd, args, { encoding: 'utf8', timeout: 10000 }); return { status: r.status, error: r.error ? r.error.code : null, value: seen(r.stdout) || seen(r.stderr) }; };
+const run = (cmd, args) => { const r = cp.spawnSync(cmd, args, { encoding: 'utf8', timeout: 10000 }); return { status: r.status, error: r.error ? r.error.code : null, value: seen(r.stdout) || seen(r.stderr) }; }; // wait-allow: a store tool that hangs in the sandbox must not hold the agent's turn
 const o = { names: Object.keys(process.env).filter((k) => ['ANTHROPIC_BEDROCK_BASE_URL', 'AWS_BEARER_TOKEN_BEDROCK'].includes(k) || seen(process.env[k]) || (nonce && process.env[k].includes(nonce))), holders: [] };
 for (const pid of fs.readdirSync('/proc').filter((p) => /^\\d+$/.test(p))) {
   try { if (seen(fs.readFileSync('/proc/' + pid + '/environ', 'latin1'))) o.holders.push(fs.readFileSync('/proc/' + pid + '/cmdline', 'latin1').split('\\0')[0]); } catch {}

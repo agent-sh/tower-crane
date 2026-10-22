@@ -265,7 +265,7 @@ test('the Bedrock broker adds the stored bearer token and forwards only claude\'
       seen.push({ method: req.method, url: req.url, auth: req.headers.authorization, apiKey: req.headers['x-api-key'], body });
       res.writeHead(201, { 'content-type': 'application/vnd.amazon.eventstream', 'x-fake': 'kept' });
       res.write('part-1;');
-      setTimeout(() => res.end('part-2'), 20);
+      setTimeout(() => res.end('part-2'), 20); // wait-allow: a second chunk after a pause shows the broker streams the body
     });
   });
   await new Promise((resolve) => upstream.listen(0, '127.0.0.1', resolve));
