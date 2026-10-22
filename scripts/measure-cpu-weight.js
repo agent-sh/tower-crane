@@ -15,13 +15,14 @@
 //     One run of the same tests gate command in a project's slice at WEIGHT,
 //     next to three agent scopes of the same project. Appends wall time and
 //     CPU-seconds to a results file in the user's cache directory, which every
-//     probe of one gate run shares; --summary also prints the median of each
-//     weight's runs.
+//     probe of one gate run (one TMPDIR) shares; --summary also prints the
+//     median of each weight's runs.
 
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const cp = require('node:child_process');
+const crypto = require('node:crypto');
 const C = require('../lib/containment');
 
 // The tests gate command this repository pins, on three CLI-heavy files.
@@ -37,7 +38,10 @@ const BURN_LIMIT_S = 600;
 // A directory only this user can write, not the shared temp directory, where
 // another user could plant the predictable file names first.
 const CACHE = path.join(process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache'), 'tower-crane-cpu-weight');
-const RESULTS = path.join(CACHE, 'results.jsonl');
+// The tests gate gives each run its own TMPDIR, so the probes of one gate run
+// share a results file and a later run starts its own.
+const RUN_KEY = crypto.createHash('sha256').update(path.resolve(os.tmpdir())).digest('hex').slice(0, 12);
+const RESULTS = path.join(CACHE, `results-${RUN_KEY}.jsonl`);
 
 const units = new Set();
 const children = new Set();
