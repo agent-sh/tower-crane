@@ -7,6 +7,7 @@ const path = require('node:path');
 const { cachedFixture } = require('./helpers');
 const Decisions = require('../lib/decisions');
 const Events = require('../lib/events');
+const Answer = require('../lib/decision-answer');
 
 const variants = [
   { name: 'no note', choice: 'redis', note: null, lines: 0 },
@@ -38,6 +39,26 @@ for (const row of variants) {
     else assert.doesNotMatch(notice, /Orchestrator note:/);
   });
 }
+
+test('decision prompt sections select answered decisions for their task', () => {
+  const decisions = [
+    { id: 'D1', status: 'answered', blocks: ['T1', 'T2'], answer: 'redis', note: 'Keep the extra requirement.' },
+    { id: 'D2', status: 'open', blocks: ['T1'], answer: null, note: null },
+    { id: 'D3', status: 'withdrawn', blocks: ['T1'], answer: null, note: null },
+    { id: 'D4', status: 'answered', blocks: ['T3'], answer: 'other', note: 'Other task requirement.' },
+  ];
+  for (const task of ['T1', 'T2', 'T3', 'T4']) {
+    const text = Answer.section(decisions, task);
+    if (task === 'T4') assert.equal(text, '');
+    else {
+      assert.ok(text.startsWith(`## Decision answers ${task}`));
+      assert.ok(text.includes(`Orchestrator note:\n${task === 'T3' ? 'Other task requirement.' : 'Keep the extra requirement.'}`));
+      assert.doesNotMatch(text, /decision D2|decision D3/);
+      if (task !== 'T3') assert.doesNotMatch(text, /Other task requirement\./);
+      else assert.doesNotMatch(text, /Keep the extra requirement\./);
+    }
+  }
+});
 
 function setup(t) {
   return cachedFixture(t, 'answer delivery', (h) => {

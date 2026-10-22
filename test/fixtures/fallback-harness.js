@@ -209,7 +209,7 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
     const auth = type === 'auth' || type === 'auth-stderr';
     const message = auth ? 'Failed to authenticate: OAuth session expired and could not be refreshed'
       : 'rate limit exceeded: The service is temporarily unavailable.';
-    if (harness === 'agy' && !auth) console.error('HTTP 503 service unavailable');
+    if (['agy', 'pi', 'opencode'].includes(harness) && !auth) console.error('HTTP 503 service unavailable');
     // An assistant record that quotes a login failure on stderr, from a run that succeeds.
     if (type === 'quoted-stderr') {
       const text = 'The task log says: Failed to authenticate: OAuth session expired and could not be refreshed';
@@ -242,6 +242,11 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
     const timer = setInterval(() => {
       if (!fs.existsSync(process.env.TOWER_CRANE_TEST_FALLBACK_FINISH)) return;
       clearInterval(timer);
+      if (process.env.TOWER_CRANE_TEST_LATE_OUTAGE && model === 'first' && process.env.TOWER_CRANE_RETRY === '0') {
+        console.error('HTTP 503 service unavailable');
+        console.log(JSON.stringify(authRecord(harness, 'rate limit exceeded: The service is temporarily unavailable.')));
+        process.exit(1);
+      }
       // A login that expires while the worker runs: its last request fails with the harness's own record.
       const lateAuth = process.env.TOWER_CRANE_TEST_LATE_AUTH;
       if (lateAuth && (lateAuth === '1' || lateAuth === model)) {

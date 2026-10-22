@@ -1,0 +1,1 @@
+- Refresh answered decisions in fresh same-route retry prompts so choices and full labelled notes survive hook acknowledgement.

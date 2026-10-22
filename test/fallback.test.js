@@ -54,7 +54,7 @@ function setup(t, { reason = 'outage', primaryHarness = 'codex', nextHarness = '
   fs.mkdirSync(bin);
   // A gh on PATH and no token in the environment make every route ask gh for
   // one, as on a CI runner; that must happen outside the state lock.
-  for (const harness of ['codex', 'claude', 'agy', 'gh']) fs.writeFileSync(path.join(bin, harness + (process.platform === 'win32' ? '.exe' : '')), '', { mode: 0o755 });
+  for (const harness of ['codex', 'claude', 'agy', 'pi', 'opencode', 'gh']) fs.writeFileSync(path.join(bin, harness + (process.platform === 'win32' ? '.exe' : '')), '', { mode: 0o755 });
   const routes = [{ harness: nextHarness, model: 'second', env: { ROUTE_ENV: 'fallback', NODE_TEST_CONTEXT: 'child-v8' } }];
   if (fallbackWebMcp) routes[0].web_mcp = fallbackWebMcp;
   if (chain) routes.push({ harness: 'claude', model: 'third' });
@@ -103,22 +103,32 @@ for (const row of [
   { state: 'resumed', nextHarness: 'codex', reason: 'refusal', ack: true },
   { state: 'resumed', nextHarness: 'claude', reason: 'outage', ack: true },
   { state: 'running', nextHarness: 'claude', reason: 'auth', ack: true },
+  { state: 'retrying', primaryHarness: 'claude', nextHarness: 'codex', reason: 'outage', ack: true },
+  { state: 'retrying', primaryHarness: 'claude', nextHarness: 'codex', reason: 'outage', ack: false },
+  { state: 'retrying', primaryHarness: 'agy', nextHarness: 'codex', reason: 'outage', ack: true },
+  { state: 'retrying', primaryHarness: 'pi', nextHarness: 'codex', reason: 'outage', ack: true },
+  { state: 'retrying', primaryHarness: 'opencode', nextHarness: 'codex', reason: 'outage', ack: true },
+  { state: 'retrying', primaryHarness: 'codex', nextHarness: 'claude', reason: 'outage', ack: true },
+  { state: 'retrying', primaryHarness: 'codex', nextHarness: 'claude', reason: 'no-session', ack: true },
 ]) {
-  test(`decision answers survive fallback: ${row.state} to ${row.nextHarness}, ${row.reason}, ${row.ack ? 'acknowledged' : 'unread'}`, async (t) => {
+  test(`decision answers survive fallback: ${row.state} ${row.primaryHarness || 'codex'} to ${row.nextHarness}, ${row.reason}, ${row.ack ? 'acknowledged' : 'unread'}`, async (t) => {
     const h = setup(t, row);
     const agent = 'worker-T1-1';
     const finish = path.join(h.base, 'finish-primary');
+    const login = path.join(h.base, 'login');
     if (row.state === 'running') {
       Object.assign(h.spawnEnv, { TOWER_CRANE_TEST_FALLBACK_FINISH: finish, TOWER_CRANE_TEST_LATE_AUTH: 'first' });
     }
+    if (row.state === 'retrying') {
+      Object.assign(h.spawnEnv, { TOWER_CRANE_TEST_FALLBACK_FINISH: finish, TOWER_CRANE_TEST_LATE_OUTAGE: '1' });
+    }
     if (row.state !== 'fresh') {
-      const login = path.join(h.base, 'login');
       fs.writeFileSync(login, '');
       const first = h.json(['spawn', '--task', 'T1', ...(row.state === 'resumed' ? ['--wait'] : [])], {
         env: { ...h.spawnEnv, TOWER_CRANE_TEST_LOGIN_FLAG: login },
       });
       assert.equal(first.agent, agent);
-      if (row.state === 'running') {
+      if (row.state === 'running' || row.state === 'retrying') {
         await waitOnRepo(h, () => fs.existsSync(h.file) && h.attempts().length === 1, 'the primary worker to start', { alive: first.monitor_pid });
       } else {
         const session = events(h).findLast((e) => e.cmd === 'spawn session').detail.session_id;
@@ -146,16 +156,32 @@ for (const row of [
       assert.equal(h.json(['spawn', '--task', 'T1', '--dry-run'], { env: h.spawnEnv }).resumed, true);
     }
     const before = row.state === 'fresh' ? 0 : h.attempts().length;
-    if (row.state === 'running') {
+    if (row.state === 'running' || row.state === 'retrying') {
+      if (row.state === 'retrying') fs.unlinkSync(login);
       fs.writeFileSync(finish, '');
       await waitOnRepo(h, () => events(h).some((e) => e.cmd === 'spawn exit'), 'the fallback worker to exit');
-      assert.equal(events(h).findLast((e) => e.cmd === 'spawn exit').detail.code, 0);
+      const exit = events(h).findLast((e) => e.cmd === 'spawn exit').detail;
+      assert.equal(exit.code, 0, JSON.stringify({ exit, attempts: h.attempts() }));
     } else {
       const result = h.spawn();
       assert.equal(result.code, 0, result.stderr);
     }
     const attempts = h.attempts().slice(before);
     assert.ok(attempts.some((a) => a.harness === row.nextHarness && a.model === 'second'));
+    if (row.state === 'retrying') {
+      const retries = attempts.filter((a) => a.model === 'first');
+      assert.deepEqual(retries.map((a) => a.retry), ['1', '2']);
+      if (row.primaryHarness === 'codex' && row.reason !== 'no-session') {
+        assert.ok(retries.every((a) => a.args.includes('resume') && a.args.includes('11111111-1111-1111-1111-111111111111')));
+        assert.ok(retries.every((a) => !a.args.some((arg) => arg.includes('## Decision answers'))),
+          'warm resumes keep their conversation without repeating the answer section');
+      } else assert.ok(retries.every((a) => !a.args.includes('resume') && !a.args.includes('--resume')));
+      if (row.primaryHarness === 'claude') {
+        const sessions = h.attempts().filter((a) => a.model === 'first')
+          .map((a) => a.args[a.args.indexOf('--session-id') + 1]);
+        assert.equal(new Set(sessions).size, 3, 'each Claude invocation starts a new conversation');
+      }
+    }
     const expected = `decision D1 answered: redis (answer has a note with 2 lines)\nOrchestrator note:\n${note}`;
     for (const attempt of attempts) {
       // Warm retries keep the conversation; route starts rebuild its prompt.
