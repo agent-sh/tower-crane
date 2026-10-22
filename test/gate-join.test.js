@@ -239,8 +239,8 @@ test('the planned commands of a tests run cover each mode, expensive proof, host
   assert.equal(Runs.budgetMs({}, project, null, task, 'tests'), 8 * (120000 + 60000));
   assert.equal(Runs.budgetMs({ flags: { timeout: '1' } }, project, null, task, 'tests'), 8 * (60000 + 60000), 'a --timeout override sets each command budget');
   assert.equal(Runs.budgetMs({}, project, null, task, 'clean'), 180000 + 60000, 'clean runs one command');
-  assert.equal(Runs.budgetMs({}, project, null, task, 'ci'), 4 * (90000 + 60000), 'local CI runs its command and a rerun, twice when the merged tree moves');
-  assert.equal(Runs.budgetMs({}, { ...project, ci: { local: { ...project.ci.local, rerun: false } } }, null, task, 'ci'), 2 * (90000 + 60000), 'without the rerun, the command and once more on a moved tree');
+  assert.equal(Runs.budgetMs({}, project, null, task, 'ci'), 2 * (90000 + 60000), 'local CI runs its command and one rerun on the same merge');
+  assert.equal(Runs.budgetMs({}, { ...project, ci: { local: { ...project.ci.local, rerun: false } } }, null, task, 'ci'), 90000 + 60000, 'without the rerun, the command alone');
   assert.equal(Runs.budgetMs({}, { tests: { mode: 'none' } }, null, task, 'tests'), 60000, 'a run with no command keeps the metadata minute');
 });
 

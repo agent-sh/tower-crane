@@ -582,6 +582,33 @@ require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'public-http'))}).fet
         if (!sources) assert.ok(tasks[0].evidence[0].commands.some((c) => c.signal === 'SIGKILL'), 'the command tree was killed');
         assert.equal(tasks[0].evidence[0].confirmed_failure, undefined, 'interruption is not a confirmed test failure');
       }
+      if (forced && !stage) {
+        // The interrupted run checked nothing: the next reaction runs it again, and its one retry
+        // is still there for a crash of that run.
+        assert.equal(tasks[0].evidence[0].voided, true);
+        for (const id of ['T2', 'T3']) h.ok(['task', 'update', id, '--status', 'cancelled']);
+        const once = path.join(h.base, 'crashed-once');
+        fs.writeFileSync(path.join(h.base, 'tools', 'slow-suite.js'), `const fs = require('node:fs');
+if (!fs.existsSync(${JSON.stringify(once)})) { fs.writeFileSync(${JSON.stringify(once)}, ''); process.kill(process.pid, 'SIGKILL'); }
+`);
+        h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
+        const after = h.readState('tasks.json').tasks[0];
+        assert.deepEqual([after.status, after.revision], ['submitted', tasks[0].revision]);
+        assert.ok(!h.logs().some((e) => e.cmd === 'rework'), 'a void never reworks');
+        assert.deepEqual(after.evidence.filter((e) => e.type === 'tests').map((e) => [e.ok, !!e.voided, !!e.runner_crash]),
+          [[false, true, true], [false, false, true], [true, false, false]]);
+      }
+      if (forced && proof) {
+        // accept reruns a void like a missing gate instead of asking for an explicit check.
+        assert.equal(tasks[0].evidence[0].voided, true);
+        fs.writeFileSync(release, '');
+        const accepted = h.run(['accept', 'T1', '--agent', 'orchestrator']);
+        assert.match(accepted.stderr, /running voided tests software gate/);
+        const tests = h.readState('tasks.json').tasks[0].evidence.filter((e) => e.type === 'tests');
+        // The slow suite passes without the change too, so the rerun records a real proof verdict.
+        assert.deepEqual(tests.map((e) => [e.ok, !!e.voided]), [[false, true], [false, false]]);
+        assert.match(tests.at(-1).summary, /do not prove it/);
+      }
     });
   }
 });
