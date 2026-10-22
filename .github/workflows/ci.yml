@@ -27,10 +27,10 @@ permissions:
 
 # GitHub keeps one running and one pending run per group; a newer run replaces the pending one.
 # Main pushes share one group: the newest pending head covers every earlier commit, and a running
-# main run is never cancelled. Scheduled and manual runs keep unique groups so none is replaced.
+# main run is never cancelled. Scheduled runs keep unique groups; manual runs replace older runs on their branch.
 concurrency:
-  group: ${{ github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || github.event_name == 'push' && 'ci-main-push' || format('ci-run-{0}', github.run_id) }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ${{ github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || github.event_name == 'push' && 'ci-main-push' || github.event_name == 'workflow_dispatch' && format('ci-dispatch-{0}', github.ref) || format('ci-run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' }}
 
 jobs:
   # Same-repository PRs pass the full local tests gate before submit, so hosted CI only

@@ -30,7 +30,12 @@ else if (checks) {
 } else if (suites) {
   for (const suite of data.suites || []) console.log(JSON.stringify(suite));
 } else if (/^repos\/[^/]+\/[^/]+\/actions\/runs\?/.test(endpoint)) {
-  for (const run of data.workflows || []) console.log(JSON.stringify(run));
+  const query = new URL(`https://api.github.com/${endpoint}`).searchParams;
+  const runs = query.get('event') === 'workflow_dispatch' ? Object.values(data.runs || {}) : data.workflows || [];
+  for (const run of runs) {
+    if (query.get('status') && run.status !== query.get('status')) continue;
+    console.log(JSON.stringify(run));
+  }
 } else if (annotations) {
   for (const row of data.annotations[annotations[1]] || []) console.log(JSON.stringify(row));
 } else if (comments) {
