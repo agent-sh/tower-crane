@@ -67,6 +67,83 @@ function github(t) {
 
 const POLICY = JSON.stringify({ conditions: ['review_clean', 'full_suite', 'main_ci_green'] });
 
+test('publish keeps completed nongreen verdicts while their runs are being rerun', (t) => {
+  for (const conclusion of ['failure', 'cancelled', 'timed_out']) {
+    const h = github(t);
+    h.mainCI('success');
+    const id = h.release();
+    h.ok(['accept', id]);
+    h.ok(['project', 'set', '--publish-policy', '{"conditions":[]}']);
+    h.mainCI(conclusion);
+    const refresh = h.run(['wait', '--inbox', '--observe', '--after', 'now', '--timeout', '0.01', '--agent', 'orchestrator'], orchestrator); // wait-allow: record one completed CI observation through the host follower before simulating a rerun
+    assert.ok([0, 2].includes(refresh.code), refresh.stderr);
+    const observed = events(h).findLast((e) => e.cmd === 'main ci').detail.push;
+    assert.ok(observed.some((run) => run.id === 1001 && run.attempt === 1 && run.conclusion === conclusion),
+      'the follower records the completed verdict before the run leaves the listing');
+    const data = JSON.parse(fs.readFileSync(h.env.INBOX_GITHUB, 'utf8'));
+    const failed = { ...data.main_runs[0] };
+    data.main_runs = [
+      { ...failed, status: 'in_progress', conclusion: null, run_attempt: 2 },
+      { ...failed, id: 1000, run_number: 49, conclusion: 'success' },
+    ];
+    fs.writeFileSync(h.env.INBOX_GITHUB, JSON.stringify(data));
+    const publish = ['ask', '--setting', 'publish', '--change', JSON.stringify({ task: id }), '--agent', 'orchestrator'];
+    const waiting = h.run(publish, orchestrator);
+    assert.equal(waiting.code, 1, conclusion);
+    assert.match(waiting.stderr, new RegExp(`run 1001: ${conclusion}`));
+    data.main_runs[0] = { ...failed, status: 'completed', conclusion: 'success', run_attempt: 2 };
+    fs.writeFileSync(h.env.INBOX_GITHUB, JSON.stringify(data));
+    assert.match(h.ok(publish, orchestrator), /go ahead/);
+  }
+});
+
+test('publish gates on the newest full run at or after the base head, else on completed base push history', (t) => {
+  const h = github(t);
+  h.mainCI('success');
+  const id = h.release();
+  h.ok(['accept', id]);
+  h.ok(['project', 'set', '--publish-policy', '{"conditions":[]}']);
+  const publish = ['ask', '--setting', 'publish', '--change', JSON.stringify({ task: id }), '--agent', 'orchestrator'];
+  const run = (event, branch, conclusion = 'failure', sha = h.sha) => ({ id: 99, workflow_id: 11, run_number: 49, name: 'CI',
+    event, head_branch: branch, head_sha: sha, status: 'completed', conclusion });
+  const [behind, ahead] = ['e'.repeat(40), 'f'.repeat(40)];
+  // Main pushes run no test matrix, so a schedule or manual run is the release's full suite.
+  for (const [name, state, history, allowed] of [
+    ['tag only', 'active', [run('push', 'v0.1.6')], true],
+    ['no Actions', 'absent', [], true],
+    ['PR only', 'active', [run('pull_request', 'main')], true],
+    ['scheduled red', 'active', [run('schedule', 'main')], false],
+    ['manual red', 'active', [run('workflow_dispatch', 'main')], false],
+    ['scheduled green at the head', 'active', [run('schedule', 'main', 'success')], true],
+    ['manual green after the head', 'active', [run('workflow_dispatch', 'main', 'success', ahead)], true],
+    ['manual green before the head', 'active', [run('workflow_dispatch', 'main', 'success', behind)], false],
+    ['green full run over a red push', 'active', [run('push', 'main'), { ...run('schedule', 'main', 'success'), id: 100, run_number: 50 }], true],
+    ['newer red full run over a green one', 'active', [run('schedule', 'main', 'success'), { ...run('workflow_dispatch', 'main'), id: 100, run_number: 50 }], false],
+    ['cancelled full run over a green one', 'active', [run('schedule', 'main', 'success'), { ...run('workflow_dispatch', 'main', 'cancelled'), id: 100, run_number: 50 }], true],
+    ['scheduled green on another branch', 'active', [run('schedule', 'develop', 'success')], true],
+    ['other branch', 'active', [run('push', 'develop')], true],
+    ['no history', 'active', [], true],
+    ['pending first push', 'active', [{ ...run('push', 'main'), status: 'queued', conclusion: null }], true],
+    ['disabled', 'disabled_manually', [run('push', 'main')], true],
+    ['managed older green', 'active', [run('push', 'main', 'success')], true],
+    ['managed older red', 'active', [run('push', 'main')], false],
+    ['managed older cancelled', 'active', [run('push', 'main', 'cancelled')], false],
+    ['unreadable history', 'active', [], false],
+  ]) {
+    const data = JSON.parse(fs.readFileSync(h.env.INBOX_GITHUB, 'utf8'));
+    data.workflows = state === 'absent' ? [] : [{ id: 11, path: name.startsWith('managed') ? 'dynamic/github-code-scanning/codeql' : '.github/workflows/ci.yml', state }];
+    data.main_runs = [];
+    data.workflow_runs = { 11: history };
+    data.failWorkflowRuns = name === 'unreadable history';
+    data.compare = { [`${h.sha}...${ahead}`]: 'ahead', [`${h.sha}...${behind}`]: 'behind' };
+    fs.writeFileSync(h.env.INBOX_GITHUB, JSON.stringify(data));
+    const result = h.run(publish, orchestrator);
+    assert.equal(result.code, allowed ? 0 : 1, `${name}: ${result.stdout} ${result.stderr}`);
+    if (!allowed && history.length) assert.match(result.stderr, /run 99|run 100/);
+    if (name === 'manual green before the head') assert.match(result.stderr, /full CI has no green run at or after .*run 99 is at eeeeeeeeee, before main head/);
+  }
+});
+
 function hostRelease(t, content) {
   const h = github(t);
   h.git(['switch', '-qc', 'release-host-proof']);
@@ -262,13 +339,12 @@ test('the owner\'s standing publish policy releases an accepted task while its c
   h.mainCI('failure');
   const red = h.run(publish, orchestrator);
   assert.equal(red.code, 1, red.stderr);
-  assert.match(red.stderr, /opened D3 .*main_ci_green: main CI is red: CI run 1001/);
-  // D3 names a task that was accepted before it opened, so no later write makes it moot.
+  assert.match(red.stderr, /main push CI is not green: CI run 1001: failure/);
+  assert.equal(h.readState('decisions.json').decisions.length, 2, 'red CI cannot be overridden by a publish approval');
   h.ok(['ask', '--kind', 'technical', '--question', 'Tag the release now?', '--option', 'yes', '--option', 'no', '--blocks', id], worker(id));
   h.add('Later work');
-  assert.deepEqual(['D3', 'D4'].map((d) => decision(h, d).status), ['open', 'open']);
-  h.ok(['decision', 'withdraw', 'D4', '--reason', 'tagged'], worker(id));
-  h.ok(['decision', 'withdraw', 'D3', '--reason', 'main is red', '--agent', 'orchestrator'], orchestrator);
+  assert.equal(decision(h, 'D3').status, 'open');
+  h.ok(['decision', 'withdraw', 'D3', '--reason', 'tagged'], worker(id));
 
   h.mainCI('success');
   const before = h.readState('decisions.json').decisions.length;
@@ -277,6 +353,36 @@ test('the owner\'s standing publish policy releases an accepted task while its c
   const audit = events(h).findLast((e) => e.cmd === 'setting');
   assert.deepEqual([audit.task, audit.detail.actor, audit.detail.settings, audit.detail.policy.conditions.map((c) => c.ok), audit.detail.policy.sha],
     [id, 'orchestrator', { publish: 'owner-required' }, [true, true, true], h.sha]);
+});
+
+test('publish refuses non-green push CI with no policy, an approval, or an empty policy', (t) => {
+  const h = github(t);
+  h.mainCI('success');
+  const id = h.release();
+  h.ok(['accept', id]);
+  const publish = ['ask', '--setting', 'publish', '--change', JSON.stringify({ task: id }), '--agent', 'orchestrator'];
+  const ask = h.run(publish, orchestrator);
+  assert.equal(ask.code, 1);
+  assert.match(ask.stderr, /opened D1/);
+  h.ok(['answer', 'D1', '--choice', 'approve']);
+  for (const conclusion of ['failure', 'cancelled', 'timed_out']) {
+    h.mainCI(conclusion);
+    const r = h.run(publish, orchestrator);
+    assert.equal(r.code, 1);
+    assert.match(r.stderr, new RegExp(`main push CI.*run 1001: ${conclusion}`));
+    assert.equal(decision(h, 'D1').applied, undefined, 'failed CI leaves approval unconsumed');
+  }
+  h.mainCI('success');
+  assert.match(h.ok(publish, orchestrator), /owner approved D1; go ahead/);
+  h.ok(['project', 'set', '--publish-policy', '{"conditions":[]}']);
+  h.mainCI('cancelled');
+  assert.equal(h.run(publish, orchestrator).code, 1);
+  h.mainCI('success');
+  assert.match(h.ok(publish, orchestrator), /publish policy holds/);
+  const data = JSON.parse(fs.readFileSync(h.env.INBOX_GITHUB, 'utf8'));
+  data.main_runs[0].conclusion = 'failure';
+  fs.writeFileSync(h.env.INBOX_GITHUB, JSON.stringify(data));
+  assert.equal(h.run(publish, orchestrator).code, 1, 'release rereads CI despite a fresh inbox cache');
 });
 
 test('an ordinary day opens no owner decision: moot decisions, a failure main shares, holds and a release under policy', (t) => {

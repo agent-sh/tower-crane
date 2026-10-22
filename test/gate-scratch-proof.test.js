@@ -22,6 +22,11 @@ fs.mkdtempSync(path.join(os.tmpdir(), 'tower-crane-unremoved-'));
 if (process.env.PROOF_LEAK === '1') {
   fs.mkdirSync(path.resolve(process.env.TOWER_CRANE_TMP, '../outer/escaped'));
 }
+if (process.env.PROOF_ROOT_ENTRY) {
+  const entry = path.join(process.env.TOWER_CRANE_TMP, process.env.PROOF_ROOT_ENTRY);
+  fs.mkdirSync(path.dirname(entry), { recursive: true });
+  fs.writeFileSync(entry, '{}');
+}
 if (process.env.PROOF_FAIL === '1') process.exit(7);
 `);
     h.git(['add', 'scratch.js']);
@@ -68,6 +73,21 @@ test('the gate proof rejects a command that writes into the caller temp root', (
   assert.deepEqual(result.outer_after, ['escaped']);
 });
 
+test('the gate proof keeps the documented base rerun cache apart from gate scratch it fails on', (t) => {
+  const h = fixture(t);
+  const cache = path.join('tests-base-cache', 'repository', 'result.json');
+  for (const [entry, ok, scratch, kept] of [
+    [cache, true, [], ['tests-base-cache', path.dirname(cache), cache]],
+    [path.join('tower-crane-stray', 'host'), false, ['tower-crane-stray', path.join('tower-crane-stray', 'host')], []],
+  ]) {
+    const result = probe({ root: h.repo, cache: path.join(h.base, `probe-${ok}`), command: 'node scratch.js',
+      environment: { ...h.env, PROOF_ROOT_ENTRY: entry } });
+    assert.equal(result.cleanup_ok, ok, entry);
+    assert.deepEqual(result.gate_root_after, scratch, entry);
+    assert.deepEqual(result.base_cache_after, kept, entry);
+  }
+});
+
 test('the gate proof retains a failing gate result even when cleanup succeeds', (t) => {
   const h = fixture(t);
   const result = probe({ root: h.repo, cache: path.join(h.base, 'probe'), command: 'node scratch.js',
@@ -77,6 +97,57 @@ test('the gate proof retains a failing gate result even when cleanup succeeds', 
   assert.equal(result.ok, false);
 });
 
+test('custom gate proofs retain their caller host readings across admission states', (t) => {
+  const h = fixture(t);
+  const variants = [
+    { name: 'available', readings: {}, exit: 0 },
+    { name: 'memory limit', readings: { used: 63 }, exit: 3, reason: /memory|line/ },
+    { name: 'memory pressure', readings: { memorySome: 50 }, exit: 3, reason: /memory pressure/ },
+    { name: 'CPU pressure', readings: { cpuSome: 90 }, exit: 3, reason: /cpu pressure/ },
+    { name: 'load', readings: { load: 10000 }, exit: 3, reason: /load/ },
+  ];
+  for (const row of variants) {
+    writeHost(h.env.TOWER_CRANE_HOST_ROOT, row.readings);
+    const cache = path.join(h.base, 'probe');
+    if (row.exit !== 0) {
+      assert.throws(() => probe({ root: h.repo, cache, command: 'node scratch.js', environment: h.env }), (error) => {
+        assert.match(error.message, /returned no JSON \(exit code 3\)/, row.name);
+        assert.match(error.message, row.reason, row.name);
+        return true;
+      });
+      assert.deepEqual(fs.readdirSync(cache), [], row.name);
+    } else {
+      const result = probe({ root: h.repo, cache, command: 'node scratch.js', environment: h.env });
+      assert.equal(result.exit, 0, row.name);
+      assert.equal(result.ok, true, row.name);
+    }
+  }
+});
+
+for (const row of [
+  { name: 'refused', status: 1, stderr: 'fixture gate refused' },
+  { name: 'usage failure', status: 2, stderr: 'fixture gate usage error' },
+  { name: 'deferred', status: 3, stderr: 'fixture gate deferred by the host governor' },
+  { name: 'empty successful output', status: 0, stderr: '' },
+]) {
+  test(`the gate proof reports a check with no receipt: ${row.name}`, (t) => {
+    const h = fixture(t);
+    const spawn = cp.spawnSync;
+    t.mock.method(cp, 'spawnSync', (program, args, options) => {
+      if (program === process.execPath && path.basename(args[0]) === 'tower-crane.js' && args[1] === 'check') {
+        return { status: row.status, stdout: '', stderr: row.stderr };
+      }
+      return spawn(program, args, options);
+    });
+    const cache = path.join(h.base, 'probe');
+    assert.throws(() => probe({ root: h.repo, cache, command: 'node scratch.js', environment: h.env }), (error) => {
+      assert.equal(error.message,
+        `tower-crane check tests T1 returned no JSON (exit code ${row.status}): ${row.stderr || '(no stderr)'}`);
+      return true;
+    });
+    assert.deepEqual(fs.readdirSync(cache), [], 'the measurement state is removed even without a receipt');
+  });
+}
 test('scratch proof preserves virtual host inputs and rejects missing gate receipts', (t) => {
   const failures = [];
   for (const row of [

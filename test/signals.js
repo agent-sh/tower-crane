@@ -28,9 +28,15 @@ function waitUntil(check, { paths = [], signal, subscribe, poll = true, alive, w
     let finished = false;
     let checking = false;
     let again = false;
+    // A check that runs a CLI takes a process start, and that CLI's own lock
+    // files under the watched fixture would run it again at once: a wait then
+    // spent a whole core. The next check waits as long as the last one took.
+    let nextAt = 0;
+    let deferred = null;
     const finish = (error, value, failed = true) => {
       if (finished) return;
       finished = true;
+      clearTimeout(deferred);
       for (const cleanup of cleanups.reverse()) cleanup();
       if (failed) reject(error);
       else resolve(value);
@@ -38,7 +44,13 @@ function waitUntil(check, { paths = [], signal, subscribe, poll = true, alive, w
     const probe = async () => {
       if (finished) return;
       if (checking) { again = true; return; }
+      const early = nextAt - performance.now();
+      if (early > 0) {
+        deferred ??= setTimeout(() => { deferred = null; void probe(); }, early); // wait-allow: probe cadence, not a readiness budget
+        return;
+      }
       checking = true;
+      const started = performance.now();
       try {
         // Read liveness before the condition: whatever the process wrote
         // before it exited is then visible to this check.
@@ -50,6 +62,7 @@ function waitUntil(check, { paths = [], signal, subscribe, poll = true, alive, w
         finish(error);
       } finally {
         checking = false;
+        nextAt = 2 * performance.now() - started;
         if (again) { again = false; void probe(); }
       }
     };

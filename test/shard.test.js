@@ -2,11 +2,12 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
-const { ROOT } = require('./helpers');
+const { ROOT, makeRepo } = require('./helpers');
 const { HUNG_TEST_MS } = require('./signals');
-const { testFiles, shardFiles, fileDurations } = require('./run');
+const { testFiles, shardFiles, longestFirst, startOrder, fileDurations } = require('./run');
 const { declarations, fileTimes, mergeTable } = require('../scripts/test-durations');
 
 const FIXTURES = ['a', 'b', 'c', 'd'].map((name) => path.join('test', 'fixtures', 'shard', `${name}.test.js`));
@@ -34,6 +35,35 @@ test('shardFiles gives each shard an equal share of the measured time', () => {
   assert.deepEqual(shardFiles(['x', 'y'], 1, 2, {}), ['x'], 'an empty table splits like equal times');
 });
 
+test('longestFirst starts the longest measured files first and keeps sorted order among equal times', () => {
+  const durations = { a: 1, b: 9, c: 1, d: 5 };
+  const files = ['d', 'c', 'b', 'a', 'new'];
+  // The new file counts as the median, 5 s here, and ties keep the sorted order.
+  assert.deepEqual(longestFirst(files, durations), ['b', 'd', 'new', 'a', 'c']);
+  assert.deepEqual(files, ['d', 'c', 'b', 'a', 'new'], 'the input is not reordered');
+  assert.deepEqual(longestFirst(['y', 'x'], {}), ['x', 'y'], 'an empty table keeps the sorted order');
+  assert.deepEqual(startOrder(['b', 'a'], 1, durations), ['b', 'a'], 'two files for one worker both start at once');
+});
+
+test('startOrder spells the longest files so that node --test sorts them first, one band per worker', () => {
+  const durations = { a: 1, b: 9, c: 1, d: 5, e: 3, f: 2 };
+  const files = ['f', 'e', 'd', 'c', 'b', 'a', 'new'];
+  const named = (cwd, order) => order.map((f) => path.relative(cwd, path.resolve(cwd, f)));
+  // Each `../` step up from the working directory is a band, then absolute paths, then plain ones.
+  for (const [depth, workers, sorted] of [
+    [3, 1, ['b', 'd', 'e', 'new', 'a', 'c', 'f']],
+    [2, 1, ['b', 'd', 'e', 'a', 'c', 'f', 'new']],
+    [1, 1, ['b', 'd', 'a', 'c', 'e', 'f', 'new']],
+    [2, 2, ['b', 'd', 'e', 'new', 'a', 'f', 'c']],
+    [1, 3, ['b', 'd', 'e', 'a', 'f', 'new', 'c']],
+  ]) {
+    const cwd = path.resolve('/', ...Array.from({ length: depth }, (_, i) => `dir${i}`));
+    const order = startOrder(files, workers, durations, cwd);
+    assert.deepEqual(named(cwd, order), files, `depth ${depth}, ${workers} workers: each file keeps its place`);
+    assert.deepEqual(named(cwd, [...order].sort()), sorted, `depth ${depth}, ${workers} workers`);
+  }
+});
+
 test('every shard count covers the real suite with each file in exactly one shard', () => {
   const files = testFiles();
   for (const platform of ['linux', 'win32', 'darwin']) {
@@ -45,15 +75,15 @@ test('every shard count covers the real suite with each file in exactly one shar
   }
 });
 
-test('the checked-in durations split each CI platform into three shards within a tenth of each other', () => {
+test('the checked-in durations split Linux into three CI shards and Windows into four within a tenth of each other', () => {
   const files = testFiles();
-  for (const platform of ['linux', 'win32']) {
+  for (const [platform, total] of [['linux', 3], ['win32', 4]]) {
     const durations = fileDurations(platform);
     assert.ok(Object.keys(durations).length > files.length / 2, `${platform} has measured times`);
     const known = Object.values(durations).sort((a, b) => a - b);
     const cost = (file) => durations[file] ?? known[Math.floor(known.length / 2)];
-    const loads = [1, 2, 3].map((i) => shardFiles(files, i, 3, durations).reduce((sum, file) => sum + cost(file), 0));
-    const mean = loads.reduce((a, b) => a + b, 0) / 3;
+    const loads = Array.from({ length: total }, (_, i) => shardFiles(files, i + 1, total, durations).reduce((sum, file) => sum + cost(file), 0));
+    const mean = loads.reduce((a, b) => a + b, 0) / total;
     assert.ok(Math.max(...loads) <= mean * 1.1, `${platform} shard seconds ${loads.map(Math.round).join(', ')}`);
   }
 });
@@ -106,6 +136,42 @@ test('TC_TEST_SHARD makes the runner run only the files of the shard it names', 
   const invalid = run('4/3');
   assert.equal(invalid.status, 1);
   assert.match(invalid.stderr, /TC_TEST_SHARD requires INDEX\/TOTAL/);
+});
+
+test('a shard logs each file as it starts and ends, and past its deadline its watchdog prints what still runs, stops it and fails', (t) => {
+  // The deadline stops the nested run before its global teardown, so its seed lives in this test's fixture.
+  const h = makeRepo(t);
+  const run = (files, extra) => cp.spawnSync(process.execPath, [path.join(ROOT, 'test', 'run.js'), ...files], {
+    cwd: ROOT, encoding: 'utf8', timeout: HUNG_TEST_MS,
+    env: { ...process.env, TOWER_CRANE_TEST_TMP: h.base, TC_TEST_SHARD: '1/1', ...extra },
+  });
+  const done = run([FIXTURES[0]], {});
+  assert.equal(done.status, 0, done.stderr);
+  assert.match(done.stdout, /^file started: .*a\.test\.js$/m);
+  assert.match(done.stdout, /^file ended: .*a\.test\.js$/m);
+  assert.match(done.stdout, /✔ shard a/, 'the spec reporter still prints each test');
+
+  const hang = path.join('test', 'fixtures', 'shard', 'hang.test.js');
+  // TC_TEST_SHARD_HANG blocks the runner's own event loop, so only a process of its own can stop the shard.
+  for (const blocked of [false, true]) {
+    const logDir = path.join(h.base, `shard-log-${blocked}`);
+    const late = run([FIXTURES[0], hang], { TC_TEST_SHARD_DEADLINE_MIN: '0.1', TC_TEST_SHARD_LOG_DIR: logDir, TC_TEST_SHARD_HANG: blocked ? '1' : '' });
+    const what = `blocked runner ${blocked}`;
+    assert.equal(late.error, undefined, `${what}: the watchdog, not this test's timeout, stops the run`);
+    assert.ok(late.status !== 0, `${what}: the shard fails\n${late.stdout}${late.stderr}`);
+    assert.match(late.stdout, /^file started: .*hang\.test\.js$/m, what);
+    assert.doesNotMatch(late.stdout, /^file ended: .*hang\.test\.js$/m, what);
+    assert.match(late.stderr, /shard deadline of 0\.1 min reached; free memory/, what);
+    // The files CI uploads keep the same record when the job log is lost.
+    const progress = fs.readFileSync(path.join(logDir, 'progress.log'), 'utf8');
+    assert.match(progress, /^file started: .*hang\.test\.js$/m, what);
+    assert.match(progress, /^file ended: .*a\.test\.js$/m, what);
+    assert.doesNotMatch(progress, /^file ended: .*hang\.test\.js$/m, what);
+    const watchdog = fs.readFileSync(path.join(logDir, 'watchdog.log'), 'utf8');
+    assert.match(watchdog, /shard deadline of 0\.1 min reached[\s\S]*processes still running/, what);
+    assert.match(watchdog, /^\S+ {3}\d+ \d+ .*hang\.test\.js/m, `${what}: the dump names the hung file's process`);
+    assert.match(watchdog, /stopped the shard$/m, what);
+  }
 });
 
 test('a durations refresh from a run with a failed shard keeps the old times of the files it did not measure', () => {

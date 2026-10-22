@@ -546,6 +546,23 @@ if (env.HOOK_FETCH_ERROR) {
   };
 }
 
+// HOOK_ORIGIN_READ_FAIL=once|always: git remote get-url origin fails as a
+// config read Windows refuses while a scanner holds the file; once fails the
+// first call only.
+if (env.HOOK_ORIGIN_READ_FAIL) {
+  const orig = cp.execFileSync;
+  cp.execFileSync = function originReadError(file, args, options) {
+    const read = file === 'git' && args[0] === 'remote' && args[1] === 'get-url' && args[2] === 'origin';
+    if (read && (env.HOOK_ORIGIN_READ_FAIL === 'always' || first('origin-read'))) {
+      const e = new Error('git remote get-url origin failed');
+      e.stderr = "warning: unable to access '.git/config': Permission denied\nfatal: unable to access '.git/config': Permission denied\n";
+      e.status = 128;
+      throw e;
+    }
+    return orig.call(this, file, args, options);
+  };
+}
+
 // Refuse overlapping worktree adds, as Git does when it reads another
 // worktree's partially written metadata. Pause before the real add to force it.
 if (env.HOOK_WORKTREE_ADD_ACTIVE) {
@@ -661,11 +678,17 @@ if (env.HOOK_USAGE_WRITE_FAIL) {
 // carries: it never rewrites the record a test may be reading, and a marker
 // left by an earlier process with the same pid cannot pass for its exit.
 if (env.HOOK_PROCESSES_DIR) {
+  // Made only inside a fixture that still exists: a process that outlives its
+  // test's cleanup must not bring the removed fixture back.
+  const processesDir = () => {
+    try { real.mkdirSync(env.HOOK_PROCESSES_DIR); } catch (error) { if (error.code !== 'EEXIST') return false; }
+    return true;
+  };
   if (path.basename(process.argv[1] || '') === 'spawn-monitor.js') {
     const token = env.HOOK_PROCESS_TOKEN || String(process.pid);
     process.once('exit', () => {
-      real.mkdirSync(env.HOOK_PROCESSES_DIR, { recursive: true });
-      real.writeFileSync(path.join(env.HOOK_PROCESSES_DIR, `${token}.exited`), '');
+      if (!processesDir()) return;
+      try { real.writeFileSync(path.join(env.HOOK_PROCESSES_DIR, `${token}.exited`), ''); } catch { /* Removed meanwhile. */ }
     });
   }
   const original = cp.spawn;
@@ -704,7 +727,7 @@ if (env.HOOK_PROCESSES_DIR) {
       // No process query runs here: a dispatch spawns its monitor inside the
       // window the monitor gives it to record the lease.
       const recordedAt = systemNow();
-      real.mkdirSync(env.HOOK_PROCESSES_DIR, { recursive: true });
+      if (!processesDir()) return child;
       const trackedFile = path.join(env.HOOK_PROCESSES_DIR, `${child.pid}.json`);
       writeAtomic(trackedFile, JSON.stringify({
         pid: child.pid, startTicks, recordedAt, ...(token ? { token } : {}),
