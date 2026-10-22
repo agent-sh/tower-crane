@@ -97,6 +97,9 @@ module.exports = function stub(harness) {
     report.settings = settings;
     // claude makes its proxy bridge sockets in the TMPDIR it starts with.
     report.tmpdir = process.env.TMPDIR || null;
+    // Names only: what claude would hand its commands, before its sandbox.
+    report.envNames = Object.keys(process.env).sort();
+    report.flagSettings = after('--settings') ? JSON.parse(after('--settings')) : null;
     if (!args.includes('--strict-mcp-config')) Object.assign(report.mcp, json(global).mcpServers || {});
     if (after('--mcp-config')) Object.assign(report.mcp, json(after('--mcp-config')).mcpServers || {});
     report.auth = read(path.join(dir, '.credentials.json'));
@@ -139,10 +142,16 @@ module.exports = function stub(harness) {
     const disabled = args.filter((a, i) => args[i - 1] === '--disable');
     const config = toml(path.join(dir, 'config.toml'));
     const profile = after('-p') ? toml(path.join(dir, `${after('-p')}.config.toml`)) : {};
-    // codex refuses to start on Bedrock without a region.
+    // codex refuses to start on Bedrock bearer auth from the environment
+    // without a region; an auth command with a base_url needs none (observed
+    // on codex-cli 0.163.0), and an aws table beside auth is refused.
     const providerId = profile.model_provider || config.model_provider;
     const provider = { ...(config.model_providers || {}), ...(profile.model_providers || {}) }[providerId] || {};
-    if (providerId === 'amazon-bedrock' && !(provider.aws && provider.aws.region) && !process.env.AWS_REGION && !process.env.AWS_DEFAULT_REGION) {
+    if (provider.aws && provider.auth) {
+      process.stderr.write(`Error loading config.toml: model_providers.${providerId}: provider aws cannot be combined with auth\n`);
+      process.exit(1);
+    }
+    if (providerId === 'amazon-bedrock' && !provider.auth && !(provider.aws && provider.aws.region) && !process.env.AWS_REGION && !process.env.AWS_DEFAULT_REGION) {
       process.stderr.write('Fatal error: Amazon Bedrock bearer token auth requires `model_providers.amazon-bedrock.aws.region`, `AWS_REGION`, or `AWS_DEFAULT_REGION`\n');
       process.exit(1);
     }
@@ -163,6 +172,8 @@ module.exports = function stub(harness) {
     report.mcp = Object.fromEntries(Object.keys(config.mcp_servers || {}).map((k) => [k, true]));
     report.auth = read(path.join(dir, 'auth.json'));
     report.env = read(path.join(dir, '.env'));
+    // Names only: what codex would hand its commands, before its policy.
+    report.envNames = Object.keys(process.env).sort();
     // codex resolves :tmpdir from the TMPDIR it starts with.
     report.tmpdir = process.env.TMPDIR || null;
     report.tmpEnv = { TMP: process.env.TMP || null, TEMP: process.env.TEMP || null, JAVA_TOOL_OPTIONS: process.env.JAVA_TOOL_OPTIONS || null };
