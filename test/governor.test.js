@@ -9,7 +9,7 @@ const G = require('../lib/governor');
 const Processes = require('../lib/processes');
 const { makeRepo, cachedFixture, BIN, TMP_ROOT } = require('./helpers');
 const { writeHost, GiB } = require('./host');
-const { waitOnRepo, killPid } = require('./signals');
+const { waitOnRepo, waitUntil, killPid } = require('./signals');
 
 const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse); // read-published: the log is only appended
 const linuxOnly = process.platform !== 'linux' && 'the governor measures and signals by Linux process start times';
@@ -982,11 +982,11 @@ test('a finished agent gives up its place before its gate reactions run', { skip
   assert.ok(h.readState('tasks.json').tasks[0].evidence.some((e) => e.type === 'tests' && e.ok), 'the reaction finished');
 });
 
-test('a unit in a scope of its own also counts its processes outside the scope', { skip: linuxOnly }, (t) => {
+test('a unit in a scope of its own also counts its processes outside the scope', { skip: linuxOnly }, async (t) => {
   // An agent's supervisor runs its state broker and the agent's waits outside the harness scope.
   const supervisor = idle(t);
   const anon = () => Number(/^RssAnon:\s+(\d+)/m.exec(fs.readFileSync(`/proc/${supervisor.pid}/status`, 'utf8'))?.[1] || 0) * 1024;
-  for (const deadline = Date.now() + 10000; anon() < 4 * 1024 * 1024 && Date.now() < deadline;) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+  await waitUntil(() => anon() >= 4 * 1024 * 1024, { poll: true, what: 'the stand-in supervisor starts' });
   const own = fs.readFileSync(`/proc/${supervisor.pid}/cgroup`, 'utf8').split('\n').find((l) => l.startsWith('0::')).slice(3).trim();
   const cases = [
     ['a supervisor outside the scope adds its memory', '/tests.slice/harness.scope', true],
