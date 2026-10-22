@@ -277,9 +277,16 @@ if (!run.length) return;
 // live sockets of agents, a worker's own included, so the run gets a private
 // one there, removed when the run ends. A test that probes the host's own
 // runtime directory, such as its session bus, reads TOWER_CRANE_HOST_RUNTIME_DIR.
+// systemctl --user and systemd-run --user find the user manager only under
+// XDG_RUNTIME_DIR, so the private directory links the host's systemd and bus
+// entries; removing the directory removes the links, never their targets.
 const runtime = process.platform === 'win32' ? null : privateRuntime(process.env);
 if (runtime) {
   if (!env.TOWER_CRANE_HOST_RUNTIME_DIR && process.env.XDG_RUNTIME_DIR) env.TOWER_CRANE_HOST_RUNTIME_DIR = process.env.XDG_RUNTIME_DIR;
+  const host = env.TOWER_CRANE_HOST_RUNTIME_DIR;
+  for (const entry of host ? ['systemd', 'bus'] : []) {
+    try { fs.symlinkSync(path.join(host, entry), path.join(runtime, entry)); } catch { /* No such entry on this host. */ }
+  }
   env.XDG_RUNTIME_DIR = runtime;
   process.on('exit', () => fs.rmSync(runtime, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
 }
