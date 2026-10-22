@@ -137,7 +137,7 @@ test('host-only commands run beside the ordinary command, and its failure still 
 const path = require('node:path');
 require('node:test')('${own} meets ${other}', async () => {
   fs.writeFileSync(path.join(${JSON.stringify(dir)}, '${own}'), 'here');
-  const deadline = Date.now() + 30000;
+  const deadline = Date.now() + 30000; // wait-allow: run in turn, the other file never starts, so this bounds the failing case
   while (!fs.existsSync(path.join(${JSON.stringify(dir)}, '${other}')) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20)); // wait-allow: the other file's marker is the event under test
   require('node:assert/strict').ok(fs.existsSync(path.join(${JSON.stringify(dir)}, '${other}')), '${other} ran at the same time');
 });
