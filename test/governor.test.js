@@ -988,24 +988,37 @@ test('a finished agent gives up its place before its gate reactions run', { skip
   assert.ok(h.readState('tasks.json').tasks[0].evidence.some((e) => e.type === 'tests' && e.ok), 'the reaction finished');
 });
 
-test('a unit in a scope of its own also counts its processes outside the scope', { skip: linuxOnly }, async (t) => {
+test('a unit in a scope of its own also counts its processes outside the scope, and each byte counts once', { skip: linuxOnly }, async (t) => {
   // An agent's supervisor runs its state broker and the agent's waits outside the harness scope.
   const supervisor = idle(t);
   const anon = () => Number(/^RssAnon:\s+(\d+)/m.exec(fs.readFileSync(`/proc/${supervisor.pid}/status`, 'utf8'))?.[1] || 0) * 1024;
   await waitUntil(() => anon() >= 4 * 1024 * 1024, { poll: true, what: 'the stand-in supervisor starts' });
+  // The cgroup the supervisor really runs in, standing for a contained orchestrator's scope.
   const own = fs.readFileSync(`/proc/${supervisor.pid}/cgroup`, 'utf8').split('\n').find((l) => l.startsWith('0::')).slice(3).trim();
+  const harness = '/tests.slice/harness.scope';
+  const root = [{ pid: supervisor.pid, ...Processes.identity(supervisor.pid) }];
+  // [name, scopes and their use in GiB, units as [id, cgroup, rooted at the supervisor], expected GiB or 'plus' for 1 GiB and the supervisor]
   const cases = [
-    ['a supervisor outside the scope adds its memory', '/tests.slice/harness.scope', true],
-    ['a process inside the scope is in the scope\'s use already', own, false],
+    ['a supervisor outside every unit scope adds its memory', { [harness]: 1 }, [['worker', harness, true]], { worker: 'plus' }],
+    ['a process inside its own scope is in the scope\'s use already', { [own]: 1 }, [['worker', own, true]], { worker: 1 }],
+    ['a supervisor inside a contained orchestrator\'s scope counts there only', { [own]: 2, [harness]: 1 }, [['orchestrator', own, false], ['worker', harness, true]], { orchestrator: 2, worker: 1 }],
+    ['so does a process of a unit measured by its processes', { [own]: 2 }, [['orchestrator', own, false], ['gate', null, true]], { orchestrator: 2, gate: 0 }],
+    ['a scope nested in another unit\'s scope counts in the inner unit', { '/tests.slice/orch.scope': 3, '/tests.slice/orch.scope/worker.scope': 1 },
+      [['orchestrator', '/tests.slice/orch.scope', false], ['worker', '/tests.slice/orch.scope/worker.scope', false]], { orchestrator: 2, worker: 1 }],
+    ['units that share a scope count it once', { [harness]: 1 }, [['a', harness, false], ['b', harness, false]], { a: 1, b: 0 }],
   ];
-  for (const [name, scope, added] of cases) {
-    const host = fakeHost(t, { limit: 36, used: 4 });
-    host.write(`sys/fs/cgroup${scope}/memory.current`, `${GiB}\n`);
-    host.write(`sys/fs/cgroup${scope}/memory.stat`, 'anon 1\nactive_file 0\ninactive_file 0\n');
-    const u = unit('worker', 1, { holders: [], roots: [{ pid: supervisor.pid, ...Processes.identity(supervisor.pid) }], cgroup: scope });
-    const reg = { ...registry([u]), windows: [], growth: [], raised: null };
-    G.observeAll(reg, host.env, reading({ limit: 36, used: 4 }), s, Date.now());
-    if (added) assert.ok(u.measured > GiB && u.measured <= GiB + anon() * 2, `${name}: ${u.measured}`);
-    else assert.equal(u.measured, GiB, name);
+  for (const [name, scopes, specs, expected] of cases) {
+    const host = fakeHost(t, { limit: 36, used: 8 });
+    for (const [scope, gib] of Object.entries(scopes)) {
+      host.write(`sys/fs/cgroup${scope}/memory.current`, `${gib * GiB}\n`);
+      host.write(`sys/fs/cgroup${scope}/memory.stat`, 'active_file 0\ninactive_file 0\n');
+    }
+    const units = specs.map(([id, cgroup, rooted]) => ({ ...unit('worker', 1, { holders: [], roots: rooted ? root : [], cgroup }), id }));
+    const reg = { ...registry(units), windows: [], growth: [], raised: null };
+    G.observeAll(reg, host.env, reading({ limit: 36, used: 8 }), s, Date.now());
+    for (const u of units) {
+      if (expected[u.id] === 'plus') assert.ok(u.measured > GiB && u.measured <= GiB + anon() * 2, `${name}: ${u.id} ${u.measured}`);
+      else assert.equal(u.measured, expected[u.id] * GiB, `${name}: ${u.id}`);
+    }
   }
 });
