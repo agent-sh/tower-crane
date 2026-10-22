@@ -142,3 +142,24 @@ test('rechecks of pending CI read GitHub at most once a minute per task; a compl
   assert.ok(reads() > first, 'a completion notification reads at once');
   assert.equal(h.readState('tasks.json').tasks[0].evidence.findLast((e) => e.type === 'ci').ok, true);
 });
+
+test('a recheck scheduled a minute after the last read reads, however late that read was written', (t) => {
+  const h = setup(t, { ci: 'pending' });
+  delete h.env.HOOK_CI_POLL_MS;
+  h.submit();
+  for (const gate of ['tests', 'clean']) h.ok(['check', gate, 'T1', '--agent', 'orchestrator']);
+  const reads = () => h.github().calls.filter((a) => a[0] === 'api' && a[1].includes('check-runs')).length;
+  h.consume();
+  const first = reads();
+  assert.ok(first > 0, 'the first reaction reads the checks');
+  // The last read was scheduled a minute ago and its reaction reached the ci
+  // gate only now, as one held behind other reactions or a suite does.
+  const file = path.join(h.state, 'events.jsonl');
+  const events = h.logs();
+  const poll = events.findLast((e) => e.cmd === 'ci poll');
+  poll.detail.scheduled = new Date(Date.now() - 60000).toISOString();
+  poll.at = new Date().toISOString();
+  fs.writeFileSync(file, events.map((e) => JSON.stringify(e)).join('\n') + '\n');
+  h.consume();
+  assert.ok(reads() > first, 'the next minute\'s recheck reads');
+});
