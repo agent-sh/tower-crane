@@ -1538,6 +1538,8 @@ On 2026-10-22, T455 observed T507's owner, `worker-T507-7`, lose ownership after
 
 The orchestrator stopped both pre-T453 monitors, using `a90b254e` and `429b8f81`, as recorded in message `Ee0c32939-86f3-4176-9794-813efe7d19e2`. These events document ownership loss during an upgrade with older monitors still running. Read each receipt with `tower-crane event EVENT_ID --agent NAME` in this project's state.
 
+T477's fix is [PR #467](https://github.com/agent-sh/tower-crane/pull/467), submitted at `6844aab6a5007933e51c09efcad320c8374b31ae`. In `test/executor-tool.test.js`, `an executor on an older tool leaves queued work for a current one; receipts and accepts record the tool` checks stale-tool refusal and recovery by a current executor. `a supervisor whose agent exits runs only its own task's reactions; the wait host runs another task's queued one` checks that a resident supervisor cannot take another task's gates. These tests exercise the guarded runtime. Monitors whose snapshots predate the guard still need to finish or stop during the upgrade.
+
 ### Spawned process exits
 
 On Windows, an npm `.cmd` harness runs as a direct Node process with the shim's script and the original arguments. Spawn events retain the configured harness and route; the recorded pid belongs to the Node process. The supervisor uses the same resolution for retries and fallback routes.
