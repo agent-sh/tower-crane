@@ -647,7 +647,7 @@ test('one fixture exposes every inbox kind and resolving commands clear their co
   event(h, stall, 'stall', { agent: 'stalled', until: claim.until, progress_at: claim.since });
   h.ok(['ask', '--kind', 'technical', '--question', 'Which API?', '--option', 'A', '--option', 'B', '--blocks', stall]);
   h.ok(['msg', '--to', 'orchestrator', '--task', stall, 'Need API guidance', '--agent', 'messenger']);
-  event(h, accepted, 'automation', { phase: 'running', pid: process.pid, ...require('../lib/processes').identity(process.pid) });
+  event(h, accepted, 'executor', { lease: 'cpu:inbox', phase: 'running', kind: 'tests', pid: process.pid, ...require('../lib/processes').identity(process.pid) });
   const github = h.github();
   github.review_comments = { 1: [{ id: 1, html_url: 'https://github.com/acme/demo/pull/1#issuecomment-1',
     body: `Review (Tower Crane, clean context)\n\nBlocking: 1 finding at ${h.sha}.\n\n- lib/value.js:1 - Check null before dereferencing. - Avoid the crash.\n` }] };
