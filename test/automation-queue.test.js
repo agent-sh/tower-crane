@@ -12,6 +12,9 @@ const { waitFor } = require('./canary');
 const { shellQuote } = require('../lib/gates/common');
 const { readPublished } = require('./atomic-file');
 const { setup, attach } = require('./automation-helpers');
+const { waitUntil } = require('./signals');
+const { identity } = require('../lib/processes');
+const { randomUUID } = require('node:crypto');
 
 // A second PR that touches other files, and a suite command that logs each
 // run with PR #7's state at that moment. Both PRs are submitted and through
@@ -626,4 +629,38 @@ poll();
   assert.equal(passes.at(-1).detail.phase, 'done');
   assert.equal(passes.at(-1).detail.blocked, null);
   assert.deepEqual(passes.at(-1).detail.skipped, []);
+});
+
+test('merge --accepted waits for a free gate executor before its head check', async (t) => {
+  const h = queueFixture(t);
+  h.moveMain();
+  h.ok(['project', 'set', '--executors', '1', '--agent', 'orchestrator']);
+  h.reviewer('T1', 'reviewer');
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha, '--ok', '--agent', 'reviewer']);
+  h.ok(['accept', 'T1', '--agent', 'orchestrator']);
+  // Another process's suite holds the only executor; this live pid stands in for it.
+  const events = path.join(h.state, 'events.jsonl');
+  const lease = (detail) => fs.appendFileSync(events, `${JSON.stringify({ id: `E${randomUUID()}`, at: new Date().toISOString(),
+    agent: 'orchestrator', cmd: 'executor', task: 'T2', detail: { lease: 'cpu:held', ...detail } })}\n`);
+  lease({ phase: 'running', kind: 'tests', pid: process.pid, ...identity(process.pid) });
+  const suites = h.suites().length;
+  const start = h.logs().length;
+  let stderr = '';
+  let child;
+  const merging = h.runAsync(['merge', '--accepted', '--agent', 'orchestrator'],
+    { onSpawn: (c) => { child = c; c.stderr.on('data', (d) => { stderr += d; }); } });
+  try {
+    await waitUntil(() => /\[head check\] T1 waits for a free gate executor \(1 of 1 in use\)/.test(stderr),
+      { alive: child, what: () => `merge --accepted waits for the executor: ${stderr}` });
+    assert.equal(h.suites().length, suites, 'no head check runs while the slot is held');
+    assert.equal(headChecks(h).length, 0);
+  } finally {
+    lease({ phase: 'done' });
+  }
+  const r = await merging;
+  assert.equal(r.code, 0, r.stderr || r.stdout);
+  assert.deepEqual(headChecks(h).map((e) => [e.task, e.detail.ok]), [['T1', true]]);
+  assert.equal(h.github().prs['7'].state, 'MERGED');
+  assert.deepEqual(h.logs().slice(start).filter((e) => e.cmd === 'executor' && e.detail.phase === 'running')
+    .map((e) => [e.task, e.detail.kind]), [['T1', 'head check']]);
 });
