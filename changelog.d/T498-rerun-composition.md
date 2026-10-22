@@ -1,0 +1,1 @@
+- Base exclusions compare both failing runs when a tests command reruns. A later test, changed error or interrupted rerun cannot pass using only the first run's base evidence. Summaries retain both rescued-run exits and excluded base-failure exits.

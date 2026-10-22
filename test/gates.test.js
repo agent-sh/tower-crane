@@ -249,10 +249,11 @@ test('a one-off native child crash records native_crash in the evidence and its 
   const evidence = h.readState('tasks.json').tasks[0].evidence.at(-1);
   assert.equal(evidence.ok, true);
   assert.deepEqual(evidence.native_crash.map((c) => [c.test, c.signal, Number.isInteger(c.pid)]), [['child crashes natively', 'SIGSEGV', true]]);
-  assert.match(evidence.summary, /Native crash: child crashes natively \(SIGSEGV, pid \d+\)\..*Rerun: reran test\/crash\.test\.js once/);
-  assert.deepEqual(evidence.receipt.reruns, [{ step: 'head', files: ['test/crash.test.js'], ok: true }]);
+  // A run-only head is the pinned tests_cmd, not the file selector, so it reruns whole.
+  assert.match(evidence.summary, /Native crash: child crashes natively \(SIGSEGV, pid \d+\)\..*Rerun: reran the whole command \(the command is not gates\.tests_proof_cmd/);
+  assert.deepEqual(evidence.receipt.reruns, [{ step: 'head', files: [], ok: true }]);
   assert.deepEqual(evidence.commands.filter((c) => c.command !== 'git').map((c) => [c.command, c.status]),
-    [[`${spec} test/crash.test.js test/value.test.js`, 1], [`${spec} test/crash.test.js`, 0]]);
+    [[`${spec} test/crash.test.js test/value.test.js`, 1], [`${spec} test/crash.test.js test/value.test.js`, 0]]);
   const testsGate = h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'tests');
   assert.equal(testsGate.ok, true, testsGate.reason);
   const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);

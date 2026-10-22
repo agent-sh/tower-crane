@@ -307,3 +307,34 @@ test('old base runs cannot excuse a current failure and the API query is bounded
     assert.match(query[query.indexOf('--jq') + 1], /workflow_id.*created_at.*html_url/);
   }
 });
+
+test('base exclusions require both failed runs to match, including later command parts and changed errors', (t) => {
+  for (const [label, second, passed] of [
+    ['same base failure twice', { name: 'base test', error: ERROR, exit: 1 }, true],
+    ['new test on rerun', { name: 'new test', error: ERROR, exit: 1 }, false],
+    ['new error on rerun', { name: 'base test', error: 'Error: new regression', exit: 1 }, false],
+    ['unnamed rerun failure', { exit: 1 }, false],
+    ['interrupted rerun', { name: 'base test', error: ERROR, exit: 143 }, false],
+    ['successful rerun', { exit: 0 }, true],
+  ]) {
+    const h = fixture(t);
+    const marker = path.join(h.base, 'reran');
+    const script = path.join(h.base, 'command.js');
+    fs.writeFileSync(script, `const fs = require('node:fs'), marker = ${JSON.stringify(marker)};
+if (!fs.existsSync(marker)) {
+  fs.writeFileSync(marker, '');
+  console.log(${JSON.stringify(failedLog())}); process.exit(1);
+}
+${second.name ? `console.log(${JSON.stringify(failedLog(second.name, second.error))});` : ''}
+process.exit(${second.exit});\n`);
+    h.ok(['project', 'set', '--tests-cmd', `node ${shellQuote(script)}`]);
+    baseState(h);
+    h.submit();
+    const result = h.run(['check', 'tests', 'T1', '--agent', 'orchestrator', '--json']);
+    assert.equal(result.code, passed ? 0 : 1, `${label}: ${result.stdout} ${result.stderr}`);
+    const entry = JSON.parse(result.stdout);
+    if (second.exit === 0) assert.match(entry.summary, /exit 1, then exit 0 on its rerun/, label);
+    else if (passed) assert.match(entry.summary, /exit 1 \(base failures excluded\)/, label);
+    else assert.equal(entry.ok, false, label);
+  }
+});
