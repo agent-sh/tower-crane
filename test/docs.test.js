@@ -124,3 +124,20 @@ test('unrelated command help edits that conflict in docs/cli.md resolve as gener
   const check = cp.spawnSync(process.execPath, ['scripts/cli-docs.js', '--check'], { cwd: h.repo, env: h.env, encoding: 'utf8' });
   assert.equal(check.status, 0, check.stderr);
 });
+
+// Contributor guidance must name the sources of the generated file; an
+// instruction to edit docs/cli.md itself fails the check and is then erased.
+test('contributor guidance points CLI prose at its template and state prose at docs/state', () => {
+  const rows = [
+    ['AGENTS.md', ['scripts/cli-reference.md', 'docs/state/']],
+    ['scripts/cli-reference.md', ['scripts/cli-reference.md', 'lib/commands-*.js']],
+    ['docs/cli.md', ['scripts/cli-reference.md', 'lib/commands-*.js']],
+    ['skills/tower-crane-work/SKILL.md', ['scripts/cli-reference.md', 'docs/state/']],
+  ];
+  for (const [file, names] of rows) {
+    const text = fs.readFileSync(path.join(ROOT, file), 'utf8');
+    assert.doesNotMatch(text, /details (and examples )?outside the generated blocks/, file);
+    assert.doesNotMatch(text, /COMMANDS` in `bin\/tower-crane\.js`/, file);
+    for (const name of names) assert.ok(text.includes(name), `${file} names ${name}`);
+  }
+});

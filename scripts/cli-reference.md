@@ -1,6 +1,6 @@
 # CLI
 
-Command tables are generated from `COMMANDS` in `bin/tower-crane.js` with `npm run docs:generate`. CI rejects drift; keep further contract details outside the generated blocks.
+`docs/cli.md` is generated whole by `npm run docs:cli`: command tables and help come from the `COMMANDS` table in each `lib/commands-*.js` module, and this prose from `scripts/cli-reference.md`. CI rejects drift; edit those sources, never `docs/cli.md`.
 
 `tower-crane <command> [args]`. `tower-crane --version` prints the package version. Every command accepts `--state DIR`, `--agent NAME`, `--json` (machine output on stdout: the task, decision, project or list the command touched) and `--help`. Exit status: 0 done, 1 refused (with the reason on stderr), 2 usage error or wait timeout, 3 lock not acquired within 60 s, or a dispatch, gate or merge-queue suite the host governor deferred or stopped (`TASK: UNIT deferred by the host governor: REASON`, [state.md: Host resource governor](state.md#host-resource-governor)). `validate` and a failing gate print their report on stdout and exit 1; `spawn --wait` exits with the agent's code, or 1 when a harness login failure ended the dispatch. `wait` always prints one compact JSON line, including with `--json`. If a reader closes stdout or stderr, the CLI treats the resulting `EPIPE` as a quiet close, finishes the command and any state write, lets the other output stream drain, then exits with that command's status.
 
@@ -559,8 +559,8 @@ names. A string declares an entire generated file, including add/add outputs
 with no ancestor blob. `blocks` declares only the
 bodies between `<!-- NAME:start -->` and `<!-- NAME:end -->`; text outside
 those markers remains hand-written. Every declared marker must occur exactly
-once in all three merge versions. Tower Crane's own mapping lists every
-command-table block in `docs/cli.md`. Deletions, renames, symlinks and missing
+once in all three merge versions. Tower Crane's own mapping declares
+`docs/cli.md` as a whole generated file. Deletions, renames, symlinks and missing
 markers remain worker conflicts.
 
 Only the fetched base's mapping authorizes repair. When GitHub reports an
