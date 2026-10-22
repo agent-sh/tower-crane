@@ -152,7 +152,7 @@ test('status lists live executors with tool version and age and flags one behind
   assert.equal(byKind['supervisor T2'].agent, 'worker-T2-1');
   assert.equal(byKind['supervisor T2'].stale, true);
   const line = h.ok(['status']).split('\n').find((l) => l.startsWith('executors'));
-  assert.match(line, new RegExp(`^executors \\(engine ${Tool.describe(Tool.current()).replace(/\./g, '\\.')}\\): `));
+  assert.ok(line.startsWith(`executors (engine ${Tool.describe(Tool.current())}): `), line);
   assert.match(line, /reaction T2 pid \d+ on [^,]+, tool 0\.0\.0 a79075ad, 3h, STALE/);
   assert.match(line, /supervisor worker-T2-1 \(T2\) pid \d+ on [^,]+, tool 0\.0\.0 a79075ad, 3h, STALE/);
   assert.match(line, /reaction T1 pid \d+ on [^,]+, tool [^,]+, \d+s(;|$)/);
