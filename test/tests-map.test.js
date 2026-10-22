@@ -335,6 +335,23 @@ test('incremental head can select no suites without invoking a default full runn
   assert.equal(h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'tests').ok, true);
 });
 
+test('crucial configuration preserves its proof and run-only policy after a full anchor', (t) => {
+  for (const mode of ['prove', 'run-only']) {
+    const h = incrementalFixture(t);
+    h.ok(['project', 'set', '--tests-mode', mode,
+      '--tests-map', JSON.stringify({ 'value.js': ['test/value.test.js'], '**/*.md': [] }),
+      '--tests-crucial', '["test/mapped.test.js"]']);
+    const before = check(h);
+    assert.equal(before.receipt.head_mode, mode === 'prove' ? 'crucial' : 'full');
+    resubmit(h, 'docs/state.md');
+    const result = check(h);
+    assert.equal(result.receipt.head_mode, mode === 'prove' ? 'crucial' : 'full', mode);
+    assert.equal(result.receipt.incremental_from, undefined, mode);
+    if (mode === 'prove') assert.ok(result.receipt.head_tests.includes('test/mapped.test.js'));
+    assert.equal(h.json(['task', 'show', 'T1']).gates.gates.find(g => g.type === 'tests').ok, true, mode);
+  }
+});
+
 test('incremental head native reruns preserve accepted receipts in prove and run-only modes', {
   skip: process.platform === 'win32' && 'POSIX native-crash fixture',
 }, (t) => {
