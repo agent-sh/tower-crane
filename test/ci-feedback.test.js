@@ -951,7 +951,7 @@ test('dispatch capacity includes unrecorded GitHub runs and failed queued starts
   const payload = path.join(h.base, 'completed.json');
   fs.writeFileSync(payload, JSON.stringify({ action: 'completed', repository: { full_name: 'acme/app' }, workflow_run: data.runs[100] }));
   const failed = h.run(['ci', 'webhook', payload]);
-  assert.equal(failed.code, 1);
+  assert.equal(failed.code, 0);
   assert.match(failed.stderr, /GitHub refused dispatch/);
   assert.deepEqual(dispatches(h), []);
   assert.equal(h.readState('tasks.json').tasks[0].ci_dispatch_queue.sha, h.sha);
@@ -1041,5 +1041,79 @@ test('a queued branch returning to an active head waits for that run even when c
     h.ok(['ci', 'webhook', payload]);
     assert.equal(dispatches(h).length, 2);
     assert.equal(h.readState('tasks.json').tasks[0].ci_dispatch_queue, undefined);
+  }
+});
+
+
+test('deleted dispatch history releases capacity across heads and task lifecycles; transient errors keep it reserved', (t) => {
+  const rows = [
+    { name: 'current head', task: 'T1', sha: 'current' },
+    { name: 'older head', task: 'T1', sha: 'older' },
+    { name: 'other task', task: 'T2', sha: 'older' },
+    { name: 'finished task', task: 'T2', sha: 'older', status: 'cancelled' },
+    { name: 'accepted task', task: 'T2', sha: 'older', status: 'accepted' },
+    { name: 'previous repository', task: 'T2', sha: 'older', branch: 'previous-repo-branch', repo: 'acme/new' },
+    { name: 'transient failure', task: 'T2', sha: 'older', error: 'gh: service unavailable (HTTP 503)' },
+    { name: 'authorization failure', task: 'T2', sha: 'older', error: 'gh: forbidden (HTTP 403)' },
+  ];
+  for (const row of rows) {
+    const h = fixture(t);
+    const data = dispatchable(h);
+    if (row.repo) h.ok(['project', 'set', '--repo', row.repo]);
+    h.ok(['task', 'add', '--title', 'Historical', '--acceptance', 'works']);
+    const state = h.readState('tasks.json');
+    const historical = state.tasks.find((t) => t.id === row.task);
+    if (row.status) historical.status = row.status;
+    historical.ci_dispatches = [{ sha: row.sha === 'current' ? h.sha : 'b'.repeat(40), branch: row.branch || BRANCH,
+      workflow: 'ci.yml', at: new Date().toISOString(), agent: 'worker', run: 400 }];
+    h.writeState('tasks.json', state);
+    if (row.error) data.runErrors = { 400: row.error };
+    writeAtomic(h.env.CI_FEEDBACK_GH, JSON.stringify(data));
+    const result = h.run(['ci', 'dispatch', 'T1', '--agent', 'worker']);
+    assert.equal(result.code, row.error ? 1 : 0, `${row.name}: ${result.stderr}`);
+    const entry = h.readState('tasks.json').tasks.find((t) => t.id === row.task).ci_dispatches[0];
+    if (row.error) {
+      assert.equal(entry.status, undefined, row.name);
+      assert.equal(JSON.parse(readPublished(h.env.CI_FEEDBACK_GH, 'utf8')).dispatched, undefined);
+    } else {
+      assert.equal(entry.status, 'completed', row.name);
+      assert.equal(entry.conclusion, 'not_found', row.name);
+      assert.equal(JSON.parse(readPublished(h.env.CI_FEEDBACK_GH, 'utf8')).dispatched.length, 1);
+    }
+  }
+});
+
+test('queue errors do not suppress CI completion webhooks for a submitted PR head', (t) => {
+  for (const failure of ['capacity read', 'dispatch POST', 'deleted branch']) {
+    const h = fixture(t);
+    let data = dispatchable(h);
+    h.ok(['task', 'add', '--title', 'Queued', '--acceptance', 'works']);
+    h.ok(['claim', 'T2', '--agent', 'worker']);
+    const state = h.readState('tasks.json');
+    state.tasks.find((t) => t.id === 'T2').branch = 'tower-crane/T2-change';
+    h.writeState('tasks.json', state);
+    data.refs['heads/tower-crane/T2-change'] = { object: { sha: 'b'.repeat(40) } };
+    data.runs = Object.fromEntries([100, 101].map((id) => [id, { id, event: 'workflow_dispatch', status: 'queued', head_sha: 'c'.repeat(40), head_branch: `external-${id}` }]));
+    writeAtomic(h.env.CI_FEEDBACK_GH, JSON.stringify(data));
+    assert.equal(h.json(['ci', 'dispatch', 'T2', '--agent', 'worker']).queued, true);
+    const submitted = h.readState('tasks.json');
+    Object.assign(submitted.tasks[0], { status: 'submitted', submitted_by: 'worker', claim: null });
+    h.writeState('tasks.json', submitted);
+    data = JSON.parse(readPublished(h.env.CI_FEEDBACK_GH, 'utf8'));
+    data.runs[100].status = 'completed';
+    data.pr = { state: 'CLOSED', headRefOid: h.sha };
+    if (failure === 'capacity read') data.capacityError = 'gh: service unavailable (HTTP 503)';
+    if (failure === 'dispatch POST') data.dispatchError = 'GitHub refused dispatch';
+    if (failure === 'deleted branch') delete data.refs['heads/tower-crane/T2-change'];
+    writeAtomic(h.env.CI_FEEDBACK_GH, JSON.stringify(data));
+    const payload = path.join(h.base, 'completed.json');
+    fs.writeFileSync(payload, JSON.stringify({ action: 'completed', repository: { full_name: 'acme/app' },
+      workflow_run: { head_sha: h.sha, status: 'completed' } }));
+    const result = h.run(['ci', 'webhook', payload]);
+    assert.equal(result.code, 0, `${failure}: ${result.stderr}`);
+    assert.match(result.stderr, /queued CI dispatch:/, failure);
+    assert.match(result.stdout, /CI completion handled for T1/, failure);
+    assert.ok(readEvents(h.state).some((e) => e.cmd === 'ci completed' && e.task === 'T1'), failure);
+    assert.ok(h.readState('tasks.json').tasks.find((t) => t.id === 'T2').ci_dispatch_queue, failure);
   }
 });
