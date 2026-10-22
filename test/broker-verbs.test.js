@@ -1,0 +1,365 @@
+'use strict';
+
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
+const fs = require('node:fs');
+const path = require('node:path');
+const zlib = require('node:zlib');
+const { cachedFixture, ROOT } = require('./helpers');
+const B = require('../lib/broker');
+const C = require('../lib/containment');
+
+const NODE = process.execPath;
+const FIXTURES = path.join(ROOT, 'test', 'fixtures');
+const WORKER = { TOWER_CRANE_AGENT: 'worker-T1-1', TOWER_CRANE_TASK: 'T1' };
+const systemd = C.canScope();
+
+const VERB_JS = `
+const fs = require('node:fs');
+const path = require('node:path');
+const [campaign, rounds, out] = process.argv.slice(2);
+fs.writeFileSync(path.join(out, 'receipt.json'), JSON.stringify({ campaign, rounds, via: process.env.TOWER_CRANE_VIA ?? null }));
+console.log('pinned', campaign, rounds, process.env.TOWER_CRANE_VERB);
+`;
+
+const SLEEP_JS = `
+const mode = process.argv[2];
+if (mode === 'trap') process.on('SIGTERM', () => process.exit(143));
+if (mode === 'trap0') process.on('SIGTERM', () => process.exit(0));
+if (mode === 'selfkill') process.kill(process.pid, 'SIGKILL');
+if (mode === 'exit3') process.exit(3);
+console.log('sleeping', process.pid);
+setInterval(() => {}, 1000);
+`;
+
+function verbs(sha) {
+  const commit = { commit: sha, paths: ['tools'] };
+  return {
+    rehearse: {
+      argv: [NODE, 'tools/verb.js', '{param.campaign}', '{param.rounds}', '{out}'], source: commit, timeout_sec: 60,
+      outputs: ['receipt.json'], delegate: true,
+      params: { campaign: { type: 'string', pattern: '[a-z0-9-]+' }, rounds: { type: 'integer', pattern: '[1-9][0-9]?' } },
+    },
+    private: { argv: [NODE, 'tools/verb.js', 'private', '1', '{out}'], source: commit, timeout_sec: 60 },
+    sleepy: { argv: [NODE, 'tools/sleep.js'], source: commit, timeout_sec: 1, delegate: true },
+    trap: { argv: [NODE, 'tools/sleep.js', 'trap'], source: commit, timeout_sec: 1, delegate: true },
+    trap0: { argv: [NODE, 'tools/sleep.js', 'trap0'], source: commit, timeout_sec: 1, delegate: true },
+    selfkill: { argv: [NODE, 'tools/sleep.js', 'selfkill'], source: commit, timeout_sec: 60, delegate: true },
+    exit3: { argv: [NODE, 'tools/sleep.js', 'exit3'], source: commit, timeout_sec: 60, delegate: true },
+    pathy: {
+      argv: [NODE, '{source}/{param.script}', '{param.target}', '1', '{out}'], source: commit, timeout_sec: 60, delegate: true,
+      params: { script: { type: 'string', pattern: '.+' }, target: { type: 'string', pattern: '.+' } },
+    },
+    storm: {
+      argv: [NODE, 'containment-harness.js', 'storm', 'unused'], source: { path: FIXTURES }, timeout_sec: 60, delegate: true,
+      resources: { tasks_max: systemd ? 32 : 4, memory_max_bytes: 512 * 1024 * 1024 },
+    },
+    memory: {
+      argv: [NODE, 'containment-harness.js', 'memory', 'unused'], source: { path: FIXTURES }, timeout_sec: 60, delegate: true,
+      resources: { tasks_max: 64, memory_max_bytes: 96 * 1024 * 1024 },
+    },
+  };
+}
+
+function fixture(t) {
+  const h = cachedFixture(t, 'broker-verbs', (h) => {
+    h.init(['--base', 'main']);
+    fs.mkdirSync(path.join(h.repo, 'tools'));
+    fs.writeFileSync(path.join(h.repo, 'tools', 'verb.js'), VERB_JS);
+    fs.writeFileSync(path.join(h.repo, 'tools', 'sleep.js'), SLEEP_JS);
+    h.git(['add', '-A']);
+    h.git(['commit', '-qm', 'verb scripts']);
+    const sha = h.git(['rev-parse', 'HEAD']);
+    h.ok(['project', 'set', '--broker-verbs', JSON.stringify(verbs(sha))]);
+    h.ok(['task', 'add', '--title', 'Lab rehearsal', '--acceptance', 'the rehearsal ran']);
+    h.ok(['task', 'add', '--title', 'Other', '--acceptance', 'other']);
+    h.ok(['claim', 'T1', '--agent', 'worker-T1-1']);
+    return { sha };
+  });
+  // Spawn records the task scratch; the test sets it the same way.
+  h.scratch = path.join(h.base, 'scratch');
+  fs.mkdirSync(h.scratch);
+  const state = h.readState('tasks.json');
+  state.tasks.find((t) => t.id === 'T1').scratch = h.scratch;
+  h.writeState('tasks.json', state);
+  return h;
+}
+
+const evidence = (h) => h.readState('tasks.json').tasks[0].evidence.filter((e) => e.type === 'verb');
+const verb = (h, name, params = [], env = WORKER) => h.run(['verb', name, ...params.flatMap((p) => ['--param', p])], { env });
+const REHEARSE = ['campaign=c1', 'rounds=3'];
+
+test('the project records owner-approved verbs with a pinned copy of their source', (t) => {
+  const h = fixture(t);
+  const v = h.readState('project.json').broker.verbs.rehearse;
+  assert.match(v.source.digest, /^[0-9a-f]{64}$/);
+  const { manifest, tree } = require('../lib/verbs').verifyPinned(h.state, v.source.digest);
+  assert.deepEqual(manifest.files.map(([p]) => p), ['tools/sleep.js', 'tools/verb.js'], 'only source.paths are pinned');
+  assert.equal(fs.readFileSync(path.join(tree, 'tools', 'verb.js'), 'utf8'), VERB_JS);
+  assert.match(h.ok(['project', 'show']), /broker verb rehearse: .*pinned [0-9a-f]{12}.*delegated/);
+});
+
+test('an approved verb runs through the broker on the host for a granted task and records evidence', async (t) => {
+  const h = fixture(t);
+  h.ok(['task', 'update', 'T1', '--broker-verbs', 'rehearse', '--agent', 'orchestrator']);
+  assert.match(h.ok(['task', 'show', 'T1']), /broker verbs: rehearse/);
+  const job = { state: h.state, task: 'T1', agent: 'worker-T1-1', role: 'worker', harness: 'codex',
+    cwd: h.repo, broker: path.join(h.base, 'brokers', 'worker-T1-1', B.FILE) };
+  assert.throws(() => B.authorize(job, ['verb', 'rehearse', '--task', 'T2']), /works on T1 only, not T2/);
+  const broker = await B.start(job);
+  t.after(() => broker.close());
+  const r = await h.runAsync(['verb', 'rehearse', '--param', 'campaign=c1', '--param', 'rounds=3'], { env: { ...broker.env, ...WORKER } });
+  assert.equal(r.code, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /^pinned c1 3 rehearse$/m);
+  assert.match(r.stdout, /verb rehearse for T1: exit 0/);
+  const [e] = evidence(h);
+  assert.equal(e.ok, true);
+  assert.equal(e.via, 'broker');
+  assert.equal(e.agent, 'worker-T1-1');
+  assert.deepEqual(e.verb.params, { campaign: 'c1', rounds: '3' });
+  assert.equal(e.verb.exit_code, 0);
+  assert.equal(e.verb.timed_out, false);
+  assert.ok(Number.isInteger(e.verb.duration_ms));
+  assert.deepEqual(e.verb.source, h.readState('project.json').broker.verbs.rehearse.source);
+  const [out] = e.verb.outputs;
+  assert.equal(path.dirname(out.path), h.scratch, 'the output lands in the task scratch');
+  const receipt = fs.readFileSync(out.path);
+  assert.equal(out.sha256, crypto.createHash('sha256').update(receipt).digest('hex'));
+  assert.deepEqual(JSON.parse(receipt), { campaign: 'c1', rounds: '3', via: null }, 'the verb gets none of the broker\'s variables');
+  assert.match(r.stdout, new RegExp(`receipt.json: ${out.path.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&')} sha256 ${out.sha256}`));
+  const events = h.events();
+  assert.ok(events.some((ev) => ev.cmd === 'verb' && ev.task === 'T1' && ev.detail.verb === 'rehearse' && ev.detail.outputs[0].sha256 === out.sha256));
+  assert.equal(fs.readdirSync(path.join(h.state, 'verbs', 'runs')).length, 0, 'the private output directory is removed');
+});
+
+test('a worker that edits or commits the verb script in its checkout still runs the pinned copy', (t) => {
+  const h = fixture(t);
+  h.ok(['task', 'update', 'T1', '--broker-verbs', 'rehearse', '--agent', 'orchestrator']);
+  const edited = "console.log('edited by the worker');\n";
+  fs.writeFileSync(path.join(h.repo, 'tools', 'verb.js'), edited);
+  let r = verb(h, 'rehearse', REHEARSE);
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stdout, /pinned c1 3/);
+  assert.doesNotMatch(r.stdout, /edited/);
+  h.git(['switch', '-qc', 'tower-crane/T1-lab']);
+  h.git(['commit', '-qam', 'worker edit']);
+  h.git(['switch', '-q', 'main']);
+  h.git(['merge', '-q', '--ff-only', 'tower-crane/T1-lab']);
+  r = verb(h, 'rehearse', REHEARSE);
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stdout, /pinned c1 3/, 'even the base branch moving does not change the approved commit');
+
+  // The pinned copy is checked before every run.
+  const { source } = h.readState('project.json').broker.verbs.rehearse;
+  fs.writeFileSync(path.join(require('../lib/verbs').sourcesDir(h.state), source.digest, 'tree', 'tools', 'verb.js'), edited);
+  const before = evidence(h).length;
+  r = verb(h, 'rehearse', REHEARSE);
+  assert.equal(r.code, 1, r.stdout);
+  assert.match(r.stderr, /pinned copy of tools\/verb\.js .* changed or went missing/);
+  assert.doesNotMatch(r.stdout, /edited/);
+  assert.equal(evidence(h).length, before);
+});
+
+test('pinning the same approved verbs again repairs a damaged copy', (t) => {
+  const h = fixture(t);
+  h.ok(['task', 'update', 'T1', '--broker-verbs', 'rehearse', '--agent', 'orchestrator']);
+  const V = require('../lib/verbs');
+  const { digest } = h.readState('project.json').broker.verbs.rehearse.source;
+  const dir = path.join(V.sourcesDir(h.state), digest);
+  const rows = [
+    { name: 'a changed file', damage: () => fs.writeFileSync(path.join(dir, 'tree', 'tools', 'verb.js'), "console.log('edited');\n") },
+    { name: 'a removed file', damage: () => fs.rmSync(path.join(dir, 'tree', 'tools', 'sleep.js')) },
+    { name: 'a changed manifest', damage: () => fs.appendFileSync(path.join(dir, 'manifest.json'), ' ') },
+    { name: 'a removed manifest', damage: () => fs.rmSync(path.join(dir, 'manifest.json')) },
+    { name: 'a removed copy', damage: () => fs.rmSync(dir, { recursive: true }) },
+  ];
+  for (const row of rows) {
+    row.damage();
+    let r = verb(h, 'rehearse', REHEARSE);
+    assert.equal(r.code, 1, `${row.name}: ${r.stdout}`);
+    assert.match(r.stderr, /the owner pins it again with project set --broker-verbs/, row.name);
+    h.ok(['project', 'set', '--broker-verbs', JSON.stringify(verbs(h.sha))]);
+    assert.equal(h.readState('project.json').broker.verbs.rehearse.source.digest, digest, row.name);
+    r = verb(h, 'rehearse', REHEARSE);
+    assert.equal(r.code, 0, `${row.name}: ${r.stderr}`);
+    assert.match(r.stdout, /^pinned c1 3 rehearse$/m, row.name);
+    assert.deepEqual(fs.readdirSync(V.sourcesDir(h.state)), [digest], `${row.name}: no staging or damaged copy is left`);
+  }
+});
+
+test('a pin that loses the race for the same copy keeps the copy placed first', (t) => {
+  const h = fixture(t);
+  const V = require('../lib/verbs');
+  const { digest } = h.readState('project.json').broker.verbs.rehearse.source;
+  const dir = path.join(V.sourcesDir(h.state), digest);
+  const first = path.join(h.base, 'first');
+  fs.cpSync(dir, first, { recursive: true });
+  fs.rmSync(dir, { recursive: true });
+  const rename = fs.renameSync;
+  // The other project set lands its copy just before this one renames.
+  t.mock.method(fs, 'renameSync', (from, to) => {
+    if (to === dir && !fs.existsSync(dir)) rename(first, dir);
+    return rename(from, to);
+  });
+  assert.equal(V.pinCommit(h.state, h.repo, h.sha, ['tools']), digest);
+  V.verifyPinned(h.state, digest);
+  assert.deepEqual(fs.readdirSync(V.sourcesDir(h.state)), [digest]);
+});
+
+test('pinning refuses git objects that do not hash to their names', (t) => {
+  const h = fixture(t);
+  fs.writeFileSync(path.join(h.repo, 'tools', 'verb.js'), "console.log('approved v2');\n");
+  h.git(['commit', '-qam', 'v2']);
+  const sha = h.git(['rev-parse', 'HEAD']);
+  const blob = h.git(['rev-parse', 'HEAD:tools/verb.js']);
+  // A worker writes the shared git directory: it swaps the approved blob's content.
+  const file = path.join(h.repo, '.git', 'objects', blob.slice(0, 2), blob.slice(2));
+  const forged = Buffer.from("console.log('forged');\n");
+  fs.chmodSync(file, 0o644);
+  fs.writeFileSync(file, zlib.deflateSync(Buffer.concat([Buffer.from(`blob ${forged.length}\0`), forged])));
+  const before = h.readState('project.json');
+  const r = h.run(['project', 'set', '--broker-verbs', JSON.stringify(verbs(sha))]);
+  assert.equal(r.code, 1, r.stdout);
+  assert.match(r.stderr, new RegExp(`object ${blob} .* does not hash to its name`));
+  assert.deepEqual(h.readState('project.json'), before);
+});
+
+test('ungranted, unclaimed and out-of-pattern requests are refused and run nothing', (t) => {
+  const h = fixture(t);
+  h.ok(['task', 'update', 'T1', '--broker-verbs', 'rehearse,pathy', '--agent', 'orchestrator']);
+  const V = require('../lib/verbs');
+  const { tree } = V.verifyPinned(h.state, h.readState('project.json').broker.verbs.pathy.source.digest);
+  const script = path.join(h.repo, 'tools', 'verb.js');
+  const rows = [
+    { name: 'a verb the task has no grant for', verb: 'private', params: [], stderr: /T1 has no grant for broker verb private; the owner grants it/ },
+    { name: 'an undeclared verb', verb: 'missing', params: [], stderr: /no broker verb missing/ },
+    { name: 'a string outside its pattern', verb: 'rehearse', params: ['campaign=../../etc', 'rounds=3'], stderr: /campaign="\.\.\/\.\.\/etc" is outside verb rehearse's string pattern/ },
+    { name: 'an integer that is not one', verb: 'rehearse', params: ['campaign=c1', 'rounds=0x1'], stderr: /rounds="0x1" is outside verb rehearse's integer pattern/ },
+    { name: 'an undeclared parameter', verb: 'rehearse', params: [...REHEARSE, 'store=/tmp'], stderr: /has no parameter store/ },
+    { name: 'a missing parameter', verb: 'rehearse', params: ['campaign=c1'], stderr: /needs --param rounds=VALUE/ },
+    { name: 'a repeated parameter', verb: 'rehearse', params: [...REHEARSE, 'rounds=4'], stderr: /--param rounds is given twice/ },
+    { name: 'an agent without the claim', verb: 'rehearse', params: REHEARSE, env: { TOWER_CRANE_AGENT: 'worker-T1-2', TOWER_CRANE_TASK: 'T1' }, stderr: /worker-T1-2 does not hold T1's claim/ },
+    { name: 'a value naming a path an agent writes', verb: 'pathy', params: ['script=tools/verb.js', `target=${script}`], stderr: /argv .*verb\.js is inside/ },
+    { name: 'an option value naming a path an agent writes', verb: 'pathy', params: ['script=tools/verb.js', `target=--config=${script}`], stderr: /argv .*verb\.js is inside/ },
+    { name: 'a value walking out of {source}', verb: 'pathy', params: [`script=${path.relative(tree, script).split(path.sep).join('/')}`, 'target=c1'], stderr: /argv .*verb\.js is inside/ },
+    { name: 'a relative value walking out of the working directory', verb: 'pathy', params: ['script=tools/verb.js', `target=${path.relative(tree, script).split(path.sep).join('/')}`], stderr: /argv .*verb\.js is inside/ },
+  ];
+  const sources = fs.readdirSync(V.sourcesDir(h.state));
+  for (const row of rows) {
+    const r = verb(h, row.verb, row.params, row.env);
+    assert.notEqual(r.code, 0, row.name);
+    assert.match(r.stderr, row.stderr, row.name);
+    assert.equal(fs.readdirSync(h.scratch).length, 0, row.name);
+    assert.deepEqual(fs.readdirSync(path.join(h.state, 'verbs')), ['sources'], `${row.name}: no run directory is made`);
+  }
+  assert.deepEqual(evidence(h), []);
+  assert.deepEqual(fs.readdirSync(V.sourcesDir(h.state)), sources);
+  const ran = verb(h, 'pathy', ['script=tools/verb.js', 'target=c1']);
+  assert.equal(ran.code, 0, ran.stderr);
+  assert.match(ran.stdout, /^pinned c1 1 pathy$/m, 'paths under {source} and {out} run');
+  const r = h.run(['evidence', 'T1', '--type', 'verb', '--ok', '--sha', 'a'.repeat(40)], { env: WORKER });
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /only tower-crane verb records verb evidence/);
+});
+
+test('the orchestrator grants delegated verbs; other grants and every verb change are the owner\'s', (t) => {
+  const h = fixture(t);
+  const orchestrator = { env: { TOWER_CRANE_AGENT: 'orchestrator' } };
+  const audit = () => h.events().findLast((e) => e.cmd === 'setting');
+  h.ok(['task', 'update', 'T1', '--broker-verbs', 'rehearse,sleepy'], orchestrator);
+  assert.deepEqual(audit().detail.settings, { 'task.broker_verbs': 'operational' });
+  let r = h.run(['task', 'update', 'T1', '--broker-verbs', 'rehearse,private'], orchestrator);
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /task\.broker_verbs_owner is owner-required; opened D1/);
+  assert.deepEqual(h.readState('tasks.json').tasks[0].broker_verbs, ['rehearse', 'sleepy']);
+  h.ok(['answer', 'D1', '--choice', 'approve']);
+  h.ok(['task', 'update', 'T1', '--broker-verbs', 'rehearse,private'], orchestrator);
+  assert.deepEqual(h.readState('tasks.json').tasks[0].broker_verbs, ['rehearse', 'private']);
+  assert.equal(audit().detail.approved_by, 'D1');
+  r = h.run(['task', 'update', 'T1', '--broker-verbs', 'rehearse'], { env: WORKER });
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /operational: only the orchestrator or the owner/);
+  assert.equal(h.run(['task', 'update', 'T1', '--broker-verbs', 'nope'], orchestrator).code, 1);
+  h.ok(['task', 'update', 'T1', '--broker-verbs', ''], orchestrator);
+  assert.equal(h.readState('tasks.json').tasks[0].broker_verbs, undefined);
+
+  const project = h.readState('project.json');
+  r = h.run(['project', 'set', '--broker-verbs', 'null'], orchestrator);
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /broker\.verbs is owner-required; opened D2/);
+  r = h.run(['project', 'set', '--broker-verbs', 'null'], { env: WORKER });
+  assert.equal(r.code, 1);
+  assert.deepEqual(h.readState('project.json'), project);
+  h.ok(['project', 'set', '--broker-verbs', 'null']);
+  assert.equal(h.readState('project.json').broker, undefined);
+});
+
+test('project set refuses verbs that a worker could steer', (t) => {
+  const h = fixture(t);
+  const sha = h.sha;
+  const base = verbs(sha).rehearse;
+  const other = h.git(['commit-tree', `${sha}^{tree}`, '-m', 'off the base branch']);
+  const rows = [
+    { name: 'a source inside the repository', verb: { ...base, source: { path: path.join(h.repo, 'tools') } }, stderr: /source\.path .* is inside .*an agent writes/ },
+    { name: 'a mount inside the repository', verb: { ...base, mounts: { store: h.repo } }, stderr: /mounts\.store .* is inside/ },
+    { name: 'a literal path into the repository', verb: { ...base, argv: [NODE, path.join(h.repo, 'tools', 'verb.js'), '{param.campaign}', '{param.rounds}', '{out}'] }, stderr: /argv .* is inside/ },
+    { name: 'a literal path before a parameter', verb: { ...base, argv: [NODE, `${path.join(h.repo, 'tools')}/{param.campaign}.js`, '{param.rounds}', '{out}'] }, stderr: /argv .*tools is inside/ },
+    { name: 'an option value into the repository', verb: { ...base, argv: [NODE, 'tools/verb.js', `--config=${path.join(h.repo, 'tools', 'verb.js')}`, '{param.campaign}', '{param.rounds}', '{out}'] }, stderr: /argv .*verb\.js is inside/ },
+    { name: 'a search path into the repository', verb: { ...base, argv: [NODE, 'tools/verb.js', `--path=${path.dirname(NODE)}${path.delimiter}${h.repo}`, '{param.campaign}', '{param.rounds}', '{out}'] }, stderr: /argv .* is inside/ },
+    { name: 'a commit off the base branch', verb: { ...base, source: { commit: other } }, stderr: /is not on refs\/heads\/main/ },
+    { name: 'a parameter in the program', verb: { ...base, argv: ['{param.campaign}', '{param.rounds}'] }, code: 2, stderr: /argv\[0\] names the program/ },
+    { name: 'an undeclared parameter', verb: { ...base, argv: [...base.argv, '{param.store}'] }, code: 2, stderr: /\{param\.store\}, which params does not declare/ },
+    { name: 'a parameter without a pattern', verb: { ...base, params: { ...base.params, rounds: { type: 'integer' } } }, code: 2, stderr: /params\.rounds must be/ },
+    { name: 'no timeout', verb: { ...base, timeout_sec: undefined }, code: 2, stderr: /timeout_sec must be/ },
+    { name: 'a given digest', verb: { ...base, source: { ...base.source, digest: '0'.repeat(64) } }, code: 2, stderr: /digest is written by project set/ },
+  ];
+  const project = h.readState('project.json');
+  for (const row of rows) {
+    const r = h.run(['project', 'set', '--broker-verbs', JSON.stringify({ rehearse: row.verb })]);
+    assert.equal(r.code, row.code ?? 1, `${row.name}: ${r.stderr}`);
+    assert.match(r.stderr, row.stderr, row.name);
+  }
+  assert.deepEqual(h.readState('project.json'), project);
+});
+
+// A stopped run exits 1 whatever code the verb returns on the way out; a verb
+// that only fails exits with its own code.
+for (const row of [
+  { verb: 'sleepy', title: 'the timeout stops a runaway verb', check: (e) => assert.equal(e.verb.timed_out, true), summary: /timed out after 1 s/ },
+  { verb: 'trap', title: 'the timeout stops a verb that traps SIGTERM and exits 143', check: (e) => assert.equal(e.verb.timed_out, true), summary: /timed out after 1 s/ },
+  { verb: 'trap0', title: 'the timeout stops a verb that traps SIGTERM and exits 0', check: (e) => assert.equal(e.verb.timed_out, true), summary: /timed out after 1 s/ },
+  { verb: 'selfkill', title: 'a verb killed by a signal exits 1', check: (e) => assert.equal(e.verb.timed_out, false), summary: /killed by SIGKILL|exit [1-9]/ },
+  { verb: 'exit3', title: 'a verb that fails exits with its own code', code: 3, check: (e) => assert.equal(e.verb.exit_code, 3), summary: /exit 3/ },
+  { verb: 'storm', title: 'the storm cap stops a runaway verb', check: (e) => assert.equal(e.verb.resource_reason, 'resource-tasks-max'), summary: /resource-tasks-max/ },
+  { verb: 'memory', title: 'the memory cap stops a runaway verb', check: (e) => assert.equal(e.verb.resource_reason, 'resource-memory-max'), summary: /resource-memory-max/ },
+]) {
+  test(`${row.title} and is recorded`, (t) => {
+    const h = fixture(t);
+    h.ok(['task', 'update', 'T1', '--broker-verbs', row.verb, '--agent', 'orchestrator']);
+    const r = verb(h, row.verb, [], { ...WORKER, TOWER_CRANE_TEST_CONTAINMENT: '1' });
+    assert.equal(r.code, row.code ?? 1, r.stdout + r.stderr);
+    assert.match(r.stdout, row.summary);
+    const [e] = evidence(h);
+    assert.equal(e.ok, false);
+    assert.match(e.summary, row.summary);
+    row.check(e);
+  });
+}
+
+// chmod cannot stop a write on Windows or for root.
+test('an output the scratch refuses keeps its digest and the run stays ok', { skip: process.platform === 'win32' || process.getuid?.() === 0 }, (t) => {
+  const h = fixture(t);
+  h.ok(['task', 'update', 'T1', '--broker-verbs', 'rehearse', '--agent', 'orchestrator']);
+  fs.chmodSync(h.scratch, 0o555);
+  const r = verb(h, 'rehearse', REHEARSE);
+  fs.chmodSync(h.scratch, 0o755);
+  assert.equal(r.code, 0, r.stderr);
+  const [e] = evidence(h);
+  assert.equal(e.ok, true);
+  const [out] = e.verb.outputs;
+  assert.deepEqual(Object.keys(out), ['name', 'sha256', 'bytes', 'refused']);
+  assert.match(out.refused, /verb-rehearse-.*-receipt\.json \(EACCES\)$/);
+  assert.match(r.stdout, new RegExp(`receipt.json: sha256 ${out.sha256}, not copied to `));
+  assert.deepEqual(fs.readdirSync(h.scratch), []);
+});
