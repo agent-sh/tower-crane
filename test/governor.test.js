@@ -979,3 +979,25 @@ test('a finished agent gives up its place before its gate reactions run', { skip
   await waitOnRepo(h, () => !alive(started.monitor_pid), 'the supervisor ends', { poll: true });
   assert.ok(h.readState('tasks.json').tasks[0].evidence.some((e) => e.type === 'tests' && e.ok), 'the reaction finished');
 });
+
+test('a unit in a scope of its own also counts its processes outside the scope', { skip: linuxOnly }, (t) => {
+  // An agent's supervisor runs its state broker and the agent's waits outside the harness scope.
+  const supervisor = idle(t);
+  const anon = () => Number(/^RssAnon:\s+(\d+)/m.exec(fs.readFileSync(`/proc/${supervisor.pid}/status`, 'utf8'))?.[1] || 0) * 1024;
+  for (const deadline = Date.now() + 10000; anon() < 4 * 1024 * 1024 && Date.now() < deadline;) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+  const own = fs.readFileSync(`/proc/${supervisor.pid}/cgroup`, 'utf8').split('\n').find((l) => l.startsWith('0::')).slice(3).trim();
+  const cases = [
+    ['a supervisor outside the scope adds its memory', '/tests.slice/harness.scope', true],
+    ['a process inside the scope is in the scope\'s use already', own, false],
+  ];
+  for (const [name, scope, added] of cases) {
+    const host = fakeHost(t, { limit: 36, used: 4 });
+    host.write(`sys/fs/cgroup${scope}/memory.current`, `${GiB}\n`);
+    host.write(`sys/fs/cgroup${scope}/memory.stat`, 'anon 1\nactive_file 0\ninactive_file 0\n');
+    const u = unit('worker', 1, { holders: [], roots: [{ pid: supervisor.pid, ...Processes.identity(supervisor.pid) }], cgroup: scope });
+    const reg = { ...registry([u]), windows: [], growth: [], raised: null };
+    G.observeAll(reg, host.env, reading({ limit: 36, used: 4 }), s, Date.now());
+    if (added) assert.ok(u.measured > GiB && u.measured <= GiB + anon() * 2, `${name}: ${u.measured}`);
+    else assert.equal(u.measured, GiB, name);
+  }
+});

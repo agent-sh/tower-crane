@@ -935,7 +935,7 @@ On each admission and tick the governor reads, on Linux:
 
 Every limited cgroup level and the host is a level, and each must fit. The binding level is the one with the least headroom; on this machine it is the agents slice shared by every agent session (`user@1000.service/agents.slice`, `memory.high` 36 GiB, `memory.max` 40 GiB). Processes in different scopes see different chains: a spawned orchestrator in a capped scope of its own has that scope as a level, and a `wait` in a terminal's scope does not.
 
-A unit's size is the anonymous resident memory (`RssAnon`) of its root processes and their descendants, each process counted once, for the unit whose root is its nearest ancestor: what a cgroup charges and cannot reclaim without swap. A contained unit uses the full attempt scope passed by containment once its report is ready, excluding its page cache. It includes detached grandchildren and nested child groups. Queued registry writes keep that scope path and do not substitute the runner leaf. Uncontained units use the PID-tree measurement. Each unit keeps its `expected` size, its last `measured` size and its `peak`.
+A unit's size is the anonymous resident memory (`RssAnon`) of its root processes and their descendants, each process counted once, for the unit whose root is its nearest ancestor: what a cgroup charges and cannot reclaim without swap. A contained unit uses the full attempt scope passed by containment once its report is ready, excluding its page cache. It includes detached grandchildren and nested child groups. Its processes outside the scope add their anonymous memory: an agent's supervisor, the state broker it runs and the commands the broker runs for the agent, such as its waits, sit beside the harness scope, and left out they were sampled as other sessions, whose room then kept them after the unit ended. Queued registry writes keep that scope path and do not substitute the runner leaf. Uncontained units use the PID-tree measurement. Each unit keeps its `expected` size, its last `measured` size and its `peak`.
 
 A unit counts in a level when its memory is charged there: the host holds every unit, and a cgroup level holds a unit whose attempt scope, or else the cgroup of the process that admitted it (`admitted_in`), is that level or lies below it. A unit recorded with neither counts in every level.
 
@@ -1050,6 +1050,70 @@ console.table(rows.filter(w => w.crossed).map(w => ({ at: w.at, reserved: w.rese
   grew: w.grew / 2 ** 30, actual_pct: 100 * w.actual / w.limit, peak_pct: 100 * w.slice_peak / w.limit })));
 console.log(Object.fromEntries(['predicted', 'actual', 'slice_peak'].map(key =>
   [key, Math.max(...rows.map(w => w[key])) / 2 ** 30])));
+NODE
+```
+
+#### Replay of 2026-10-22's deferrals (T525)
+
+On 2026-10-22 ginza deferred its T21 local CI gate and T73 tests gate at every attempt from 11:51Z to 13:01Z while `agents.slice` held 15.9 to 20.5 GiB of 36. Its reasons projected 35.4 to 41.2 GiB: growth 8.3 to 10.2 GiB and other sessions' room 7.9 to 12.2 GiB. Tower Crane deferred its own gates and suites from 11:10Z to 11:34Z the same way at its 85% line, then raised it to 92%.
+
+Inputs, supplied by the orchestrator from the live host: the registry `avifenesh.json` at 14:04:16Z (SHA-256 `b2882946fdd6b0dd4ec0e56cf490b2bad0fe156bf2254deee2479fee7662c850`; other-session samples from 12:04Z), the window log `avifenesh.windows.jsonl` (`acd0cc00faaaed1ef02dc22ba076ed6a1eace87f68badebe2b4b1a5ade56ae0b`; 2929 windows from 2026-10-20 10:57Z to 2026-10-22 14:04Z, all on `agents.slice`), ginza's 64 event lines of the day that name the host governor, as `ginza-2026-10-22-governor.jsonl` (`6b4e9baa0269fee0261cd5173c802df0effd26fbc004a0901481ed137538073e`), and Tower Crane's own, as `tc-defers.jsonl` (`grep '"at":"2026-10-22' events.jsonl | grep -E 'deferred by the host governor|over the [0-9]+% line'`, `bef3cc79fae4f12927bab4ab2f56cf6b41a7947af17a180b27094a2c4dd06bd2`). That gives 186 readings with a projection: 52 of ginza's and 134 of Tower Crane's.
+
+The replay rebuilds the registry at each reading. Growth samples and raises come from feeding the window log through `observe` and `reserve`, as the T451 replay does. That reproduces every logged reservation under the governor before T525, with no mismatch. The units running at a reading are those of the last window opened before it, with its logged room (the largest unit's on its first unit, the rest shared evenly) and its measured total. Other-session samples are the registry's own from 12:04Z, plus one per window opening (its use less its units' size): one per minute where the live ones take the minute's largest. On Tower Crane's 134 readings, logged by main's governor, the replayed growth is within 1.0 GiB of the logged growth, and the replayed room runs from 0.7 GiB over to 2.0 GiB under the logged room. Each reading is projected with the reading's own use and need against the 85% line.
+
+| Readings | Sum of the logged terms | Before T525 | T525 |
+| --- | --- | --- | --- |
+| ginza T21 and T73, 11:51Z to 13:01Z (28) | 35.4 to 41.2 GiB, all deferred | 25.0 to 30.4 GiB, all admitted | 24.9 to 30.0 GiB, all admitted |
+| a Tower Crane tests gate (1.9 GiB) at the same readings (28) | | | 24.9 to 29.1 GiB, all admitted |
+| Tower Crane at 28.0 to 32.0 GiB in use, 11:13Z to 11:17Z (37) | 34.3 to 38.4 GiB | 34.4 to 37.8 GiB, all deferred | 34.3 to 37.6 GiB, all deferred |
+| all 186 | | 57 admitted | 61 admitted |
+
+Most of ginza's hour came from the release it ran, 0.1.7, which predates the per-level budget (9b99f2d3). Its `assess` counts every other-session sample whatever level it was taken on, so the host's samples, where other use was 19 to 24 GiB, set room in `agents.slice`. Recomputed with 0.1.7's `assess` over the registry's samples, its room at the readings from 12:08Z is within 0.9 GiB of ginza's logged room. Its `reserve` also has no room exemption for owners waiting on their heads. Main's per-level room at the same readings is 0.1 to 6.3 GiB, and its growth 3.2 to 6.9 GiB. T525 removes 0.1 to 0.5 GiB more at those readings and admits 4 more of Tower Crane's 11:24Z to 11:34Z attempts.
+
+Tower Crane's 11:22Z to 11:24Z attempts stay deferred: the slice fell from 31 to 17 GiB from 11:16Z, and the room kept for that fall is the design. The replay cannot show two of T525's changes: a sample taking the lower of the two readings, and a unit counting its processes outside its scope, change what is measured, not what was logged. A raise naming its units shows only roughly, since the log keeps each window's summed room and not each unit's; it moves growth by no more than the raise above the 99th percentile (0.283 against 0.259 to 0.262 from 11:55Z to 12:10Z) times the room outside its set. Registry windows open each minute and record the binding level's use, so a replayed sample is one tick a minute and the room a lower bound; the Tower Crane comparison above bounds the gap.
+
+To reproduce, put the four inputs in `DIR` and run the following from the repository root, with `BEFORE` the `lib/governor.js` of a checkout at d87be869:
+
+```sh
+node - DIR BEFORE lib/governor.js <<'NODE'
+const fs = require('node:fs'), path = require('node:path');
+const [dir, before, after] = process.argv.slice(2), GiB = 2 ** 30, line = 0.85 * 36 * GiB;
+const LEVEL = '/user.slice/user-1000.slice/user@1000.service/agents.slice';
+const read = (f) => fs.readFileSync(path.join(dir, f), 'utf8').trim().split('\n');
+const rows = read('avifenesh.windows.jsonl').map(JSON.parse), reg0 = JSON.parse(read('avifenesh.json').join('\n'));
+const opens = [...rows, ...reg0.windows].sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
+const openAt = (t) => opens.findLast((w) => Date.parse(w.at) <= t);
+const unitsOf = (w) => w.units.map((id, i) => ({ id, expected: i ? (w.sum - w.largest) / Math.max(1, w.units.length - 1) : w.largest, measured: 0 }));
+function timeline(G) {
+  const s = G.settings({}), reg = { units: [], windows: [], growth: [], raised: null }, reserved = [], states = [];
+  const events = rows.flatMap((w, i) => [[Date.parse(w.at), 1, i, w], [Date.parse(w.end), 0, i, w]]).sort((a, b) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2]);
+  for (const [now, opening, i, w] of events) {
+    if (opening) { reg.units = unitsOf(w); reserved[i] = G.reserve(reg, s, now).bytes; continue; }
+    reg.units = [];
+    reg.windows = [{ ...w, reserved: reserved[i] }];
+    G.observe(reg, { binding: w.level, levels: [{ name: w.level, limit: w.limit, used: w.used }] }, s, now);
+    states.push({ at: now, growth: [...reg.growth], raised: reg.raised && { ...reg.raised } });
+  }
+  return { s, at: (t) => states.findLast((x) => x.at <= t) || { growth: [], raised: null } };
+}
+const minute = new Map();
+const add = (at, bytes, used) => { const k = Math.floor(Date.parse(at) / 60000); if (!(minute.get(k)?.bytes >= bytes)) minute.set(k, { at, level: LEVEL, bytes, used }); };
+for (const w of opens) add(w.at, Math.max(0, w.used - w.base), w.used);
+for (const o of reg0.others.filter((o) => o.level === LEVEL)) add(o.at, o.bytes, o.bytes + (openAt(Date.parse(o.at))?.base || 0));
+const others = [...minute.values()];
+const RE = /has ([\d.]+) GiB of 36\.0 GiB in use.*? needs ([\d.]+) GiB;/;
+const readings = [['ginza-2026-10-22-governor.jsonl', 'gate run'], ['tc-defers.jsonl', 'automation']].flatMap(([f, cmd]) => read(f).map(JSON.parse)
+  .filter((e) => e.cmd === cmd).map((e) => [e, RE.exec(JSON.stringify(e.detail))]).filter(([, m]) => m)
+  .map(([e, m]) => ({ at: Date.parse(e.at), file: f, task: e.task, used: +m[1] * GiB, need: +m[2] * GiB })));
+const project = (G, tl, r) => {
+  const w = openAt(r.at), state = tl.at(r.at);
+  const reg = { units: [...unitsOf(w), { id: 'measured', expected: 0, measured: w.base }], others: others.filter((o) => Date.parse(o.at) <= r.at), growth: state.growth, raised: state.raised, history: [] };
+  const b = G.assess({ levels: [{ name: LEVEL, used: r.used, limit: 36 * GiB }], binding: LEVEL, pressure: {}, load: 0, cores: 24 }, reg, tl.s, r.need, null, r.at).budget;
+  return r.used + b.growth + b.others_room + r.need;
+};
+const [B, A] = [before, after].map((f) => { const G = require(path.resolve(f)); return [G, timeline(G)]; });
+console.table(readings.map((r) => ({ at: new Date(r.at).toISOString().slice(11, 19), file: r.file.slice(0, 5), task: r.task, used: +(r.used / GiB).toFixed(1),
+  before: +(project(...B, r) / GiB).toFixed(1), after: +(project(...A, r) / GiB).toFixed(1), admits: project(...A, r) <= line })));
 NODE
 ```
 
