@@ -209,6 +209,71 @@ for (const linked of [false, true]) {
   }
 }
 
+for (const status of ['submitted', 'accepted']) {
+  for (const dirty of ['unstaged', 'staged', 'untracked']) {
+    for (const entry of ['accept', 'check clean']) {
+      if (status === 'accepted' && entry === 'accept') continue;
+      test(`dirty ${status} child schedules rework through ${entry} with ${dirty} edits`, (t) => {
+        const f = setup(t);
+        const top = upper(f);
+        if (status === 'accepted') f.accept('T2');
+        const file = dirty === 'untracked' ? 'pr-body.md' : 'T2.txt';
+        fs.writeFileSync(path.join(top.wt.path, file), 'pending edits\n');
+        if (dirty === 'staged') f.h.git(['add', file], top.wt.path);
+        const before = f.h.git(['status', '--porcelain'], top.wt.path);
+        const parent = resubmit(f, false);
+        const args = entry === 'accept' ? ['accept', 'T2'] : ['check', 'clean', 'T2'];
+        const result = f.h.run(args);
+        assert.equal(result.code, 1, result.stdout + result.stderr);
+        const task = f.h.json(['task', 'show', 'T2']);
+        assert.equal(task.status, 'rework', 'a completed submission needs a worker to recover');
+        assert.equal(task.revision, 2);
+        assert.equal(task.sha, top.sha);
+        assert.equal(task.stack.parent_sha, f.sha);
+        assert.equal(f.h.git(['rev-parse', 'HEAD'], top.wt.path), top.sha);
+        assert.equal(f.h.git(['status', '--porcelain'], top.wt.path), before);
+        const reworks = () => events(f).filter((e) => e.task === 'T2' && e.cmd === 'rework');
+        assert.equal(reworks().length, 1);
+        assert.match(reworks()[0].detail.reason, new RegExp(parent));
+        f.h.run(['check', 'clean', 'T2']);
+        assert.equal(reworks().length, 1, 'repeated gates do not advance rework again');
+        const inbox = f.h.json(['inbox', '--agent', 'orchestrator']);
+        assert.ok(inbox.items.some((item) => item.task === 'T2' && item.kind === 'rework_ready'));
+        const inspect = inspector(f);
+        const dispatched = f.h.run(['spawn', '--task', 'T2', '--wait']);
+        assert.equal(dispatched.code, 0, dispatched.stdout + dispatched.stderr);
+        assert.equal(inspect().head, top.sha);
+        assert.match(inspect().prompt, new RegExp(parent));
+        assert.equal(fs.readFileSync(path.join(top.wt.path, file), 'utf8'), 'pending edits\n');
+        const gate = f.h.run(['check', 'ci', 'T2']);
+        assert.equal(gate.code, 1);
+        assert.match(gate.stderr, new RegExp(`containing T1 at ${parent}`));
+      });
+    }
+  }
+}
+
+for (const status of ['submitted', 'accepted']) {
+  test(`an existing dirty deferral still schedules a ${status} child for rework`, (t) => {
+    const f = setup(t);
+    const top = upper(f);
+    if (status === 'accepted') f.accept('T2');
+    fs.writeFileSync(path.join(top.wt.path, 'pr-body.md'), 'pending edits\n');
+    const parent = resubmit(f, false);
+    // A prior pass may have recorded the receipt before submission completed.
+    fs.appendFileSync(path.join(f.h.state, 'events.jsonl'), JSON.stringify({
+      at: new Date().toISOString(), agent: 'orchestrator', cmd: 'stack sync deferred', task: 'T2',
+      detail: { parent: 'T1', parent_sha: parent, failure: 'dirty', reason: 'prior dirty deferral' },
+    }) + '\n');
+    f.h.run(['check', 'clean', 'T2']);
+    assert.equal(f.h.json(['task', 'show', 'T2']).status, 'rework');
+    const deferred = events(f).filter((e) => e.task === 'T2' && e.cmd === 'stack sync deferred');
+    assert.equal(deferred.length, 1, 'the recovery does not duplicate its receipt');
+    assert.equal(events(f).filter((e) => e.task === 'T2' && e.cmd === 'rework').length, 1);
+    assert.equal(f.h.git(['rev-parse', 'HEAD'], top.wt.path), top.sha);
+  });
+}
+
 for (const busy of ['live', 'dirty']) {
   for (const linked of [false, true]) {
     test(`parent refresh records ${busy} ${linked ? 'linked' : 'prepared'} deferral once per parent head`, (t) => {

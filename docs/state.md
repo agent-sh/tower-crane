@@ -47,7 +47,10 @@ compare the parent inputs again in their final state transactions.
 Live workers and dirty checkouts defer parent refresh, with one
 `stack sync deferred` event per parent head. A dirty child can dispatch its worker on the
 unchanged branch and checkout; its brief names the parent head it must include
-before resubmitting. Gates still wait for that head. Stopped Git operations
+before resubmitting. A dirty submitted or accepted child returns to rework so
+that worker can be scheduled. This recovery also runs when the same parent
+head already has a deferral receipt; repeated checks while rework is pending
+do not advance its revision again. Gates still wait for the parent head. Stopped Git operations
 keep their worktree operation checks and prevent automatic refresh. Merged
 parents take the completed-chain retirement path before any parent branch fetch.
 Refresh only merges a newer submitted or accepted head from an unmerged parent
