@@ -1,1 +1,2 @@
 - Run the CI gate scratch and model swap proofs over four fixed test files covering ladders, brokers, workers and nested gates. Give each proof a 10-minute deadline, with 15-minute model swap and 30-minute scratch jobs, independently of the full-suite gate timeout.
+- Preserve a caller's granted short socket directory in proof runs so deep gate scratch does not prevent brokers and fixture workers from starting.

@@ -38,8 +38,9 @@ function probe({ root = ROOT, cache, command, environment = process.env } = {}) 
   const state = path.join(run, 'state');
   const env = { ...environment };
   // Host readings describe the machine, independently of the probe's fresh state.
+  // A worker's granted socket leaf is the short root its nested brokers reach.
   for (const key of Object.keys(env)) {
-    if (key.startsWith('TOWER_CRANE_') && key !== 'TOWER_CRANE_HOST_ROOT'
+    if (key.startsWith('TOWER_CRANE_') && !['TOWER_CRANE_HOST_ROOT', 'TOWER_CRANE_SOCKET_DIR'].includes(key)
       || key.startsWith('TC_TEST_') || key === 'NODE_TEST_CONTEXT') delete env[key];
   }
   // Tests use an isolated governor; host measurements still use the real host.

@@ -8,6 +8,7 @@ const path = require('node:path');
 const cp = require('node:child_process');
 const { cachedFixture } = require('./helpers');
 const { writeHost } = require('./host');
+const { socketDir } = require('./socket-dir');
 const { HUNG_TEST_MS } = require('./signals');
 const { probe } = require('../scripts/probe-gate-scratch');
 const { suiteTime, reportSuiteTime, DEADLINE_MIN, PROOF_DEADLINE_MIN } = require('../scripts/suite-time');
@@ -52,6 +53,59 @@ require('../scratch.js');
     assert.equal(result.cleanup_ok, !leak);
     assert.equal(result.ok, !leak);
     assert.deepEqual(result.outer_after, leak ? ['escaped'] : []);
+  }
+});
+
+test('deep scratch proofs keep a granted socket leaf across runtime root variants', {
+  skip: process.platform === 'win32' && 'Windows brokers use named pipes',
+}, async (t) => {
+  const h = fixture(t);
+  const sockets = socketDir(t);
+  fs.writeFileSync(path.join(h.repo, 'broker-proof.js'), `
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+assert.equal(process.env.TOWER_CRANE_SOCKET_DIR, process.env.PROOF_SOCKET_DIR);
+assert.equal(process.env.TOWER_CRANE_BROKER, undefined);
+// The account cache is overlong too, so the granted leaf is the fallback.
+const os = require('node:os');
+const userInfo = os.userInfo;
+os.userInfo = (...args) => ({ ...userInfo(...args), homedir: path.join(process.cwd(), 'account-'.repeat(30)) });
+const broker = require(${JSON.stringify(require.resolve('../lib/broker'))});
+(async () => {
+  const state = path.join(process.cwd(), 'deep-'.repeat(30), 'state');
+  const where = path.join(state, 'brokers', 'worker-T1-1');
+  const listener = await broker.start({ state, task: 'T1', agent: 'worker-T1-1',
+    role: 'worker', harness: 'claude', cwd: process.cwd(), broker: path.join(where, 'broker.json') });
+  try {
+    const socket = JSON.parse(fs.readFileSync(path.join(where, 'broker.json'), 'utf8')).socket;
+    if (process.platform !== 'win32') {
+      assert.ok(Buffer.byteLength(socket) <= 103, socket);
+      assert.ok(socket.startsWith(process.env.PROOF_SOCKET_DIR + path.sep), socket);
+      assert.ok(fs.statSync(socket).isSocket());
+    }
+  } finally { await listener.close(); }
+  assert.deepEqual(fs.readdirSync(process.env.PROOF_SOCKET_DIR), []);
+})().catch(error => { console.error(error); process.exitCode = 1; });
+`);
+  h.git(['add', 'broker-proof.js']);
+  h.git(['commit', '-qm', 'Add deep broker proof']);
+  for (const [name, runtime] of [
+    ['overlong runtime', path.join(h.base, 'runtime-'.repeat(30))],
+    ['short runtime', sockets],
+    ['missing runtime', path.join(sockets, 'missing')],
+  ]) {
+    await t.test(name, () => {
+      const cache = path.join(h.base, 'deep-cache-'.repeat(12), name);
+      const result = probe({ root: h.repo, cache, command: 'node broker-proof.js',
+        environment: { ...h.env, XDG_RUNTIME_DIR: runtime,
+          TOWER_CRANE_SOCKET_DIR: sockets, PROOF_SOCKET_DIR: sockets } });
+      assert.equal(result.exit, 0, `${name}: ${result.gate?.summary}`);
+      assert.equal(result.ok, true, name);
+      assert.equal(result.cleanup_ok, true, name);
+      assert.deepEqual(fs.readdirSync(sockets), [], name);
+      assert.deepEqual(fs.readdirSync(cache), [], name);
+    });
   }
 });
 
