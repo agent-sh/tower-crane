@@ -221,7 +221,7 @@ test('in a real codex sandbox forged state edits fail and the CLI writes through
 // A project at a deep path: brokers/<agent>/broker.sock is too long for a
 // socket address, and the caller's TMPDIR is under the home, as ~/.cache is
 // in production. claude's sandbox hides the home, so a socket there failed
-// every brokered command with ENOENT; the agent's own temp directory holds
+// every brokered command with ENOENT; the socket leaf the spawn grants holds
 // it instead. codex brokers over TCP, so its run checks only the deep path.
 for (const harness of ['claude', 'codex']) {
   const flag = `TOWER_CRANE_LIVE_${harness.toUpperCase()}`;
@@ -637,7 +637,7 @@ test('a real codex sandbox starts for a home among 5,000 entries and reads nothi
 // With inject, the push runs with NODE_OPTIONS asking node to load a file
 // first, which the shim must not do. before runs first, extra after the push.
 // The claude probe leaves it out: a model asked to run it declined
-// (2026-10-14), and the stub test in isolation.test.js covers claude's shim.
+// (2026-10-14), and the stub test in isolation-shims.test.js covers claude's shim.
 function shimProbe(h, out, { before = '', extra = '', inject = false } = {}) {
   const dir = path.dirname(out);
   const repo = path.join(dir, 'shim-repo');
