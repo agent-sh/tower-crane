@@ -55,8 +55,8 @@ test('the stack poll observer isolates its held backoff from ordinary cleanup ti
     const context = { global, process: { on() {} }, require: (name) => name === 'node:fs'
       ? { existsSync: () => ready, writeFileSync: (file) => writes.push(file) } : timers };
     vm.runInNewContext(pollObserver('poll', 'sleeping'), context);
-    if (kind === 'global') global.setTimeout(() => {}, ms);
-    else timers.setTimeout(ms, undefined, { signal });
+    if (kind === 'global') global.setTimeout(() => {}, ms); // wait-allow: the scheduler stub records the delay without waiting
+    else timers.setTimeout(ms, undefined, { signal }); // wait-allow: the scheduler stub records the delay and signal without waiting
     assert.deepEqual(calls, [expected], `${kind} ${ms} ready=${ready}`);
     assert.deepEqual(writes, kind === 'promise' && ms === 1000 && ready ? ['sleeping'] : []);
   }
