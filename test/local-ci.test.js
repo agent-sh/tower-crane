@@ -87,6 +87,7 @@ test('reports merge the pinned base once per base move', (t) => {
   h.ok(['check', 'ci', 'T1']);
   const log = path.join(h.base, 'tree-queries');
   const opts = { env: { LOCAL_TREE_LOG: log } };
+  // read-published: the git shim appends queries; nothing replaces the file.
   const pinnedMerges = () => (fs.existsSync(log) ? fs.readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse) : [])
     .filter((args) => args.includes('merge-tree') && args.includes(h.baseSha)).length;
   for (const name of ['later.txt', 'last.txt']) {
