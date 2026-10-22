@@ -58,6 +58,10 @@ function storeSecretService(t, name, value) {
   t.after(() => cp.spawnSync('secret-tool', ['clear', 'service', SERVICE, 'name', name]));
 }
 
+// A user file that names systemd-creds for each credential, so a lookup
+// never asks the keyring.
+const systemdOnly = (file, ...names) => fs.writeFileSync(file, JSON.stringify({ credentials: Object.fromEntries(names.map((n) => [n, { store: 'systemd-creds' }])) }));
+
 const helper = (args, env) => cp.spawnSync(process.execPath, [HELPER, ...args], { env, encoding: 'utf8' });
 
 test('the credential helper prints a value from a systemd-creds file and nothing else, and its errors never hold it', { skip: SYSTEMD_CREDS }, (t) => {
@@ -67,8 +71,9 @@ test('the credential helper prints a value from a systemd-creds file and nothing
   const name = fakeName('creds');
   const value = fakeValue('creds');
   storeSystemdCreds(file, name, value);
+  systemdOnly(file, name, `${name}-copy`, `${name}-missing`);
   const env = { ...process.env, TOWER_CRANE_CONFIG: path.join(dir, 'elsewhere.json') };
-  const r = helper(['value', name, '--config', file, '--session-bus'], env);
+  const r = helper(['value', name, '--config', file], env);
   assert.equal(r.status, 0, r.stderr);
   assert.equal(r.stdout, value, 'the value, with no line break');
   assert.equal(r.stderr, '');
@@ -76,12 +81,12 @@ test('the credential helper prints a value from a systemd-creds file and nothing
   assert.equal(helper(['check', name, '--config', file], env).status, 0);
   // A file encrypted under another name is refused, and the refusal holds no value.
   fs.copyFileSync(credFile(file, name), credFile(file, `${name}-copy`));
-  const copied = helper(['value', `${name}-copy`, '--config', file, '--session-bus'], env);
+  const copied = helper(['value', `${name}-copy`, '--config', file], env);
   assert.equal(copied.status, 1);
   assert.equal(copied.stdout, '');
   assert.match(copied.stderr, /tower-crane credential .* cannot be read \(systemd-creds: /);
   assert.ok(!copied.stderr.includes(value));
-  const missing = helper(['value', `${name}-missing`, '--config', file, '--session-bus'], env);
+  const missing = helper(['value', `${name}-missing`, '--config', file], env);
   assert.equal(missing.status, 1);
   assert.match(missing.stderr, /is not stored \(systemd-creds: not stored\); store it with tower-crane credentials set /);
 });
@@ -101,12 +106,6 @@ test('the credential helper prints a value from the Secret Service', { skip: SEC
   const r = helper(['value', name, '--config', file], env);
   assert.equal(r.status, 0, r.stderr);
   assert.equal(r.stdout, value);
-  // With the session bus granted to the sandbox, only systemd-creds is read.
-  const bus = helper(['value', name, '--config', file, '--session-bus'], env);
-  assert.equal(bus.status, 1);
-  assert.match(bus.stderr, /is not stored \(systemd-creds: not stored\)/);
-  fs.writeFileSync(file, JSON.stringify({ credentials: { [name]: { store: 'secret-service' } } }));
-  assert.match(helper(['value', name, '--config', file, '--session-bus'], env).stderr, /sandbox\.session_bus puts that store in reach of the agent's commands/);
 });
 
 // The CLI's store tools run through recording wrappers, so the test sees
@@ -139,14 +138,15 @@ test('credentials set reads the value from stdin and it never reaches argv, even
   const name = fakeName('set');
   const value = fakeValue('set');
   const { env, log } = recordingTools(h);
+  systemdOnly(h.env.TOWER_CRANE_CONFIG, name);
   const out = h.json(['credentials', 'set', name, '--store', 'systemd-creds'], { env, input: `${value}\n` });
   assert.deepEqual(out, { name, store: 'systemd-creds' });
-  assert.equal(helper(['value', name, '--config', h.env.TOWER_CRANE_CONFIG, '--session-bus'], h.env).stdout, value, 'stored without the line break');
+  assert.equal(helper(['value', name, '--config', h.env.TOWER_CRANE_CONFIG], h.env).stdout, value, 'stored without the line break');
   assert.equal(fs.statSync(credFile(h.env.TOWER_CRANE_CONFIG, name)).mode & 0o777, 0o600);
   // Rotation replaces the value in place.
   const rotated = fakeValue('rotated');
   h.ok(['credentials', 'set', name, '--store', 'systemd-creds'], { env, input: rotated });
-  assert.equal(helper(['value', name, '--config', h.env.TOWER_CRANE_CONFIG, '--session-bus'], h.env).stdout, rotated);
+  assert.equal(helper(['value', name, '--config', h.env.TOWER_CRANE_CONFIG], h.env).stdout, rotated);
   const argv = fs.readFileSync(log, 'utf8');
   assert.match(argv, /^systemd-creds --user encrypt --name=tc-test-fake-set-/m, 'the store tool ran');
   for (const v of [value, rotated]) {
@@ -170,11 +170,12 @@ test('credentials import stores one variable of an env file under a name', { ski
   const envFile = path.join(h.base, 'bedrock.env');
   fs.writeFileSync(envFile, `CLAUDE_CODE_USE_BEDROCK=1\nAWS_BEARER_TOKEN_BEDROCK="${value}"\n`, { mode: 0o600 });
   const name = fakeName('import');
+  systemdOnly(h.env.TOWER_CRANE_CONFIG, name);
   const { env, log } = recordingTools(h);
   const r = h.run(['credentials', 'import', '--env-file', envFile, '--var', 'AWS_BEARER_TOKEN_BEDROCK', '--name', name, '--store', 'systemd-creds'], { env });
   assert.equal(r.code, 0, r.stderr);
   assert.match(r.stdout, new RegExp(`stored credential ${name} in systemd-creds from AWS_BEARER_TOKEN_BEDROCK in .*bedrock\\.env; remove that line`));
-  assert.equal(helper(['value', name, '--config', h.env.TOWER_CRANE_CONFIG, '--session-bus'], h.env).stdout, value);
+  assert.equal(helper(['value', name, '--config', h.env.TOWER_CRANE_CONFIG], h.env).stdout, value);
   assert.ok(!fs.readFileSync(log, 'utf8').includes(value));
   assert.match(h.run(['credentials', 'import', '--env-file', envFile, '--var', 'MISSING', '--name', name], { env }).stderr, /sets no MISSING/);
 });
@@ -226,6 +227,13 @@ test('spawn refuses a route whose credential the store cannot give, and ladder s
   assert.ok(!fs.existsSync(u.out), 'no harness started');
   const show = h.json(['ladder', 'show'], { env: { ...u.env, TOWER_CRANE_CONFIG: h.env.TOWER_CRANE_CONFIG } });
   assert.ok(show.problems.some((p) => p.startsWith(`ladder small: tower-crane credential ${name} is not stored`)), show.problems.join('\n'));
+  // With the session bus granted, no store keeps the credential from the agent's commands.
+  h.ok(['project', 'set', '--session-bus', 'true']);
+  const bus = h.run(['spawn', '--role', 'small', '--task', 'T1', '--wait', '--json'], { env: { ...u.env, TOWER_CRANE_CONFIG: h.env.TOWER_CRANE_CONFIG } });
+  assert.equal(bus.code, 1, bus.stdout);
+  assert.match(bus.stderr, new RegExp(`credential ${name} cannot run with sandbox\\.session_bus`));
+  assert.ok(!fs.existsSync(u.out), 'no harness started');
+  h.ok(['project', 'set', '--session-bus', 'false']);
   // A credential is a rung field only claude, with a provider, and codex take.
   assert.match(h.run(['ladder', 'set', 'small', '--clear', 'provider']).stderr, /credential on claude needs provider bedrock or anthropic/);
 });
@@ -257,6 +265,7 @@ test('the Bedrock broker adds the stored bearer token and forwards only claude\'
   const name = fakeName('broker');
   const value = fakeValue('broker');
   storeSystemdCreds(file, name, value);
+  systemdOnly(file, name, `${name}-missing`);
   const seen = [];
   const upstream = http.createServer((req, res) => {
     let body = '';
@@ -282,7 +291,7 @@ test('the Bedrock broker adds the stored bearer token and forwards only claude\'
     req.end(method === 'POST' ? '{"fake":true}' : undefined);
   });
   assert.equal((await call('POST', `${broker.url}/model/x/invoke`)).status, 403, 'no route is running yet');
-  broker.target({ name, config: file, session_bus: true, base_url: `http://127.0.0.1:${upstream.address().port}/prefix`, region: 'us-east-1' });
+  broker.target({ name, config: file, base_url: `http://127.0.0.1:${upstream.address().port}/prefix`, region: 'us-east-1' });
   const r = await call('POST', `${broker.url}/model/global.anthropic.fake/invoke-with-response-stream?x=1`, { authorization: 'Bearer agent-supplied', 'x-api-key': 'agent-key' });
   assert.equal(r.status, 201);
   assert.equal(r.headers['x-fake'], 'kept');
@@ -299,7 +308,7 @@ test('the Bedrock broker adds the stored bearer token and forwards only claude\'
   }
   assert.equal(seen.length, 2, 'nothing else reached Bedrock');
   // A credential the store cannot give is refused with the helper's reason.
-  broker.target({ name: `${name}-missing`, config: file, session_bus: true, base_url: `http://127.0.0.1:${upstream.address().port}`, region: 'us-east-1' });
+  broker.target({ name: `${name}-missing`, config: file, base_url: `http://127.0.0.1:${upstream.address().port}`, region: 'us-east-1' });
   const missing = await call('POST', `${broker.url}/model/x/invoke`);
   assert.equal(missing.status, 403);
   assert.match(JSON.parse(missing.body).message, /tower-crane credential .*-missing is not stored/);
@@ -330,16 +339,14 @@ test('a failing credential helper reads as a harness login failure', () => {
   assert.equal(auth, null);
 });
 
-test('the store order follows the platform, the user file and the session bus grant', () => {
+test('the store order follows the platform and the user file', () => {
   const Credentials = require('../lib/credentials');
   const at = { file: '/fake/config.json' };
   assert.deepEqual(Credentials.order('n', { store: 'auto' }, { ...at, platform: 'linux' }), ['secret-service', 'systemd-creds']);
-  assert.deepEqual(Credentials.order('n', { store: 'auto' }, { ...at, platform: 'linux', sessionBus: true }), ['systemd-creds']);
   assert.deepEqual(Credentials.order('n', { store: 'auto' }, { ...at, platform: 'darwin' }), [], 'the untested Keychain stays off by default');
   assert.deepEqual(Credentials.order('n', { store: 'auto' }, { ...at, platform: 'win32' }), []);
   assert.deepEqual(Credentials.order('n', { store: 'keychain' }, { ...at, platform: 'darwin' }), ['keychain']);
-  assert.deepEqual(Credentials.order('n', { store: 'systemd-creds' }, { ...at, platform: 'linux', sessionBus: true }), ['systemd-creds']);
-  assert.throws(() => Credentials.order('n', { store: 'secret-service' }, { ...at, platform: 'linux', sessionBus: true }), /sandbox\.session_bus puts that store in reach/);
+  assert.deepEqual(Credentials.order('n', { store: 'systemd-creds' }, { ...at, platform: 'linux' }), ['systemd-creds']);
   assert.throws(() => Credentials.read('n', { file: at.file, platform: 'darwin' }), /macOS Keychain support is untested and off by default; opt in with "credentials": \{"n": \{"store": "keychain"\}\}/);
   assert.deepEqual(Credentials.configErrors({ ok: { store: 'systemd-creds' }, 'bad name': {}, x: { store: 'nope' }, y: { store: 'env' }, z: { var: 'V' } }), [
     'credentials.bad name: a credential name is 1 to 64 letters, digits, dots, underscores or hyphens, starting with a letter or digit',
@@ -348,4 +355,35 @@ test('the store order follows the platform, the user file and the session bus gr
     'credentials.y: store env needs var, the variable in env_file that holds the value',
     'credentials.z: env_file and var apply only to store env',
   ]);
+});
+
+// With sandbox.session_bus a sandboxed command can start a user unit, which
+// runs outside the sandbox as the owner and reaches every store and the
+// helper, so no store keeps a credential from it: the route is refused.
+test('preflight refuses a credential on a route that grants the session bus, whatever its store', { skip: SYSTEMD_CREDS }, (t) => {
+  const Credentials = require('../lib/credentials');
+  const dir = fs.mkdtempSync(path.join(require('./helpers').TMP_ROOT, 'creds-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'config.json');
+  const name = fakeName('bus');
+  const value = fakeValue('bus');
+  storeSystemdCreds(file, name, value);
+  const envFile = path.join(dir, 'fallback.env');
+  fs.writeFileSync(envFile, `AWS_BEARER_TOKEN_BEDROCK=${value}\n`, { mode: 0o600 });
+  const env = { ...process.env, TOWER_CRANE_CONFIG: file };
+  const stores = [{}, { store: 'auto' }, { store: 'secret-service' }, { store: 'systemd-creds' }, { store: 'keychain' }, { store: 'wincred' }, { store: 'env', env_file: envFile, var: 'AWS_BEARER_TOKEN_BEDROCK' }];
+  const routes = [{ harness: 'claude', provider: 'bedrock', model: 'claude-haiku-5-5', credential: name }, { harness: 'claude', provider: 'anthropic', model: 'claude-haiku-5-5', credential: name }];
+  for (const entry of stores) {
+    fs.writeFileSync(file, JSON.stringify({ credentials: { [name]: entry } }));
+    for (const route of routes) {
+      // Without the grant the systemd-creds and env stores give the value.
+      if ([undefined, 'auto', 'systemd-creds', 'env'].includes(entry.store) && process.platform === 'linux') {
+        assert.deepEqual(Credentials.preflight(route, { sandbox: {} }, { env }), [], `${JSON.stringify(entry)} without the grant`);
+      }
+      const problems = Credentials.preflight(route, { sandbox: { session_bus: true } }, { env });
+      assert.equal(problems.length, 1, `${JSON.stringify(entry)} ${route.provider}: ${problems.join('; ')}`);
+      assert.match(problems[0], new RegExp(`^credential ${name} cannot run with sandbox\\.session_bus: .*runs outside the sandbox as the owner.*clear sandbox\\.session_bus .*or drop the credential from this route`), JSON.stringify(entry));
+      assert.ok(!problems[0].includes(value));
+    }
+  }
 });

@@ -250,7 +250,7 @@ Probed with a Tower Crane-like profile: `:minimal` read, the home not named, net
 
 ### Changes that come with it
 
-- **Session bus:** refuse `sandbox.session_bus: true` with a Secret Service credential, or switch that project to systemd-creds. The grant puts the bus socket, and so the store, in reach of sandboxed commands. docs/state.md already names "a running secret service" as the risk.
+- **Session bus:** refuse `sandbox.session_bus: true` with a Secret Service credential, or switch that project to systemd-creds. Correction, in review: switching does not help. Over the bus a command can start a user unit with `systemd-run --user`, which runs outside the sandbox as the owner and reaches systemd-creds and the helper too. The implementation refuses any credential on a route with the grant. The grant puts the bus socket, and so the store, in reach of sandboxed commands. docs/state.md already names "a running secret service" as the risk.
 - **Preflight:** spawn runs `helper check NAME` before launch and refuses with "unlock the login keyring" or "run tower-crane credentials set NAME". Without it:
   - Claude retries with backoff for minutes on a 401 (A7).
   - Codex sends unauthenticated requests (C5).

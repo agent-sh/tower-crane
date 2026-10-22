@@ -157,12 +157,11 @@ process.exit(r.status ?? 1);
   assert.ok(seen.secretTool.status !== 0 && !seen.secretTool.value, `the command cannot read the keyring: ${JSON.stringify(seen.secretTool)}`);
   assert.ok(seen.systemdCreds.status !== 0 && !seen.systemdCreds.value, `the command cannot decrypt systemd-creds: ${JSON.stringify(seen.systemdCreds)}`);
   assert.equal(seen.credFile, false, 'the credentials directory is hidden');
-  // The broker stops with the spawn.
+  // The broker stops with the spawn: nothing listens on its port, nonce or not.
+  const port = Number(/:(\d+)\//.exec(own.url)[1]);
   const after = await new Promise((resolve) => {
-    const req = require('node:http').request(`${own.url}/inference-profiles`, { timeout: 5000 }, (res) => resolve(`status ${res.statusCode}`));
-    req.on('error', (e) => resolve(e.code));
-    req.on('timeout', () => { req.destroy(); resolve('timeout'); });
-    req.end();
+    const socket = require('node:net').connect({ host: '127.0.0.1', port }, () => { socket.destroy(); resolve('connected'); });
+    socket.on('error', (e) => resolve(e.code));
   });
   assert.equal(after, 'ECONNREFUSED', 'the broker is gone once the spawn ends');
 });
