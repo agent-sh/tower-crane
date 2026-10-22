@@ -8,7 +8,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { BIN } = require('./helpers');
-const { waitUntil } = require('./signals');
+const { fileWritten, waitUntil } = require('./signals');
 const { shellQuote } = require('../lib/gates/common');
 const { setup, configureHarness } = require('./automation-helpers');
 
@@ -169,6 +169,24 @@ poll();
 function ownerSpawn(h, id) {
   const started = h.json(['spawn', '--task', id]);
   return started.agent;
+}
+
+for (const steer of [false, true]) {
+  test(`ownership wait keeps waiting after a direct ${steer ? 'steer' : 'message'}`, async (t) => {
+    const h = ownerFixture(t, { OWNER_NO_PR: '1' });
+    const agent = ownerSpawn(h, 'T1');
+    await waitUntil(() => h.task().status === 'submitted', { paths: [h.base], what: 'the owner submitted' });
+    const signal = path.join(h.base, 'own-watch-ready');
+    const ready = fileWritten(signal);
+    const waiting = h.runAsync(['wait', '--own', '--task', 'T1', '--agent', agent, '--timeout', '2'],
+      { hooks: { HOOK_WATCH_READY: signal } }); // wait-allow: ordinary messages must leave an ownership wait running until its deadline
+    await Promise.race([ready, waiting.then((r) => { throw new Error(`ownership wait exited before watch setup: ${r.stdout} ${r.stderr}`); })]);
+    h.ok(['msg', '--agent', 'orchestrator', '--to', agent, '--task', 'T1', ...(steer ? ['--steer'] : []), 'direct instruction']);
+    const result = await waiting;
+    assert.equal(result.code, 2, result.stderr || result.stdout);
+    assert.deepEqual(JSON.parse(result.stdout), { type: 'timeout', outcome: 'wait', task: 'T1' });
+    h.ok(['interrupt', 'T1', '--agent', 'orchestrator']);
+  });
 }
 
 test('waiting owners hold no worker slot and have their own limit; a handback takes its claim past the worker limit; a crashed owner is a dead claim', async (t) => {

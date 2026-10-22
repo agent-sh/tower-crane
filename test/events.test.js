@@ -238,6 +238,22 @@ test('orchestrator wait types still exclude direct messages and steers', async (
   await event(result, 'submitted');
 });
 
+for (const row of [
+  { name: 'wait help', text: () => require('../bin/tower-crane').COMMANDS.find((c) => c.name === 'wait').summary },
+  { name: 'msg help', text: () => require('../bin/tower-crane').COMMANDS.find((c) => c.name === 'msg').summary },
+  { name: 'wait command row', file: 'docs/cli.md', marker: '| `wait [' },
+  { name: 'msg command row', file: 'docs/cli.md', marker: '| `msg --to' },
+  { name: 'wait prose', file: 'docs/cli.md', marker: '- `--for` defaults' },
+  { name: 'msg prose', file: 'docs/cli.md', marker: '`tower-crane msg --to' },
+  { name: 'changelog', file: 'changelog.d/T487.md', marker: '- Worker and reviewer' },
+]) {
+  test(`${row.name}: direct-message contract excludes ownership waits`, () => {
+    const text = row.text ? row.text() : fs.readFileSync(path.join(ROOT, row.file), 'utf8').split('\n').find((line) => line.startsWith(row.marker));
+    assert.ok(text, `missing ${row.name}`);
+    assert.match(text, /without `?--own`?/, `${row.name} must limit the direct-message exception to event waits`);
+  });
+}
+
 test('owner task comment wakes, worker progress notes are not owner comments', async (t) => {
   const h = setup(t);
   const result = await waiting(t, h, { automation: false, args: ['--types', 'owner-comment'] });
