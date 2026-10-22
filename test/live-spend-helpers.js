@@ -7,13 +7,15 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { cachedFixture } = require('./helpers');
-const { waitOnRepo } = require('./signals');
+const { waitOnRepo, killPid } = require('./signals');
 
 const STUB = path.join(__dirname, 'fixtures', 'live-usage-harness.js').replace(/\\/g, '/');
 const events = (h) => require('../lib/state').readEvents(h.state);
 const recordedSpend = (h) => h.readState('tasks.json').tasks[0].spend;
 const liveEntries = (h) => (recordedSpend(h).entries || []).filter((e) => e.live);
 
+// The runner's timeout reports only the test, so an aborted wait names itself,
+// the last events and the end of the dispatch log, where the supervisor writes.
 function until(t, h, fn, message, stream) {
   return waitOnRepo(h, fn, message, {
     signal: t.signal,
@@ -21,6 +23,22 @@ function until(t, h, fn, message, stream) {
       stream.on('data', probe);
       return () => stream.off('data', probe);
     }),
+  }).catch((error) => {
+    if (t.signal.aborted) {
+      let seen;
+      try {
+        const log = events(h);
+        const spawned = log.findLast((e) => e.cmd === 'spawn')?.detail;
+        const alive = (pid) => { try { killPid(pid, 0); return 'alive'; } catch (e) { return e.code || e.message; } };
+        const lock = path.join(h.state, 'lock');
+        const holders = fs.existsSync(lock) ? fs.readdirSync(lock).map((n) => fs.readFileSync(path.join(lock, n), 'utf8')).join(' ') : 'none';
+        seen = `last events: ${log.slice(-12).map((e) => e.cmd).join(', ')}; supervisor ${spawned?.monitor_pid} ${spawned ? alive(spawned.monitor_pid) : '-'}; `
+          + `harness ${spawned?.pid} ${spawned?.pid ? alive(spawned.pid) : '-'}, done: ${fs.existsSync(h.done)}; state lock: ${holders}; `
+          + `dispatch log ends: ${spawned ? fs.readFileSync(spawned.log, 'utf8').slice(-2000) : '(none)'}`;
+      } catch (e) { seen = `fixture unreadable: ${e.message}`; }
+      process.stderr.write(`${message}: still waiting when the test was aborted; ${seen}\n`);
+    }
+    throw error;
   });
 }
 

@@ -33,27 +33,55 @@ function plant(root, name, record) {
   return dir;
 }
 
-test('runner startup removes only an old fixture with a dead owner and reports count and bytes', (t) => {
+test('runner startup sweeps abandoned fixtures and cleans its private runtime across selection modes', async (t) => {
   const h = makeRepo(t);
-  const root = path.join(h.base, 'sweep');
   const pid = deadPid();
-  const dead = plant(root, 'old-dead', owner(pid));
-  const live = plant(root, 'old-live', owner(process.pid));
-  const fresh = plant(root, 'fresh-dead', owner(pid, Date.now()));
-  const expectedBytes = fs.readdirSync(dead).reduce((sum, file) => sum + fs.lstatSync(path.join(dead, file)).size, 0);
-  const probe = path.join(h.base, 'probe.test.js');
-  fs.writeFileSync(probe, "require('node:test')('probe', () => {});\n");
-  const result = cp.spawnSync(process.execPath, [path.join(ROOT, 'test', 'run.js'), probe], {
-    cwd: ROOT,
-    env: { ...h.env, TOWER_CRANE_TEST_TMP: root },
-    encoding: 'utf8',
-    timeout: HUNG_TEST_MS,
-  });
-  assert.equal(result.status, 0, result.stderr + result.stdout);
-  assert.equal(fs.existsSync(dead), false, 'startup must remove the abandoned fixture');
-  assert.equal(fs.existsSync(live), true, 'the old live fixture must survive');
-  assert.equal(fs.existsSync(fresh), true, 'the fresh fixture must survive');
-  assert.match(result.stderr, new RegExp(`^Test tmp sweep: removed 1 directories, ${expectedBytes} bytes$`, 'm'));
+  for (const [mode, vars] of [
+    ['ordinary', {}],
+    ['shard', { TC_TEST_SHARD: '1/1' }],
+    ['exclusions', { TOWER_CRANE_TEST_EXCLUDE: '["test/unused.test.js"]' }],
+  ]) {
+    await t.test(mode, () => {
+      const root = path.join(h.base, mode);
+      const dead = plant(root, 'old-dead', owner(pid));
+      const live = plant(root, 'old-live', owner(process.pid));
+      const fresh = plant(root, 'fresh-dead', owner(pid, Date.now()));
+      const expectedBytes = fs.readdirSync(dead).reduce((sum, file) => sum + fs.lstatSync(path.join(dead, file)).size, 0);
+      const hostRuntime = path.join(h.base, `${mode}-runtime`);
+      fs.mkdirSync(hostRuntime);
+      const observed = path.join(h.base, `${mode}-observed.json`);
+      const probe = path.join(h.base, `${mode}.test.js`);
+      fs.writeFileSync(probe, `
+        const fs = require('node:fs');
+        const assert = require('node:assert/strict');
+        require('node:test')('probe', () => {
+          if (process.platform === 'win32') return;
+          const runtime = process.env.XDG_RUNTIME_DIR;
+          assert.notEqual(runtime, ${JSON.stringify(hostRuntime)});
+          assert.equal(fs.statSync(runtime).isDirectory(), true);
+          assert.equal(process.env.TOWER_CRANE_HOST_RUNTIME_DIR, ${JSON.stringify(hostRuntime)});
+          fs.writeFileSync(${JSON.stringify(observed)}, JSON.stringify(runtime));
+        });
+      `);
+      const result = cp.spawnSync(process.execPath, [path.join(ROOT, 'test', 'run.js'), probe], {
+        cwd: ROOT,
+        env: { ...h.env, TOWER_CRANE_TEST_TMP: root, XDG_RUNTIME_DIR: hostRuntime,
+          TOWER_CRANE_HOST_RUNTIME_DIR: hostRuntime, ...vars },
+        encoding: 'utf8',
+        timeout: HUNG_TEST_MS,
+      });
+      assert.equal(result.status, 0, result.stderr + result.stdout);
+      assert.equal(fs.existsSync(dead), false, 'startup must remove the abandoned fixture');
+      assert.equal(fs.existsSync(live), true, 'the old live fixture must survive');
+      assert.equal(fs.existsSync(fresh), true, 'the fresh fixture must survive');
+      assert.match(result.stderr, new RegExp(`^Test tmp sweep: removed 1 directories, ${expectedBytes} bytes$`, 'm'));
+      if (process.platform !== 'win32') {
+        const runtime = JSON.parse(fs.readFileSync(observed, 'utf8'));
+        assert.equal(fs.existsSync(runtime), false, 'the private runtime must be cleaned up');
+        assert.equal(fs.existsSync(hostRuntime), true, 'the host runtime must survive');
+      }
+    });
+  }
 });
 
 test('shared fixtures and harness guards record their creating process', (t) => {

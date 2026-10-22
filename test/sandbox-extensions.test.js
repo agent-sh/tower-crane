@@ -450,7 +450,9 @@ test('real Codex worker writes the toolchain lock, receives a private env file, 
   fs.mkdirSync(rustup);
   fs.writeFileSync(path.join(rustup, 'toolchain'), 'toolchain');
   const file = path.join(h.base, 'private.env');
-  fs.writeFileSync(file, `${SECRET_KEY}='${SECRET}'\n`, { mode: 0o600 });
+  // codex hands its commands no credential-shaped name, from the env file
+  // either (lib/agents.js codexEnvPolicy); the plain one reaches them.
+  fs.writeFileSync(file, `${SECRET_KEY}='${SECRET}'\nTC_PRIVATE_ENV_FILE_VALUE='${SECRET}'\n`, { mode: 0o600 });
   // The state directory is read-only in the sandbox.
   const results = path.join(h.base, 'results');
   fs.mkdirSync(results);
@@ -463,7 +465,8 @@ test('real Codex worker writes the toolchain lock, receives a private env file, 
   fs.writeFileSync(script, [
     "'use strict';",
     'const fs = require("node:fs"), path = require("node:path"), net = require("node:net");',
-    `if (process.env[${JSON.stringify(SECRET_KEY)}] !== ${JSON.stringify(SECRET)}) throw new Error("private environment missing");`,
+    `if (process.env.TC_PRIVATE_ENV_FILE_VALUE !== ${JSON.stringify(SECRET)}) throw new Error("private environment missing");`,
+    `if (process.env[${JSON.stringify(SECRET_KEY)}] !== undefined) throw new Error("a credential-shaped variable reached the command");`,
     `if (process.env.CARGO_HOME !== ${JSON.stringify(cargo)} || process.env.RUSTUP_HOME !== ${JSON.stringify(rustup)}) throw new Error("toolchain homes missing");`,
     'if (fs.readFileSync(path.join(process.env.RUSTUP_HOME, "toolchain"), "utf8") !== "toolchain") throw new Error("toolchain missing");',
     'fs.closeSync(fs.openSync(path.join(process.env.CARGO_HOME, ".package-cache"), "wx"));',
