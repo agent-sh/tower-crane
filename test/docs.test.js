@@ -90,3 +90,37 @@ test('release documentation steps reject stale help and prose without overwritin
     if (variant !== 'clean') assert.match(result.stderr, /docs\/cli.md.*drifted/);
   }
 });
+
+// docs/cli.md is generated whole, so unrelated command edits that meet in its
+// help section must resolve through the repository's own generated mapping.
+test('unrelated command help edits that conflict in docs/cli.md resolve as generated output', async (t) => {
+  const G = require('../lib/generated-conflicts');
+  const h = makeDocsRepo(t);
+  const gc = {};
+  const edit = (branch, file, from, to) => {
+    h.git(['checkout', '-q', '-b', branch, 'main']);
+    const target = path.join(h.repo, 'lib', file);
+    const text = fs.readFileSync(target, 'utf8');
+    assert.ok(text.includes(from), from);
+    fs.writeFileSync(target, text.replace(from, to));
+    const result = cp.spawnSync(process.execPath, ['scripts/cli-docs.js'], { cwd: h.repo, env: h.env, encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    h.git(['commit', '-qam', branch]);
+  };
+  edit('claim-help', 'commands-tasks.js', "summary: 'take a ready task for --agent'", "summary: 'take a ready task for the --agent'");
+  edit('event-help', 'commands-events.js', "summary: 'print one event with its detail, as a wake line names it'",
+    "summary: 'print one event and its detail, as a wake line names it'");
+  const merge = cp.spawnSync('git', ['merge', '-q', '--no-edit', 'claim-help'], { cwd: h.repo, env: h.env, encoding: 'utf8' });
+  assert.notEqual(merge.status, 0, 'the two help edits must meet in docs/cli.md');
+  assert.deepEqual(await G.files(gc, h.repo), ['docs/cli.md']);
+  const config = await G.configuration(gc, h.repo, 'main');
+  const { generated, remaining } = await G.resolve(gc, h.repo, config);
+  assert.deepEqual({ generated, remaining }, { generated: ['docs/cli.md'], remaining: [] });
+  const regenerated = await G.regenerate(gc, h.repo, config, generated, remaining, 120000);
+  assert.ok(regenerated.ok, JSON.stringify(regenerated));
+  const docs = fs.readFileSync(path.join(h.repo, 'docs', 'cli.md'), 'utf8');
+  assert.match(docs, /take a ready task for the --agent/);
+  assert.match(docs, /print one event and its detail/);
+  const check = cp.spawnSync(process.execPath, ['scripts/cli-docs.js', '--check'], { cwd: h.repo, env: h.env, encoding: 'utf8' });
+  assert.equal(check.status, 0, check.stderr);
+});
