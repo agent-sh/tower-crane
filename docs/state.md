@@ -1042,7 +1042,8 @@ cannot override its ancestor's share. Optional `scope.CPUWeight` is replaced by
 the governor weight, with the same warning as other mandatory properties.
 
 Unix launches without a usable delegated systemd scope run through `nice`
-before executing the command. Nice approximates the weight relative to 100
+before executing the command. Native launch failures such as missing executables
+and denied execution remain distinct from the command's exit status. Nice approximates the weight relative to 100
 with `round(log(100 / weight) / log(1.25))`, clamped to 0 through 19: default
 agents use 0 and gates 19. It applies per process and descendants rather than
 per cgroup; inherited nice values still apply, and weights above 100 stay at

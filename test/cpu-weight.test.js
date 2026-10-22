@@ -104,3 +104,47 @@ test('nested runners write every configured weight inside the inherited fence', 
     assert.equal(fs.readFileSync(path.join(group, 'cgroup.subtree_control'), 'utf8'), '+pids +memory +cpu');
   }
 });
+
+test('nice fallback preserves native launch errors and successful shell execution', { skip: process.platform !== 'linux' }, async (t) => {
+  const h = cachedFixture(t, 'cpu-weight-errors', (h) => h.init());
+  const bin = path.join(h.base, 'error-bin');
+  fs.mkdirSync(bin);
+  const blocked = path.join(bin, 'blocked');
+  fs.writeFileSync(blocked, '#!/bin/sh\nexit 0\n', { mode: 0o644 });
+  const badInterpreter = path.join(bin, 'bad-interpreter');
+  fs.writeFileSync(badInterpreter, '#!/does-not-exist-t518-shell\n', { mode: 0o755 });
+  const plainShell = path.join(bin, 'plain-shell');
+  fs.writeFileSync(plainShell, 'printf "fallback\\n"\n', { mode: 0o755 });
+  const fake = path.join(__dirname, 'fixtures', 'containment-systemd.js');
+  for (const [label, command, args, code, status, output, emptyPath] of [
+    ['bare missing', 'missing-t518-command', [], 'ENOENT'],
+    ['absolute missing', path.join(bin, 'missing'), [], 'ENOENT'],
+    ['relative missing', './missing-t518-command', [], 'ENOENT'],
+    ['absolute permission', blocked, [], 'EACCES'],
+    ['PATH permission', 'blocked', [], 'EACCES'],
+    ['missing interpreter', badInterpreter, [], 'ENOENT'],
+    ['plain executable shell', plainShell, [], undefined, 0, 'fallback\n'],
+    ['application exit 126', process.execPath, ['-e', 'process.exit(126)'], undefined, 126, ''],
+    ['application exit 127', process.execPath, ['-e', 'process.exit(127)'], undefined, 127, ''],
+    ['absolute executable with empty PATH', process.execPath, ['-e', 'console.log(require("node:os").getPriority())'], undefined, 0, '19\n', true],
+  ]) {
+    const script = `
+const G = require(${JSON.stringify(require.resolve('../lib/gates/common'))});
+G.treeExec(${JSON.stringify(command)}, ${JSON.stringify(args)}, {
+  cpuWeight: 1, resources: { tasks_max: 64, memory_max_bytes: 536870912 },
+  env: { ...process.env, ${emptyPath ? "PATH: ''," : ''} TOWER_CRANE_TEST_CONTAINMENT: '1' },
+}).then((result) => console.log(JSON.stringify({ code: result.error?.code, status: result.status, stdout: result.stdout })));
+`;
+    const result = await gates.treeExec(process.execPath, ['--require', fake, '-e', script], {
+      env: { ...h.env, PATH: bin + path.delimiter + h.env.PATH,
+        TC_FAKE_NO_MANAGER: '1', [C.MARK]: '' },
+    });
+    assert.equal(result.status, 0, `${label}: ${result.stderr}`);
+    const actual = JSON.parse(result.stdout);
+    assert.equal(actual.code, code, label);
+    if (!code) {
+      assert.equal(actual.status, status, label);
+      assert.equal(actual.stdout, output, label);
+    }
+  }
+});

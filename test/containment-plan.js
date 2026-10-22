@@ -13,7 +13,7 @@ function scopeEnv(h) {
 
 // Harness assertions ignore only the launcher's known prefix, keeping all harness arguments.
 function harnessArgv(argv) {
-  if (argv[0] === 'nice' && argv[1] === '-n') argv = argv.slice(3);
+  if (path.basename(argv[0] || '') === 'nice' && argv[1] === '-n') argv = argv.slice(3);
   const runner = argv[0] === 'systemd-run' ? argv.indexOf('--') + 2 : 1;
   return path.basename(argv[runner] || '') === 'containment-runner.js' ? argv.slice(runner + 4) : argv;
 }

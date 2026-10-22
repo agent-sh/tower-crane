@@ -20,6 +20,7 @@ test('harness assertions preserve arguments across containment backends', () => 
       [],
       [process.execPath, runner, limits, `@${unit}:agents.slice`, unit],
       [process.execPath, runner, limits, '/sys/fs/cgroup/agents.slice/parent.scope', unit],
+      ['/usr/bin/nice', '-n', '19', process.execPath, runner, limits, '!nice', unit],
       ['systemd-run', '--user', '--scope', '-p', 'MemoryMax=536870912', '--', process.execPath, runner, limits, '', unit],
     ]) assert.deepEqual(harnessArgv([...prefix, ...harness]), harness, JSON.stringify(prefix));
   }
