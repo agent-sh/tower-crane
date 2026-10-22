@@ -189,7 +189,9 @@ Set `hot_paths` with `init --hot-paths JSON` or `project set --hot-paths JSON`. 
 tower-crane project set --hot-paths '["docs/state.md","docs/state/*","docs/cli.md","bin/tower-crane.js","lib/automation.js"]' --agent orchestrator
 ```
 
-This is the measured seed for Tower Crane's own project. Globs use the `tests.paths` syntax and must be repository-relative without parent components. A ready task whose brief's `## Scope` paths or local diff overlap a configured glob waits while an in-progress, submitted, rework, accepted but unmerged task, or live worker reservation holds it. Local diffs include committed, staged, unstaged, and untracked changes. `status` and `ready --all` name the holder: `waits on hot path <glob> held by T<n>`. Eligible dependent stacks share their parent chain's hot paths. Merge or cancellation ends the wait, and automatic refill starts unrelated ready tasks meanwhile. [State contract](state.md#ready-and-blocked).
+This is the measured seed for Tower Crane's own project. Globs use the `tests.paths` syntax and must be repository-relative without parent components. A new todo task whose brief's `## Scope` paths or local diff overlap a configured glob waits while an in-progress, submitted, rework, accepted but unmerged task, or live worker reservation holds it. Local diffs include committed, staged, unstaged, and untracked changes. `status` and `ready --all` name the holder: `waits on hot path <glob> held by T<n>`. Eligible dependent stacks share their parent chain's hot paths. Merge or cancellation ends the wait, and automatic refill starts unrelated ready tasks meanwhile. Rework and expired-claim recovery wait only on overlapping live worker leases or reservations, so passive peers and submitted stack descendants cannot deadlock recovery. Each granted recovery lease blocks other overlapping recoveries until its worker slot is freed. [State contract](state.md#ready-and-blocked).
+
+Dispatched workers claiming their own reservation resume past passive holders too. Overlapping reservations claim in their recorded dispatch order; a granted live lease blocks every overlapping claim.
 
 ## Already-merged hotfixes
 

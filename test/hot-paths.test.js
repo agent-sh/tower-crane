@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { cachedFixture } = require('./helpers');
 const Scope = require('../lib/scope');
+const StackFixture = require('./stack-fixture');
 
 function fixture(t) {
   return cachedFixture(t, 'hot-paths', (h) => {
@@ -142,6 +143,110 @@ test('every in-flight lifecycle holds a hot path until cancellation or merge', (
   h.ok(['claim', 'T2', '--agent', 'worker-2']);
 });
 
+function recoveryState(task, state, agent) {
+  task.status = state === 'reserved todo' ? 'todo' : state.startsWith('expired') || state === 'live' ? 'in_progress' : state;
+  task.claim = task.status === 'in_progress' ? {
+    agent, from: state === 'expired rework' ? 'rework' : 'todo',
+    since: new Date(Date.now() - 60000).toISOString(),
+    until: new Date(Date.now() + (state === 'live' ? 60000 : -1000)).toISOString(),
+  } : null;
+}
+
+function reservation(h, id, agent) {
+  fs.appendFileSync(path.join(h.state, 'events.jsonl'), JSON.stringify({
+    at: new Date().toISOString(), cmd: 'spawn', task: id, agent: 'orchestrator',
+    detail: { role: 'worker', agent, attempt: 1, pid: 424201, reserved: true, active: true },
+  }) + '\n');
+}
+
+const recoveryCases = [
+  { candidate: 'rework', holder: 'rework', pass: true },
+  { candidate: 'rework', holder: 'submitted', pass: true },
+  { candidate: 'rework', holder: 'accepted', pass: true },
+  { candidate: 'rework', holder: 'expired todo', pass: true },
+  { candidate: 'expired todo', holder: 'expired todo', pass: true },
+  { candidate: 'expired rework', holder: 'rework', pass: true },
+  { candidate: 'expired todo', holder: 'rework', verb: 'renew', pass: true },
+  { candidate: 'expired rework', holder: 'submitted', verb: 'renew', pass: true },
+  { candidate: 'rework', holder: 'live', pass: false },
+  { candidate: 'expired todo', holder: 'live', verb: 'renew', pass: false },
+  { candidate: 'rework', holder: 'reservation', pass: false },
+  { candidate: 'expired todo', holder: 'reservation', pass: false },
+  { candidate: 'todo', holder: 'rework', pass: false },
+  { candidate: 'todo', holder: 'expired todo', pass: false },
+  { candidate: 'rework', holder: 'rework', diff: true, pass: true },
+  { candidate: 'reserved todo', holder: 'rework', pass: true },
+  { candidate: 'reserved todo', holder: 'submitted', pass: true },
+  { candidate: 'reserved todo', holder: 'live', pass: false },
+  { candidate: 'reserved todo', holder: 'reservation', pass: true },
+  { candidate: 'reserved todo', holder: 'reservation', peerFirst: true, pass: false },
+];
+
+for (const c of recoveryCases) {
+test(`hot-path recovery ${c.candidate} ${c.verb || 'claim'} against ${c.peerFirst ? 'earlier ' : ''}${c.holder}${c.diff ? ' diff' : ''}`, (t) => {
+  const h = fixture(t);
+  if (c.diff) {
+    h.ok(['brief', 'set', 'T2', '-'], { input: '## Scope\n\nlib/cold.js\n' });
+    const wt = h.json(['worktree', 'T2']);
+    fs.writeFileSync(path.join(wt.path, 'lib/hot.js'), 'module.exports = 5;\n');
+  }
+  const doc = h.readState('tasks.json');
+  recoveryState(doc.tasks[0], c.candidate, 'worker-1');
+  recoveryState(doc.tasks[1], c.holder === 'reservation' ? 'todo' : c.holder, 'worker-2');
+  h.writeState('tasks.json', doc);
+  if (c.peerFirst) reservation(h, 'T2', 'worker-2');
+  if (c.candidate === 'reserved todo') reservation(h, 'T1', 'worker-1');
+  if (c.holder === 'reservation' && !c.peerFirst) reservation(h, 'T2', 'worker-2');
+  const ready = h.json(['ready']).ready.some((r) => r.id === 'T1');
+  assert.equal(ready, c.pass, 'ready and claim use the same recovery blockers');
+  const result = h.run([c.verb || 'claim', 'T1', '--agent', 'worker-1']);
+  assert.equal(result.code, c.pass ? 0 : 1, result.stderr);
+  if (!c.pass) {
+    assert.match(result.stderr, /waits on hot path lib\/hot.js held by T2/);
+    assert.match(h.ok(['status']), /T1 waits on hot path lib\/hot.js held by T2/);
+  } else if (c.holder === 'rework' || c.holder.startsWith('expired') || c.holder === 'reservation') {
+    const second = h.run(['claim', 'T2', '--agent', 'worker-2']);
+    assert.equal(second.code, 1, second.stderr);
+    assert.match(second.stderr, /waits on hot path lib\/hot.js held by T1/);
+    h.ok(['release', 'T1', '--reason', 'recover peer next', '--agent', 'worker-1']);
+    h.ok(['claim', 'T2', '--agent', 'worker-2']);
+  }
+  if (c.peerFirst) {
+    h.ok(['claim', 'T2', '--agent', 'worker-2']);
+    h.ok(['release', 'T2', '--reason', 'consume next reservation', '--agent', 'worker-2']);
+    h.ok(['claim', 'T1', '--agent', 'worker-1']);
+  }
+});
+}
+
+for (const descendant of ['submitted', 'accepted', 'rework', 'live']) {
+test(`stack parent recovery with ${descendant} hot-path descendant`, (t) => {
+  const f = StackFixture.stacked(t), h = f.h;
+  h.ok(['project', 'set', '--hot-paths', '["T1.txt"]']);
+  for (const id of ['T1', 'T2']) h.ok(['brief', 'set', id, '-'], { input: '## Scope\n\nT1.txt\n' });
+  h.ok(['rework', 'T1', '--reason', 'recover lower stack']);
+  const doc = h.readState('tasks.json');
+  recoveryState(doc.tasks[1], descendant, 'worker-T2');
+  h.writeState('tasks.json', doc);
+  const result = h.run(['claim', 'T1', '--agent', 'worker-T1']);
+  assert.equal(result.code, descendant === 'live' ? 1 : 0, result.stderr);
+  if (descendant === 'live') {
+    assert.match(result.stderr, /waits on hot path T1.txt held by T2/);
+    h.ok(['submit', 'T2', '--sha', f.upper.sha, '--branch', f.upper.wt.branch, '--pr', '12', '--agent', 'worker-T2']);
+    h.ok(['claim', 'T1', '--agent', 'worker-T1']);
+  }
+});
+}
+
+test('concurrent hot-path recovery claims grant one live worker', async (t) => {
+  const h = fixture(t), doc = h.readState('tasks.json');
+  for (const task of doc.tasks.slice(0, 2)) recoveryState(task, 'rework', `worker-${task.id}`);
+  h.writeState('tasks.json', doc);
+  const results = await Promise.all(['T1', 'T2'].map((id) => h.runAsync(['claim', id, '--agent', `worker-${id}`])));
+  assert.equal(results.filter((r) => r.code === 0).length, 1, JSON.stringify(results));
+  assert.match(results.find((r) => r.code !== 0).stderr, /waits on hot path lib\/hot.js held by T[12]/);
+});
+
 test('diffs hold hot paths absent from Scope, including pending and submitted changes', (t) => {
   const h = fixture(t);
   h.ok(['brief', 'set', 'T1', '-'], { input: '## Scope\n\nlib/cold.js\n' });
@@ -184,7 +289,7 @@ test('new untracked hot files and directory scopes hold a configured glob', (t) 
 });
 
 test('eligible dependent stacks share their parent hot path but still wait on other holders', (t) => {
-  const f = require('./stack-fixture').setup(t);
+  const f = StackFixture.setup(t);
   const h = f.h;
   h.ok(['project', 'set', '--hot-paths', '["T1.txt"]']);
   for (const id of ['T1', 'T2']) h.ok(['brief', 'set', id, '-'], { input: '## Scope\n\nT1.txt\n' });
@@ -217,4 +322,23 @@ test('automatic refill skips the overlapping ready task and starts it after the 
   const next = h.run(['wait', '--after', '0', '--types', 'spawn', '--task', 'T2', '--timeout', '300', '--agent', 'orchestrator']);
   assert.equal(next.code, 0, next.stderr);
   await waitFor(h.marker('T2'));
+});
+
+test('automatic refill serializes overlapping recovery candidates while unrelated work starts', async (t) => {
+  const h = require('./automation-helpers').refillFixture(t);
+  const { waitFor } = require('./canary');
+  h.ok(['task', 'update', 'T4', '--status', 'cancelled']);
+  h.ok(['project', 'set', '--workers', '3', '--hot-paths', '["value.js"]']);
+  for (const [id, file] of [['T1', 'value.js'], ['T2', 'value.js'], ['T3', 'test/value.test.js']]) {
+    h.ok(['brief', 'set', id, '-'], { input: `## Scope\n\n${file}\n` });
+  }
+  const doc = h.readState('tasks.json');
+  for (const task of doc.tasks.slice(0, 2)) recoveryState(task, 'rework', `worker-${task.id}`);
+  h.writeState('tasks.json', doc);
+  const first = h.run(['wait', '--after', '0', '--types', 'spawn', '--task', 'T3', '--timeout', '300', '--agent', 'orchestrator']);
+  assert.equal(first.code, 0, first.stderr);
+  await waitFor(h.marker('T1'));
+  await waitFor(h.marker('T3'));
+  assert.equal(fs.existsSync(h.marker('T2')), false);
+  assert.match(h.ok(['status']), /T2 waits on hot path value.js held by T1/);
 });
