@@ -504,6 +504,7 @@ poll();
   github.ci[h.sha] = 'success';
   h.saveGithub(github);
   h.submit();
+  // read-published: the gate fixture only appends to this file.
   const suites = () => (fs.existsSync(path.join(h.base, 'suites')) ? fs.readFileSync(path.join(h.base, 'suites'), 'utf8').split('\n').length - 1 : 0);
   let child;
   const host = h.runAsync(['wait', '--follow', '--types', 'never', '--agent', 'orchestrator'], { onSpawn: (c) => { child = c; } });
