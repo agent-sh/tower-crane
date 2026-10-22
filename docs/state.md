@@ -1899,10 +1899,15 @@ fetched base differs from `base_sha`, a passing receipt still lands, without a
 rerun, when the fetched tip contains `base_sha`, a trial `merge-tree` of the head onto
 the tip is clean, and no path changed between `base_sha` and the tip is one the
 head changes since `base_sha` or one the command reads: a repository path its
-argv names (a file, or any path under a directory it names; a leading `./` and
-absolute paths, flags and drive paths are ignored) or a `ci.local.inputs` glob.
-Renames count as both paths. The run then already saw every file it would see
-again, and for a task with a tests gate the head check still runs the suite on
+argv names (a file, or any path under a directory it names) or a `ci.local.inputs` glob.
+Argv paths are read with `\` as `/` and `./` and `a/../` resolved; `.`, `./` and Go's
+`./...` name the whole repository, `pkg/...` names `pkg`, a glob such as
+`test/**/*.test.js` names what it matches and everything under it, and a flag's
+`=value` counts as a path. Bare flags, `-`, absolute and drive paths and paths
+above the repository are ignored. Renames count as both paths. The run then
+already saw every file it would see again only when the argv and `inputs` cover
+everything the command reads, including what its tests import: list such paths in
+`inputs`, or `**` for a suite that reads the whole repository. For a task with a tests gate the head check still runs the suite on
 the real merge. Otherwise the
 queue reruns local CI on the fetched base, so what lands was checked on the
 merged tree it lands as. A run as long as a few hours on a busy base would come

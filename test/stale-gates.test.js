@@ -243,6 +243,11 @@ const overlaps = [
     local: JSON.stringify({ command: [process.execPath, '-e', 'process.exit(0)'], timeout: 5, inputs: ['config/**'] }),
     move: (h) => advanceMain(h, { 'config/ci.json': '{}\n' }),
   }, /the base changed config\/ci\.json,/],
+  // `pytest .`, `ruff check ./` and `go test ./...` read the whole repository.
+  ...['.', './', './...'].map((root) => [`a file under the repository root the argv names as ${root}`, {
+    local: JSON.stringify({ command: [process.execPath, '-e', 'process.exit(0)', root], timeout: 5 }),
+    move: (h) => advanceMain(h, { 'README.md': 'Updated base.\n' }),
+  }, /the base changed README\.md,/]),
   // A force-push drops the checked commit and keeps the base the head branched from.
   ['a rewritten base', { local: localCI, prepare: (h) => advanceMain(h, { 'notes.txt': 'notes\n' }), move: (h) => {
     const base = h.git(['rev-parse', 'main']);

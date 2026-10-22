@@ -913,6 +913,29 @@ test('local CI reads the repository paths its argv names and its inputs globs', 
     ['package.json', true], ['sub/package.json', false], ['config/ci/x.json', true], ['configs/x.json', false],
     ['README.md', false],
   ]) assert.equal(read(file), expected, file);
+  // Each row: the argv, a file it reads and a file it does not (null when it reads every file).
+  for (const [argv, yes, no] of [
+    [['pytest', '.'], 'lib/x.py', null],
+    [['ruff', 'check', './'], 'lib/x.py', null],
+    [['go', 'test', './...'], 'lib/x.go', null],
+    [['go', 'test', '...'], 'lib/x.go', null],
+    [['node', '--test', '.\\'], 'lib/x.js', null],
+    [['go', 'test', './pkg/...'], 'pkg/a/b.go', 'cmd/main.go'],
+    [['python', 'tools\\check.py'], 'tools/check.py', 'tools/other.py'],
+    [['python', '.\\tools\\check.py'], 'tools/check.py', 'tools/other.py'],
+    [['node', 'test/../lib/run.js'], 'lib/run.js', 'test/x.js'],
+    [['tool', '--config=ci/conf.toml'], 'ci/conf.toml', 'ci/other.toml'],
+    [['tool', '--root=.'], 'any/file', null],
+    [['tool', '--flag', '-'], null, 'flag'],
+    [['tool', '../outside', '..'], null, 'outside'],
+    [['node', '--test', 'test/**/*.test.js'], 'test/a/b.test.js', 'test/a/helper.js'],
+    [['eslint', 'src/*'], 'src/deep/x.js', 'lib/x.js'],
+  ]) {
+    const read = reads(argv, []);
+    if (yes) assert.equal(read(yes), true, `${argv.join(' ')} reads ${yes}`);
+    if (no) assert.equal(read(no), false, `${argv.join(' ')} does not read ${no}`);
+    else assert.equal(read('README.md'), !!yes, `${argv.join(' ')} reads README.md`);
+  }
 });
 
 test('task local CI overrides replace, inherit or disable receipt copies on pass and fail', (t) => {
