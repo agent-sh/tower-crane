@@ -1103,8 +1103,9 @@ function ownerTokenHash() {
 // A worker in a real sandbox, spawned by a user whose gh is logged in: no
 // GitHub token in its environment, in any file it can read (its HOME, the
 // state directory, its git config, every /proc environ it sees) or from a
-// git credential helper; the host's git cannot push over https; the SSH
-// agent is out of reach. Its push through the git shim goes to its broker
+// git credential helper; with otherCredentials, the same holds for the fake
+// API key the dispatcher's environment holds (FAKE_CREDENTIAL); the host's
+// git cannot push over https; the SSH agent is out of reach. Its push through the git shim goes to its broker
 // and lands on its task branch of origin, a bare repository its sandbox
 // cannot write, and a push to another task's branch is refused.
 function credentialProbe(h, dir, tokenHash) {
@@ -1118,6 +1119,8 @@ const o = {};
 const TOKEN = /gh[opusr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}/g;
 const hash = (t) => crypto.createHash('sha256').update(t).digest('hex');
 o.env = ['GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN'].filter((k) => process.env[k] !== undefined);
+o.fakeEnv = Object.keys(process.env).filter((k) => k === ${JSON.stringify(FAKE_CREDENTIAL.name)} || process.env[k] === ${JSON.stringify(FAKE_CREDENTIAL.value)});
+o.fakeHits = [];
 o.hits = [];
 o.scanned = 0;
 const scan = (p, depth) => {
@@ -1135,6 +1138,7 @@ const scan = (p, depth) => {
   try { text = fs.readFileSync(p, 'latin1'); } catch { return; }
   o.scanned++;
   for (const m of text.match(TOKEN) || []) if (hash(m) === ${JSON.stringify(tokenHash)}) o.hits.push(p);
+  if (text.includes(${JSON.stringify(FAKE_CREDENTIAL.value)})) o.fakeHits.push(p);
 };
 let pids = [];
 try { pids = fs.readdirSync('/proc').filter((n) => /^\\d+$/.test(n)); } catch {}
@@ -1165,7 +1169,11 @@ else net.connect(sock).on('connect', function () { this.destroy(); o.sshAgent = 
   return { file, out };
 }
 
-function assertCredentialProbe(h, seen, label) {
+// A credential-shaped variable that is not GitHub's, as a provider key in the
+// dispatcher's environment would be. The value is fake.
+const FAKE_CREDENTIAL = { name: 'TC_PROBE_FAKE_API_KEY', value: `tc-probe-fake-credential-${process.pid}` };
+
+function assertCredentialProbe(h, seen, label, { otherCredentials = true } = {}) {
   const branch = h.readState('tasks.json').tasks[0].branch;
   const remote = path.join(h.base, 'remote.git');
   const remoteRef = (ref) => {
@@ -1175,6 +1183,10 @@ function assertCredentialProbe(h, seen, label) {
   assert.deepEqual(seen.env, [], `${label}: no GitHub token variable`);
   assert.ok(seen.scanned > 10, `${label}: the probe read files (${seen.scanned})`);
   assert.deepEqual(seen.hits, [], `${label}: no readable file holds the owner's token`);
+  if (otherCredentials) {
+    assert.deepEqual(seen.fakeEnv, [], `${label}: no other credential-shaped variable`);
+    assert.deepEqual(seen.fakeHits, [], `${label}: no readable file holds the other credential`);
+  }
   assert.deepEqual(seen.fill, { status: seen.fill.status, password: false }, `${label}: no credential helper answers for GitHub`);
   assert.notEqual(seen.hostPush, 0, `${label}: the host git cannot push over https`);
   // The sandbox reaches GitHub, so the push fails for want of a credential.
@@ -1203,7 +1215,8 @@ function credentialFixture(t) {
   const home = os.homedir();
   // The owner's home, so spawn finds the gh login it handed over before. The
   // cache is short, so a claude agent's temp directory holds its proxy sockets.
-  const env = { ...h.env, HOME: home, USERPROFILE: home, CLAUDE_CONFIG_DIR: '', CODEX_HOME: '', XDG_CACHE_HOME: shortCache(t) };
+  const env = { ...h.env, HOME: home, USERPROFILE: home, CLAUDE_CONFIG_DIR: '', CODEX_HOME: '', XDG_CACHE_HOME: shortCache(t),
+    [FAKE_CREDENTIAL.name]: FAKE_CREDENTIAL.value };
   return { h, dir, env };
 }
 
@@ -1237,7 +1250,9 @@ test('a real claude worker sandbox holds no GitHub credential, and its push goes
   assert.ok(fs.existsSync(probe.out), `the probe ran\n${agentLog(h)}`);
   const seen = JSON.parse(fs.readFileSync(probe.out, 'utf8'));
   console.log(`claude credential probe: ${JSON.stringify(seen)}`);
-  assertCredentialProbe(h, seen, 'claude');
+  // claude hands its commands its own environment, which holds the
+  // dispatcher's credentials (docs/state.md); only GitHub's are removed.
+  assertCredentialProbe(h, seen, 'claude', { otherCredentials: false });
 });
 
 // A research agent fetches sources with WebFetch, which runs in claude's
