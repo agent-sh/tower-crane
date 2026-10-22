@@ -469,6 +469,75 @@ test('the wait host dispatches a ready task while a gate reaction is still runni
   assert.equal(h.logs().findLast((e) => e.cmd === 'check tests' && e.task === 'T1').detail.ok, true);
 });
 
+// The wait host's pass is held inside T1's gate, so only the supervisor could
+// take T3's submission at once, and its gate holds too. A supervisor that ran
+// its own reactions stayed alive, with its parsed history, for that gate.
+test('a supervisor whose agent exited hands its reactions to the live wait host and exits', async (t) => {
+  const h = refillFixture(t);
+  const suite = path.join(h.base, 'tools', 'hold-every-suite.js');
+  const release = path.join(h.base, 'release');
+  fs.writeFileSync(suite, `const fs = require('node:fs');
+fs.appendFileSync(${JSON.stringify(path.join(h.base, 'suites'))}, 'run\\n');
+const end = Date.now() + 120000;
+const poll = () => (fs.existsSync(${JSON.stringify(release)}) || Date.now() >= end ? process.exit(0) : setTimeout(poll, 50)); // wait-allow: probe cadence only; the release signal and its two minutes bound this fixture
+poll();
+`);
+  h.ok(['project', 'set', '--tests-cmd', `node ${JSON.stringify(suite)}`, '--tests-mode', 'run-only', '--executors', '2', '--agent', 'orchestrator']);
+  const worker = path.join(h.base, 'submit-worker.js');
+  fs.writeFileSync(worker, `
+const { fakeAgentEnv } = require(${JSON.stringify(path.join(__dirname, 'agent-env.js'))});
+const fs = require('node:fs'), cp = require('node:child_process'), path = require('node:path');
+const task = process.env.TOWER_CRANE_TASK;
+const run = (args) => cp.execFileSync(process.execPath, [${JSON.stringify(require('./helpers').BIN)}, ...args], { env: fakeAgentEnv(process.env), stdio: 'pipe' });
+run(['claim', task]);
+const file = path.join(process.env.AUTOMATION_CONTEXT_DIR, task);
+fs.writeFileSync(file, '');
+const poll = () => { // wait-allow: probe cadence only; the go file releases the worker
+  if (!fs.existsSync(file + '.go')) return setTimeout(poll, 25);
+  run(['submit', task, '--sha', ${JSON.stringify(h.sha)}, '--pr', '8']);
+  fs.writeFileSync(file + '.exited', '');
+};
+poll();
+`);
+  h.ok(['ladder', 'set', 'easy', '--command', JSON.stringify([process.execPath, worker, '{prompt}'])]);
+  const github = h.github();
+  github.ci[h.sha] = 'success';
+  h.saveGithub(github);
+  h.submit();
+  const suites = () => (fs.existsSync(path.join(h.base, 'suites')) ? fs.readFileSync(path.join(h.base, 'suites'), 'utf8').split('\n').length - 1 : 0);
+  let child;
+  const host = h.runAsync(['wait', '--follow', '--types', 'never', '--agent', 'orchestrator'], { onSpawn: (c) => { child = c; } });
+  try {
+    await waitOnRepo(h, () => suites() === 1, 'the wait host holds its pass in the T1 tests gate');
+    await waitFor(h.marker('T3'), { alive: child, what: 'refill dispatches T3 beside the held gate' });
+    const spawn = h.logs().findLast((e) => e.cmd === 'spawn' && e.task === 'T3').detail;
+    const state = h.github();
+    state.prs['8'] = { ...state.prs['7'], headRefName: h.readState('tasks.json').tasks.find((x) => x.id === 'T3').branch,
+      url: 'https://github.com/acme/demo/pull/8' };
+    h.saveGithub(state);
+    fs.writeFileSync(`${h.marker('T3')}.go`, '');
+    await waitFor(`${h.marker('T3')}.exited`, { alive: child, what: 'the T3 worker submits and exits' });
+    const exited = performance.now();
+    const BOUND_MS = 30000;
+    const gone = await Promise.race([
+      waitUntil(() => !require('./helpers').detachedAlive({ pid: spawn.monitor_pid }), { what: 'the T3 supervisor exits' }).then(() => true),
+      new Promise((resolve) => { setTimeout(resolve, BOUND_MS, false); }), // wait-allow: the exit bound under test
+    ]);
+    assert.ok(gone, `the T3 supervisor still runs ${BOUND_MS / 1000} s after its agent exited`);
+    assert.ok(performance.now() - exited < BOUND_MS);
+    assert.equal(suites(), 1, 'the supervisor ran no gate of its own');
+    const queued = h.logs().filter((e) => e.cmd === 'automation queued' && e.task === 'T3');
+    assert.ok(queued.some((e) => e.detail.handed_to === child.pid), JSON.stringify(queued));
+  } finally {
+    fs.writeFileSync(release, '');
+  }
+  await waitOnRepo(h, () => h.logs().some((e) => e.cmd === 'check tests' && e.task === 'T3'), 'the wait host runs the handed-off gate');
+  const runs = h.logs().filter((e) => e.cmd === 'automation' && e.task === 'T3' && e.detail.phase === 'running');
+  assert.ok(runs.length && runs.every((e) => e.detail.pid === child.pid), JSON.stringify(runs.map((e) => e.detail.pid)));
+  child.kill('SIGTERM');
+  await host;
+});
+
 // With the fallback tick off and the watch silent, nothing but the host's own
 // timer wakes it once the hold ends.
 test('an ending rework hold dispatches on the wait host\'s own timer, with no other event', async (t) => {
