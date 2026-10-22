@@ -87,6 +87,55 @@ test('the first command moves a 0.1 file layout into state.db, keeps every event
   released(h, ['--state', out, 'task', 'note', 'T1', 'written by 0.1.3 again']);
 });
 
+// Every line the file layout's readers took as an event is one after
+// migration, with or without an id; only the lines they skipped stay lines.
+test('migration keeps audit lines without an id or with a repeated one as events, and only skipped lines as lines', (t) => {
+  const h = fileLayout(t);
+  const file = path.join(h.state, 'events.jsonl');
+  const first = JSON.parse(fs.readFileSync(file, 'utf8').split('\n')[0]);
+  const at = '2026-10-06T14:06:50.398Z';
+  const rows = [
+    ['an audit line without an id', { at, agent: 'owner', cmd: 'task note', task: 'T1', detail: { text: 'id-less audit line' } }, true],
+    ['a spawn without an id', { at, agent: 'orchestrator', cmd: 'spawn', task: 'T1', detail: { agent: 'worker-T1-7', role: 'worker' } }, true],
+    ['a line without a command', { at, agent: 'owner', task: 'T1', detail: {} }, true],
+    ['a line that repeats an id', { ...first, detail: { text: 'repeated id' } }, true],
+    ['an older tool\'s progress', { id: 'Eprogress', at, agent: 'worker', cmd: 'hook progress', task: 'T1', detail: {} }, false],
+    ['a blank line', '', false],
+    ['a JSON array', [1], false],
+    ['a torn record', '{"id":"Etorn","cmd":"task no', false],
+  ];
+  const lines = rows.map(([, line]) => (typeof line === 'string' ? line : JSON.stringify(line)));
+  fs.appendFileSync(file, lines.join('\n') + '\n');
+  const log = fs.readFileSync(file);
+  const before = log.toString('utf8').split('\n').slice(0, -1 - lines.length);
+
+  h.ok(['task', 'show', 'T1']);
+  const ends = lineEnds(log);
+  const kept = [...before.map((line, i) => [line, ends[i]]), ...lines.map((line, i) => [line, ends[before.length + i], rows[i]])]
+    .filter(([, , row]) => !row || row[2]);
+  const events = h.events({ offsets: true });
+  assert.deepEqual(events, kept.map(([line, offset]) => ({ ...JSON.parse(line), offset })));
+  for (const [name, line, event] of rows) {
+    const found = events.some(({ offset, ...e }) => JSON.stringify(e) === JSON.stringify(line));
+    assert.equal(found, event, `${name} ${event ? 'is' : 'is not'} an event`);
+  }
+
+  const Db = require('../lib/db');
+  StateFiles.withDb(h.state, () => {
+    const notes = Db.taskEvents(h.state, 'T1', Db.end(h.state), ['task note']).map((r) => JSON.parse(r.body).detail.text);
+    assert.deepEqual(notes, ['written by 0.1.3', 'id-less audit line']);
+    assert.deepEqual(Db.spawnRoles(h.state, 'worker-T1-7'), ['worker']);
+    assert.equal(Db.idEndingAt(h.state, kept.find(([, , row]) => row?.[0] === 'a line that repeats an id')[1]), first.id);
+  });
+  // A lookup by id finds the first line with it, as a scan of the log did.
+  assert.equal(h.json(['event', first.id]).detail.text, first.detail.text);
+
+  const out = path.join(h.base, 'export');
+  h.ok(['state', 'export', out]);
+  assert.ok(fs.readFileSync(path.join(out, 'events.jsonl')).equals(log), 'the export writes the migrated log back byte for byte');
+  assert.equal(fs.readFileSync(path.join(out, 'events.cuts.jsonl'), 'utf8'), '');
+});
+
 // Every release before this one, each from its tag.
 for (const tag of ['v0.1.0', 'v0.1.1', 'v0.1.2', 'v0.1.3', 'v0.1.4', 'v0.1.5', 'v0.1.6', 'v0.1.7']) {
 test(`${tag.slice(1)} refuses a migrated state before it reads or writes any of it`, (t) => {

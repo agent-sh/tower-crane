@@ -2,7 +2,7 @@
 
 ## Project
 
-Tower Crane is a CLI and an agent plugin. The CLI (`bin/`, `lib/`) keeps a project's plan and progress in plain files in the project's Tower Crane state directory and runs the software gates; the plugin (`skills/`, `agents/`, `standards/`) is the methodology agents follow on top of it. Part of the [agentsys](https://github.com/agent-sh/agentsys) ecosystem.
+Tower Crane is a CLI and an agent plugin. The CLI (`bin/`, `lib/`) keeps a project's plan and progress in a SQLite database (`state.db`) in the project's Tower Crane state directory and runs the software gates; the plugin (`skills/`, `agents/`, `standards/`) is the methodology agents follow on top of it. Part of the [agentsys](https://github.com/agent-sh/agentsys) ecosystem.
 
 ## Rules
 

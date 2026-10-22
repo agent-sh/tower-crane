@@ -287,7 +287,7 @@ function flagLine(name, spec) {
 }
 
 function generalHelp() {
-  const lines = ['tower-crane: plan, dispatch, review and merge agent work, with state in plain files', '', 'usage: tower-crane <command> [args] [--state DIR] [--agent NAME] [--json]'];
+  const lines = ['tower-crane: plan, dispatch, review and merge agent work, with state in one SQLite file', '', 'usage: tower-crane <command> [args] [--state DIR] [--agent NAME] [--json]'];
   for (const section of SECTIONS) {
     lines.push('', `${section}:`);
     for (const c of COMMANDS.filter((x) => x.section === section)) lines.push(`  ${c.name.padEnd(16)} ${c.summary}`);

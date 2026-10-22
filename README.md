@@ -10,7 +10,7 @@
 
 > Running open models for your company? [**Tiyuvta**](https://tiyuvta.ai/services/) helps with model choice, deployment and optimization, and fine-tuning on your hardware or cloud account.
 
-Tower Crane is a CLI and an agent plugin for delegating software work to coding agents. An orchestrator agent splits the work into tasks, spawns a worker per task in its own worktree and sandbox, gets each change reviewed by an agent that did not write it, and merges it once software gates pass. The plan and its progress live in plain JSON files that only the CLI writes. It is for people who want agents to carry a project end to end: you watch instead of steering, and answer the few questions only you can answer. It is part of the [agentsys](https://github.com/agent-sh/agentsys) ecosystem.
+Tower Crane is a CLI and an agent plugin for delegating software work to coding agents. An orchestrator agent splits the work into tasks, spawns a worker per task in its own worktree and sandbox, gets each change reviewed by an agent that did not write it, and merges it once software gates pass. The plan and its progress live in a SQLite database that only the CLI writes. It is for people who want agents to carry a project end to end: you watch instead of steering, and answer the few questions only you can answer. It is part of the [agentsys](https://github.com/agent-sh/agentsys) ecosystem.
 
 ## Why
 
