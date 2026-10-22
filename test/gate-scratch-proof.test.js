@@ -56,6 +56,60 @@ require('../scratch.js');
   }
 });
 
+test('default host proofs isolate ambient admission while preserving supplied hosts', (t) => {
+  const h = fixture(t);
+  fs.mkdirSync(path.join(h.repo, 'test'));
+  fs.writeFileSync(path.join(h.repo, 'test', 'run.js'), "require('../scratch.js');\n");
+  h.git(['add', 'test/run.js']);
+  h.git(['commit', '-qm', 'Add host proof runner']);
+  const busy = writeHost(path.join(h.base, 'busy-host'), { limit: 5, used: 3 });
+  const script = `
+const cp = require('node:child_process');
+const spawn = cp.spawnSync;
+cp.spawnSync = (bin, args, options) => {
+  if (args[1] === 'check' && !options.env.TOWER_CRANE_HOST_ROOT) {
+    options = { ...options, env: { ...options.env, TOWER_CRANE_HOST_ROOT: process.env.PROOF_BUSY_HOST } };
+  }
+  return spawn(bin, args, options);
+};
+const { probe } = require(${JSON.stringify(require.resolve('../scripts/probe-gate-scratch'))});
+try {
+  console.log(JSON.stringify(probe({ root: process.cwd(), cache: process.argv[1] })));
+} catch (error) { console.error(error.message); process.exitCode = 1; }
+`;
+  const failures = [];
+  for (const row of [
+    { name: 'standalone', supplied: null, leak: false },
+    { name: 'nested host gate', supplied: null, leak: false, tmp: true },
+    { name: 'nested leak', supplied: null, leak: true, tmp: true },
+    { name: 'supplied available host', supplied: h.env.TOWER_CRANE_HOST_ROOT, leak: false },
+    { name: 'supplied busy host', supplied: busy, deferred: true },
+  ]) {
+    const cache = path.join(h.base, row.name);
+    const environment = { ...h.env, PROOF_BUSY_HOST: busy, PROOF_LEAK: row.leak ? '1' : '0' };
+    delete environment.NODE_TEST_CONTEXT;
+    delete environment.TOWER_CRANE_HOST_ROOT;
+    if (row.supplied) environment.TOWER_CRANE_HOST_ROOT = row.supplied;
+    if (row.tmp) environment.TOWER_CRANE_TEST_TMP = path.join(h.base, 'enclosing-gate', 'tmp');
+    const out = cp.spawnSync(process.execPath, ['-e', script, cache], {
+      cwd: h.repo, env: environment, encoding: 'utf8', timeout: HUNG_TEST_MS,
+    });
+    if (out.status !== (row.deferred ? 1 : 0)) {
+      failures.push(`${row.name}: ${out.stderr || out.stdout}`);
+      continue;
+    }
+    if (row.deferred) assert.match(out.stderr, /exit code 3[\s\S]*deferred by the host governor/);
+    else {
+      const result = JSON.parse(out.stdout);
+      assert.equal(result.exit, 0, row.name);
+      assert.equal(result.cleanup_ok, !row.leak, row.name);
+      assert.equal(result.ok, !row.leak, row.name);
+    }
+    assert.deepEqual(fs.readdirSync(cache), [], row.name);
+  }
+  assert.deepEqual(failures, []);
+});
+
 test('deep scratch proofs keep a granted socket leaf across runtime root variants', {
   skip: process.platform === 'win32' && 'Windows brokers use named pipes',
 }, async (t) => {

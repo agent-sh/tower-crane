@@ -26,6 +26,7 @@ const scratch = (entries) => entries.filter((entry) => entry.split(path.sep)[0] 
 
 // A separate state exercises the real gate without changing the project's tasks.
 function probe({ root = ROOT, cache, command, environment = process.env } = {}) {
+  const representative = !command;
   if (!command && (environment.TOWER_CRANE_SANDBOX === '1' || environment.TOWER_CRANE_BROKER)) {
     throw new Error('the complete gate scratch proof must run on the host, outside the worker sandbox');
   }
@@ -37,15 +38,16 @@ function probe({ root = ROOT, cache, command, environment = process.env } = {}) 
   const gates = path.join(run, 'gates');
   const state = path.join(run, 'state');
   const env = { ...environment };
-  // Host readings describe the machine, independently of the probe's fresh state.
   // A worker's granted socket leaf is the short root its nested brokers reach.
   for (const key of Object.keys(env)) {
     if (key.startsWith('TOWER_CRANE_') && !['TOWER_CRANE_HOST_ROOT', 'TOWER_CRANE_SOCKET_DIR'].includes(key)
       || key.startsWith('TC_TEST_') || key === 'NODE_TEST_CONTEXT') delete env[key];
   }
-  // Tests use an isolated governor; host measurements still use the real host.
-  // A fake host made here is written inside the try below, so the run's removal covers it.
-  const fakeHost = !environment.TOWER_CRANE_HOST_ROOT && (environment.NODE_TEST_CONTEXT || process.env.NODE_TEST_CONTEXT);
+  // The representative proof checks cleanup, not admission. Its enclosing host
+  // gate already reserves resources, so another real reservation can defer it.
+  // Custom commands retain real admission; supplied host readings always win.
+  const fakeHost = !environment.TOWER_CRANE_HOST_ROOT
+    && (representative || environment.NODE_TEST_CONTEXT || process.env.NODE_TEST_CONTEXT);
   if (environment.TOWER_CRANE_HOST_ROOT) env.TOWER_CRANE_HOST_ROOT = environment.TOWER_CRANE_HOST_ROOT;
   else if (fakeHost) env.TOWER_CRANE_HOST_ROOT = path.join(run, 'host');
   Object.assign(env, {
