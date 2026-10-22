@@ -196,6 +196,47 @@ test('a glob or placeholder in a worker note does not block accept on its litera
   assert.deepEqual(m.files.map((f) => f.path).sort(), ['probe-1.log', 'probe-2.log', 'probe/stderr.log']);
 });
 
+test('a line location or parentheses in a cited path do not block accept on a path nobody named', (t) => {
+  const h = ready(t);
+  fs.writeFileSync(path.join(h.scratch, 'report(1).txt'), 'second run\n');
+  h.ok(['task', 'note', 'T1', 'RSS peak at $XDG_CACHE_HOME/probe/stderr.log:1', '--agent', 'w-1']);
+  h.ok(['task', 'note', 'T1', 'second run in $XDG_CACHE_HOME/report(1).txt', '--agent', 'w-1']);
+  h.ok(['accept', 'T1']);
+  assert.equal(task(h, 'T1').status, 'accepted');
+  assert.deepEqual(manifest(h, 'T1').cited, ['probe/stderr.log', 'report(1).txt']);
+});
+
+test('an accept the gates refuse writes no archive, and its --drop-citation carries no weight', (t) => {
+  const h = ready(t);
+  h.ok(['task', 'note', 'T1', 'fill in $XDG_CACHE_HOME/fill.json', '--agent', 'w-1']);
+  gateEvidence(h, 'clean', 'orchestrator', false);
+  const r = h.run(['accept', 'T1', '--drop-citation', 'fill.json', '--reason', 'x', '--agent', 'orchestrator']);
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /T1 cannot be accepted yet: clean: latest clean at .* failed/);
+  assert.equal(fs.existsSync(path.join(h.state, 'archive', 'T1')), false);
+  assert.deepEqual(events(h).filter((e) => e.cmd === 'archive refused'), []);
+  gateEvidence(h, 'clean', 'orchestrator', true);
+  // An archive an accept wrote before its acceptance write refused (the head moved) lists the
+  // drop with no accept event behind it; the next accept cites the path again.
+  const config = process.env.TOWER_CRANE_CONFIG;
+  process.env.TOWER_CRANE_CONFIG = h.userConfig;
+  try {
+    Archive.save({ stateDir: h.state, cwd: h.repo }, S.loadState(h.state), task(h, 'T1'),
+      { reason: 'accept', strict: true, drop: [{ path: 'fill.json', reason: 'x', by: 'orchestrator', at: new Date().toISOString() }] });
+  } finally { if (config === undefined) delete process.env.TOWER_CRANE_CONFIG; else process.env.TOWER_CRANE_CONFIG = config; }
+  assert.deepEqual(manifest(h, 'T1').dropped.map((d) => d.path), ['fill.json']);
+  const again = h.run(['accept', 'T1']);
+  assert.equal(again.code, 1);
+  assert.match(again.stderr, /cannot be archived: fill\.json \(missing; cited in a note\)/);
+  assert.equal(task(h, 'T1').status, 'submitted');
+  h.ok(['accept', 'T1', '--drop-citation', 'fill.json', '--reason', 'never written', '--agent', 'orchestrator']);
+  const log = events(h);
+  const accepted = log.findLast((e) => e.cmd === 'accept' && e.task === 'T1');
+  assert.deepEqual(accepted.detail.dropped_citations, ['fill.json']);
+  assert.deepEqual(log[log.indexOf(accepted) - 1].detail.settings, { 'accept.drop_citation': 'operational' });
+  assert.deepEqual(manifest(h, 'T1').dropped.map((d) => [d.path, d.reason]), [['fill.json', 'never written']]);
+});
+
 test('task archive lists an archive and copies it into another task with evidence, for a granted worker', (t) => {
   const h = ready(t);
   h.ok(['accept', 'T1']);
@@ -306,6 +347,16 @@ test('citations find the scratch path in its absolute, home and XDG_CACHE_HOME f
     ['a shell variable', '$XDG_CACHE_HOME/runs/$RUN/out.log and ${XDG_CACHE_HOME}/runs/${RUN}/err.log', []],
     ['an ellipsis segment', `${scratch}/.../stderr.log and ${scratch}/…/x.log`, []],
     ['a pattern beside a real path', '$XDG_CACHE_HOME/probe-*.log and $XDG_CACHE_HOME/probe-1.log', ['probe-1.log']],
+    // A line location points into the file; parentheses belong to the name only when it closes them.
+    ['a :line location', '$XDG_CACHE_HOME/probe/stderr.log:12', ['probe/stderr.log']],
+    ['a :line:col location with a period', `${scratch}/probe/stderr.log:12:5.`, ['probe/stderr.log']],
+    ['a :line-line range', '$XDG_CACHE_HOME/probe/stderr.log:12-40', ['probe/stderr.log']],
+    ['a #L location', '$XDG_CACHE_HOME/probe/stderr.log#L12', ['probe/stderr.log']],
+    ['a #L range in emphasis', '**$XDG_CACHE_HOME/probe/stderr.log#L12-L40**', ['probe/stderr.log']],
+    ['parentheses in a name', '$XDG_CACHE_HOME/out/report(1).txt', ['out/report(1).txt']],
+    ['a name with parentheses in a markdown link', `[r](${scratch}/out/report(1).txt)`, ['out/report(1).txt']],
+    ['a path inside parentheses', '(see $XDG_CACHE_HOME/a.log) and ($XDG_CACHE_HOME/b.log:3).', ['a.log', 'b.log']],
+    ['an unclosed parenthesis after a path', '$XDG_CACHE_HOME/a.log(see above and $XDG_CACHE_HOME/run(1)/out(2', ['a.log', 'run(1)/out']],
   ];
   for (const [what, text, expected] of cases) {
     const st = { decisions: { decisions: [] }, events: [] };
