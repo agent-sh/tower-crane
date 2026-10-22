@@ -65,7 +65,7 @@ Workers, reviewers and every other identity are refused both. For an operational
 | `ci.required`, `ci.ignore_apps`, `ci.capped_review` | operational | `project set --ci-required`, `--ci-ignore-apps`, `--ci-capped-review` |
 | `ci.local` | operational | `project set --ci-local`, `task update --ci-local` |
 | `ci.dispatch` | operational | `project set --ci-dispatch` |
-| `tests.paths`, `tests.keep`, `tests.host_only`, `tests.host_env`, `tests.mode`, `tests.by_kind`, `tests.expensive`, `tests.map` | operational | `project set --tests-*` |
+| `tests.paths`, `tests.keep`, `tests.host_only`, `tests.host_env`, `tests.mode`, `tests.by_kind`, `tests.expensive`, `tests.map`, `tests.crucial` | operational | `project set --tests-*`; `tests map refresh` also pins `tests.map` |
 | `limits.workers`, `limits.lease_minutes`, `limits.paused` | operational | `project set --workers`, `--lease-minutes`, `--paused REASON` (empty resumes) |
 | `resources.tasks_max`, `resources.memory_max_bytes` | operational | `project set --tasks-max N --memory-max-bytes N`; positive integers, per agent or gate including descendants |
 | `budget.lower` | operational | `project set` or `task update --budget-hours`, `--budget-tokens` to a lower limit, or a limit where there was none |

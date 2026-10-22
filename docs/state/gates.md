@@ -318,7 +318,8 @@ unmerged task below it, extended up its stack by the accepted, linked tasks
 directly above it; entries are ordered by their bottom task's latest
 `accept` event at the current sha and revision.
 `head check` records the head-of-line suite run on the entry's top task:
-`{sha, revision, base_sha, command, members, ok, summary, commands}`, where
+`{sha, revision, base_sha, command, members, ok, summary, commands}`, plus
+`head_mode: "crucial"` and `head_tests` when crucial mode selected the suites, where
 `base_sha` is the `project.base` tip merged into the head, `members` lists
 the entry's task ids bottom up and `commands` lists the Git and shell
 executions with their status. An ok check at the same sha, revision,

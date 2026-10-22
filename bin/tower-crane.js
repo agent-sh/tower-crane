@@ -172,7 +172,10 @@ function resolveCommand(argv) {
   }
   if (GROUPS.has(word)) {
     const sub = argv[i + 1];
-    const cmd = sub && !sub.startsWith('-') ? COMMANDS.find((c) => c.name === `${word} ${sub}`) : null;
+    const third = argv[i + 2];
+    // A group can name a command of three words, such as tests map refresh.
+    const cmd = sub && !sub.startsWith('-') ? COMMANDS.find((c) => c.name === `${word} ${sub}`)
+      || (third && !third.startsWith('-') ? COMMANDS.find((c) => c.name === `${word} ${sub} ${third}`) : null) : null;
     if (!cmd) {
       const parent = COMMANDS.find((c) => c.name === word);
       if (parent) return { cmd: parent, rest: argv.slice(i + 1), lead };
@@ -180,7 +183,7 @@ function resolveCommand(argv) {
       if (rest.includes('--help') || rest.includes('-h') || sub === undefined) return { groupHelp: word, lead, bare: sub === undefined };
       throw usage(`unknown command "${word} ${sub}"; run tower-crane ${word} --help`);
     }
-    return { cmd, rest: argv.slice(i + 2), lead };
+    return { cmd, rest: argv.slice(i + cmd.name.split(' ').length), lead };
   }
   const cmd = COMMANDS.find((c) => c.name === word);
   if (!cmd) throw usage(`unknown command "${word}"; run tower-crane --help`);
