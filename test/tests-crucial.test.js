@@ -95,9 +95,47 @@ test('with tests.crucial and a map pinned, a change runs crucial plus the suites
   assert.equal(counts(h), true);
 });
 
-test('a crucial file missing at head is the orchestrator\'s setting to fix, not the task\'s', (t) => {
+for (const baseRef of ['main', 'origin/main']) test(`a crucial file added on ${baseRef} after the submitted head is skipped with a receipt`, (t) => {
   const h = fixture(t);
-  h.ok(['project', 'set', '--tests-crucial', '["test/missing.test.js"]']);
+  h.git(['switch', 'main']);
+  fs.writeFileSync(path.join(h.repo, 'test/new.test.js'), "console.log('new suite');\n");
+  h.git(['add', '.']);
+  h.git(['commit', '-qm', 'new crucial suite']);
+  const added = h.git(['rev-parse', 'HEAD']);
+  h.git(['commit', '--allow-empty', '-qm', 'later base tip']);
+  const tip = h.git(['rev-parse', 'HEAD']);
+  if (baseRef === 'origin/main') {
+    h.git(['update-ref', 'refs/remotes/origin/main', tip]);
+    h.git(['reset', '--hard', `${added}^`]);
+  }
+  h.git(['switch', 'fixture-change']);
+  const setting = h.run(['project', 'set', '--tests-crucial', '["test/crucial.test.js","test/new.test.js"]', '--json']);
+  assert.equal(setting.code, 0, setting.stderr);
+  assert.equal(JSON.parse(setting.stdout).warnings, undefined, 'a path present on base needs no warning');
+  const result = check(h);
+  assert.deepEqual(result.receipt.head_tests, ['test/crucial.test.js', 'test/mapped.test.js', 'test/value.test.js']);
+  assert.deepEqual(result.receipt.crucial_skipped, [{
+    path: 'test/new.test.js', added_on_base: added,
+    note: `crucial path not at head: test/new.test.js, added on base at ${added}`,
+  }]);
+  assert.ok(result.commands.filter((c) => c.command !== 'git').every((c) => !c.command.includes('new.test.js')));
+  assert.equal(counts(h), true);
+  const { mismatch } = require('../lib/gate-commands');
+  const project = h.readState('project.json');
+  const task = h.json(['task', 'show', 'T1']);
+  for (const skipped of [[], null, {}, [{ path: 'test/new.test.js', added_on_base: 'bad' }],
+    [{ ...result.receipt.crucial_skipped[0], path: 'test/wrong.test.js' }]]) {
+    const entry = { ...result, type: 'tests', receipt: { ...result.receipt, crucial_skipped: skipped } };
+    assert.match(mismatch(entry, project, task), /command receipts do not match/, 'missing or malformed skip evidence does not count');
+  }
+});
+
+test('a crucial file missing on both head and base is the orchestrator\'s setting to fix', (t) => {
+  const h = fixture(t);
+  const setting = h.run(['project', 'set', '--tests-crucial', '["test/missing.test.js"]', '--json']);
+  assert.equal(setting.code, 0, setting.stderr);
+  assert.deepEqual(JSON.parse(setting.stdout).warnings, ['tests.crucial path missing at base tip: test/missing.test.js']);
+  assert.match(h.ok(['project', 'set', '--tests-crucial', '["test/missing.test.js"]']), /warning: tests\.crucial path missing at base tip: test\/missing\.test\.js/);
   const result = check(h, 1);
   assert.deepEqual(result.config_failure, { key: 'tests_crucial' });
   assert.match(result.summary, /tests\.crucial names paths that are not test files at head: test\/missing\.test\.js/);
@@ -105,6 +143,28 @@ test('a crucial file missing at head is the orchestrator\'s setting to fix, not 
   const item = h.json(['inbox', '--agent', 'orchestrator']).items.find((i) => i.kind === 'gate_config');
   assert.equal(item.setting, 'tests.crucial');
   assert.deepEqual(item.action.argv, ['project', 'set', '--tests-crucial', '<JSON>']);
+});
+
+test('skipping every crucial file on a kept-file diff does not invoke an empty selector or the full suite', (t) => {
+  const h = fixture(t);
+  h.git(['switch', 'main']);
+  h.git(['switch', '-c', 'docs-change']);
+  fs.appendFileSync(path.join(h.repo, 'README.md'), 'Documentation only.\n');
+  h.git(['add', '.']);
+  h.git(['commit', '-qm', 'documentation change']);
+  const head = h.git(['rev-parse', 'HEAD']);
+  h.git(['switch', 'main']);
+  fs.writeFileSync(path.join(h.repo, 'test/new.test.js'), "console.log('new suite');\n");
+  h.git(['add', '.']);
+  h.git(['commit', '-qm', 'new crucial suite']);
+  h.ok(['project', 'set', '--tests-crucial', '["test/new.test.js"]', '--tests-keep', '["*.md"]']);
+  h.ok(['submit', 'T1', '--sha', head, '--agent', 'worker']);
+  const result = check(h);
+  assert.equal(result.receipt.head_mode, 'crucial');
+  assert.deepEqual(result.receipt.head_tests, []);
+  assert.equal(result.receipt.crucial_skipped[0].path, 'test/new.test.js');
+  assert.equal(result.commands.filter((c) => c.command !== 'git').length, 0);
+  assert.equal(counts(h), true);
 });
 
 for (const [name, settings, valueTest, ok, pattern] of [
