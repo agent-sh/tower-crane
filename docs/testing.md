@@ -45,6 +45,8 @@ The 2026-10-21 local Node 26/Linux sizing run took 133.5 seconds at three file w
 
 On a host, `node test/proof-breaks.js scratch` plants a surviving gate parent and requires the scratch proof to reject it after a passing gate. `node test/proof-breaks.js model-swap` plants a worker test that depends on the original built-in harness and requires the swap proof to reject that extra failure. Both use temporary processes or copies and remove their scratch. These commands complement `test/gate-scratch-proof.test.js` and `test/model-config.test.js`, whose regression checks pin the representative command and preserve the leak and unexpected-failure assertions.
 
+`test/proof-breaks.test.js` executes the planted-proof CLI and its generated hooks with fixture proof responses. Its variant table covers detected and absent properties, a failed gate, wrong exit status or diagnostics, child-process errors, invalid modes and cleanup after each outcome. These runs give task gates measured coverage of the helper.
+
 Proof scratch may be deep: socket paths use the runner's private runtime directory and the broker's short socket roots, independently of `TMPDIR`. Both proofs preserve a supplied `TOWER_CRANE_SOCKET_DIR`, so a sandbox's granted short leaf remains available when the runtime root is missing or overlong. The scratch regression table starts real brokers through the CLI gate with deep scratch and account caches, covering short, missing and overlong runtime roots and cleanup after each run.
 
 ## Writing tests
