@@ -18,7 +18,7 @@ Method: harness behaviour was observed against a local fake endpoint. It speaks 
 
 ## Current state in Tower Crane
 
-- **Claude rungs:** five rungs in `.tower-crane/project.json` (easy, hard, research, review, small) set `env_file: ~/.config/claude-code/bedrock.env`.
+- **Claude rungs:** five rungs in the project's ladder in `.tower-crane/state.db` (easy, hard, research, review, small) set `env_file: ~/.config/claude-code/bedrock.env`.
   - That file holds `AWS_BEARER_TOKEN_BEDROCK`, plus non-secret routing: `CLAUDE_CODE_USE_BEDROCK` and the `ANTHROPIC_DEFAULT_*_MODEL` pins.
   - `lib/spawn-settings.js` `agentEnv` reads it at spawn into the harness environment.
 - **Codex:** `lib/agents.js` links `~/.codex/auth.json` and `~/.codex/.env` into each agent home. The `.env` holds only `AWS_BEARER_TOKEN_BEDROCK`, and Codex loads it into its own environment.
