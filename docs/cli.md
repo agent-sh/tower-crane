@@ -542,6 +542,10 @@ including reservations from cancelled tasks. A refused task leaves the free
 slots for the next dispatchable tasks in rank order. Lasting stack worktree
 refusals are recorded per task and skipped until task, dependency, brief,
 routing, project or local Git inputs change; status shows their reasons.
+Status also shows ordinary ready-worker refusal reasons for their one-minute
+retry window, ahead of worker-slot limits. Those refused tasks take no place
+in the free-slot order. Changed inputs, expiry or a later successful worker
+spawn clears the old reason; an explicit ready batch can retry it immediately.
 Missing briefs are skipped before dispatch preparation. Other ordinary dispatch
 refusals are remembered per task for one minute, without repeating preparation
 or the stderr diagnostic while that task's dispatch inputs are unchanged.
