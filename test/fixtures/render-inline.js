@@ -10,8 +10,11 @@ const path = require('node:path');
 const cp = require('node:child_process');
 const { EventEmitter } = require('node:events');
 
-// Any test process that writes starts one: a CLI command, a supervisor.
-if (!process.env.HOOK_ASYNC_RENDER && ['tower-crane.js', 'spawn-monitor.js'].includes(path.basename(process.argv[1] || ''))) {
+// Any test process that writes starts one: a CLI command, a supervisor, or a
+// fixture script here that runs the CLI's main in its own process (lock-stress.js).
+const script = process.argv[1] || '';
+if (!process.env.HOOK_ASYNC_RENDER && (['tower-crane.js', 'spawn-monitor.js'].includes(path.basename(script))
+  || path.dirname(path.resolve(script)) === __dirname)) {
   const spawn = cp.spawn;
   cp.spawn = function renderInline(command, args, options) {
     if (!Array.isArray(args) || path.basename(String(args[0] || '')) !== 'render-worker.js') return spawn.call(this, command, args, options);

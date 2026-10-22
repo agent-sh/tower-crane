@@ -177,3 +177,45 @@ for (const [harness, scope, logOnly] of [['claude', 'project'], ['claude', 'task
     assert.ok(!text.includes('"claude_home"'), 'events never carry the claude session root');
   });
 }
+
+// What a taskkill run leaves decides whether the child's own handle stops it.
+const ETIMEDOUT = Object.assign(new Error('spawnSync taskkill ETIMEDOUT'), { code: 'ETIMEDOUT' });
+for (const [name, result, child, killed] of [
+  ['taskkill stopped the tree', { status: 0 }, { exitCode: null, signalCode: null }, false],
+  ['taskkill failed', { status: 1 }, { exitCode: null, signalCode: null }, true],
+  ['taskkill outlasted its timeout', { status: null, signal: 'SIGTERM', error: ETIMEDOUT }, { exitCode: null, signalCode: null }, true],
+  ['taskkill failed after the child exited', { status: 128 }, { exitCode: 0, signalCode: null }, false],
+  ['taskkill failed after the child was signalled', { status: 1 }, { exitCode: null, signalCode: 'SIGKILL' }, false],
+]) {
+  test(`a Windows tree stop: ${name}`, () => {
+    const P = require('../lib/processes');
+    const calls = [];
+    const kills = [];
+    const target = { pid: 4242, ...child, kill: (signal) => kills.push(signal) };
+    P.windowsKillTree(target, { run: (file, args, options) => { calls.push([file, args, options.timeout]); return result; } });
+    assert.deepEqual(calls, [['taskkill', ['/PID', '4242', '/T', '/F'], 10000]]);
+    assert.deepEqual(kills, killed ? ['SIGKILL'] : []);
+  });
+}
+
+test('a budget stop ends the harness when taskkill outlasts its timeout, as on a loaded Windows runner', { skip: process.platform !== 'win32' && 'taskkill is the Windows stop' }, async (t) => {
+  const h = setup(t, 'claude');
+  h.ok(['task', 'update', 'T1', '--budget-tokens', '3500']);
+  const taskkill = path.join(h.base, 'taskkill');
+  const spawned = h.json(['spawn', '--task', 'T1'], { env: h.liveEnv({
+    LIVE_STEPS: '4', LIVE_EVERY: '300', LIVE_COMPLETE: path.join(h.base, 'complete'), LIVE_TASKKILL_TIMEOUT: taskkill,
+  }) });
+  await until(t, h, () => exited(h, spawned.agent), 'the agent was not stopped');
+  assert.ok(fs.readFileSync(taskkill, 'utf8').includes('/T /F'), 'the supervisor ran taskkill');
+  assert.ok(events(h).some((e) => e.cmd === 'budget stop'));
+  assert.equal(fs.existsSync(h.done), false, 'the agent was stopped before it finished on its own');
+  await until(t, h, () => recordedSpend(h).entries?.length && recordedSpend(h).entries.every((e) => !e.live), 'exit usage was not finalized');
+});
+
+test('a supervisor collects usage at the exit it saw though another process took the harness pid, as Windows reuses pids', async (t) => {
+  const h = setup(t, 'claude');
+  const spawned = h.json(['spawn', '--task', 'T1'], { env: h.liveEnv({ LIVE_STEPS: '1', LIVE_PID_REUSED: '1' }) });
+  await until(t, h, () => exited(h, spawned.agent), 'the harness did not exit');
+  await until(t, h, () => recordedSpend(h).entries?.length && recordedSpend(h).entries.every((e) => !e.live), 'exit usage was not finalized');
+  assert.equal(h.json(['task', 'show', 'T1']).spend.tokens, 1000);
+});

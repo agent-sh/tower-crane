@@ -201,6 +201,41 @@ test('the fixture process probe uses lsof off Linux and reports a skip where not
     /no process the test started outlives its fixture/);
 });
 
+// A fixture script that writes through the CLI's main in its own process, as
+// lock-stress.js does, draws each sketch before the write returns: a detached
+// renderer would outlive the script and write into the fixture while cleanup
+// removes it. Each renderer here takes 1 s, so one is always running while
+// the script writes.
+test('a fixture script that writes through the CLI leaves no renderer running when it exits', async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Notes', '--acceptance', 'a']);
+  const marks = path.join(h.base, 'renderers');
+  const barrier = path.join(h.base, 'barrier');
+  fs.mkdirSync(marks);
+  fs.mkdirSync(barrier);
+  fs.writeFileSync(path.join(barrier, 'go'), '');
+  const slow = path.join(h.base, 'slow-render.js');
+  fs.writeFileSync(slow, `const fs = require('node:fs'), path = require('node:path');
+if (path.basename(process.argv[1] || '') === 'render-worker.js') {
+  fs.writeFileSync(path.join(${JSON.stringify(marks)}, 'start-' + process.pid), '');
+  process.on('exit', () => fs.writeFileSync(path.join(${JSON.stringify(marks)}, 'done-' + process.pid), ''));
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000); // wait-allow: a slow renderer, so one runs while the script writes
+}
+`);
+  const child = cp.spawn(process.execPath, [path.join(ROOT, 'test', 'fixtures', 'lock-stress.js')], {
+    cwd: h.repo,
+    env: { ...h.env, NODE_OPTIONS: `${h.env.NODE_OPTIONS || ''} --require ${JSON.stringify(slow)}`,
+      TOWER_CRANE_AGENT: 'worker-notes', TOWER_CRANE_OWNER_KEY: '', LOCK_STRESS_BARRIER: barrier },
+    stdio: 'ignore',
+  });
+  assert.deepEqual(await childExit(child), { code: 0, signal: null });
+  const names = fs.readdirSync(marks);
+  const started = names.filter((n) => n.startsWith('start-')).map((n) => n.slice('start-'.length));
+  assert.ok(started.length > 0, 'the writes started renderers');
+  assert.deepEqual(started.filter((pid) => !names.includes(`done-${pid}`)), [], 'every renderer finished before the script exited');
+});
+
 // Detached, the repack and prune that a commit starts outlive the commit and
 // delete loose objects while fixture cleanup removes the directory, which
 // leaves the fixture behind. Git 2.54 and later start one after any commit

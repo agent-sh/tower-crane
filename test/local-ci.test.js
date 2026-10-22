@@ -65,23 +65,83 @@ test('accept reruns local CI when the submitted head has no receipt', (t) => {
   assert.equal(evidence.at(-1).receipt.head_sha, next);
 });
 
-test('accept reruns local CI for an older merged tree while merge requires a fresh check', (t) => {
+test('accept keeps a receipt on its pinned base while the base moves, and merge requires a fresh check', (t) => {
   const h = fixture(t);
   h.ok(['check', 'ci', 'T1']);
   fs.writeFileSync(path.join(h.repo, 'later.txt'), 'later\n');
   h.git(['add', '.']);
   h.git(['commit', '-qm', 'base advances again']);
-  assert.match(h.json(['task', 'show', 'T1']).gates.missing.join('; '), /local CI receipt.*merged tree/);
+  assert.equal(h.json(['task', 'show', 'T1']).gates.ok, true, 'the receipt holds on the tree it checked');
   h.ok(['accept', 'T1']);
-  assert.equal(h.readState('tasks.json').tasks[0].evidence.at(-1).receipt.base_sha, h.git(['rev-parse', 'HEAD']));
-  fs.writeFileSync(path.join(h.repo, 'last.txt'), 'last\n');
-  h.git(['add', '.']);
-  h.git(['commit', '-qm', 'base moves after acceptance']);
+  const ci = h.readState('tasks.json').tasks[0].evidence.filter((e) => e.type === 'ci');
+  assert.equal(ci.length, 1, 'accept does not rerun a pinned receipt');
+  assert.equal(ci[0].receipt.base_sha, h.baseSha);
   const merge = h.run(['merge', 'T1']);
   assert.equal(merge.code, 1);
-  assert.match(merge.stderr, /local CI receipt.*merged tree/);
+  assert.match(merge.stderr, /local CI receipt base moved: main is [0-9a-f]+, checked base was [0-9a-f]+/);
   assert.match(merge.stderr, /tower-crane check ci T1/);
   assert.doesNotMatch(merge.stderr, /tower-crane rework/);
+});
+
+test('reports merge the pinned base once per base move', (t) => {
+  const h = mergeFixture(t);
+  h.ok(['check', 'ci', 'T1']);
+  const log = path.join(h.base, 'tree-queries');
+  const opts = { env: { LOCAL_TREE_LOG: log } };
+  // read-published: the git shim appends queries; nothing replaces the file.
+  const pinnedMerges = () => (fs.existsSync(log) ? fs.readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse) : [])
+    .filter((args) => args.includes('merge-tree') && args.includes(h.baseSha)).length;
+  for (const name of ['later.txt', 'last.txt']) {
+    fs.writeFileSync(path.join(h.repo, name), `${name}\n`);
+    h.git(['add', '.']);
+    h.git(['commit', '-qm', `base adds ${name}`]);
+    const before = pinnedMerges();
+    assert.equal(h.json(['task', 'show', 'T1'], opts).gates.ok, true);
+    assert.equal(h.json(['task', 'show', 'T1'], opts).gates.ok, true);
+    assert.equal(h.json(['task', 'list'], opts)[0].gates.ok, true);
+    assert.equal(pinnedMerges() - before, 1, `one pinned merge after the base adds ${name}`);
+  }
+});
+
+test('merge without origin records its base read in its command receipts', (t) => {
+  const h = mergeFixture(t);
+  h.ok(['check', 'ci', 'T1']);
+  h.ok(['accept', 'T1']);
+  const merged = h.json(['merge', 'T1']);
+  assert.equal(merged.ok, true, merged.summary);
+  assert.ok(merged.commands.some((c) => c.command === 'git' && c.args.includes('rev-parse') && c.args.includes('main^{commit}') && c.status === 0),
+    JSON.stringify(merged.commands.map((c) => c.args)));
+});
+
+// The command advances main from inside its run: HEAD^1 of the gate checkout is the base it merged.
+const ADVANCE_BASE = `
+const cp = require('node:child_process');
+const env = { ...process.env, GIT_AUTHOR_NAME: 'T', GIT_AUTHOR_EMAIL: 't@localhost', GIT_COMMITTER_NAME: 'T', GIT_COMMITTER_EMAIL: 't@localhost' };
+const git = (args, input) => cp.execFileSync('git', args, { encoding: 'utf8', input, env }).trim();
+const base = git(['rev-parse', 'HEAD^1']);
+const blob = git(['hash-object', '-w', '--stdin'], 'later ' + base + '\\n');
+const tree = git(['mktree'], git(['ls-tree', base]) + '\\n100644 blob ' + blob + '\\tlater.txt\\n');
+git(['update-ref', 'refs/heads/main', git(['commit-tree', tree, '-p', base, '-m', 'base advances during the check'])]);
+`;
+
+test('main moving during a local CI run leaves a valid receipt on the pinned tree; a rewritten base does not', (t) => {
+  const h = fixture(t, ADVANCE_BASE);
+  const e = h.json(['check', 'ci', 'T1']);
+  assert.equal(e.ok, true, e.summary);
+  assert.equal(e.receipt.base_sha, h.baseSha);
+  assert.match(e.summary, new RegExp(`of base ${h.baseSha.slice(0, 10)}`));
+  const moved = h.git(['rev-parse', 'main']);
+  assert.notEqual(moved, h.baseSha, 'the command advanced main');
+  assert.notEqual(h.git(['merge-tree', '--write-tree', moved, h.sha]).split('\n')[0], e.receipt.tree_hash, 'the merged tree moved');
+  assert.equal(h.json(['task', 'show', 'T1']).gates.ok, true);
+
+  // A base that no longer contains the checked one is not the same line of history.
+  const rewritten = h.git(['commit-tree', `${moved}^{tree}`, '-p', `${h.baseSha}^`, '-m', 'rewritten base']);
+  h.git(['update-ref', 'refs/heads/main', rewritten]);
+  assert.match(h.json(['task', 'show', 'T1']).gates.missing.join('; '),
+    new RegExp(`current merged tree, and its checked base ${h.baseSha.slice(0, 10)} is not in the selected base's history`));
+  h.ok(['accept', 'T1']);
+  assert.equal(h.readState('tasks.json').tasks[0].evidence.findLast((x) => x.type === 'ci').receipt.base_sha, rewritten);
 });
 
 for (const changedTree of [true, false]) {
@@ -175,9 +235,11 @@ test('completed local CI tasks keep their audited result without reading current
   const merged = h.json(['merge', 'T1']);
   assert.equal(merged.ok, true);
   assert.match(merged.summary, /into main/);
+  // A rewritten base fails a receipt that is still validated; a forward move would keep it.
   fs.writeFileSync(path.join(h.repo, 'later.txt'), 'later\n');
   h.git(['add', '.']);
   h.git(['commit', '-qm', 'base moves after merge']);
+  h.git(['update-ref', 'refs/heads/main', h.git(['commit-tree', 'HEAD^{tree}', '-p', `${h.baseSha}^`, '-m', 'base rewritten after merge'])]);
   const log = path.join(h.base, 'tree-queries');
   const opts = { env: { LOCAL_TREE_LOG: log } };
   assert.equal(h.json(['task', 'show', 'T1'], opts).gates.ok, true);

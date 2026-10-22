@@ -1526,7 +1526,7 @@ test('tracked changes made by a successful local check cannot pass', (t) => {
   assert.equal(e.ok, false);
 });
 
-test('a newer fetched base invalidates a local receipt while preserving the local branch', (t) => {
+test('a newer fetched base keeps a pinned receipt, and a rewritten one reruns it, while preserving the local branch', (t) => {
   const h = fixture(t);
   h.ok(['check', 'ci', 'T1']);
   fs.writeFileSync(path.join(h.repo, 'remote.txt'), 'remote\n');
@@ -1535,11 +1535,15 @@ test('a newer fetched base invalidates a local receipt while preserving the loca
   const remote = h.git(['rev-parse', 'HEAD']);
   h.git(['update-ref', 'refs/remotes/origin/main', remote]);
   h.git(['reset', '--hard', h.baseSha]);
-  assert.match(h.json(['task', 'show', 'T1']).gates.missing.join('; '), /current merged tree/);
+  assert.equal(h.json(['task', 'show', 'T1']).gates.ok, true, 'origin/main descends from the checked base');
+  const rewritten = h.git(['commit-tree', `${remote}^{tree}`, '-p', `${h.baseSha}^`, '-m', 'remote base rewritten']);
+  h.git(['update-ref', 'refs/remotes/origin/main', rewritten]);
+  h.git(['update-ref', 'refs/heads/main', `${h.baseSha}^`]);
+  assert.match(h.json(['task', 'show', 'T1']).gates.missing.join('; '), /current merged tree, and its checked base/);
   h.ok(['accept', 'T1']);
   const e = h.readState('tasks.json').tasks[0].evidence.at(-1);
-  assert.equal(e.receipt.base_sha, remote);
-  assert.equal(h.git(['rev-parse', 'main']), h.baseSha);
+  assert.equal(e.receipt.base_sha, rewritten);
+  assert.equal(h.git(['rev-parse', 'main']), h.git(['rev-parse', `${h.baseSha}^`]));
   assert.equal(h.readState('tasks.json').tasks[0].status, 'accepted');
 });
 

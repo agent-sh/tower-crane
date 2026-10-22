@@ -63,7 +63,7 @@ test('hook polls, writes and waits read only their own events, not the whole log
 
 // The bulk of a log is finished tasks' events: gate receipts, live spend,
 // hook reports, reaction receipts, dispatches and their exits.
-const CLOSED_CMDS = ['check tests', 'spend live', 'hook report', 'automation', 'automation queued', 'spawn', 'spawn exit', 'submit', 'rework', 'claim', 'renew', 'task note'];
+const CLOSED_CMDS = ['check tests', 'spend live', 'hook report', 'automation', 'automation queued', 'executor', 'spawn', 'spawn exit', 'submit', 'rework', 'claim', 'renew', 'task note'];
 
 function viewFixture(t) {
   return cachedFixture(t, 'view-paths', (h) => {
@@ -86,12 +86,22 @@ function viewFixture(t) {
     const events = Array.from({ length: OTHER }, (_, i) => {
       const cmd = CLOSED_CMDS[i % CLOSED_CMDS.length];
       const id = `E${crypto.randomUUID()}`;
+      // Executor leases taken and released in pairs; their pid is long gone.
+      const lease = Math.floor(i / CLOSED_CMDS.length);
       const detail = cmd === 'automation' ? { source: id, phase: 'done', error: null }
         : cmd === 'automation queued' ? { source: id }
+          : cmd === 'executor' ? { lease: `cpu:closed-${lease >> 1}`, phase: lease % 2 ? 'done' : 'running', kind: 'tests', pid: 2147483646 }
           : ['spawn', 'spawn exit'].includes(cmd) ? { agent: 'worker-T2-1', role: 'worker', pid: 1, code: 0 }
             : { agent: 'worker-T2-1', tokens: i, until: old, ok: true, type: 'tests', summary: 'ran', ...(i === 0 ? { native_crash: [{ test: 'old', signal: 'SIGSEGV' }] } : {}) };
       return { id, at: old, agent: 'worker-T2-1', cmd, task: 'T2', detail, type: cmd, to: 'orchestrator' };
     });
+    // A lease the merge line moved to another task: one it released, and one
+    // it still holds under the task it moved to.
+    const lease = (task, detail) => ({ id: `E${crypto.randomUUID()}`, at: new Date().toISOString(), agent: 'orchestrator', cmd: 'executor', task,
+      detail: { kind: 'head check', pid: 2147483646, ...detail }, type: 'executor', to: 'orchestrator' });
+    events.push(lease('T3', { lease: 'cpu:moved', phase: 'running' }), lease('T4', { lease: 'cpu:moved', phase: 'running' }),
+      lease('T4', { lease: 'cpu:moved', phase: 'done' }), lease('T3', { lease: 'cpu:held', phase: 'running' }),
+      lease('T4', { lease: 'cpu:held', phase: 'running' }));
     // A crash this week, which status counts.
     events.push({ id: `E${crypto.randomUUID()}`, at: new Date().toISOString(), agent: 'orchestrator', cmd: 'check tests', task: 'T3',
       detail: { ok: false, type: 'tests', summary: 'crashed', native_crash: [{ test: 'new', signal: 'SIGSEGV' }] }, type: 'check tests', to: 'orchestrator' });
@@ -142,6 +152,14 @@ test('an indexed select and a select over every event agree', (t) => {
       assert.deepEqual(ids(T.select(S.loadState(h.state).log, spec)), ids(T.select(all, spec)), JSON.stringify(spec));
     }
     assert.equal(T.select(all, { cmds: ['check tests'], since: week }).length, 1, 'the week holds one gate run');
+    // Each lease's latest event, kept while it is running: the indexed read
+    // and the fold over every event name the same ones.
+    const fold = new Map();
+    for (const e of all) if (e.cmd === 'executor') fold.set(e.detail.lease, e);
+    const open = [...fold.values()].filter((e) => e.detail.phase === 'running');
+    assert.deepEqual(S.loadState(h.state).log.openLeases().map((e) => e.id), open.map((e) => e.id));
+    assert.ok(open.some((e) => e.detail.lease === 'cpu:held' && e.task === 'T4'), 'a moved lease is open under the task it moved to');
+    assert.ok(!open.some((e) => e.detail.lease === 'cpu:moved'), 'a released lease is not open');
   });
 });
 
