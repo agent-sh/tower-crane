@@ -467,7 +467,7 @@ test('a sandboxed claude denies its commands every credential-shaped name it sta
     assert.ok(seen.envNames.includes(name), `${name} reaches claude itself`);
     assert.ok(denied.includes(name), `${name} is denied to its commands`);
   }
-  const shaped = seen.envNames.filter((n) => /^AWS_|SECRET|TOKEN|PASSWORD|PASSWD|PASSPHRASE|CREDENTIAL|KEY(?!_\d)/i.test(n) && !/^(TOWER_CRANE_|GIT_|XDG_)/i.test(n));
+  const shaped = seen.envNames.filter((n) => /(?:^AWS_)|(?:SECRET|TOKEN|PASSWORD|PASSWD|PASSPHRASE|CREDENTIAL|KEY(?!_\d))/i.test(n) && !/^(TOWER_CRANE_|GIT_|XDG_)/i.test(n));
   assert.deepEqual(shaped.filter((n) => !denied.includes(n)), [], 'every credential-shaped name claude starts with is denied');
   const kept = denied.filter((n) => /^(TOWER_CRANE_|GIT_|XDG_|PATH$|HOME$|TMPDIR$|GH_CONFIG_DIR$)/i.test(n) || ['TC_FILE_PLAIN', 'TC_ENV_PLAIN'].includes(n));
   assert.deepEqual(kept, [], 'Tower Crane\'s own, git\'s and plain names reach the commands');

@@ -214,11 +214,15 @@ console.log('PROBE ' + JSON.stringify(o));
   const bin = path.join(h.base, 'claude-bin');
   fs.mkdirSync(bin);
   const outside = path.join(h.base, 'claude-env.json');
+  // The stand-in reads its settings from a JSON file beside it, so no test
+  // value is spliced into its source.
+  fs.writeFileSync(path.join(bin, 'stand-in.json'), JSON.stringify({ outside, fake, bin, url: api.url }));
   fs.writeFileSync(path.join(bin, 'claude'), `#!${process.execPath}
 const cp = require('node:child_process'), fs = require('node:fs'), path = require('node:path');
-fs.writeFileSync(${JSON.stringify(outside)}, JSON.stringify(Object.keys(process.env).filter((k) => process.env[k] === ${JSON.stringify(fake)}[k])));
-const PATH = process.env.PATH.split(path.delimiter).filter((d) => path.resolve(d) !== ${JSON.stringify(bin)}).join(path.delimiter);
-const env = { ...process.env, PATH, ANTHROPIC_BASE_URL: ${JSON.stringify(api.url)}, ANTHROPIC_API_KEY: 'fake-key', CLAUDE_CODE_USE_BEDROCK: '', DISABLE_TELEMETRY: '1', CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1' };
+const c = JSON.parse(fs.readFileSync(path.join(__dirname, 'stand-in.json'), 'utf8'));
+fs.writeFileSync(c.outside, JSON.stringify(Object.keys(process.env).filter((k) => process.env[k] === c.fake[k])));
+const PATH = process.env.PATH.split(path.delimiter).filter((d) => path.resolve(d) !== c.bin).join(path.delimiter);
+const env = { ...process.env, PATH, ANTHROPIC_BASE_URL: c.url, ANTHROPIC_API_KEY: 'fake-key', CLAUDE_CODE_USE_BEDROCK: '', DISABLE_TELEMETRY: '1', CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1' };
 const r = cp.spawnSync('claude', process.argv.slice(2), { env, stdio: 'inherit' });
 process.exit(r.status ?? 1);
 `, { mode: 0o755 });
