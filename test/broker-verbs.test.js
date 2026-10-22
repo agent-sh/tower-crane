@@ -23,6 +23,15 @@ fs.writeFileSync(path.join(out, 'receipt.json'), JSON.stringify({ campaign, roun
 console.log('pinned', campaign, rounds, process.env.TOWER_CRANE_VERB);
 `;
 
+const SLEEP_JS = `
+const mode = process.argv[2];
+if (mode === 'trap') process.on('SIGTERM', () => process.exit(143));
+if (mode === 'selfkill') process.kill(process.pid, 'SIGKILL');
+if (mode === 'exit3') process.exit(3);
+console.log('sleeping', process.pid);
+setInterval(() => {}, 1000);
+`;
+
 function verbs(sha) {
   const commit = { commit: sha, paths: ['tools'] };
   return {
@@ -33,6 +42,9 @@ function verbs(sha) {
     },
     private: { argv: [NODE, 'tools/verb.js', 'private', '1', '{out}'], source: commit, timeout_sec: 60 },
     sleepy: { argv: [NODE, 'tools/sleep.js'], source: commit, timeout_sec: 1, delegate: true },
+    trap: { argv: [NODE, 'tools/sleep.js', 'trap'], source: commit, timeout_sec: 1, delegate: true },
+    selfkill: { argv: [NODE, 'tools/sleep.js', 'selfkill'], source: commit, timeout_sec: 60, delegate: true },
+    exit3: { argv: [NODE, 'tools/sleep.js', 'exit3'], source: commit, timeout_sec: 60, delegate: true },
     pathy: {
       argv: [NODE, '{source}/{param.script}', '{param.target}', '1', '{out}'], source: commit, timeout_sec: 60, delegate: true,
       params: { script: { type: 'string', pattern: '.+' }, target: { type: 'string', pattern: '.+' } },
@@ -53,7 +65,7 @@ function fixture(t) {
     h.init(['--base', 'main']);
     fs.mkdirSync(path.join(h.repo, 'tools'));
     fs.writeFileSync(path.join(h.repo, 'tools', 'verb.js'), VERB_JS);
-    fs.writeFileSync(path.join(h.repo, 'tools', 'sleep.js'), "console.log('sleeping', process.pid); setInterval(() => {}, 1000);\n");
+    fs.writeFileSync(path.join(h.repo, 'tools', 'sleep.js'), SLEEP_JS);
     h.git(['add', '-A']);
     h.git(['commit', '-qm', 'verb scripts']);
     const sha = h.git(['rev-parse', 'HEAD']);
@@ -309,16 +321,21 @@ test('project set refuses verbs that a worker could steer', (t) => {
   assert.deepEqual(h.readState('project.json'), project);
 });
 
+// A stopped run exits 1 whatever code the verb returns on the way out; a verb
+// that only fails exits with its own code.
 for (const row of [
-  { verb: 'sleepy', check: (e) => assert.equal(e.verb.timed_out, true), summary: /timed out after 1 s/ },
-  { verb: 'storm', check: (e) => assert.equal(e.verb.resource_reason, 'resource-tasks-max'), summary: /resource-tasks-max/ },
-  { verb: 'memory', check: (e) => assert.equal(e.verb.resource_reason, 'resource-memory-max'), summary: /resource-memory-max/ },
+  { verb: 'sleepy', title: 'the timeout stops a runaway verb', check: (e) => assert.equal(e.verb.timed_out, true), summary: /timed out after 1 s/ },
+  { verb: 'trap', title: 'the timeout stops a verb that traps SIGTERM and exits 143', check: (e) => assert.equal(e.verb.timed_out, true), summary: /timed out after 1 s/ },
+  { verb: 'selfkill', title: 'a verb killed by a signal exits 1', check: (e) => assert.equal(e.verb.timed_out, false), summary: /killed by SIGKILL|exit [1-9]/ },
+  { verb: 'exit3', title: 'a verb that fails exits with its own code', code: 3, check: (e) => assert.equal(e.verb.exit_code, 3), summary: /exit 3/ },
+  { verb: 'storm', title: 'the storm cap stops a runaway verb', check: (e) => assert.equal(e.verb.resource_reason, 'resource-tasks-max'), summary: /resource-tasks-max/ },
+  { verb: 'memory', title: 'the memory cap stops a runaway verb', check: (e) => assert.equal(e.verb.resource_reason, 'resource-memory-max'), summary: /resource-memory-max/ },
 ]) {
-  test(`the ${row.verb === 'sleepy' ? 'timeout' : `${row.verb} cap`} stops a runaway verb and is recorded`, (t) => {
+  test(`${row.title} and is recorded`, (t) => {
     const h = fixture(t);
     h.ok(['task', 'update', 'T1', '--broker-verbs', row.verb, '--agent', 'orchestrator']);
     const r = verb(h, row.verb, [], { ...WORKER, TOWER_CRANE_TEST_CONTAINMENT: '1' });
-    assert.equal(r.code, 1, r.stdout + r.stderr);
+    assert.equal(r.code, row.code ?? 1, r.stdout + r.stderr);
     assert.match(r.stdout, row.summary);
     const [e] = evidence(h);
     assert.equal(e.ok, false);
@@ -326,3 +343,20 @@ for (const row of [
     row.check(e);
   });
 }
+
+// chmod cannot stop a write on Windows or for root.
+test('an output the scratch refuses keeps its digest and the run stays ok', { skip: process.platform === 'win32' || process.getuid?.() === 0 }, (t) => {
+  const h = fixture(t);
+  h.ok(['task', 'update', 'T1', '--broker-verbs', 'rehearse', '--agent', 'orchestrator']);
+  fs.chmodSync(h.scratch, 0o555);
+  const r = verb(h, 'rehearse', REHEARSE);
+  fs.chmodSync(h.scratch, 0o755);
+  assert.equal(r.code, 0, r.stderr);
+  const [e] = evidence(h);
+  assert.equal(e.ok, true);
+  const [out] = e.verb.outputs;
+  assert.deepEqual(Object.keys(out), ['name', 'sha256', 'bytes', 'refused']);
+  assert.match(out.refused, /verb-rehearse-.*-receipt\.json \(EACCES\)$/);
+  assert.match(r.stdout, new RegExp(`receipt.json: sha256 ${out.sha256}, not copied to `));
+  assert.deepEqual(fs.readdirSync(h.scratch), []);
+});
