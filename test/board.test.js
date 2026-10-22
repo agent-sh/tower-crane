@@ -1449,3 +1449,17 @@ test('the board marks a ready task without a brief until its brief is written', 
   h.ok(['brief', 'set', 'T1', '-'], { input: 'Context.\n' });
   assert.deepEqual(marks(), [[true], false]);
 });
+
+test('the board names days and months as English Intl does, in UTC', () => {
+  const { dayName, clock } = require('../lib/board/parts');
+  const day = new Intl.DateTimeFormat('en', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'UTC' });
+  const month = new Intl.DateTimeFormat('en', { month: 'short', timeZone: 'UTC' });
+  // A leap year at shifting hours, so a local-time slip or a wrong table entry shows.
+  for (let t = Date.UTC(2024, 0, 1, 0, 30); t < Date.UTC(2025, 0, 2); t += 86400000 * 0.85) {
+    const d = new Date(t);
+    assert.equal(dayName(d), day.format(d), d.toISOString());
+    const hm = d.toISOString().slice(11, 16);
+    assert.equal(clock(d.toISOString(), '2030-01-01T00:00:00Z'), `${month.format(d)} ${d.getUTCDate()} ${hm}`, d.toISOString());
+    assert.equal(clock(d.toISOString(), d.toISOString()), hm, 'the same day shows the time alone');
+  }
+});

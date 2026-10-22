@@ -53,6 +53,15 @@ function setup(t) {
   });
 }
 
+test('wait help keeps ownership and complete decision answers', (t) => {
+  const h = setup(t);
+  const help = h.ok(['wait', '--help']);
+  assert.match(help, /--own --task ID/);
+  assert.match(help, /--own waits as the PR owner/);
+  assert.match(help, /--follow streams wakes with complete decision answers/);
+  assert.match(help, /including complete decision answers/);
+});
+
 for (const rule of [null, 'owner', 'owner-named-agent', 'owner-technical-delegation', 'orchestrator-escalated-question']) {
   test(`decision notes retain the answer rule: ${rule || 'legacy'}`, () => {
     const note = 'Use Redis.\nKeep the extra requirement.';

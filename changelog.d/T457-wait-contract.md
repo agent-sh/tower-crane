@@ -1,0 +1,1 @@
+- Keep PR-owner wait usage and full decision-answer wake descriptions together in CLI help and generated command documentation.
