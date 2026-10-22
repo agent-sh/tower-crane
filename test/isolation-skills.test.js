@@ -56,9 +56,11 @@ test('unbound projects spawn workers and reviewers with owner-key denials but st
 test('a spawned codex agent is pointed at the user\'s global rules, loads none of the user memory, instructions, MCP servers or rules, and reaches auth through a link', { skip: NO_STUBS }, (t) => {
   const { h, u } = setup(t);
   isolated(h, 'small', 'codex');
+  // A .env name that is not credential-shaped is still kept from commands.
+  fs.appendFileSync(path.join(u.home, '.codex', '.env'), 'export BEDROCK_PLAIN_SETTING=plain\n');
   const dry = h.json(['spawn', '--role', 'small', '--task', 'T1', '--dry-run'], { env: u.env });
   assert.ok(!JSON.stringify(dry).includes(SECRET), 'no credential in the command or its env');
-  const started = spawn(h, u, 'small');
+  const started = spawn(h, u, 'small', { PROBE_FAKE_API_KEY: 'fake', PROBE_FAKE_SECRET: 'fake', AWS_SECRET_ACCESS_KEY: 'fake' });
   const seen = u.report();
   assert.ok(!seen.memory.join('\n').includes('PLANTED'), 'user instruction files and memories stay out of its home');
   assert.ok(seen.prompt.includes(`- ${path.join(u.home, '.codex', 'AGENTS.md')} (global, read it)`), 'the prompt names the user\'s global rules for the agent to read');
@@ -67,7 +69,23 @@ test('a spawned codex agent is pointed at the user\'s global rules, loads none o
   assert.ok(!seen.rules.join('\n').includes('planted-rule'), 'no approved-command rules');
   assert.match(seen.rules.join('\n'), /pattern = \["gh", "pr", "merge"\],\n {4}decision = "forbidden"/, 'the role denies gh writes');
   assert.equal(seen.auth, `{"token":"${SECRET}-CRED"}`, 'auth.json reaches the agent');
-  assert.equal(seen.env, `AWS_BEARER_TOKEN_BEDROCK=${SECRET}-ENV\n`, '.env reaches the agent');
+  assert.equal(seen.env, `AWS_BEARER_TOKEN_BEDROCK=${SECRET}-ENV\nexport BEDROCK_PLAIN_SETTING=plain\n`, '.env reaches codex\'s own process');
+  // ...but not the commands codex runs: codex hands them its environment
+  // through this policy, which takes out credential-shaped names and every
+  // name .env sets, and keeps what Tower Crane gave the agent.
+  const policy = seen.config.shell_environment_policy;
+  assert.ok(policy, 'the agent home renders a shell_environment_policy');
+  assert.equal(policy.inherit, 'all');
+  assert.equal(policy.ignore_default_excludes, true, 'codex\'s own default excludes would drop GIT_CONFIG_KEY_<n>');
+  const excluded = (name) => policy.exclude.some((glob) => new RegExp(`^${glob.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.')}$`, 'i').test(name));
+  for (const name of ['AWS_BEARER_TOKEN_BEDROCK', 'BEDROCK_PLAIN_SETTING', 'PROBE_FAKE_API_KEY', 'PROBE_FAKE_SECRET', 'AWS_SECRET_ACCESS_KEY', 'AWS_PROFILE',
+    'OPENAI_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'DB_PASSWORD', 'GOOGLE_APPLICATION_CREDENTIALS', 'P_KEY', 'API_KEY2', 'KEY', 'npm_token', 'SIGNING_KEY_FILE']) {
+    assert.ok(excluded(name), `${name} stays out of commands`);
+  }
+  for (const name of ['PROBE_FAKE_API_KEY', 'AWS_SECRET_ACCESS_KEY']) assert.ok(seen.envNames.includes(name), `${name} reached codex itself`);
+  const kept = seen.envNames.filter((n) => /^(TOWER_CRANE_|GIT_|XDG_|PATH$|HOME$|TMPDIR$|GH_CONFIG_DIR$)/.test(n));
+  assert.ok(kept.includes('TOWER_CRANE_BROKER') && kept.includes('PATH') && kept.includes('GH_CONFIG_DIR'), kept.join(' '));
+  for (const name of [...kept, 'GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0', 'GIT_CONFIG_KEY_12']) assert.ok(!excluded(name), `${name} reaches commands`);
   assert.equal(seen.config.model_provider, 'p', 'the provider is kept');
   assert.deepEqual(seen.config.model_providers, { p: { name: 'P', env_key: 'P_KEY' }, q: { name: 'Q', env_key: 'Q_KEY', wire_api: 'responses' } }, 'providers in any layout, without credentials');
   for (const k of ['approval_policy', 'model_instructions_file']) assert.equal(seen.config[k], undefined, `${k} is the user's, not the role's`);
@@ -85,6 +103,52 @@ test('a spawned codex agent is pointed at the user\'s global rules, loads none o
   spawn(h, u, 'review');
   assert.deepEqual(u.report().skills, ['tower-crane-review'], 'the reviewer gets its own skill only');
   noSecretsCopied(h);
+});
+
+// Why the real codex sandbox cannot run here, or false. `codex sandbox`
+// calls no model, but it is the real codex, which only a live opt-in runs.
+function codexSandboxSkip() {
+  if (process.env.TOWER_CRANE_LIVE_CODEX !== '1') return 'set TOWER_CRANE_LIVE_CODEX=1 to run the real codex sandbox';
+  if (process.platform !== 'linux') return 'the probe covers the Linux sandbox';
+  const r = cp.spawnSync('codex', ['sandbox', '--', 'true'], { encoding: 'utf8', timeout: 120000 }); // wait-allow: backstop for a codex sandbox that never starts
+  if (r.error?.code === 'ENOENT') return 'codex is not on PATH';
+  return r.status === 0 ? false : `codex sandbox does not start here: ${String(r.stderr).trim().split('\n').pop()}`;
+}
+
+// A stand-in codex runs the real `codex sandbox` with the home spawn wrote,
+// so the command runs as codex would run an agent's, and no model is called.
+// Every value here is fake.
+test('in the real codex sandbox an agent\'s command gets no credential-shaped variable and no .env name, and keeps what Tower Crane gives the agent', { skip: NO_STUBS, timeout: 300000 }, (t) => {
+  const why = codexSandboxSkip();
+  if (why) {
+    t.skip(why);
+    return;
+  }
+  const { h, u } = setup(t);
+  isolated(h, 'small', 'codex');
+  fs.appendFileSync(path.join(u.home, '.codex', '.env'), 'BEDROCK_PLAIN_SETTING=fake-plain\n');
+  const envFile = path.join(h.base, 'private.env');
+  fs.writeFileSync(envFile, 'TC_FILE_TOKEN=fake-file-token\nTC_FILE_PLAIN=fake-plain\n', { mode: 0o600 });
+  h.ok(['project', 'set', '--env_file', envFile]);
+  const out = path.join(h.base, 'sandbox-env.json');
+  const bin = path.join(h.base, 'bin');
+  fs.writeFileSync(path.join(bin, 'codex'), `#!${process.execPath}
+const cp = require('node:child_process'), fs = require('node:fs'), path = require('node:path');
+const PATH = process.env.PATH.split(path.delimiter).filter((d) => path.resolve(d) !== ${JSON.stringify(bin)}).join(path.delimiter);
+process.stdout.write(JSON.stringify({ type: 'thread.started', thread_id: 'probe' }) + '\\n');
+const r = cp.spawnSync('codex', ['sandbox', '-c', 'default_permissions="tower-crane"', '--', process.execPath, '-e', 'console.log(JSON.stringify(Object.keys(process.env)))'], { env: { ...process.env, PATH }, encoding: 'utf8' });
+fs.writeFileSync(${JSON.stringify(out)}, JSON.stringify({ status: r.status, stderr: r.stderr, inside: r.status === 0 ? JSON.parse(r.stdout) : null, outside: Object.keys(process.env) }));
+process.exit(r.status ?? 1);
+`, { mode: 0o755 });
+  spawn(h, u, 'small', { PROBE_FAKE_API_KEY: 'fake', AWS_SECRET_ACCESS_KEY: 'fake', AWS_REGION: 'fake-region' });
+  const seen = JSON.parse(fs.readFileSync(out, 'utf8'));
+  assert.equal(seen.status, 0, seen.stderr);
+  const gone = ['PROBE_FAKE_API_KEY', 'AWS_SECRET_ACCESS_KEY', 'AWS_REGION', 'TC_FILE_TOKEN'];
+  for (const name of gone) assert.ok(seen.outside.includes(name), `${name} reached codex itself`);
+  for (const name of [...gone, 'AWS_BEARER_TOKEN_BEDROCK', 'BEDROCK_PLAIN_SETTING']) assert.ok(!seen.inside.includes(name), `${name} stays out of the command`);
+  const given = seen.outside.filter((n) => /^(TOWER_CRANE_|GIT_|XDG_)/.test(n) || ['HOME', 'TMPDIR', 'GH_CONFIG_DIR', 'TC_FILE_PLAIN'].includes(n));
+  assert.ok(given.includes('TOWER_CRANE_BROKER') && given.includes('TC_FILE_PLAIN'), given.join(' '));
+  for (const name of given) assert.ok(seen.inside.includes(name), `${name} reaches the command`);
 });
 
 // Automation dispatches from inside a worker's monitor, so its package root is

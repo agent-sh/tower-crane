@@ -5,6 +5,8 @@ on:
     # No base filter: a stacked task's PR targets its lower task's branch, whatever its name.
   push:
     branches: [main]
+    # A release tag runs the full matrix; the release gate reads the daily or a manual run.
+    tags: ['v*']
   schedule:
     - cron: '17 3 * * *'
   workflow_dispatch:
@@ -27,17 +29,18 @@ permissions:
 
 # GitHub keeps one running and one pending run per group; a newer run replaces the pending one.
 # Main pushes share one group: the newest pending head covers every earlier commit, and a running
-# main run is never cancelled. Scheduled and manual runs keep unique groups so none is replaced.
+# main run is never cancelled. Tag, scheduled and manual runs keep unique groups so none is replaced.
 concurrency:
-  group: ${{ github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || github.event_name == 'push' && 'ci-main-push' || format('ci-run-{0}', github.run_id) }}
+  group: ${{ github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || github.ref == 'refs/heads/main' && github.event_name == 'push' && 'ci-main-push' || format('ci-run-{0}', github.run_id) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # Same-repository PRs pass the full local tests gate before submit, so hosted CI only
-  # validates the shared files. Fork PRs, main pushes, daily and manual runs run the test matrix.
+  # Tasks pass their tests gate (crucial and mapped suites) before submit, so same-repository PRs
+  # and main pushes only validate the shared files. Fork PRs, release tags, daily and manual runs
+  # run the full matrix, the repeats and the proofs.
   checks:
     name: checks (shared files)
-    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    if: (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -49,23 +52,26 @@ jobs:
           node-version: 26
       - run: npm run check:shared
         env:
-          TOWER_CRANE_CHANGE_BASE: ${{ github.event.pull_request.base.sha }}
+          TOWER_CRANE_CHANGE_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
 
   test:
     name: test (${{ matrix.os }}, node ${{ matrix.node }}, shard ${{ matrix.shard }})
     # A profile dispatch runs only the profile and mutation jobs.
-    if: "!inputs.profile && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)"
+    if: "!inputs.profile && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository))"
     runs-on: ${{ matrix.os }}
     # test/run.js splits shards by measured file time (test/durations.json). Three Windows shards
     # took 28 to 36 minutes, against test/run.js's 36-minute shard deadline, so Windows runs four.
     # This is a per-shard hang limit, not the suite deadline in scripts/suite-time.js; the runner
     # still bounds each test independently. The test step's own limit leaves time to upload its log.
     timeout-minutes: 45
+    # The Windows shard guard posts its progress as a check run.
+    permissions:
+      contents: read
+      checks: write
     strategy:
       fail-fast: false
       matrix:
-        # The local tests gate covers Linux at every submitted head.
-        os: ${{ fromJSON(github.event_name == 'pull_request' && '["windows-latest"]' || '["ubuntu-latest","windows-latest"]') }}
+        os: ['ubuntu-latest', 'windows-latest']
         node: [26, 24]
         shard: ['1/3', '2/3', '3/3']
         # Exclusions apply before inclusions, so Windows keeps only its four Node 26 shards.
@@ -86,16 +92,34 @@ jobs:
       - run: npm run check:shared
         env:
           TOWER_CRANE_CHANGE_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
-      # The shard watchdog stops a hung run at 36 minutes; this limit ends the step if it cannot.
-      - run: npm test
+      # The shard watchdog stops a hung run at 36 minutes. On Windows scripts/shard-guard.ps1, a
+      # process outside node, runs the tests in a job object, posts their progress to a check run
+      # every minute and stops them at 38 minutes if node could not. This limit ends the step if
+      # neither can.
+      - name: npm test
+        run: ${{ runner.os == 'Windows' && 'pwsh -NoProfile -File scripts/shard-guard.ps1 npm test' || 'npm test' }}
         timeout-minutes: 40
         env:
           TOWER_CRANE_TEST_TMP: ${{ runner.temp }}/tower-crane-tests
           TC_TEST_SHARD: ${{ matrix.shard }}
           TC_TEST_SHARD_LOG_DIR: ${{ runner.temp }}/shard-log
           TC_TEST_SHARD_HANG: ${{ inputs.hang && '1' || '' }}
-          TC_TEST_SHARD_DEADLINE_MIN: ${{ inputs.hang && '2' || '' }}
-      # A job its limit cancels keeps no log; this keeps the file progress and the watchdog's dump.
+          # A hang run on Windows leaves the stop to the guard, as when node itself is stuck.
+          TC_TEST_SHARD_DEADLINE_MIN: ${{ inputs.hang && (runner.os == 'Windows' && '10' || '2') || '' }}
+          TC_SHARD_GUARD_DEADLINE_MIN: ${{ inputs.hang && '2' || '38' }}
+          # Healthy Windows shards peaked at 28 to 69 active processes and 0.9 to 1.8 GiB committed
+          # (run 39561962547). The VM has 16 GiB with about 3 GiB in use before the tests, so a job at
+          # its memory limit still leaves the runner room; 1000 processes is about 14 times the peak.
+          TC_SHARD_GUARD_MAX_PROCESSES: 1000
+          TC_SHARD_GUARD_MAX_MEMORY_MB: 12288
+          TC_SHARD_PROGRESS_CHECK: shard progress (${{ matrix.os }}, node ${{ matrix.node }}, shard ${{ matrix.shard }})
+          TC_SHARD_PROGRESS_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          TC_SHARD_PROGRESS_TOKEN: ${{ runner.os == 'Windows' && github.token || '' }}
+          # The daily and manual runs build the coverage map tests.map pins (test/run.js) on the
+          # three Linux Node 26 shards, which together run every file.
+          TC_TEST_COVERAGE_DIR: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && matrix.os == 'ubuntu-latest' && matrix.node == 26 && format('{0}/coverage', runner.temp) || '' }}
+      # A job its limit cancels keeps no log; this keeps the file progress, the watchdog's dump and on
+      # Windows the guard's log.
       - name: Save shard progress
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -103,16 +127,53 @@ jobs:
           name: shard-progress-${{ matrix.os }}-node-${{ matrix.node }}-${{ strategy.job-index }}
           path: ${{ runner.temp }}/shard-log
           if-no-files-found: warn
+      # A failing test still ran its code, so the shard's map is kept on any outcome but a cancel.
+      - name: Save shard coverage map
+        if: ${{ !cancelled() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && matrix.os == 'ubuntu-latest' && matrix.node == 26 }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: coverage-map-shard-${{ strategy.job-index }}
+          path: ${{ runner.temp }}/coverage/tests-coverage-map.json
+          if-no-files-found: error
+
+  # Joins the three shard maps into tests-coverage-map.json, which `tower-crane tests map refresh
+  # --from-run RUN_ID` pins as tests.map after each daily run.
+  coverage-map:
+    name: coverage map
+    needs: test
+    if: ${{ !cancelled() && !inputs.profile && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 26
+      - name: Merge the shard maps
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run download "$GITHUB_RUN_ID" -R "$GITHUB_REPOSITORY" -p 'coverage-map-shard-*' -D "$RUNNER_TEMP/coverage-shards"
+          node scripts/tests-coverage-map.js merge --expect 3 --out "$RUNNER_TEMP/tests-coverage-map.json" "$RUNNER_TEMP"/coverage-shards/*/tests-coverage-map.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: tests-coverage-map
+          path: ${{ runner.temp }}/tests-coverage-map.json
+          if-no-files-found: error
 
   # Flake repeats for Windows-only races. They run in their own job so the test shards keep
   # an even, measured share of the suite.
   repeats:
     name: repeat (windows-latest, node 26)
-    if: github.event_name != 'pull_request' && !inputs.profile
+    if: "!inputs.profile && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository))"
     runs-on: windows-latest
-    # About 30 to 45 minutes: ten passes of the authority files take about 16, and twenty of the
-    # interrupt backoff and origin read tests about 8.
-    timeout-minutes: 55
+    # About 60 to 75 minutes: ten passes of the authority files take about 16, twenty of state
+    # compatibility about 15, twenty of the interrupt backoff and origin read tests about 8 and
+    # ten of the mutation tests about 15, within their 40-minute step limit.
+    timeout-minutes: 110
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -151,6 +212,16 @@ jobs:
           }
         env:
           TOWER_CRANE_TEST_TMP: ${{ runner.temp }}/tower-crane-tests
+      - name: Repeat state compatibility twenty times
+        shell: pwsh
+        run: |
+          foreach ($attempt in 1..20) {
+            Write-Host "State compatibility: pass $attempt/20"
+            npm test -- test/state-compatibility.test.js
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+        env:
+          TOWER_CRANE_TEST_TMP: ${{ runner.temp }}/tower-crane-tests
       - name: Repeat owner authority and board approval files ten times
         shell: pwsh
         run: |
@@ -171,11 +242,24 @@ jobs:
           }
         env:
           TOWER_CRANE_TEST_TMP: ${{ runner.temp }}/tower-crane-tests
+      # Each pass asserts that every process its mutant runs started has stopped. A step limit
+      # under the job's keeps the log of a pass that hangs.
+      - name: Repeat mutation containment tests ten times
+        timeout-minutes: 40
+        shell: pwsh
+        run: |
+          foreach ($attempt in 1..10) {
+            Write-Host "Mutation containment tests: pass $attempt/10"
+            npm test -- test/mutants.test.js
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+        env:
+          TOWER_CRANE_TEST_TMP: ${{ runner.temp }}/tower-crane-tests
 
   gate-scratch:
     name: complete gate scratch cleanup proof
-    # PRs skip the proofs; main pushes, daily and manual runs keep them.
-    if: github.event_name != 'pull_request' && !inputs.profile
+    # Same-repository PRs and main pushes skip the proofs; fork PRs, release tags, daily and manual runs keep them.
+    if: "!inputs.profile && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository))"
     runs-on: ubuntu-latest
     # A failing head reruns the suite on the base: two runs at the suite deadline and setup.
     # check:shared holds this to scripts/suite-time.js.
@@ -201,8 +285,8 @@ jobs:
 
   model-swap:
     name: complete model swap proof
-    # PRs skip the proofs; main pushes, daily and manual runs keep them.
-    if: github.event_name != 'pull_request' && !inputs.profile
+    # Same-repository PRs and main pushes skip the proofs; fork PRs, release tags, daily and manual runs keep them.
+    if: "!inputs.profile && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository))"
     runs-on: ubuntu-latest
     # Leave setup time outside the probe's software-gate deadline; check:shared holds this to
     # scripts/suite-time.js.
