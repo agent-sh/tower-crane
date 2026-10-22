@@ -195,7 +195,7 @@ test('status names the growth rule and its sample count, and closed windows go t
   h.ok(['project', 'set', '--governor', '{"growth_samples_min":1,"expected_mb":{"tests":2048}}']);
   const project = h.readState('project.json');
   const held = G.admit({ stateDir: h.state, env: h.env, agent: 'orchestrator' }, { kind: 'tests', task: 'T1', project });
-  t.after(() => held.release());
+  h.teardown.push(() => held.release());
   assert.match(h.ok(['status']), /in 1 unit across 1 project, may grow 2\.0 GiB \(sum of unit peaks; 0 of 1 window before measured growth\);/);
   G.tick(h.env, project);
   // An hour later: the window the tick opened closes on the next tick.
@@ -324,7 +324,7 @@ test('every project on the host draws on one budget', (t) => {
   supervised(b, ['T1']);
   const project = a.readState('project.json');
   const held = [];
-  t.after(() => held.forEach((u) => u.release()));
+  a.teardown.push(() => held.forEach((u) => u.release()));
   for (const task of ['T1', 'T2', 'T3', 'T4']) held.push(G.admit({ stateDir: a.state, env: a.env, agent: 'orchestrator' }, { kind: 'tests', task, project }));
   const refused = b.run(['spawn', '--task', 'T1']);
   assert.equal(refused.code, 3, refused.stderr);
@@ -458,7 +458,7 @@ test('past the stop line a running gate stops without a verdict and says why', {
   writeHost(host, { limit: 10, used: 2 });
   let child;
   const run = h.runAsync(['check', 'tests', 'T1'], { onSpawn: (c) => { child = c; } });
-  t.after(() => { if (child && child.exitCode === null) killPid(child.pid, 'SIGKILL'); });
+  h.teardown.push(() => { if (child && child.exitCode === null) killPid(child.pid, 'SIGKILL'); });
   await waitOnRepo(h, () => fs.existsSync(h.started), 'the tests command starts');
   const suitePid = Number(fs.readFileSync(h.started, 'utf8'));
   const suite = { pid: suitePid, ...Processes.identity(suitePid) };
@@ -491,7 +491,7 @@ test('a gate that joins a run already going takes no place in the budget', { ski
   h.ok(['project', 'set', '--governor', '{"expected_mb":{"tests":4000}}']);
   let first;
   const holder = h.runAsync(['check', 'tests', 'T1'], { onSpawn: (c) => { first = c; } });
-  t.after(() => { if (first && first.exitCode === null) killPid(first.pid, 'SIGKILL'); });
+  h.teardown.push(() => { if (first && first.exitCode === null) killPid(first.pid, 'SIGKILL'); });
   await waitOnRepo(h, () => fs.existsSync(h.started), 'the first run starts its suite');
   let stderr = '';
   const joiner = h.runAsync(['check', 'tests', 'T1'], { onSpawn: (c) => c.stderr.on('data', (d) => { stderr += d; }) });
@@ -518,7 +518,9 @@ test('a wait defers a gate reaction under pressure and runs it once there is roo
     c.stdout.on('data', (d) => { stdout += d; });
     c.stderr.on('data', (d) => { stderr += d; });
   } });
-  t.after(async () => { if (child.exitCode === null) { child.kill('SIGTERM'); await wait; } });
+  // node:test runs after hooks in the order they were added, so a t.after here
+  // would stop the wait only once fixture cleanup had removed what it writes.
+  h.teardown.push(async () => { if (child.exitCode === null) { child.kill('SIGTERM'); await wait; } });
   await waitOnRepo(h, () => stdout.includes('"type":"ready"'), 'the wait is ready');
   h.ok(['submit', 'T1', '--agent', 'worker', '--sha', h.sha, '--branch', 'change']);
   await waitOnRepo(h, () => /T1: tests gate deferred by the host governor: memory pressure: some avg10 15% is at or over 10%/.test(stderr), 'the wait defers the tests gate');
@@ -580,7 +582,7 @@ test('a supervisor-deferred submission stays visible and a new wait retries its 
   const spawned = h.runAsync(['spawn', '--task', 'T1', '--wait', '--agent', 'orchestrator'], {
     onSpawn: (c) => { supervisor = c; },
   });
-  t.after(() => { if (supervisor.exitCode === null) killPid(supervisor.pid, 'SIGKILL'); });
+  h.teardown.push(() => { if (supervisor.exitCode === null) killPid(supervisor.pid, 'SIGKILL'); });
   await waitOnRepo(h, () => fs.existsSync(hold), 'the supervisor worker submits', { alive: supervisor });
   const host = h.env.TOWER_CRANE_HOST_ROOT;
   writeHost(host, { limit: 10, used: 2, memorySome: 15 });
@@ -622,7 +624,7 @@ global.Date = class extends NativeDate {
     env,
     onSpawn: (c) => { waiter = c; c.stdout.on('data', (d) => { stdout += d; }); },
   });
-  t.after(async () => { if (waiter.exitCode === null) { waiter.kill('SIGTERM'); await wait; } });
+  h.teardown.push(async () => { if (waiter.exitCode === null) { waiter.kill('SIGTERM'); await wait; } });
   await waitOnRepo(h, () => stdout.includes('"type":"ready"'), 'the new wait is ready');
   await waitOnRepo(h, () => h.readState('tasks.json').tasks.every((task) => task.evidence.some((e) => e.type === 'tests' && e.ok)), 'the new wait drains both submissions');
   const starts = h.logs().filter((e) => e.cmd === 'automation' && e.detail.phase === 'running');
@@ -694,7 +696,7 @@ global.Date = class extends NativeDate {
     const blocked = row.completion
       ? h.run(['ci', 'completed', 'T2', '--sha', h.sha, '--agent', 'orchestrator'], { env })
       : h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator'], { env });
-    assert.equal(blocked.code, row.completion ? 0 : 2, blocked.stderr);
+    assert.equal(blocked.code, row.completion ? 0 : 2, `signal ${blocked.signal}: ${blocked.stderr}`);
     assert.ok(logs().some((e) => e.cmd === 'automation' && e.task === 'T2' && e.detail.phase === 'running'), 'T2 reaction started while T1 was held');
     assert.equal(logs().filter((e) => e.cmd === 'automation' && e.detail.source === original && e.detail.phase === 'running').length, 1, 'held work took no new executor');
     if (row.failed) assert.equal(h.readState('tasks.json').tasks.find((task) => task.id === 'T2').status, 'rework');
@@ -708,7 +710,7 @@ global.Date = class extends NativeDate {
     const retryAt = Math.max(...logs().filter((e) => e.cmd === 'automation' && e.detail.governor).map((e) => e.detail.governor.until)) + 1;
     writeClock(retryAt);
     const resumed = h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator'], { env });
-    assert.equal(resumed.code, 2, resumed.stderr);
+    assert.equal(resumed.code, 2, `signal ${resumed.signal}: ${resumed.stderr}`);
     const starts = logs().filter((e) => e.cmd === 'automation' && e.detail.phase === 'running');
     const retried = starts.findIndex((e, i) => i > 0 && e.detail.source === original);
     assert.ok(retried > 0, 'the original source resumed');
@@ -971,7 +973,7 @@ test('a finished agent gives up its place before its gate reactions run', { skip
   h.ok(['ladder', 'set', 'easy', '--harness', 'command', '--command', JSON.stringify([process.execPath, '-e', script, '{brief}']), '--clear', 'profile', '--clear', 'effort']);
   const started = h.json(['spawn', '--task', 'T1']);
   // A failed assertion leaves the gate holding; the release ends it before the fixture goes.
-  t.after(() => { if (fs.existsSync(path.dirname(h.release))) fs.writeFileSync(h.release, ''); });
+  h.teardown.push(() => { if (fs.existsSync(path.dirname(h.release))) fs.writeFileSync(h.release, ''); });
   await waitOnRepo(h, () => fs.existsSync(h.started), 'the supervisor runs the tests gate');
   assert.ok(alive(started.monitor_pid), 'the supervisor is still running its reaction');
   assert.deepEqual(G.read(h.env).units.map((u) => u.kind), ['tests'], 'only the gate holds a place');
