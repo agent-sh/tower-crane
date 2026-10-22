@@ -22,6 +22,8 @@ test('worker instructions keep base merges conditional and publication at submit
   assert.match(publish, /Publish once, right before submit/);
   assert.match(publish, /Run submit immediately after publication/);
   assert.match(publish, /No push between submits/);
+  assert.match(publish, /fix locally, run step 7 at the new local head, then publish and resubmit once through step 8/);
+  assert.doesNotMatch(publish, /fix, push, run step 7/);
   assert.match(rework, /Keep every rework fix local until resubmit/);
   assert.match(rework, /push and update the PR once, immediately before resubmitting/);
   assert.doesNotMatch(work, /Fix the blocking ones, push|fix them, push,|Do it after the PR exists/);

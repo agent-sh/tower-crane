@@ -35,6 +35,7 @@ test('the budget admits work only under every defer line, counting growth, other
     ['exactly at the line', reading({ used: 7 }), registry(), true],
     ['past the line', reading({ used: 7.1 }), registry(), false, /tests\.slice has 7\.1 GiB of 10\.0 GiB in use.*8\.6 GiB is over the 85% line \(8\.5 GiB\)/],
     ['admitted units may still grow', reading({ used: 2 }), registry([unit('worker', 1, { expected: 4 * GiB, measured: GiB }), unit('tests', 2, { expected: 4 * GiB, measured: GiB })]), false, /Tower Crane work may grow 6\.0 GiB/],
+    ['an owner waiting on its submitted head grows no further', reading({ used: 2 }), registry([unit('worker', 1, { expected: 8 * GiB, measured: GiB, waiting: true })]), true],
     ['other sessions may return to their recent peak', reading({ used: 4 }), registry([], [recent(8, 3)]), false, /other sessions 3\.6 GiB toward their peak of the last 30 minutes/],
     ['a peak\'s claim fades over the window', reading({ used: 4 }), registry([], [recent(8, 25)]), true],
     ['a peak past the window no longer counts', reading({ used: 4 }), registry([], [recent(9, 31)]), true],
