@@ -18,7 +18,7 @@ function withoutFences(text) {
 }
 
 function slug(text) {
-  return text.toLowerCase().replace(/<[^>]*>/g, '').replace(/[^\p{L}\p{N}\p{M}_\s-]/gu, '').replace(/\s/g, '-');
+  return text.toLowerCase().replace(/<[^>]*>|[<>]|[^\p{L}\p{N}\p{M}_\s-]/gu, '').replace(/\s/g, '-');
 }
 
 function anchors(text) {

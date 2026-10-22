@@ -15,6 +15,10 @@ test('documentation anchors and links handle Markdown variants in process', () =
     ['# `Quoted` & punctuation!\n## Héllo', ['quoted--punctuation', 'héllo']],
     ['```md\n# Hidden\n[a](missing.md)\n```\n## Visible', ['visible']],
     ['~~~md\n# Hidden\n~~~\n<h2 id="named">Heading</h2>', ['named']],
+    ['## <span>Visible</span>', ['visible']],
+    ['## <script', ['script']],
+    ['## <scr<a>ipt>', ['ipt']],
+    ['## <<script>script>', ['script']],
   ];
   for (const [text, expected] of variants) assert.deepEqual([...anchors(text)], expected);
   assert.deepEqual(links('`[ignored](missing)`\n[valid](area.md#topic)\n[ref]: <other.md#anchor>\n'),
