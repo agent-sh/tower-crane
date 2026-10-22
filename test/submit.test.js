@@ -150,7 +150,7 @@ test('the claimant resubmits a newer head and its gates need evidence at that he
   h.ok(['submit', 'T1', '--sha', oldSha, '--branch', 'fixture-change', '--pr', '7', '--agent', 'w-1']);
   assert.deepEqual(
     events(h).find((event) => event.cmd === 'submit').detail,
-    { previous_sha: null, sha: oldSha, branch: 'fixture-change', pr: 7, summary: null, scope: { basis: 'repo', named: [], outside: [] } },
+    { previous_sha: null, sha: oldSha, branch: 'fixture-change', pr: 7, host_probes: [], summary: null, scope: { basis: 'repo', named: [], outside: [] } },
   );
   const gates = [['tests', 'w-1'], ['clean', 'w-1'], ['review', 'r-1'], ['ci', 'ci']];
   for (const [type, agent] of gates) pass(h, type, agent, oldSha);

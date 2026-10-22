@@ -5,12 +5,15 @@ const StateFiles = require('./state-files');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { waitOnRepo } = require('./signals');
-const { cachedFixture } = require('./helpers');
+const { waitOnRepo, waitUntil } = require('./signals');
+const { BIN, cachedFixture } = require('./helpers');
+const { readPublished } = require('./atomic-file');
 const { gateEvidence } = require('./gate-helpers');
 const { waitFor } = require('./canary');
 const { shellQuote } = require('../lib/gates/common');
-const { setup, holdSuite } = require('./automation-helpers');
+const { setup, holdSuite, configureHarness } = require('./automation-helpers');
+
+const OWNER = path.join(__dirname, 'fixtures', 'pr-owner.js');
 
 function generatedSetup(t) {
   const h = cachedFixture(t, 'generated-conflicts', (repo) => {
@@ -370,6 +373,61 @@ test('mixed conflicts keep a prepared merge with generated files staged and only
   assert.match(task.notes.at(-1).text, /generated files are pre-resolved: docs\/cli\.md, generated\.txt/);
 });
 
+// A worker that owns its PR waits on it while the engine repairs a conflict
+// at its head: a generated-only repair keeps it the owner, and a mixed one
+// hands the prepared merge back to it with its receipt. The owner fixture
+// exits at its first handback.
+for (const mixed of [false, true]) {
+  test(`a ${mixed ? 'mixed' : 'generated-only'} conflict at a waiting owner's head ${mixed ? 'hands the prepared merge back to the owner' : 'is repaired while the owner keeps the PR'}`, async (t) => {
+    const h = generatedSetup(t);
+    if (mixed) {
+      h.git(['switch', 'main']);
+      fs.writeFileSync(path.join(h.repo, 'value.js'), 'module.exports = 3;\n');
+      h.git(['add', '.']);
+      h.git(['commit', '-qm', 'hand-written conflict']);
+      h.git(['push', 'origin', 'main']);
+      h.git(['switch', 'fixture-change']);
+    }
+    configureHarness(h);
+    for (const rung of ['easy', 'review']) h.ok(['ladder', 'set', rung, '--command', JSON.stringify([process.execPath, OWNER, BIN, '{prompt}'])]);
+    Object.assign(h.env, { OWNER_HEADS: JSON.stringify([h.sha]), OWNER_LOG: path.join(h.base, 'owner.jsonl'), OWNER_CRASH_ON_FIX: '1' });
+    // The owner appends while the test reads: only complete lines count.
+    const outcomes = () => (fs.existsSync(h.env.OWNER_LOG) ? readPublished(h.env.OWNER_LOG, 'utf8') : '').split('\n').filter((l) => l.endsWith('}')).map(JSON.parse);
+    const github = h.github();
+    Object.assign(github.prs['7'], { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' });
+    h.saveGithub(github);
+    const { agent } = h.json(['spawn', '--task', 'T1']);
+    const task = () => h.readState('tasks.json').tasks[0];
+    const until = (check, what) => waitUntil(check, { paths: [h.base], what });
+    await until(() => task().status === 'submitted' && h.logs().some((e) => e.cmd === 'submit' && e.detail.own), 'the owner submits');
+    const conflicting = h.github();
+    // The PR's head is the branch the owner's worktree holds, pushed as a worker does.
+    h.git(['push', 'origin', `${h.sha}:refs/heads/${task().branch}`]);
+    Object.assign(conflicting.prs['7'], { mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY', headRefName: task().branch });
+    h.saveGithub(conflicting);
+    h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
+    assert.deepEqual(h.logs().filter((e) => e.cmd === 'automation' && e.detail.error).map((e) => e.detail.error), []);
+    if (mixed) {
+      assert.deepEqual([task().status, task().claim.agent], ['in_progress', agent]);
+      const receipt = h.logs().find((e) => e.cmd === 'generated merge' && e.detail.phase === 'mixed');
+      assert.ok(receipt, 'the mixed merge keeps its receipt');
+      assert.deepEqual([receipt.detail.revision, receipt.detail.remaining], [2, ['value.js']]);
+    } else {
+      assert.equal(task().status, 'submitted');
+      assert.notEqual(task().sha, h.sha);
+      assert.equal(h.logs().findLast((e) => e.cmd === 'submit').detail.owner, agent);
+      // The owner still holds the repaired head: the next failure comes back to it.
+      assert.match(h.ok(['rework', 'T1', '--reason', 'value.js must be 2', '--agent', 'orchestrator']), new RegExp(`its owner ${agent} fixes it`));
+    }
+    await until(() => h.logs().some((e) => e.cmd === 'spawn exit' && e.detail.agent === agent), 'the owner takes the handback');
+    const [fix, ...rest] = outcomes().filter((o) => o.outcome !== 'wait');
+    assert.deepEqual(rest, []);
+    assert.equal(fix.outcome, 'fix', JSON.stringify(fix));
+    assert.match(fix.message, mixed ? /conflicts with main: value\.js\. The merge is prepared at / : /value\.js must be 2/);
+    assert.equal(h.logs().filter((e) => e.cmd === 'spawn' && e.detail.role === 'worker').length, 1);
+  });
+}
+
 test('mixed binary outputs preserve the branch bytes when generation must wait for source resolution', (t) => {
   const h = generatedSetup(t);
   for (const [branch, bytes] of [['main', [0, 254, 67]], ['fixture-change', [0, 255, 66]]]) {
@@ -694,8 +752,13 @@ test('pending CI on a PR closed without merging stalls at the next recheck', (t)
   const github = h.github();
   github.prs['7'].state = 'CLOSED';
   h.saveGithub(github);
-  h.consume();
-  assert.equal(latest().stalled, true);
+  const closedAt = h.logs().length;
+  const recheck = h.consume();
+  // This failed once in a loaded tests gate and never locally; the gate keeps
+  // only the output tail, so the message carries what the recheck did.
+  const did = () => JSON.stringify({ code: recheck.code, stderr: recheck.stderr.slice(-1500),
+    events: h.logs().slice(closedAt).map((e) => [e.cmd, e.detail.phase, e.detail.type, e.detail.ok, e.detail.error].filter((x) => x != null).join(' ')) });
+  assert.equal(latest().stalled, true, did());
   assert.match(latest().summary, /closed without merging/);
   assert.equal(h.readState('tasks.json').tasks[0].status, 'submitted');
   const checks = () => h.logs().filter((e) => e.cmd === 'check ci').length;

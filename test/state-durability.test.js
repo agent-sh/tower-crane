@@ -8,11 +8,11 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const cp = require('node:child_process');
 const { cachedFixture, BIN } = require('./helpers');
-const T = require('../lib/tasks');
 const S = require('../lib/state');
 const Db = require('../lib/db');
-const { runReleased } = require('./released-tool');
+const T = require('../lib/tasks');
 const { windowsFileIds } = require('./fixtures/windows-file-ids');
+const { runReleased } = require('./released-tool');
 
 const RELEASED = 'v0.1.3';
 
@@ -245,17 +245,29 @@ function tornMultiEvent(t, { windows = false } = {}) {
   fs.writeSync(fd, `${JSON.stringify(first)}\n${JSON.stringify(second)}`);
   fs.closeSync(fd);
   h.ok(['task', 'note', 'T1', 'next note'], cli);
-  const ids = logged(h).map((e) => e.id);
-  assert.ok(!ids.includes(first.id) && !ids.includes(second.id), 'the torn commit left no event');
-  assert.deepEqual(noted(h, 'torn note'), { task: false, event: false });
-  assert.deepEqual(noted(h, 'next note'), { task: true, event: true });
   assertConsistent(h);
+  return { h, torn: [first.id, second.id] };
 }
 
-test('recovery before migration cuts a torn multi-event append off the log, including a final line missing only its newline', (t) => tornMultiEvent(t));
+function assertCut({ h, torn }) {
+  const ids = logged(h).map((e) => e.id);
+  assert.ok(!torn.some((id) => ids.includes(id)), 'the torn commit left no event');
+  assert.deepEqual(noted(h, 'torn note'), { task: false, event: false });
+  assert.deepEqual(noted(h, 'next note'), { task: true, event: true });
+}
+
+test('recovery before migration cuts a torn multi-event append off the log, including a final line missing only its newline', (t) => {
+  const run = tornMultiEvent(t);
+  assert.equal(run.torn.length, 2);
+  assertCut(run);
+});
 
 // A tool through 0.1.2 wrote the inode as a Number only, rounded past 2^53.
-test('recovery before migration cuts a torn append that a 0.1.2 manifest describes when file ids pass 2^53, as on Windows', (t) => tornMultiEvent(t, { windows: true }));
+test('recovery before migration cuts a torn append that a 0.1.2 manifest describes when file ids pass 2^53, as on Windows', (t) => {
+  const run = tornMultiEvent(t, { windows: true });
+  assert.equal(run.torn.length, 2);
+  assertCut(run);
+});
 
 test('an add that failed after its commit keeps its brief, and only then', (t) => {
   const h = migrated(t);
@@ -326,7 +338,8 @@ test('rolling a 0.1 commit forward syncs the log before it renames the staged fi
   assert.deepEqual(noted(h, 'crashed note'), { task: true, event: true });
 });
 
-const SHORT_WAIT = path.join(__dirname, 'fixtures', 'lock-wait.js');
+// Timeout tests use the real CLI with a one-second lock wait (lib/intervals.js).
+const SHORT_WAIT = JSON.stringify({ lock_wait: 1000 });
 
 test('a recovery rename another process holds open reports the busy code, and a later command finishes it', (t) => {
   const h = setup(t);
@@ -334,7 +347,7 @@ test('a recovery rename another process holds open reports the busy code, and a 
   // Every rename onto tasks.json is refused past the 2 s retry, as Windows
   // refuses one while a scanner holds the file.
   const r = h.run(['task', 'note', 'T1', 'blocked note'], {
-    env: { NODE_OPTIONS: `--require=${JSON.stringify(SHORT_WAIT)}` },
+    env: { TOWER_CRANE_INTERVALS: SHORT_WAIT },
     hooks: { HOOK_BUSY_RENAME: '^tasks\\.json$', HOOK_BUSY_RENAME_TIMES: '0', HOOK_SHARING_BUSY: '1' },
   });
   assert.equal(r.code, 3, r.stderr);

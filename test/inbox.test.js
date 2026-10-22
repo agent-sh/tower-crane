@@ -1,6 +1,6 @@
 'use strict';
 
-const { waitOnRepo } = require('./signals');
+const { waitOnRepo, fileWritten } = require('./signals');
 const StateFiles = require('./state-files');
 
 const test = require('node:test');
@@ -8,7 +8,9 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
-const { makeRepo, cachedFixture } = require('./helpers');
+const cp = require('node:child_process');
+const { once } = require('node:events');
+const { makeRepo, cachedFixture, BIN, HOOKS } = require('./helpers');
 const { gateFixture } = require('./gate-helpers');
 const { shellQuote } = require('../lib/gates/common');
 
@@ -29,7 +31,10 @@ function setup(t) {
     return { sha };
   });
   h.github = () => JSON.parse(fs.readFileSync(h.env.INBOX_GITHUB, 'utf8'));
-  h.save = (data) => fs.writeFileSync(h.env.INBOX_GITHUB, JSON.stringify(data));
+  h.save = (data) => {
+    fs.writeFileSync(h.env.INBOX_GITHUB, JSON.stringify(data));
+    fs.rmSync(path.join(h.state, 'inbox-github-cache.json'), { force: true });
+  };
   h.add = (title, kind = 'docs') => {
     const task = h.json(['task', 'add', '--title', title, '--kind', kind, '--acceptance', 'works']);
     h.ok(['brief', 'set', task.id, '-'], { input: `${title}\n` });
@@ -39,17 +44,578 @@ function setup(t) {
     h.ok(['claim', id, '--agent', `worker-${id}`]);
     h.ok(['submit', id, '--sha', h.sha, ...(pr ? ['--pr', String(pr)] : []), '--agent', `worker-${id}`]);
   };
-  h.inbox = () => h.json(['inbox', '--agent', 'orchestrator']);
+  h.refresh = () => {
+    const r = h.run(['wait', '--inbox', '--observe', '--after', 'now', '--types', 'inbox item',
+      '--timeout', '0.01', '--agent', 'orchestrator']); // wait-allow: run one host follower refresh before reading its cached GitHub findings
+    assert.ok([0, 2].includes(r.code), r.stderr);
+  };
+  h.inbox = (refresh = true) => {
+    if (refresh) h.refresh();
+    return h.json(['inbox', '--agent', 'orchestrator']);
+  };
   h.logs = () => StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
   return h;
 }
 
+test('completed push selection preserves the newest recorded run and attempt', () => {
+  const { latestPush } = require('../lib/main-ci');
+  const previous = { id: 100, workflow_id: 11, number: 50, attempt: 2, event: 'push', conclusion: 'success' };
+  for (const [number, attempt, status, conclusion, expected] of [
+    [51, 1, 'in_progress', null, [50, 2, 'success']],
+    [50, 3, 'in_progress', null, [50, 2, 'success']],
+    [50, 1, 'completed', 'failure', [50, 2, 'success']],
+    [49, 9, 'completed', 'failure', [50, 2, 'success']],
+    [50, 3, 'completed', 'failure', [50, 3, 'failure']],
+    [51, 1, 'completed', 'cancelled', [51, 1, 'cancelled']],
+  ]) {
+    const [run] = latestPush([{ id: 100, workflow_id: 11, run_number: number, run_attempt: attempt,
+      name: 'CI', event: 'push', status, conclusion }], [previous]);
+    assert.deepEqual([run.number, run.attempt, run.conclusion], expected);
+  }
+});
+
+test('main push failures produce one item per current head and follow observes completion without --inbox', async (t) => {
+  const h = setup(t);
+  const github = h.github();
+  const run = (id, workflow, sha = h.sha, conclusion = 'failure') => ({
+    id, workflow_id: workflow, name: `CI ${workflow}`, run_number: id, event: 'push',
+    status: 'completed', conclusion, head_sha: sha,
+  });
+  github.main_head = h.sha;
+  github.main_runs = [run(101, 11), run(102, 12), run(99, 13, 'd'.repeat(40))];
+  github.jobs = { 101: [{ id: 501, name: 'linux', status: 'completed', conclusion: 'failure' }] };
+  github.logs = { 501: 'not ok 1 - current head regression\n  ---\n  error: failed\n  ...\n' };
+  h.save(github);
+  const cache = path.join(h.state, 'main-ci-cache.json');
+  const failed = () => {
+    fs.rmSync(cache, { force: true });
+    return h.inbox().items.filter((i) => i.kind === 'main_ci_failed');
+  };
+  const beforeRefresh = String(StateFiles.logEnd(h.state));
+  const first = failed().filter((i) => i.sha === h.sha);
+  assert.equal(first.length, 1);
+  assert.equal(first[0].id, `main_ci_failed:project:${h.sha}`);
+  assert.deepEqual(first[0].runs.map((r) => r.id).sort(), [101, 102]);
+  assert.equal(first[0].jobs[0].tests[0].name, 'current head regression');
+  assert.deepEqual(failed().filter((i) => i.sha === h.sha).map((i) => i.id), first.map((i) => i.id));
+  assert.equal(h.logs().filter((e) => e.cmd === 'main ci').length, 1);
+  const observe = (after = 'now') => h.run(['wait', '--inbox', '--observe', '--after', after, '--types', 'inbox item', '--timeout', '0.2', '--agent', 'orchestrator']); // wait-allow: observe already-published main CI
+  assert.equal(observe(beforeRefresh).code, 0);
+  github.main_runs[0].run_attempt = 2;
+  h.save(github);
+  failed();
+  const rerun = observe();
+  if (rerun.code === 0) assert.notEqual(JSON.parse(rerun.stdout).detail.item, first[0].id);
+  else assert.equal(rerun.code, 2);
+  assert.equal(h.logs().filter((e) => e.cmd === 'inbox item' && e.detail.item === first[0].id).length, 1);
+  github.main_runs = [run(103, 11, h.sha, 'success'), run(104, 12, h.sha, 'success'), run(106, 13, h.sha, 'success')];
+  h.save(github);
+  assert.deepEqual(failed(), []);
+  observe();
+
+  github.main_runs = [run(105, 11, h.sha, 'timed_out')];
+  github.main_runs[0].status = 'in_progress';
+  github.main_runs[0].conclusion = null;
+  h.save(github);
+  fs.rmSync(cache, { force: true });
+  const advance = path.join(h.base, 'advance-main-clock');
+  const clock = path.join(h.base, 'main-clock.js');
+  fs.writeFileSync(clock, "const fs = require('node:fs'); const real = Date.now; Date.now = () => real() + (fs.existsSync(process.env.TC_MAIN_CLOCK_ADVANCE) ? 61000 : 0);\n");
+  const follower = cp.spawn(process.execPath, ['--require', clock, '--require', HOOKS, BIN, 'wait', '--follow', '--agent', 'orchestrator'], {
+    cwd: h.repo, env: { ...h.env, TC_MAIN_CLOCK_ADVANCE: advance },
+  });
+  const closed = once(follower, 'close');
+  let output = '';
+  let errors = '';
+  follower.stderr.on('data', (b) => { errors += b; });
+  const woke = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`no main CI wake: ${output} ${errors}`)), 20000); // wait-allow: bound the follower completion probe
+    follower.stdout.on('data', (b) => {
+      output += b;
+      if (output.includes('"type":"main ci"')) { clearTimeout(timer); resolve(); }
+    });
+    follower.once('close', () => { clearTimeout(timer); reject(new Error(`follower exited: ${errors}`)); });
+  });
+  try {
+    await Promise.all([woke, fileWritten(cache, { signal: t.signal }).then(() => {
+      github.main_runs[0].status = 'completed';
+      github.main_runs[0].conclusion = 'timed_out';
+      h.save(github);
+      fs.writeFileSync(advance, '');
+    })]);
+    assert.equal(h.inbox().items.filter((i) => i.kind === 'main_ci_failed').length, 1);
+  } finally {
+    follower.kill();
+    await closed;
+  }
+});
+
+test('push inbox retains older-head blockers and uses every green conclusion', (t) => {
+  const h = setup(t);
+  for (const current of [false, true]) for (const pending of [true, false]) {
+    for (const conclusion of ['failure', 'cancelled', 'timed_out', 'success', 'neutral', 'skipped']) {
+      const data = h.github();
+      data.main_head = current ? h.sha : 'd'.repeat(40);
+      const run = { id: 100, workflow_id: 11, run_number: 50, name: 'CI', event: 'push',
+        status: 'completed', conclusion, head_sha: h.sha };
+      data.main_runs = [run];
+      if (pending) data.main_runs.unshift({ ...run, id: 101, run_number: 51, head_sha: data.main_head, status: 'in_progress', conclusion: null });
+      h.save(data);
+      fs.rmSync(path.join(h.state, 'main-ci-cache.json'), { force: true });
+      const items = h.inbox().items.filter((i) => i.kind === 'main_ci_failed');
+      const green = ['success', 'neutral', 'skipped'].includes(conclusion);
+      assert.equal(items.length, green ? 0 : 1, JSON.stringify({ current, pending, conclusion, items }));
+      if (!green) {
+        assert.equal(items[0].run, 100);
+        assert.equal(items[0].id, `main_ci_failed:project:${h.sha}`);
+        assert.equal(items[0].action.argv[1], 'add');
+      }
+    }
+  }
+});
+
 // Lifecycle fixtures represent processes that exited before the observer
 // starts. All task transitions and the resolving actions use the real CLI.
-function event(h, task, cmd, detail, agent = 'orchestrator') {
-  const e = { id: `fixture-${h.logs().length}`, at: new Date().toISOString(), cmd, agent, task, detail };
+function event(h, task, cmd, detail, agent = 'orchestrator', at = new Date().toISOString()) {
+  const e = { id: `fixture-${h.logs().length}`, at, cmd, agent, task, detail };
   StateFiles.appendLog(h.state, `${JSON.stringify(e)}\n`);
 }
+
+test('multi-item acknowledgements are atomic, deduplicated and retain single-item receipts', (t) => {
+  const h = setup(t);
+  for (const text of ['one', 'two', 'three']) h.ok(['msg', '--to', 'orchestrator', text, '--agent', 'messenger']);
+  const messages = h.inbox().items.filter((i) => i.kind === 'message');
+  const before = h.logs();
+  for (const invalid of ['message:project:missing', h.inbox().items.find((i) => i.kind === 'ready')?.id || 'ready:T999']) {
+    assert.equal(h.run(['inbox', '--ack', messages[0].id, '--ack', invalid, '--agent', 'orchestrator']).code, 2);
+    assert.deepEqual(h.logs(), before, 'one invalid id refuses the entire batch');
+  }
+  const data = h.json(['inbox', '--ack', messages[0].id, '--ack', messages[1].id,
+    '--ack', messages[0].id, '--agent', 'orchestrator']);
+  assert.deepEqual(data, { acknowledged: messages.slice(0, 2).map((i) => i.id), count: 2 });
+  const added = h.logs().slice(before.length);
+  assert.equal(added.length, 1);
+  assert.equal(added[0].cmd, 'inbox ack');
+  assert.deepEqual(added[0].detail, { items: data.acknowledged, count: 2 });
+  assert.deepEqual(h.inbox().items.filter((i) => i.kind === 'message').map((i) => i.id), [messages[2].id]);
+  const single = h.json(['inbox', '--ack', messages[2].id, '--agent', 'orchestrator']);
+  assert.deepEqual(single, { acknowledged: messages[2].id });
+  assert.deepEqual(h.logs().at(-1).detail, { item: messages[2].id });
+  assert.equal(h.inbox().items.filter((i) => i.kind === 'message').length, 0);
+});
+
+test('owner comment acknowledgements distinguish current and legacy events on one task', (t) => {
+  for (const legacy of [false, true]) {
+    const h = setup(t);
+    const task = h.add(`Comment ids ${legacy ? 'legacy' : 'current'}`);
+    const cutoff = '2026-01-02T00:00:00.000Z';
+    for (let i = 0; i < 2; i++) {
+      event(h, task, 'task note', { text: 'Same owner comment' }, 'owner', cutoff);
+    }
+    if (legacy) {
+      StateFiles.editEvents(h.state, (e) => {
+        if (e.cmd !== 'task note' || e.agent !== 'owner') return null;
+        delete e.id;
+        return e;
+      });
+    }
+    const comments = () => h.inbox().items.filter((i) => i.kind === 'owner_comment');
+    const first = comments();
+    assert.equal(first.length, 2);
+    assert.equal(new Set(first.map((i) => i.id)).size, 2, 'every comment has its own id');
+    assert.deepEqual(comments(), first, 'ids survive repeated CLI reads');
+    h.ok([...first[0].action.argv, '--agent', 'orchestrator']);
+    assert.deepEqual(comments(), [first[1]], 'single ack clears exactly one comment');
+    event(h, task, 'task note', { text: 'Later owner comment' }, 'owner', cutoff);
+    const before = comments();
+    assert.equal(before.length, 2);
+    assert.equal(before[0].id, first[1].id, 'appending events preserves legacy ids');
+    const ack = h.json(['inbox', '--ack-before', cutoff, '--kind', 'owner_comment', '--agent', 'orchestrator']);
+    assert.deepEqual(ack.acknowledged, before.map((i) => i.id));
+    assert.equal(ack.count, before.length);
+    assert.equal(comments().length, 0, 'listing decreases by the acknowledgement count');
+  }
+});
+
+test('inbox reuses successful GitHub reads for a minute and refreshes changed submissions', (t) => {
+  const h = setup(t);
+  const id = h.add('Cached GitHub');
+  h.submit(id, 7);
+  const first = h.inbox();
+  const before = h.github().calls.length;
+  assert.deepEqual(h.inbox(false), first);
+  assert.equal(h.github().calls.length, before, 'a second CLI process reuses the GitHub observations');
+  const cacheFile = path.join(h.state, 'inbox-github-cache.json');
+  const cache = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
+  cache.started_at = '2000-01-01T00:00:00.000Z';
+  fs.writeFileSync(cacheFile, JSON.stringify(cache));
+  h.refresh();
+  assert.ok(h.github().calls.length > before, 'the next follower pass refreshes even responses that arrived late');
+  for (const entry of Object.values(cache.entries)) entry.at = '2000-01-01T00:00:00.000Z';
+  fs.writeFileSync(cacheFile, JSON.stringify(cache));
+  const afterRefresh = h.github().calls.length;
+  assert.ok(h.inbox(false).items.some((i) => i.kind === 'github_pending'));
+  assert.equal(h.github().calls.length, afterRefresh, 'expired data does not launch foreground reads');
+  h.refresh();
+  assert.ok(h.github().calls.length > before, 'expired reads refresh');
+  const current = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
+  for (const entry of Object.values(current.entries)) entry.at = '2999-01-01T00:00:00.000Z';
+  fs.writeFileSync(cacheFile, JSON.stringify(current));
+  const expired = h.github().calls.length;
+  assert.ok(h.inbox(false).items.some((i) => i.kind === 'github_pending'));
+  h.refresh();
+  assert.ok(h.github().calls.length > expired, 'future cache stamps are not trusted');
+  h.ok(['rework', id, '--reason', 'new submission']);
+  h.ok(['claim', id, '--agent', `worker-${id}`]);
+  h.ok(['submit', id, '--sha', h.sha, '--pr', '7', '--agent', `worker-${id}`]);
+  const resubmitted = h.github().calls.length;
+  assert.ok(h.inbox(false).items.some((i) => i.kind === 'github_pending'));
+  h.refresh();
+  assert.ok(h.github().calls.length > resubmitted, 'a new revision invalidates cached PR observations');
+  h.ok(['task', 'update', id, '--status', 'cancelled']);
+  h.refresh();
+  const pruned = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
+  assert.ok(Object.values(pruned.entries).every((entry) => !entry.tasks.some((task) => task[0] === id)),
+    'closed task observations are pruned from the cache file');
+});
+
+test('foreground inbox never launches slow GitHub reads and preserves refreshed failures and local comments', (t) => {
+  for (const endpoint of ['', '/code-scanning/', '/issues/']) {
+    const h = setup(t);
+    const id = h.add(`Slow GitHub ${endpoint}`);
+    h.submit(id, 7);
+    if (endpoint === '/issues/') {
+      h.reviewer(id, 'reviewer', h.sha);
+      h.ok(['evidence', id, '--type', 'review', '--fail', '--sha', h.sha, '--revision', h.revision(id),
+        '--summary', 'A blocking review', '--agent', 'reviewer']);
+    }
+    event(h, id, 'task note', { text: 'Keep owner input' }, 'owner');
+    h.save({ ...h.github(), delayMs: 4000, delayEndpoint: endpoint });
+    const before = h.github().calls.length;
+    const started = performance.now();
+    const data = h.inbox(false);
+    assert.ok(performance.now() - started < 3000, 'foreground reads never wait for GitHub'); // wait-allow: verify the three-second inbox contract with cold GitHub cache and stalled endpoints
+    assert.ok(data.items.some((i) => i.kind === 'owner_comment' && i.text === 'Keep owner input'));
+    assert.equal(data.items.filter((i) => i.kind === 'github_pending').length, 1, 'one summary covers missing reads');
+    assert.equal(data.items.filter((i) => i.kind === 'github_error').length, 0, 'missing cache entries are not GitHub failures');
+    assert.equal(h.github().calls.length, before, 'no foreground GitHub subprocesses');
+    h.save({ ...h.github(), delayMs: 0, failEndpoint: '/code-scanning/',
+      failMessage: 'GitHub unavailable: INBOX_GITHUB_PENDING appears in a repository name' });
+    h.refresh();
+    const refreshed = h.github().calls.length;
+    const failures = h.inbox(false).items.filter((i) => i.kind === 'github_error');
+    assert.ok(failures.some((i) => /GitHub unavailable/.test(i.reason)), 'real background failures stay visible');
+    assert.equal(h.github().calls.length, refreshed, 'cached failures do not trigger foreground reads');
+    const cacheFile = path.join(h.state, 'inbox-github-cache.json');
+    const cache = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
+    for (const entry of Object.values(cache.entries)) entry.at = new Date(Date.now() - 61000).toISOString();
+    fs.writeFileSync(cacheFile, JSON.stringify(cache));
+    assert.deepEqual(h.inbox(false).items.filter((i) => i.kind === 'github_error'), failures,
+      'overdue failed observations stay explicit until replacement');
+    assert.equal(h.github().calls.length, refreshed, 'overdue errors do not launch foreground reads');
+  }
+});
+
+test('overdue cached findings survive every refresh boundary and an in-flight follower pass', async (t) => {
+  const h = setup(t);
+  const submitted = h.add('Cached security findings');
+  h.submit(submitted, 7);
+  const moved = h.add('Cached moved head');
+  h.submit(moved, 8);
+  const accepted = h.add('Cached merge confirmation');
+  h.submit(accepted, 9);
+  h.reviewer(accepted, 'accepted-reviewer', h.sha);
+  h.ok(['evidence', accepted, '--revision', h.revision(accepted), '--type', 'review', '--ok',
+    '--sha', h.sha, '--agent', 'accepted-reviewer']);
+  h.ok(['check', 'ci', accepted]);
+  h.ok(['accept', accepted]);
+  const acceptedOpen = h.add('Cached accepted mergeability');
+  h.submit(acceptedOpen, 7);
+  h.reviewer(acceptedOpen, 'open-reviewer', h.sha);
+  h.ok(['evidence', acceptedOpen, '--revision', h.revision(acceptedOpen), '--type', 'review', '--ok',
+    '--sha', h.sha, '--agent', 'open-reviewer']);
+  h.ok(['check', 'ci', acceptedOpen]);
+  h.ok(['accept', acceptedOpen]);
+  const reviewed = h.add('Cached failed review');
+  h.submit(reviewed, 7);
+  h.reviewer(reviewed, 'failed-reviewer', h.sha);
+  h.ok(['evidence', reviewed, '--revision', h.revision(reviewed), '--type', 'review', '--fail',
+    '--sha', h.sha, '--summary', 'Blocking review', '--agent', 'failed-reviewer']);
+  const restore = h.add('Cached restore hint');
+  h.submit(restore, 7);
+  h.ok(['rework', restore, '--reason', 'environment failed']);
+  const revision = h.json(['task', 'show', restore]).revision;
+  event(h, restore, 'rework', { gate: 'ci', sha: h.sha, revision, previous_revision: revision - 1,
+    reason: 'environment failed' }, 'automation');
+  const github = h.github();
+  github.prs[8].headRefOid = 'f'.repeat(40);
+  github.prs[9].state = 'MERGED';
+  github.revuto = { name: 'revuto', app: { slug: 'revuto-review' }, status: 'completed',
+    conclusion: 'failure', output: { summary: 'Bounds error' } };
+  github.alerts = { 7: [{ number: 1, tool: { name: 'CodeQL' }, rule: { id: 'js/injection' },
+    most_recent_instance: { commit_sha: h.sha, message: { text: 'Untrusted input' } } }] };
+  github.review_comments = { 7: [{ id: 1,
+    body: `Review (Tower Crane, clean context)\n\nBlocking: 1 at ${h.sha}.\n\n- lib/value.js:1 - Bounds error - Avoid corruption.\n` }] };
+  h.save(github);
+  const expected = h.inbox().items.filter((i) => i.task);
+  for (const kind of ['revuto_failed', 'codeql_alert', 'head_changed', 'accepted_unmerged', 'review_failed', 'rework_ready']) {
+    assert.ok(expected.some((i) => i.kind === kind), kind);
+  }
+  assert.equal(expected.find((i) => i.task === accepted && i.kind === 'accepted_unmerged').confirmation, true);
+  assert.equal(expected.find((i) => i.task === acceptedOpen && i.kind === 'accepted_unmerged').remote.mergeable,
+    'MERGEABLE');
+  assert.equal(expected.find((i) => i.task === reviewed && i.kind === 'review_failed').findings_complete, true);
+  assert.equal(expected.find((i) => i.task === restore && i.kind === 'rework_ready').restore,
+    `gates retry ${restore} --from-rework`);
+  const file = path.join(h.state, 'inbox-github-cache.json');
+  const original = JSON.parse(fs.readFileSync(file, 'utf8'));
+  for (const age of [59000, 61000, 78000, 123000]) {
+    const cache = structuredClone(original);
+    const at = new Date(Date.now() - age).toISOString();
+    cache.started_at = at;
+    for (const entry of Object.values(cache.entries)) entry.at = at;
+    fs.writeFileSync(file, JSON.stringify(cache));
+    const calls = h.github().calls.length;
+    const data = h.inbox(false);
+    assert.deepEqual(data.items.filter((i) => i.task), expected, `last findings remain visible at age ${age}`);
+    assert.equal(h.github().calls.length, calls, 'foreground launches no GitHub reads');
+    if (age > 60000) assert.ok(data.items.some((i) => i.kind === 'github_pending' && i.stale),
+      'overdue data is explicit');
+  }
+  const signalFile = path.join(h.base, 'refresh-paused');
+  fs.writeFileSync(h.env.INBOX_GITHUB, JSON.stringify({ ...h.github(), delayMs: 4000,
+    delayEndpoint: '/code-scanning/', delaySignal: signalFile }));
+  const follower = cp.spawn(process.execPath, ['--require', HOOKS, BIN, 'wait', '--inbox', '--observe', '--after', 'now', '--timeout', '0.01', '--agent', 'orchestrator'], { cwd: h.repo, env: h.env }); // wait-allow: pause one follower refresh to verify cached findings stay visible until its replacement is written
+  const closed = once(follower, 'close');
+  let errors = '';
+  follower.stderr.on('data', (b) => { errors += b; });
+  follower.stdout.resume();
+  try {
+    await fileWritten(signalFile, { signal: t.signal });
+    assert.deepEqual(h.inbox(false).items.filter((i) => i.task), expected,
+      'old findings stay visible while replacement reads are in flight');
+    const [code] = await closed;
+    assert.ok([0, 2].includes(code), errors);
+    assert.deepEqual(h.inbox(false).items.filter((i) => i.task), expected, 'completed refresh replaces the snapshot');
+  } finally {
+    follower.kill();
+    await closed;
+  }
+});
+
+test('base CI observations expire into one pending summary without active PRs or foreground reads', (t) => {
+  const h = setup(t);
+  h.refresh();
+  const file = path.join(h.state, 'main-ci-cache.json');
+  const base = JSON.parse(fs.readFileSync(file, 'utf8'));
+  const actions = fs.readFileSync(`${h.env.INBOX_GITHUB}.actions`, 'utf8');
+  const cases = [
+    { name: 'fresh', cache: base, pending: false },
+    { name: 'missing', cache: null, pending: true },
+    { name: 'expired', cache: { ...base, read_at: '2000-01-01T00:00:00.000Z' }, pending: true },
+    { name: 'future', cache: { ...base, read_at: '2999-01-01T00:00:00.000Z' }, pending: true },
+    { name: 'repository changed', cache: { ...base, repo: 'other/repo' }, pending: true },
+    { name: 'base changed', cache: { ...base, base: 'other' }, pending: true },
+  ];
+  for (const row of cases) {
+    if (row.cache) fs.writeFileSync(file, JSON.stringify(row.cache));
+    else fs.rmSync(file, { force: true });
+    const pending = h.inbox(false).items.filter((i) => i.kind === 'github_pending');
+    assert.equal(pending.length, row.pending ? 1 : 0, row.name);
+    if (row.pending) {
+      assert.equal(pending[0].count, 0);
+      assert.match(pending[0].reason, /project base/);
+    }
+    assert.equal(fs.readFileSync(`${h.env.INBOX_GITHUB}.actions`, 'utf8'), actions, 'foreground never refreshes base CI');
+  }
+  fs.rmSync(file, { force: true });
+  h.save({ ...h.github(), failActions: true });
+  h.refresh();
+  const failed = h.inbox(false).items;
+  assert.ok(failed.some((i) => i.kind === 'github_error' && /GitHub unavailable/.test(i.reason)));
+  assert.ok(!failed.some((i) => i.kind === 'github_pending'), 'a fresh failed base read is an explicit error');
+  const inboxFile = path.join(h.state, 'inbox-github-cache.json');
+  const cache = JSON.parse(fs.readFileSync(inboxFile, 'utf8'));
+  cache.read_at = '2000-01-01T00:00:00.000Z';
+  fs.writeFileSync(inboxFile, JSON.stringify(cache));
+  assert.equal(h.inbox(false).items.filter((i) => i.kind === 'github_pending').length, 1,
+    'an expired failed base read also needs a refresh');
+});
+
+test('pending GitHub actions reread recent refreshes or perform one bounded observation without dispatch', (t) => {
+  for (const row of [
+    { name: 'cold', at: null, observe: true },
+    { name: 'recent refresh', age: 10000, observe: false },
+    { name: 'between healthy passes', age: 59000, observe: false },
+    { name: 'overdue refresh', age: 61000, observe: true },
+    { name: 'stopped follower', age: 180000, observe: true },
+    { name: 'invalid timestamp', at: 'invalid', observe: true },
+    { name: 'future timestamp', at: '2999-01-01T00:00:00.000Z', observe: true },
+  ]) {
+    const h = setup(t);
+    h.add(`Ready during ${row.name}`);
+    h.refresh();
+    const now = Date.now();
+    const clock = path.join(h.base, 'pending-clock');
+    fs.writeFileSync(clock, String(now));
+    h.env.HOOK_CLOCK_FILE = clock;
+    const inboxFile = path.join(h.state, 'inbox-github-cache.json');
+    const baseFile = path.join(h.state, 'main-ci-cache.json');
+    if (row.name === 'cold') fs.rmSync(inboxFile, { force: true });
+    else {
+      const cache = JSON.parse(fs.readFileSync(inboxFile, 'utf8'));
+      cache.read_at = row.at || new Date(now - row.age).toISOString();
+      fs.writeFileSync(inboxFile, JSON.stringify(cache));
+    }
+    const base = JSON.parse(fs.readFileSync(baseFile, 'utf8'));
+    base.read_at = '2000-01-01T00:00:00.000Z';
+    fs.writeFileSync(baseFile, JSON.stringify(base));
+    const pending = h.inbox(false).items.find((i) => i.kind === 'github_pending');
+    assert.ok(pending, row.name);
+    assert.deepEqual(pending.action.argv, row.observe
+      ? ['wait', '--inbox', '--observe', '--timeout', '1'] : ['inbox'], row.name); // wait-allow: assert the pending item's bounded observer argv
+    const before = h.logs().length;
+    const tasks = h.readState('tasks.json').tasks;
+    const action = h.run([...pending.action.argv, '--agent', 'orchestrator']); // wait-allow: execute each bounded pending-data action and verify it exits without dispatch
+    assert.ok([0, 2].includes(action.code), `${row.name}: ${action.stderr}`);
+    assert.deepEqual(h.readState('tasks.json').tasks, tasks, `${row.name}: ready work stays untouched`);
+    assert.ok(h.logs().slice(before).every((e) => !['spawn', 'automation', 'automation reconcile'].includes(e.cmd)),
+      `${row.name}: resolving unread data must not start work or software reactions`);
+  }
+});
+
+test('ack-before includes the cutoff, filters kinds and leaves newer items and findings', (t) => {
+  const h = setup(t);
+  const task = h.add('Cutoff input');
+  const stalled = h.add('Cutoff stall');
+  h.ok(['claim', stalled, '--agent', 'stalled']);
+  const claim = h.json(['task', 'show', stalled]).claim;
+  const cutoff = '2026-01-02T00:00:00.000Z';
+  event(h, stalled, 'stall', { agent: 'stalled', until: claim.until, progress_at: claim.since }, 'orchestrator', cutoff);
+  event(h, stalled, 'review exit missing', { agent: 'reviewer', reason: 'monitor exited' }, 'orchestrator', cutoff);
+  for (const at of ['2026-01-01T23:59:59.999Z', cutoff, '2026-01-02T00:00:00.001Z']) {
+    event(h, task, 'msg', { to: 'orchestrator', text: at }, 'messenger', at);
+    event(h, task, 'task note', { text: at }, 'owner', at);
+  }
+  h.ok(['ask', '--kind', 'technical', '--question', 'Which API?', '--option', 'A', '--blocks', task]);
+  h.ok(['answer', 'D1', '--choice', 'A']);
+  h.ok(['ask', '--kind', 'technical', '--question', 'Which later API?', '--option', 'A', '--blocks', task]);
+  h.ok(['answer', 'D2', '--choice', 'A']);
+  const decisions = StateFiles.readDoc(h.state, 'decisions.json');
+  decisions.decisions[0].answered_at = cutoff;
+  decisions.decisions[1].answered_at = '2026-01-02T00:00:00.001Z';
+  StateFiles.writeDoc(h.state, 'decisions.json', decisions);
+  const items = h.inbox().items;
+  let before = h.logs();
+  for (const args of [
+    ['--ack-before', 'invalid'],
+    ['--ack-before', cutoff, '--kind', 'ready'],
+    ['--kind', 'message'],
+    ['--ack-before', cutoff, '--ack', items.find((i) => i.kind === 'message').id],
+  ]) {
+    assert.equal(h.run(['inbox', ...args, '--agent', 'orchestrator']).code, 2);
+    assert.deepEqual(h.logs(), before);
+  }
+  const messages = items.filter((i) => i.kind === 'message' && i.text <= cutoff).map((i) => i.id);
+  const filtered = h.json(['inbox', '--ack-before', cutoff, '--kind', 'message', '--agent', 'orchestrator']);
+  assert.deepEqual(filtered, { acknowledged: messages, count: 2, cutoff });
+  let added = h.logs().slice(before.length);
+  assert.equal(added.length, 1);
+  assert.deepEqual(added[0].detail, { items: messages, count: 2, cutoff, kind: 'message' });
+  assert.equal(h.inbox().items.filter((i) => i.kind === 'owner_comment').length, 3);
+  before = h.logs();
+  const remaining = items.filter((i) => (i.kind === 'owner_comment' && i.text <= cutoff)
+    || (i.kind === 'decision_answer' && i.decision.answered_at <= cutoff)
+    || ['stall', 'review_exit_missing'].includes(i.kind)).map((i) => i.id);
+  const all = h.json(['inbox', '--ack-before', '2026-01-02T02:00:00+02:00', '--agent', 'orchestrator']);
+  assert.deepEqual(all, { acknowledged: remaining, count: 5, cutoff });
+  added = h.logs().slice(before.length);
+  assert.equal(added.length, 1);
+  assert.deepEqual(added[0].detail, { items: remaining, count: 5, cutoff });
+  const newer = h.inbox().items;
+  assert.equal(newer.filter((i) => ['message', 'owner_comment'].includes(i.kind)).length, 2);
+  assert.deepEqual(newer.filter((i) => i.kind === 'decision_answer').map((i) => i.decision.id), ['D2']);
+  assert.ok(newer.some((i) => i.kind === 'ready'));
+  before = h.logs();
+  assert.deepEqual(h.json(['inbox', '--ack-before', cutoff, '--agent', 'orchestrator']),
+    { acknowledged: [], count: 0, cutoff });
+  assert.equal(h.logs().length, before.length + 1);
+});
+
+test('old closed-task inputs expire without changing history while main CI is observed', (t) => {
+  const h = setup(t);
+  const merged = h.add('Merged input');
+  h.submit(merged, 7);
+  h.reviewer(merged, 'reviewer', h.sha);
+  h.ok(['evidence', merged, '--revision', h.revision(merged), '--type', 'review', '--ok', '--sha', h.sha, '--agent', 'reviewer']);
+  h.ok(['check', 'ci', merged]);
+  h.ok(['accept', merged]);
+  h.ok(['merge', merged]);
+  const cancelled = h.add('Cancelled input');
+  h.ok(['task', 'update', cancelled, '--status', 'cancelled']);
+  const unmerged = h.add('Accepted input');
+  h.submit(unmerged, 8);
+  h.reviewer(unmerged, 'reviewer', h.sha);
+  h.ok(['evidence', unmerged, '--revision', h.revision(unmerged), '--type', 'review', '--ok', '--sha', h.sha, '--agent', 'reviewer']);
+  h.ok(['check', 'ci', unmerged]);
+  h.ok(['accept', unmerged]);
+  const active = h.add('Active input');
+  const old = new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString();
+  const recent = new Date(Date.now() - 23 * 60 * 60 * 1000).toISOString();
+  const cases = [
+    { tasks: [merged], hidden: true },
+    { tasks: [cancelled], hidden: true },
+    { tasks: [merged, cancelled], hidden: true },
+    { tasks: [unmerged], hidden: false },
+    { tasks: [active], hidden: false },
+    { tasks: [merged, active], hidden: false },
+    { tasks: [], hidden: false },
+  ];
+  for (const [index, row] of cases.entries()) {
+    for (const at of [old, recent]) event(h, row.tasks[0] || null, 'msg', { to: 'orchestrator', text: `${index}:${at}` }, 'messenger', at);
+    h.ok(['ask', '--kind', 'technical', '--question', `Input ${index}`, '--option', 'A', ...row.tasks.flatMap((id) => ['--blocks', id])]);
+    h.ok(['answer', `D${index + 1}`, '--choice', 'A']);
+  }
+  h.ok(['ask', '--kind', 'technical', '--question', 'Recent merged input', '--option', 'A', '--blocks', merged]);
+  h.ok(['answer', `D${cases.length + 1}`, '--choice', 'A']);
+  event(h, merged, 'task note', { text: 'Retain owner input' }, 'owner', old);
+  const decisions = StateFiles.readDoc(h.state, 'decisions.json');
+  for (const decision of decisions.decisions) decision.answered_at = old;
+  decisions.decisions.at(-1).answered_at = recent;
+  StateFiles.writeDoc(h.state, 'decisions.json', decisions);
+  for (const [index, conclusion] of [null, 'pending', 'success', 'failure', 'success'].entries()) {
+    const github = h.github();
+    github.main_head = (index + 1).toString(16).repeat(40);
+    github.main_runs = conclusion === null ? [] : [{
+      id: 100 + index, workflow_id: 11, run_number: index + 1, name: 'CI', event: 'push',
+      head_sha: github.main_head, status: conclusion === 'pending' ? 'in_progress' : 'completed',
+      conclusion: conclusion === 'pending' ? null : conclusion,
+    }];
+    h.save(github);
+    fs.rmSync(path.join(h.state, 'main-ci-cache.json'), { force: true });
+    const before = h.logs();
+    h.refresh();
+    const refreshed = h.logs();
+    const items = h.inbox(false).items;
+    for (const [index, row] of cases.entries()) {
+      const messageHidden = [merged, cancelled].includes(row.tasks[0]);
+      assert.equal(items.some((i) => i.kind === 'message' && i.text === `${index}:${old}`), !messageHidden, JSON.stringify(row));
+      assert.ok(items.some((i) => i.kind === 'message' && i.text === `${index}:${recent}`));
+      assert.equal(items.some((i) => i.kind === 'decision_answer' && i.decision.id === `D${index + 1}`), !row.hidden, JSON.stringify(row));
+    }
+    assert.ok(items.some((i) => i.kind === 'owner_comment' && i.text === 'Retain owner input'));
+    assert.ok(items.some((i) => i.kind === 'decision_answer' && i.decision.id === `D${cases.length + 1}`));
+    assert.equal(items.filter((i) => i.kind === 'main_ci_failed').length, conclusion === 'failure' ? 1 : 0);
+    const after = h.logs();
+    assert.deepEqual(after, refreshed, 'foreground expiration appends no events');
+    assert.deepEqual(refreshed.slice(0, before.length), before, 'expiration preserves every existing event');
+    const added = refreshed.slice(before.length);
+    assert.deepEqual(added.filter((e) => e.cmd === 'main ci').map((e) => e.detail.head),
+      [github.main_head], 'the follower appends the fresh CI observation');
+    assert.ok(added.every((e) => ['main ci', 'inbox item', 'inbox snapshot'].includes(e.cmd)),
+      'the follower only appends CI observations and inbox receipts');
+  }
+});
 
 test('one fixture exposes every inbox kind and resolving commands clear their conditions', async (t) => {
   const h = setup(t);
@@ -63,7 +629,7 @@ test('one fixture exposes every inbox kind and resolving commands clear their co
   h.ok(['rework', rework, '--reason', 'base conflict in parser.js']);
   const dead = h.add('Dead claim');
   h.ok(['claim', dead, '--agent', 'gone']);
-  event(h, dead, 'spawn', { agent: 'gone', role: 'worker', pid: 2147483647, host: os.hostname() });
+  event(h, dead, 'spawn', { agent: 'gone', role: 'worker', harness: 'command', pid: 2147483647, host: os.hostname() });
   const accepted = h.add('Accepted but not merged');
   h.submit(accepted, 7);
   h.reviewer(accepted, 'reviewer', h.sha);
@@ -253,6 +819,8 @@ test('new inbox items wake through wait and unchanged snapshots do not wake twic
   const h = setup(t);
   h.add('Ready');
   const before = StateFiles.logEnd(h.state);
+  // Retain the follower's ready notification while warming its CI cache.
+  h.inbox();
   const args = ['wait', '--inbox', '--observe', '--after', String(before), '--types', 'inbox item', '--timeout', '0.2', '--agent', 'orchestrator']; // wait-allow: verify the CLI observation, filtering or timeout contract with already-published state
   const wake = h.run(args);
   assert.equal(wake.code, 0, wake.stderr);
@@ -413,7 +981,8 @@ test('GitHub-only findings wake the watcher and endpoint failures retain other f
   const id = h.add('Remote review');
   h.submit(id, 8);
   const after = () => String(StateFiles.logEnd(h.state));
-  const wait = () => h.run(['wait', '--inbox', '--observe', '--after', after(), '--types', 'inbox item', '--timeout', '0.1', '--agent', 'orchestrator']); // wait-allow: verify the CLI observation, filtering or timeout contract with already-published state
+  // Async GitHub reads must finish within the wait, including a cold cache.
+  const wait = () => h.run(['wait', '--inbox', '--observe', '--after', after(), '--types', 'inbox item', '--timeout', '2', '--agent', 'orchestrator']); // wait-allow: verify the CLI observation, filtering or timeout contract with already-published state
   assert.equal(wait().code, 2);
   const github = h.github();
   github.revuto = { name: 'review', app: { slug: 'revuto-review' }, status: 'completed', conclusion: 'failure', output: { summary: 'Bounds check missing' } };
@@ -841,7 +1410,7 @@ test('a red push or schedule run on the base shows in inbox and status until a l
 
   const [failed] = red();
   assert.equal(failed.kind, 'main_ci_failed', JSON.stringify(red()));
-  assert.equal(failed.id, 'main_ci_failed:project:11');
+  assert.equal(failed.id, `main_ci_failed:project:${h.sha}`);
   assert.deepEqual(failed.jobs.map((j) => [j.name, j.conclusion, j.tests.map((x) => x.name)]), [[linux, 'failure', [test]]]);
   assert.match(failed.reason, /CI run 1001 attempt 1 \(push at .+\): failure/);
   assert.deepEqual(failed.action.argv, ['task', 'add', '--title', 'Fix main CI: CI (workflow 11), red since run 1001', '--kind', 'code',
@@ -879,17 +1448,27 @@ test('a red push or schedule run on the base shows in inbox and status until a l
   h.save(github);
   assert.deepEqual(red().map((i) => [i.kind, i.run, i.attempt]), [['main_ci_failed', 1002, 2]]);
 
-  // A later green run of the workflow clears it, a manual dispatch at the same head included.
-  github.main_runs.unshift(run(1003, 52, 'workflow_dispatch', 'completed', 'success'));
+  // A later green push of the workflow clears it.
+  github.main_runs.unshift(run(1003, 52, 'push', 'completed', 'success'));
   h.save(github);
   assert.deepEqual(red(), []);
   assert.doesNotMatch(h.ok(['status']), /ci red/);
 
-  // A cancelled run with a newer run of its workflow was superseded and is not red.
-  github.main_runs.unshift(run(1005, 54, 'push', 'in_progress', null), run(1004, 53, 'push', 'completed', 'cancelled'));
+  // A successful completed attempt still decides while its next attempt runs.
+  github.main_runs[0] = run(1003, 52, 'push', 'in_progress', null, 2);
   h.save(github);
   assert.deepEqual(red(), []);
   assert.doesNotMatch(h.ok(['status']), /ci red/);
+  github.main_runs[0] = run(1003, 52, 'push', 'completed', 'success', 2);
+  h.save(github);
+  assert.deepEqual(red(), []);
+
+  // A pending newer push cannot clear a cancelled completed push.
+  github.main_runs.unshift(run(1005, 54, 'push', 'in_progress', null), run(1004, 53, 'push', 'completed', 'cancelled'));
+  github.jobs[1004] = [job(503, linux, 'cancelled')];
+  h.save(github);
+  assert.equal(red()[0].conclusion, 'cancelled');
+  assert.match(h.ok(['status']), /ci red/);
 
   // Without a newer run, a cancelled run is not green.
   github.main_runs.shift();
@@ -920,4 +1499,24 @@ test('a red push or schedule run on the base shows in inbox and status until a l
   h.save(github);
   assert.doesNotMatch(h.ok(['status']), /ci red/);
   assert.deepEqual(red(), []);
+});
+
+// Main pushes run only the shared-files check, so the daily full run is where a regression shows.
+test('a red daily full run stays in inbox past newer green pushes of its workflow until a green full run', (t) => {
+  const h = setup(t);
+  const run = (id, number, event, conclusion) => ({ id, run_number: number, run_attempt: 1, workflow_id: 11, name: 'CI',
+    path: '.github/workflows/ci.yml', event, status: 'completed', conclusion, head_sha: h.sha, html_url: `https://github.com/acme/demo/actions/runs/${id}` });
+  const github = h.github();
+  github.jobs = { 2001: [] };
+  const red = (runs) => {
+    github.main_runs = runs;
+    h.save(github);
+    fs.rmSync(path.join(h.state, 'main-ci-cache.json'), { force: true });
+    return h.inbox().items.filter((i) => i.kind === 'main_ci_failed').map((i) => [i.id, i.run]);
+  };
+  const daily = run(2001, 60, 'schedule', 'failure');
+  assert.deepEqual(red([daily]), [['main_ci_failed:project:11', 2001]]);
+  assert.deepEqual(red([run(2002, 61, 'push', 'success'), daily]), [['main_ci_failed:project:11', 2001]]);
+  assert.match(h.ok(['status']), /main ci red: CI run 2001 attempt 1 \(schedule at /);
+  assert.deepEqual(red([run(2003, 62, 'workflow_dispatch', 'success'), run(2002, 61, 'push', 'success'), daily]), []);
 });

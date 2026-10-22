@@ -1,0 +1,1 @@
+- Use published-file readers in the base-cache gate tests and cover guarded JSONL reads in the publication lint.

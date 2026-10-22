@@ -6,11 +6,13 @@
 // named files miss is run against the suite before it counts as missed, except
 // for the pristine-anchor check, which cannot score a deliberately planted bug.
 //
-//   node scripts/mutants.js [--root DIR] [--jobs 4] [--only ID,ID] [--no-full] [--skip PATTERN] [--process-limit N]
+//   node scripts/mutants.js [--root DIR] [--jobs 4] [--only ID,ID] [--no-full] [--skip PATTERN] [--process-limit N] [--deadline-floor MS]
 //   node scripts/mutants.js --check [--root DIR] [--only ID,ID]
 //
 // --skip passes --test-skip-pattern to every run, for a test the current
 // environment cannot run, such as a nested git push inside an agent's sandbox.
+// --deadline-floor lowers the 30-second floor of a mutant's deadline, so a test
+// of the timeout catch waits seconds, not minutes.
 
 const cp = require('node:child_process');
 const fs = require('node:fs');
@@ -159,7 +161,7 @@ const MUTANTS = [
   { id: 'expired-renewal-skips-readiness', area: 'spawn/supervisor', file: 'lib/tasks.js',
     from: 'if (leaseExpired(t, now)) checkReady(', to: 'if (leaseExpired(t, now)) checkWorkers(', tests: ['test/claim.test.js'] },
   { id: 'worker-starts-before-lease', area: 'spawn/supervisor', file: 'lib/spawn-monitor.js',
-    from: "const gated = initial && spawn.role === 'worker' && !spawn.handshake;", to: 'const gated = false;', tests: ['test/supervision.test.js'] },
+    from: "const gated = initial && spawn.role === 'worker' && !spawn.body_fix && !spawn.handshake;", to: 'const gated = false;', tests: ['test/supervision.test.js'] },
   { id: 'handshake-launches-before-go', area: 'spawn/supervisor', file: 'lib/spawn-monitor.js',
     from: 'while (!fs.existsSync(spawn.handshake.go)) {', to: 'while (false) {', tests: ['test/supervision.test.js'] },
   { id: 'spawn-ignores-live-reservation', area: 'spawn/supervisor', file: 'lib/spawn.js',
@@ -299,6 +301,300 @@ function checkMutants(root, mutants = MUTANTS) {
   if (failures.length) throw new Error(failures.join('\n'));
 }
 
+// Windows does not reparent and has no process groups, so a snapshot cannot follow a
+// tree whose parents exit between snapshots. Each run there starts suspended in its
+// own job object, which no descendant can leave: libuv sets no breakaway flag, and
+// its own job's silent breakaway stops at this one. The helper stops the job when
+// the command exits, is capped or is told to stop, and reports once the job is
+// empty. Its handle is the job's only one, so the job dies with the helper.
+const JOB_SOURCE = String.raw`
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading;
+
+public static class TowerCraneMutantJob {
+  [StructLayout(LayoutKind.Sequential)]
+  struct BasicLimit {
+    public long PerProcessUserTimeLimit; public long PerJobUserTimeLimit; public uint LimitFlags;
+    public UIntPtr MinimumWorkingSetSize; public UIntPtr MaximumWorkingSetSize; public uint ActiveProcessLimit;
+    public UIntPtr Affinity; public uint PriorityClass; public uint SchedulingClass;
+  }
+  [StructLayout(LayoutKind.Sequential)]
+  struct ExtendedLimit {
+    public BasicLimit Basic; public ulong ReadOperations, WriteOperations, OtherOperations, ReadBytes, WriteBytes, OtherBytes;
+    public UIntPtr ProcessMemoryLimit, JobMemoryLimit, PeakProcessMemoryUsed, PeakJobMemoryUsed;
+  }
+  [StructLayout(LayoutKind.Sequential)]
+  struct Accounting {
+    public long TotalUserTime, TotalKernelTime, ThisPeriodTotalUserTime, ThisPeriodTotalKernelTime;
+    public uint TotalPageFaultCount, TotalProcesses, ActiveProcesses, TotalTerminatedProcesses;
+  }
+  [StructLayout(LayoutKind.Sequential)]
+  struct CompletionPort { public IntPtr Key; public IntPtr Port; }
+  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+  struct StartupInfo {
+    public int cb; public string lpReserved, lpDesktop, lpTitle;
+    public int dwX, dwY, dwXSize, dwYSize, dwXCountChars, dwYCountChars, dwFillAttribute, dwFlags;
+    public short wShowWindow, cbReserved2; public IntPtr lpReserved2, hStdInput, hStdOutput, hStdError;
+  }
+  [StructLayout(LayoutKind.Sequential)]
+  struct ProcessInfo { public IntPtr hProcess, hThread; public int dwProcessId, dwThreadId; }
+  [StructLayout(LayoutKind.Sequential)]
+  struct SecurityAttributes { public int nLength; public IntPtr lpSecurityDescriptor; public int bInheritHandle; }
+
+  [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+  static extern IntPtr CreateJobObjectW(IntPtr attributes, string name);
+  [DllImport("kernel32.dll", SetLastError = true)]
+  static extern bool SetInformationJobObject(IntPtr job, int infoClass, ref ExtendedLimit info, int length);
+  [DllImport("kernel32.dll", SetLastError = true)]
+  static extern bool SetInformationJobObject(IntPtr job, int infoClass, ref CompletionPort info, int length);
+  [DllImport("kernel32.dll", SetLastError = true)]
+  static extern bool QueryInformationJobObject(IntPtr job, int infoClass, out Accounting info, int length, IntPtr returned);
+  [DllImport("kernel32.dll", SetLastError = true)]
+  static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+  [DllImport("kernel32.dll", SetLastError = true)]
+  static extern bool TerminateJobObject(IntPtr job, uint code);
+  [DllImport("kernel32.dll", SetLastError = true)]
+  static extern IntPtr CreateIoCompletionPort(IntPtr file, IntPtr existing, UIntPtr key, uint threads);
+  [DllImport("kernel32.dll", SetLastError = true)]
+  static extern bool GetQueuedCompletionStatus(IntPtr port, out uint message, out UIntPtr key, out IntPtr overlapped, uint ms);
+  [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+  static extern bool CreateProcessW(string application, StringBuilder commandLine, IntPtr processAttributes,
+    IntPtr threadAttributes, bool inherit, uint flags, IntPtr environment, string directory,
+    ref StartupInfo startup, out ProcessInfo info);
+  [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+  static extern IntPtr CreateFileW(string name, uint access, uint share, ref SecurityAttributes attributes,
+    uint disposition, uint flags, IntPtr template);
+  [DllImport("kernel32.dll", SetLastError = true)]
+  static extern uint ResumeThread(IntPtr thread);
+  [DllImport("kernel32.dll", SetLastError = true)]
+  static extern bool TerminateProcess(IntPtr process, uint code);
+  [DllImport("kernel32.dll", SetLastError = true)]
+  static extern uint WaitForSingleObject(IntPtr handle, uint ms);
+  [DllImport("kernel32.dll", SetLastError = true)]
+  static extern bool GetExitCodeProcess(IntPtr process, out uint code);
+  [DllImport("kernel32.dll", SetLastError = true)]
+  static extern IntPtr GetStdHandle(int which);
+  [DllImport("kernel32.dll", SetLastError = true)]
+  static extern bool SetHandleInformation(IntPtr handle, uint mask, uint flags);
+  [DllImport("kernel32.dll", SetLastError = true)]
+  static extern bool CloseHandle(IntPtr handle);
+
+  static volatile bool stopped;
+
+  static void Check(bool ok) { if (!ok) throw new Win32Exception(); }
+
+  static uint Active(IntPtr job) {
+    Accounting info;
+    Check(QueryInformationJobObject(job, 1, out info, Marshal.SizeOf(typeof(Accounting)), IntPtr.Zero));
+    return info.ActiveProcesses;
+  }
+
+  static string Name(string entry) {
+    int split = entry.IndexOf('=', 1);
+    return split < 0 ? entry : entry.Substring(0, split);
+  }
+
+  static void Report(string marker, string fields) {
+    Console.Out.Write("\n" + marker + " {" + fields + "}\n");
+    Console.Out.Flush();
+  }
+
+  public static int Run(string commandLine, string[] env, int limit, int waitMs, string marker) {
+    IntPtr job = CreateJobObjectW(IntPtr.Zero, null);
+    Check(job != IntPtr.Zero);
+    ExtendedLimit limits = new ExtendedLimit();
+    // KILL_ON_JOB_CLOSE and ACTIVE_PROCESS, without a breakaway flag.
+    limits.Basic.LimitFlags = 0x2000 | 0x8;
+    limits.Basic.ActiveProcessLimit = (uint)limit;
+    Check(SetInformationJobObject(job, 9, ref limits, Marshal.SizeOf(typeof(ExtendedLimit))));
+    IntPtr port = CreateIoCompletionPort(new IntPtr(-1), IntPtr.Zero, UIntPtr.Zero, 1);
+    Check(port != IntPtr.Zero);
+    CompletionPort association = new CompletionPort();
+    association.Key = job;
+    association.Port = port;
+    Check(SetInformationJobObject(job, 7, ref association, Marshal.SizeOf(typeof(CompletionPort))));
+
+    // The control pipe stays with this helper; the command reads an empty stdin.
+    IntPtr control = GetStdHandle(-10);
+    if (control != IntPtr.Zero && control != new IntPtr(-1)) SetHandleInformation(control, 1, 0);
+    SecurityAttributes inherit = new SecurityAttributes();
+    inherit.nLength = Marshal.SizeOf(typeof(SecurityAttributes));
+    inherit.bInheritHandle = 1;
+    IntPtr empty = CreateFileW("NUL", 0x80000000, 3, ref inherit, 3, 0, IntPtr.Zero);
+    Check(empty != new IntPtr(-1));
+    StartupInfo startup = new StartupInfo();
+    startup.cb = Marshal.SizeOf(typeof(StartupInfo));
+    startup.dwFlags = 0x100;
+    startup.hStdInput = empty;
+    // Both streams share stdout: PowerShell writes its own progress records to stderr.
+    startup.hStdOutput = GetStdHandle(-11);
+    startup.hStdError = startup.hStdOutput;
+    List<string> entries = new List<string>(env);
+    entries.Sort(delegate (string a, string b) { return string.Compare(Name(a), Name(b), StringComparison.OrdinalIgnoreCase); });
+    StringBuilder block = new StringBuilder();
+    foreach (string entry in entries) block.Append(entry).Append('\0');
+    IntPtr environment = Marshal.StringToHGlobalUni(block.Append('\0').ToString());
+    ProcessInfo child;
+    // CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT and CREATE_NO_WINDOW: it joins the job before it runs.
+    if (!CreateProcessW(null, new StringBuilder(commandLine), IntPtr.Zero, IntPtr.Zero, true,
+      0x4 | 0x400 | 0x08000000, environment, null, ref startup, out child)) {
+      Report(marker, "\"error\":" + Marshal.GetLastWin32Error());
+      return 0;
+    }
+    if (!AssignProcessToJobObject(job, child.hProcess)) {
+      int error = Marshal.GetLastWin32Error();
+      TerminateProcess(child.hProcess, 1);
+      throw new Win32Exception(error);
+    }
+    // The command is still suspended, so nothing it writes can split this line.
+    Console.Out.Write("\n" + marker + " started\n");
+    Console.Out.Flush();
+    Check(ResumeThread(child.hThread) != 0xFFFFFFFF);
+    CloseHandle(child.hThread);
+
+    Thread reader = new Thread(delegate () {
+      try { while (true) { string line = Console.In.ReadLine(); if (line == null || line == "stop") break; } }
+      catch (Exception) { }
+      stopped = true;
+    });
+    reader.IsBackground = true;
+    reader.Start();
+
+    string reason = null;
+    uint peak = 0;
+    bool exited = false;
+    while (!exited && reason == null && !stopped) {
+      uint message; UIntPtr key; IntPtr overlapped;
+      for (uint wait = 25; GetQueuedCompletionStatus(port, out message, out key, out overlapped, wait); wait = 0) {
+        // JOB_OBJECT_MSG_ACTIVE_PROCESS_LIMIT: a process start was refused at the cap.
+        if (message == 3 && reason == null) reason = "process cap (" + limit + ")";
+      }
+      uint active = Active(job);
+      peak = Math.Max(peak, active);
+      if (active >= limit && reason == null) reason = "process cap (" + limit + "); observed " + active;
+      exited = WaitForSingleObject(child.hProcess, 0) == 0;
+    }
+    Check(TerminateJobObject(job, 1));
+    uint status;
+    WaitForSingleObject(child.hProcess, (uint)waitMs);
+    Check(GetExitCodeProcess(child.hProcess, out status));
+    DateTime deadline = DateTime.UtcNow.AddMilliseconds(waitMs);
+    uint left = Active(job);
+    while (left > 0 && DateTime.UtcNow < deadline) {
+      Thread.Sleep(25);
+      left = Active(job);
+    }
+    Report(marker, "\"status\":" + status + ",\"peak\":" + peak + ",\"left\":" + left
+      + (reason == null ? "" : ",\"reason\":\"" + reason + "\""));
+    return 0;
+  }
+}
+`;
+
+// The spec waits in the pipe while Windows PowerShell 5.1 compiles the helper as C# 5.
+const JOB_SCRIPT = `$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+Add-Type -IgnoreWarnings -TypeDefinition @'
+${JOB_SOURCE}
+'@
+$spec = [Console]::In.ReadLine() | ConvertFrom-Json
+exit [TowerCraneMutantJob]::Run([string]$spec.command, [string[]]$spec.env, [int]$spec.limit, [int]$spec.wait, [string]$spec.marker)
+`;
+
+// The command line CreateProcess parses back into argv, quoted as libuv quotes it.
+function windowsCommandLine(argv) {
+  return argv.map(arg => {
+    if (!arg) return '""';
+    if (!/[\s"]/.test(arg)) return arg;
+    if (!/["\\]/.test(arg)) return `"${arg}"`;
+    let out = '"';
+    let slashes = 0;
+    for (const ch of arg) {
+      if (ch === '\\') { slashes++; continue; }
+      out += '\\'.repeat(ch === '"' ? slashes * 2 + 1 : slashes) + ch;
+      slashes = 0;
+    }
+    return `${out}${'\\'.repeat(slashes * 2)}"`;
+  }).join(' ');
+}
+
+// Cold PowerShell startup and the C# compile take seconds on a loaded hosted runner;
+// a job stop is quick, so this bounds only a helper that stopped answering.
+const WINDOWS_WAIT_MS = 30000;
+
+async function runJob(command, argv, { cwd, env, limit, timeout }) {
+  const marker = `tower-crane-mutant-job-${require('node:crypto').randomUUID()}`;
+  const child = cp.spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand',
+    Buffer.from(JOB_SCRIPT, 'utf16le').toString('base64')],
+  { cwd, env, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+  const names = new Map();
+  for (const [name, value] of Object.entries(env)) if (value !== undefined) names.set(name.toUpperCase(), `${name}=${value}`);
+  child.stdin.on('error', () => {});
+  // Windows PowerShell decodes stdin in the OEM code page, so the spec stays ASCII.
+  const spec = JSON.stringify({ command: windowsCommandLine([command, ...argv]), env: [...names.values()],
+    limit, wait: WINDOWS_WAIT_MS, marker }).replace(/[\u007f-\uffff]/g, ch => `\\u${ch.charCodeAt(0).toString(16).padStart(4, '0')}`);
+  child.stdin.write(`${spec}\n`);
+  let output = '';
+  let helper = '';
+  let reason = null;
+  let force;
+  let deadline;
+  let started = false;
+  const begin = `\n${marker} started\n`;
+  const capture = chunk => {
+    output = (output + chunk.toString()).slice(-8192);
+    // The timeout measures the command, not the helper's startup and compile.
+    if (!started && output.includes(begin)) {
+      started = true;
+      clearTimeout(deadline);
+      deadline = setTimeout(() => stop(`caught-by-timeout (${timeout} ms)`), timeout);
+    }
+  };
+  child.stdout.on('data', capture);
+  child.stderr.on('data', chunk => { helper = (helper + chunk.toString()).slice(-8192); });
+  const stop = why => {
+    reason ||= why;
+    if (child.stdin.writable) child.stdin.end('stop\n');
+    // Killing the helper closes the job's last handle, which kills every member.
+    force ||= setTimeout(() => child.kill(), 2 * WINDOWS_WAIT_MS);
+  };
+  const onInt = () => stop('interrupted by SIGINT');
+  const onTerm = () => stop('interrupted by SIGTERM');
+  process.on('SIGINT', onInt);
+  process.on('SIGTERM', onTerm);
+  deadline = setTimeout(() => stop(`caught-by-timeout (${timeout} ms)`), timeout);
+  try {
+    const { status, signal } = await new Promise((resolve, reject) => {
+      child.once('error', reject);
+      child.once('close', (code, sig) => resolve({ status: code, signal: sig }));
+    });
+    output = output.replace(begin, '');
+    const at = output.lastIndexOf(`\n${marker} {`);
+    const report = at < 0 ? null : JSON.parse(output.slice(at + marker.length + 2).split('\n')[0]);
+    if (at >= 0) output = output.slice(0, at);
+    if (!report || status !== 0) throw new Error(`cannot contain the mutant run in a Windows job (${signal || status}):\n${output}\n${helper}`);
+    if (report.error !== undefined) {
+      // ERROR_FILE_NOT_FOUND and ERROR_PATH_NOT_FOUND, as Node reports a missing executable.
+      const code = [2, 3].includes(report.error) ? 'ENOENT' : `WIN32_${report.error}`;
+      throw Object.assign(new Error(`spawn ${command} ${code}`), { code, errno: -report.error });
+    }
+    if (report.left) throw new Error(`mutant descendants survived containment cleanup: ${report.left} still in the job`);
+    return { status: report.status, signal: null, reason: reason || report.reason || null, output, peak: report.peak };
+  } finally {
+    clearTimeout(deadline);
+    clearTimeout(force);
+    process.off('SIGINT', onInt);
+    process.off('SIGTERM', onTerm);
+    child.stdin.destroy();
+    child.stdout.destroy();
+    child.stderr.destroy();
+  }
+}
+
 // Track descendants as well as groups: the CLI starts detached supervisors.
 function processSnapshot() {
   if (process.platform === 'linux') {
@@ -315,16 +611,6 @@ function processSnapshot() {
       }
     }
     return rows;
-  }
-  if (process.platform === 'win32') {
-    const r = cp.spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
-      'Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,CreationDate | ConvertTo-Json -Compress'],
-    { encoding: 'utf8', timeout: 5000, windowsHide: true });
-    if (r.error || r.status !== 0) throw new Error(`cannot inspect mutant processes: ${r.error?.message || r.stderr}`);
-    const rows = JSON.parse(r.stdout);
-    return (Array.isArray(rows) ? rows : [rows]).map(row => ({
-      pid: row.ProcessId, parent: row.ParentProcessId, start: row.CreationDate, live: true,
-    }));
   }
   const r = cp.spawnSync('ps', ['-axo', 'pid=,ppid=,pgid=,stat=,lstart='], { encoding: 'utf8', timeout: 5000 });
   if (r.error || r.status !== 0) throw new Error(`cannot inspect mutant processes: ${r.error?.message || r.stderr}`);
@@ -354,6 +640,7 @@ function scopeAvailable() {
 
 async function runContained(command, argv, { cwd, env = process.env, limit = 512, scope = false, timeout = 3600000 } = {}) {
   if (!Number.isSafeInteger(limit) || limit < 2 || limit > 512) throw new Error('process limit must be an integer from 2 to 512');
+  if (process.platform === 'win32') return runJob(command, argv, { cwd, env, limit, timeout });
   const before = new Map((scope ? [] : processSnapshot()).map(row => [row.pid, row.start]));
   // The inherited marker finds Linux descendants reparented between snapshots.
   const marker = require('node:crypto').randomUUID();
@@ -362,7 +649,7 @@ async function runContained(command, argv, { cwd, env = process.env, limit = 512
   const args = scope ? ['--user', '--scope', '--quiet', callerSlice(), `--unit=${unit}`, '-p', `TasksMax=${limit}`,
     '-p', 'MemoryMax=4G', '--', command, ...argv] : argv;
   const child = cp.spawn(scope ? 'systemd-run' : command, args, { cwd, env: markedEnv,
-    detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+    detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
   const known = new Map();
   let output = '';
   let peak = 0;
@@ -460,17 +747,12 @@ async function runContained(command, argv, { cwd, env = process.env, limit = 512
     if (scope) cp.spawnSync('systemctl', ['--user', 'kill', '--signal=SIGKILL', '--kill-whom=all', unit],
       { encoding: 'utf8', timeout: 5000 });
     const members = remember();
-    if (process.platform === 'win32') {
-      for (const row of members) cp.spawnSync('taskkill', ['/F', '/T', '/PID', String(row.pid)],
-        { encoding: 'utf8', timeout: 5000, windowsHide: true });
-    } else {
-      const groups = new Set(members.filter(row => row.pid === row.group).map(row => row.group));
-      for (const group of groups) {
-        try { process.kill(-group, 'SIGKILL'); } catch (error) { if (error.code !== 'ESRCH') throw error; }
-      }
-      for (const row of members) {
-        try { process.kill(row.pid, 'SIGKILL'); } catch (error) { if (error.code !== 'ESRCH') throw error; }
-      }
+    const groups = new Set(members.filter(row => row.pid === row.group).map(row => row.group));
+    for (const group of groups) {
+      try { process.kill(-group, 'SIGKILL'); } catch (error) { if (error.code !== 'ESRCH') throw error; }
+    }
+    for (const row of members) {
+      try { process.kill(row.pid, 'SIGKILL'); } catch (error) { if (error.code !== 'ESRCH') throw error; }
     }
   };
   const scopeCap = () => {
@@ -545,17 +827,18 @@ async function runContained(command, argv, { cwd, env = process.env, limit = 512
 }
 
 // Five baseline times leave room for loaded hosts; the floor covers process startup.
-function mutationTimeout(files, timings) {
+const DEADLINE_FLOOR_MS = 30000;
+function mutationTimeout(files, timings, floor = DEADLINE_FLOOR_MS) {
   const measured = files.reduce((sum, file) => {
     const ms = timings.get(file);
     if (!Number.isFinite(ms) || ms < 0) throw new Error(`missing baseline time for ${file}`);
     return sum + ms;
   }, 0);
-  return Math.ceil(Math.max(30000, measured * 5));
+  return Math.ceil(Math.max(floor, measured * 5));
 }
 
-async function runMutationTests(files, timings, testResult, onRetry = () => {}) {
-  const timeout = mutationTimeout(files, timings);
+async function runMutationTests(files, timings, testResult, onRetry = () => {}, floor = DEADLINE_FLOOR_MS) {
+  const timeout = mutationTimeout(files, timings, floor);
   let run = await testResult(files, timeout);
   if (run.reason?.startsWith('caught-by-timeout')) {
     onRetry();
@@ -566,7 +849,7 @@ async function runMutationTests(files, timings, testResult, onRetry = () => {}) 
   return { run, caughtBy };
 }
 
-module.exports = { MUTANTS, checkMutants, runContained, mutationTimeout, runMutationTests };
+module.exports = { MUTANTS, checkMutants, runContained, windowsCommandLine, mutationTimeout, runMutationTests };
 if (require.main !== module) return;
 
 async function main() {
@@ -582,6 +865,8 @@ async function main() {
   const skip = opt('--skip', null);
   const processLimit = Number(opt('--process-limit', '512'));
   if (!Number.isSafeInteger(processLimit) || processLimit < 2 || processLimit > 512) throw new Error('--process-limit must be an integer from 2 to 512');
+  const floor = Number(opt('--deadline-floor', String(DEADLINE_FLOOR_MS)));
+  if (!Number.isSafeInteger(floor) || floor < 1000 || floor > DEADLINE_FLOOR_MS) throw new Error(`--deadline-floor must be an integer from 1000 to ${DEADLINE_FLOOR_MS} ms`);
   const root = path.resolve(opt('--root', path.join(__dirname, '..')));
   const selected = only ? MUTANTS.filter((m) => only.includes(m.id)) : MUTANTS;
   if (!selected.length || only?.some((id) => !MUTANTS.some((m) => m.id === id))) throw new Error('unknown or empty mutation selection');
@@ -623,7 +908,7 @@ async function main() {
     if (failed) throw failed;
   }
   const runTests = (files, id) => runMutationTests(files, timings, testResult,
-    () => console.log(`retry   ${id}: timeout-only catch`));
+    () => console.log(`retry   ${id}: timeout-only catch`), floor);
 
   // Anchor validation checks the pristine catalog, not behavior under a planted bug.
   const allFiles = () => require(path.join(copy, 'test', 'run.js')).testFiles()

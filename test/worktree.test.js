@@ -96,7 +96,7 @@ test('a dependent task starts from the base as it is under the dispatch lock, no
   const h = setup(t);
   h.ok(['task', 'add', '--title', 'Dependent', '--acceptance', 'builds on T1', '--dep', 'T1']);
   const W = require('../lib/worktree');
-  const repo = { root: h.repo, commonDir: path.join(h.repo, '.git') };
+  const repo = { root: h.repo, commonDir: path.join(h.repo, '.git'), stateDir: h.state };
   const st = require('../lib/state').loadState(h.state);
   const task = st.tasks.tasks.find((x) => x.id === 'T2');
   const fetched = W.prefetch(repo, st, task);
@@ -334,7 +334,9 @@ for (const command of ['worktree', 'spawn']) {
         JSON.stringify([process.execPath, '-e', 'process.exit(0)', '{prompt}']), '--clear', 'profile', '--clear', 'effort']);
       for (const id of ids) h.ok(['brief', 'set', id, '-'], { input: 'Use the fresh base.\n' });
     }
-    const attempts = guardUploadPack(h, 15000);
+    // Seconds where an ordinary fetch takes milliseconds; the count of
+    // upload-pack calls, not the delay, is the proof.
+    const attempts = guardUploadPack(h, 2000);
     const hooks = { HOOK_WORKTREE_ADD_ACTIVE: path.join(h.base, 'worktree-add-active') };
     const trees = h.json(['worktree', ...ids], { hooks });
     assert.equal(fs.readFileSync(attempts, 'utf8'), '.', 'the dispatcher fetched once before preparing workers');
@@ -643,7 +645,7 @@ test('a gate that prepares while a task worktree is being created waits until it
 
 // A sandboxed worker writes the repository's git directory, where Tower Crane
 // 0.1.2 and earlier took the worktree lock; one it leaves there must stall
-// nothing (the sandboxes' write lists: test/isolation.test.js).
+// nothing (the sandboxes' write lists: test/isolation-installs.test.js).
 test('a worktree lock planted in the git directory stalls neither relink nor gate preparation', async (t) => {
   const h = makeRepo(t);
   h.init();

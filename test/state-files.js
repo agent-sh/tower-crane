@@ -113,16 +113,18 @@ function replaceLog(dir, text) {
 
 // Rewrites in place each event `edit` returns, as a test that edited lines
 // of events.jsonl to stand for what an older tool logged. Every event keeps
-// its cursor, so cursors taken before the edit still resolve.
+// its cursor, so cursors taken before the edit still resolve. An event left
+// without an id has none in its row either, as migration stores an audit
+// line older than event ids.
 function editEvents(dir, edit) {
   withDb(dir, () => S.withLock(dir, () => {
     const { db } = Db.handle(dir);
-    const update = db.prepare('UPDATE events SET body = ? WHERE pos = ?');
+    const update = db.prepare('UPDATE events SET body = ?, id = CASE WHEN ? THEN id END WHERE pos = ?');
     db.exec('BEGIN IMMEDIATE');
     try {
       for (const r of Db.eventsAfter(dir, 0)) {
         const e = edit(JSON.parse(r.body));
-        if (e) update.run(JSON.stringify(e), r.pos);
+        if (e) update.run(JSON.stringify(e), typeof e.id === 'string' ? 1 : 0, r.pos);
       }
       db.exec('COMMIT');
     } catch (e) {

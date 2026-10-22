@@ -335,10 +335,12 @@ test('the published-read lint finds each form of a reader waiting for a file', (
     "try { x = real.readFileSync(f); } catch (e) { if (e.code !== 'ENOENT') throw e; }", // read-published: lint sample
     "const x = fs.existsSync(f) && require('node:fs').readFileSync(f);", // read-published: lint sample
     "const x = () => fs.existsSync(f)\n  ? fs.readFileSync(f, 'utf8') : '';", // read-published: lint sample
+    "const rows = () => fs.existsSync(marker) ? fs.readFileSync(marker, 'utf8').trim().split('\\n').filter(Boolean).map(JSON.parse) : [];", // read-published: lint sample
   ];
   for (const text of flagged) assert.equal(unpublishedReads(text).length, 1, text);
   const clean = [
     "const x = fs.existsSync(f) ? JSON.parse(readPublished(f, 'utf8')) : [];",
+    "const rows = () => fs.existsSync(marker) ? readPublished(marker, 'utf8').trim().split('\\n').filter(Boolean).map(JSON.parse) : [];",
     "const x = fs.readFileSync(f, 'utf8');",
     "assert.ok(fs.existsSync(f), fs.readFileSync(log, 'utf8'));", // read-published: lint sample
     "assert.ok(fs.existsSync(f));\nconst x = fs.readFileSync(f, 'utf8');", // read-published: lint sample

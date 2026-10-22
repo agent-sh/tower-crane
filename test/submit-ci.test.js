@@ -163,7 +163,7 @@ test('revuto findings print with file, line and body; only a latest [resolved] r
     ],
   });
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, /revuto left 3 open inline findings on PR #7 \(listed for you; a \[P1\]\/\[P2\] one blocks the submit until its path changes after the comment or it has a \[resolved\] reply\):\n {2}lib\/x\.js:12\n {4}\*\*\[P3\]\*\* Quoted paths break on Windows\.\n {2}lib\/x\.js:40\n {4}Question finding\n {2}lib\/x\.js:50\n {4}Reopened finding/);
+  assert.match(r.stdout, /revuto left 3 open inline findings on PR #7 \(listed for you; a \[P1\]\/\[P2\] one blocks the submit until its path changes after the comment or it has a \[resolved\] reply\):\n {2}lib\/x\.js:12 \(comment 11\)\n {4}\*\*\[P3\]\*\* Quoted paths break on Windows\.\n {2}lib\/x\.js:40 \(comment 14\)\n {4}Question finding\n {2}lib\/x\.js:50 \(comment 16\)\n {4}Reopened finding/);
   assert.doesNotMatch(r.stdout, /Answered finding|a human comment/);
   assert.equal(status(h), 'submitted');
 });
@@ -179,7 +179,7 @@ test('--json carries the CI report as ci_report, findings included', (t) => {
   const data = JSON.parse(r.stdout);
   assert.equal(data.status, 'submitted');
   assert.match(data.ci_report, /revuto left 1 open inline finding on PR #7/);
-  assert.match(data.ci_report, /lib\/x\.js:12\n {4}\*\*\[P3\]\*\* Quoted paths break on Windows\./);
+  assert.match(data.ci_report, /lib\/x\.js:12 \(comment 11\)\n {4}\*\*\[P3\]\*\* Quoted paths break on Windows\./);
 });
 
 test('a PR that conflicts with its base refuses the submit, even with a failing required check', (t) => {
@@ -225,7 +225,8 @@ test('a [P1]/[P2] revuto finding with no change at its path and no [resolved] re
   assert.equal(r.status, 1, r.stderr);
   assert.match(r.stderr, /revuto's finding \[P2\] lib\/y\.js:7 \(comment 12\) on PR #7 has no code change at its path since the comment and no \[resolved\] reply/);
   assert.match(r.stderr, /tower-crane ci resolve <comment id>/);
-  assert.doesNotMatch(r.stderr, /\(comment 11\)|\(comment 13\)|\(comment 15\)|Not revuto/);
+  assert.doesNotMatch(r.stderr.split('\n')[0], /\(comment 11\)|\(comment 13\)|\(comment 15\)/);
+  assert.doesNotMatch(r.stderr, /\(comment 15\)|Not revuto/);
   assert.equal(status(h), 'in_progress');
 
   const resolved = submit({ ...data, comments: [...findings, comment(14, { in_reply_to_id: 12, user: 'worker-T1', body: '[resolved]\nnot reachable here' })] });
@@ -239,6 +240,27 @@ test('a [P1] finding left on a commit git cannot read refuses with the fetch or 
   assert.equal(r.status, 1, r.stderr);
   assert.match(r.stderr, /revuto's finding \[P1\] lib\/x\.js:12 \(comment 21\)/);
   assert.match(r.stderr, /git could not read the commit that finding was left on \(comment 21 at ffffffffff\), so its path counts as unchanged\. Fetch the PR's earlier heads with git fetch origin, or close the finding with tower-crane ci resolve\./);
+  assert.equal(status(h), 'in_progress');
+});
+
+test('revuto submit refusal lists both open bodies with ids, paths and per-finding caps', (t) => {
+  const h = fixture(t);
+  const longBody = '[P2] Long finding: ' + 'x'.repeat(4000) + ' omitted tail';
+  const r = submitPr(h, { ...PENDING, comments: [
+    comment(31, { path: 'lib/a.js', line: 7, body: '<!-- hidden submit\nmetadata -->\n[P1] Guard the input\nReject the unsafe value.\nUse the `<!--` opener check here.\nSecond paragraph with the actual fix.\n```suggestion\n<!-- commands:Gates:start -->\n| a | b |\n```', original_commit_id: h.sha }),
+    comment(32, { path: 'lib/b.js', line: 40, body: longBody, original_commit_id: h.sha }),
+    comment(33, { path: 'lib/outdated.js', line: null, body: '[P1] Outdated finding.', original_commit_id: h.sha }),
+    comment(34, { path: 'lib/closed.js', body: '[P1] Resolved finding.', original_commit_id: h.sha }),
+    comment(35, { in_reply_to_id: 34, user: 'worker-T1', body: '[resolved]\nFixed.' }),
+  ] });
+  assert.equal(r.status, 1, r.stderr);
+  assert.match(r.stderr, /revuto left 2 open inline findings/);
+  assert.match(r.stderr, /lib\/a\.js:7 \(comment 31\)\n {4}\[P1\] Guard the input\n {4}Reject the unsafe value\./);
+  assert.match(r.stderr, /Use the `<!--` opener check here\.\n {4}Second paragraph with the actual fix\./);
+  assert.match(r.stderr, /```suggestion\n {4}<!-- commands:Gates:start -->\n {4}\| a \| b \|\n {4}```/);
+  assert.match(r.stderr, /\[31 characters of HTML comment removed\]/);
+  assert.ok(r.stderr.includes(`lib/b.js:40 (comment 32)\n    ${longBody.slice(0, 4000)}\n    [body truncated after 4000 characters]`));
+  assert.doesNotMatch(r.stderr, /hidden submit|metadata|omitted tail|lib\/(?:outdated|closed)\.js|comment (?:33|34)/);
   assert.equal(status(h), 'in_progress');
 });
 

@@ -16,7 +16,9 @@ const stack = require('./stack-fixture');
 const A = require('../lib/agents');
 const S = require('../lib/state');
 const { readPublished } = require('./atomic-file');
-const SHORT_WAIT = path.join(__dirname, 'fixtures', 'lock-wait.js');
+const { scopeEnv, harnessArgv } = require('./containment-plan');
+// Timeout tests use the real CLI with a one-second lock wait (lib/intervals.js).
+const SHORT_WAIT = JSON.stringify({ lock_wait: 1000 });
 
 function setup(t) {
   return cachedFixture(t, 'task', (h) => {
@@ -402,7 +404,8 @@ test('spawn --dry-run builds each harness command', (t) => {
   pluginRoot(empty);
   for (const [flags, expected] of cases) {
     setRung(h, 'small', flags);
-    const out = dry(h, 'small', { TOWER_CRANE_PLUGIN_ROOT: empty });
+    const out = dry(h, 'small', { ...scopeEnv(h), TOWER_CRANE_PLUGIN_ROOT: empty });
+    assert.equal(out.containment.backend, process.platform === 'linux' ? 'cgroup' : 'watchdog');
     const prompt = out.argv.find((a) => a.includes('## Task'));
     assert.ok(prompt, `prompt present for ${flags.join(' ')}`);
     const argv = expected(prompt, out.env.TOWER_CRANE_STATE);
@@ -411,7 +414,7 @@ test('spawn --dry-run builds each harness command', (t) => {
       if (out.argv.includes('--resume')) assert.equal(out.session_id, out.argv[out.argv.indexOf('--resume') + 1]);
       else argv.push('--session-id', out.session_id);
     }
-    assert.deepEqual(out.argv, argv, flags.join(' '));
+    assert.deepEqual(harnessArgv(out.argv), argv, flags.join(' '));
   }
   const out = dry(h, 'small');
   assert.equal(out.agent, 'small-T1-1');
@@ -554,7 +557,7 @@ test('the prompt is the role skill, brief, task, then how to use tower-crane', (
   assert.deepEqual(json, { id: 'T1', title: 'Idempotency key on retries', acceptance: ['processed once', 'test proves it'], kind: 'code', needs: [], locks: ['lab/rdma'], environment: 'lab' });
   assert.match(p, /TOWER_CRANE_STATE, TOWER_CRANE_TASK and TOWER_CRANE_AGENT are set/);
   assert.ok(p.includes('you are not the owner; never pass --agent owner'));
-  assert.ok(p.endsWith('run tower-crane with --agent worker-T1-1 if TOWER_CRANE_AGENT is missing.'));
+  assert.ok(p.endsWith("run tower-crane with --agent worker-T1-1 if TOWER_CRANE_AGENT is missing. After submit you own T1's PR until it is green: stay in this session, run tower-crane wait --own --task T1 --timeout 540, fix what it hands back, submit again and wait again, and exit only when it says your ownership ended."));
 });
 
 test('prompts name role skills in the state directory\'s skill store, since a user worktree has no skills directory', (t) => {
@@ -1253,7 +1256,7 @@ test('a spawn that cannot take the lock leaves its worktree, names it and exits 
   const lock = S.acquireLock(h.state);
   try {
     const r = h.run(['spawn', '--role', 'small', '--task', 'T1'], {
-      env: { NODE_OPTIONS: `--require=${JSON.stringify(SHORT_WAIT)}` },
+      env: { TOWER_CRANE_INTERVALS: SHORT_WAIT },
     });
     assert.equal(r.code, 3, r.stderr);
     assert.match(r.stderr, /state is locked by .*; its worktree stays at .*T1-idempotency-key-on-retries for the next spawn/);
@@ -1354,26 +1357,29 @@ test('spawn runs the rung of the tier and ladder it finds under the lock, not th
   assert.equal(spawns.length, 1);
 });
 
-test('spawn refuses a stacked rework with claim\'s reason when its dependency went back to in_progress, before its worktree work', (t) => {
-  const f = stack.stacked(t);
-  stack.worker(f);
-  // T2's worktree is prepared on T1's head. T1 then takes a new head and goes back to in_progress.
-  f.h.ok(['rework', 'T2', '--reason', 'more upper work']);
-  stack.resubmit(f, false);
-  f.h.ok(['rework', 'T1', '--reason', 'more lower work']);
-  f.h.ok(['claim', 'T1', '--agent', 'worker-T1']);
-  // The stack is not linked on GitHub, so T2's worktree is stale and must be revalidated at dispatch.
-  const state = f.h.readState('tasks.json');
-  state.tasks.find((item) => item.id === 'T2').stack.linked = false;
-  f.h.writeState('tasks.json', state);
-  f.write((d) => { d.linked = false; });
+for (const status of ['rework', 'in_progress']) {
+  test(`spawn refuses a stacked rework with claim's reason when its dependency went back to ${status}, before its worktree work`, (t) => {
+    const f = stack.stacked(t);
+    stack.worker(f);
+    // A parent leaving its submitted state must block before worktree preparation.
+    f.h.ok(['rework', 'T2', '--reason', 'more upper work']);
+    stack.resubmit(f, false);
+    f.h.ok(['rework', 'T1', '--reason', 'more lower work']);
+    if (status === 'in_progress') f.h.ok(['claim', 'T1', '--agent', 'worker-T1']);
+    // The stack is not linked on GitHub, so T2's worktree is stale and must be revalidated at dispatch.
+    const state = f.h.readState('tasks.json');
+    state.tasks.find((item) => item.id === 'T2').stack.linked = false;
+    f.h.writeState('tasks.json', state);
+    f.write((d) => { d.linked = false; });
 
-  const r = f.h.run(['spawn', '--task', 'T2']);
-  assert.equal(r.code, 1, r.stdout + r.stderr);
-  assert.match(r.stderr, /T2 is blocked: depends on T1 \(in_progress\)/);
-  assert.doesNotMatch(r.stderr, /prepared on T1|before dispatch/);
-  assert.equal(f.h.json(['task', 'show', 'T2']).status, 'rework');
-});
+    const r = f.h.run(['spawn', '--task', 'T2']);
+    assert.equal(r.code, 1, r.stdout + r.stderr);
+    assert.match(r.stderr, new RegExp(`T2 is blocked: depends on T1 \\(${status}\\)`));
+    assert.doesNotMatch(r.stderr, /prepared on T1|before dispatch/);
+    assert.equal(f.h.json(['task', 'show', 'T2']).status, 'rework');
+    assert.equal(f.h.git(['rev-parse', 'HEAD'], f.upper.wt.path), f.upper.sha);
+  });
+}
 
 // A worker writes its worktree's `.git` file. The directory it names is
 // granted to the next sandbox in that worktree, so it must be an admin
@@ -1415,4 +1421,25 @@ test('a worker spawn in a repository without origin is refused before its worktr
   assert.equal(h.git(['worktree', 'list', '--porcelain']).split('\n').filter((l) => l.startsWith('worktree ')).length, 1);
   // A dry run still previews the command, on the rung the marker belongs to.
   assert.equal(h.json(['spawn', '--task', 'T1', '--dry-run']).rung, 'medium');
+});
+
+test('a failed origin read is read again, and one that keeps failing reports git, not a missing origin', async (t) => {
+  for (const [mode, starts] of [['once', true], ['always', false]]) {
+    await t.test(mode, (t) => {
+      const h = setup(t);
+      const marker = path.join(h.base, 'harness-started');
+      commandRung(h, 'medium', [process.execPath, '-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)}, '')`]);
+      const r = h.run(['spawn', '--task', 'T1', '--wait'], { hooks: { HOOK_ORIGIN_READ_FAIL: mode } });
+      assert.doesNotMatch(r.stderr, /no origin remote/);
+      if (starts) {
+        assert.equal(r.code, 0, r.stderr);
+        assert.ok(fs.existsSync(marker), 'the harness started');
+        return;
+      }
+      assert.equal(r.code, 1, r.stdout);
+      assert.match(r.stderr, /cannot read this repository's origin remote: fatal: unable to access '\.git\/config': Permission denied/);
+      assert.equal(h.readState('tasks.json').tasks[0].worktree, undefined);
+      assert.ok(!fs.existsSync(marker), 'the harness did not start');
+    });
+  }
 });

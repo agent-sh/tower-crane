@@ -7,7 +7,10 @@ const path = require('node:path');
 if (process.env.TOWER_CRANE_TEST_MISSING_STATUS) {
   const spawn = cp.spawn;
   cp.spawn = function windowsMissingCommand(file, args, opts) {
-    if (file !== 'tower-crane-missing-test-program') return spawn.call(this, file, args, opts);
+    // cmd.exe runs the command without the core limit a POSIX gate puts in front of it.
+    const { CORE_LIMIT } = require('../../lib/gates/common');
+    const command = typeof file === 'string' && file.startsWith(CORE_LIMIT) ? file.slice(CORE_LIMIT.length) : file;
+    if (command !== 'tower-crane-missing-test-program') return spawn.call(this, file, args, opts);
     // POSIX truncates exit codes, so both exit events reproduce cmd.exe's full status.
     const diagnostic = "'tower-crane-missing-test-program' is not recognized as an internal or external command,\r\noperable program or batch file.\r\n";
     // Only the submitted head holds the change's test; the base checkout runs the same command without that failure.

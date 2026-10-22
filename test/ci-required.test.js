@@ -15,9 +15,10 @@ const REQUIRED = [
   'test (ubuntu-latest, node 24, shard 1/3)',
   'test (ubuntu-latest, node 24, shard 2/3)',
   'test (ubuntu-latest, node 24, shard 3/3)',
-  'test (windows-latest, node 26, shard 1/3)',
-  'test (windows-latest, node 26, shard 2/3)',
-  'test (windows-latest, node 26, shard 3/3)',
+  'test (windows-latest, node 26, shard 1/4)',
+  'test (windows-latest, node 26, shard 2/4)',
+  'test (windows-latest, node 26, shard 3/4)',
+  'test (windows-latest, node 26, shard 4/4)',
 ];
 const CAP_POLICY = [{ app: 'revuto-review', pattern: 'reached the \\d+-round review limit' }];
 const github = path.join(__dirname, 'fixtures', 'github.js');
@@ -27,20 +28,21 @@ function readWorkflow(root) {
   return fs.readFileSync(path.join(root, '.github', 'workflows', 'ci.yml'), 'utf8').replace(/\r\n/g, '\n');
 }
 
-function workflowMatrix(workflow, event) {
-  const included = [...workflow.matchAll(/^\s+- \{ os: ([^,]+), node: (\d+), shard: '(\d+\/\d+)' \}$/gm)]
+// Every event that runs the test job runs the whole matrix.
+function workflowMatrix(workflow) {
+  // Inclusions apply after exclusions; each one here names a whole job.
+  const included = [...workflow.matchAll(/^[ \t]+- \{ os: ([^,}\n]+), node: (\d+), shard: '(\d+\/\d+)' \}$/gm)]
     .map(([, os, node, shard]) => ({ os, node: Number(node), shard }));
-  if (included.length) return included;
 
-  // Read the workflow's event expression and axes, rather than a second matrix in the test.
-  const expression = workflow.match(/os: \$\{\{ fromJSON\(github\.event_name == 'pull_request' && '([^']+)' \|\| '([^']+)'\) \}\}/);
-  assert.ok(expression, 'the OS axis selects its JSON list from the event');
-  const systems = JSON.parse(expression[event === 'pull_request' ? 1 : 2]);
+  // Read the workflow's axes, rather than a second matrix in the test.
+  const systems = JSON.parse(workflow.match(/^\s+os: (\[[^\n]+\])/m)[1].replace(/'/g, '"'));
   const nodes = JSON.parse(workflow.match(/^\s+node: (\[[^\n]+\])/m)[1]);
   const shards = JSON.parse(workflow.match(/^\s+shard: (\[[^\n]+\])/m)[1].replace(/'/g, '"'));
-  const excluded = [...workflow.matchAll(/^\s+- \{ os: ([^,]+), node: (\d+) \}$/gm)];
-  return systems.flatMap((os) => nodes.flatMap((node) => shards.map((shard) => ({ os, node, shard }))))
-    .filter((entry) => !excluded.some(([, os, node]) => entry.os === os && entry.node === Number(node)));
+  // An exclusion matches every job that agrees with the keys it names.
+  const excluded = [...workflow.matchAll(/^[ \t]+- \{ os: ([^,}\n]+)(?:, node: (\d+))? \}$/gm)];
+  return [...systems.flatMap((os) => nodes.flatMap((node) => shards.map((shard) => ({ os, node, shard }))))
+    .filter((entry) => !excluded.some(([, os, node]) => entry.os === os && (node === undefined || entry.node === Number(node)))),
+  ...included];
 }
 
 function jobNames(matrix) {
@@ -53,7 +55,7 @@ test('package support, CI matrix, and required jobs target Node 24 and 26', () =
   assert.equal(metadata.engines.node, '>=24');
 
   const workflow = readWorkflow(root);
-  const matrix = workflowMatrix(workflow, 'push');
+  const matrix = workflowMatrix(workflow);
   // Each OS and Node pair must run every shard of its split once, and no other shard.
   const jobs = new Map();
   for (const entry of matrix) {
@@ -70,53 +72,125 @@ test('package support, CI matrix, and required jobs target Node 24 and 26', () =
   assert.match(agents, /\bNode 24 or newer\b/);
 });
 
-test('pull requests run CI for every base, with main pushes, daily and manual full runs', () => {
+test('pull requests run CI for every base, with main pushes, release tags, daily and manual runs', () => {
   const root = path.resolve(__dirname, '..');
   const workflow = readWorkflow(root);
   // A base filter would drop CI from stacks on custom task branches, which submission accepts.
-  assert.match(workflow, /^on:\n {2}pull_request:\n(?: {4}#.*\n)* {2}push:\n {4}branches: \[main\]\n/m);
+  assert.match(workflow, /^on:\n {2}pull_request:\n(?: {4}#.*\n)* {2}push:\n {4}branches: \[main\]\n(?: {4}#.*\n)* {4}tags: \['v\*'\]\n/m);
   assert.match(workflow, /^ {2}schedule:\n {4}- cron: '[0-9]+ [0-9]+ \* \* \*'\n/m);
   assert.match(workflow, /^ {2}workflow_dispatch:\s*$/m);
 });
 
-test('same-repo PRs run the shared check, fork PRs the Windows shards; other events run all nine shards, proofs and the repeat job', () => {
+function jobBlock(workflow, id) {
+  return workflow.split(`\n  ${id}:\n`)[1].split(/\n {2}[\w-]+:\n/)[0];
+}
+
+// A job's `if:` under one event's github context and dispatch inputs. The workflow's conditions use
+// ==, !=, !, &&, ||, startsWith and cancelled(), whose JavaScript forms mean the same for these values.
+function runsOn(workflow, id, { inputs = {}, ...github }) {
+  const condition = /^ {4}if: (.+)$/m.exec(jobBlock(workflow, id))?.[1];
+  if (!condition) return true;
+  const value = (root, name) => JSON.stringify(name.split('.').slice(1).reduce((o, k) => o?.[k], root) ?? null);
+  const js = condition.replace(/^"(.*)"$/, '$1').replace(/^\$\{\{\s*|\s*\}\}$/g, '')
+    .replace(/github(?:\.[\w]+)+/g, (name) => value(github, name))
+    .replace(/inputs(?:\.[\w]+)+/g, (name) => value(inputs, name));
+  return Function('startsWith', 'cancelled', `return (${js});`)((a, b) => String(a).startsWith(b), () => false);
+}
+
+const REPO = 'agent-sh/tower-crane';
+const EVENTS = {
+  'main push': { event_name: 'push', ref: 'refs/heads/main', repository: REPO },
+  'same-repository PR': { event_name: 'pull_request', ref: 'refs/pull/7/merge', repository: REPO, event: { pull_request: { head: { repo: { full_name: REPO } } } } },
+  'fork PR': { event_name: 'pull_request', ref: 'refs/pull/8/merge', repository: REPO, event: { pull_request: { head: { repo: { full_name: 'someone/tower-crane' } } } } },
+  'release tag': { event_name: 'push', ref: 'refs/tags/v0.1.0', repository: REPO },
+  schedule: { event_name: 'schedule', ref: 'refs/heads/main', repository: REPO },
+  'manual run': { event_name: 'workflow_dispatch', ref: 'refs/heads/main', repository: REPO },
+  'profile dispatch': { event_name: 'workflow_dispatch', ref: 'refs/heads/main', repository: REPO, inputs: { profile: true } },
+};
+
+test('main pushes and same-repo PRs run only the shared check; fork PRs, tags, daily and manual runs the full matrix', () => {
   const workflow = readWorkflow(path.resolve(__dirname, '..'));
-  assert.deepEqual(jobNames(workflowMatrix(workflow, 'pull_request')), REQUIRED.filter((name) => name.includes('windows-latest')));
-  for (const event of ['push', 'schedule', 'workflow_dispatch']) {
-    assert.deepEqual(jobNames(workflowMatrix(workflow, event)), REQUIRED, event);
+  const jobs = [...workflow.split('\njobs:\n')[1].matchAll(/^ {2}([\w-]+):\n/gm)].map((m) => m[1]);
+  assert.deepEqual(jobs, ['checks', 'test', 'coverage-map', 'repeats', 'gate-scratch', 'model-swap', 'profile', 'mutants']);
+  const full = ['test', 'repeats', 'gate-scratch', 'model-swap'];
+  for (const [event, expected] of [
+    ['main push', ['checks']],
+    ['same-repository PR', ['checks']],
+    ['fork PR', full],
+    ['release tag', full],
+    ['schedule', [...full, 'coverage-map']],
+    ['manual run', [...full, 'coverage-map']],
+    ['profile dispatch', ['profile', 'mutants']],
+  ]) {
+    assert.deepEqual(jobs.filter((id) => runsOn(workflow, id, EVENTS[event])).sort(), expected.sort(), event);
   }
+  // The daily and manual runs collect coverage on the three Linux Node 26 shards, which run every file.
+  const coverage = /TC_TEST_COVERAGE_DIR: \$\{\{ (.+) && format\('\{0\}\/coverage', runner\.temp\) \|\| '' \}\}/.exec(jobBlock(workflow, 'test'))?.[1];
+  assert.ok(coverage, 'the shard step sets TC_TEST_COVERAGE_DIR from the event and matrix');
+  for (const [event, github] of Object.entries(EVENTS)) {
+    if (!runsOn(workflow, 'test', github)) continue;
+    const shards = workflowMatrix(workflow).filter((m) => Function('github', 'matrix', `return (${coverage});`)(github, m));
+    assert.deepEqual(jobNames(shards), ['schedule', 'manual run'].includes(event) ? REQUIRED.slice(0, 3) : [], event);
+  }
+  assert.match(jobBlock(workflow, 'coverage-map'), /node scripts\/tests-coverage-map\.js merge --expect 3 /);
+  assert.match(jobBlock(workflow, 'coverage-map'), /name: tests-coverage-map\n/);
+});
+
+test('the matrix is all ten shards, beside the proofs and the repeat job', () => {
+  const workflow = readWorkflow(path.resolve(__dirname, '..'));
+  assert.deepEqual(jobNames(workflowMatrix(workflow)), REQUIRED);
   assert.equal([...workflow.matchAll(/^ {2}test:\n/gm)].length, 1, 'one test job owns the matrix');
   assert.match(workflow, /^ {4}name: test \(\$\{\{ matrix\.os \}\}, node \$\{\{ matrix\.node \}\}, shard \$\{\{ matrix\.shard \}\}\)$/m);
   const testJob = workflow.split('\n  test:\n')[1].split(/\n {2}[\w-]+:\n/)[0];
-  // Same-repository PRs run only the shared-files check; fork PRs and every other event run the matrix.
-  const FORK = "github.event.pull_request.head.repo.full_name";
-  assert.ok(testJob.includes(`    if: github.event_name != 'pull_request' || ${FORK} != github.repository\n`), 'the test job skips same-repository PRs only');
-  const checks = workflow.split('\n  checks:\n')[1].split(/\n {2}[\w-]+:\n/)[0];
-  assert.ok(checks.includes(`    if: github.event_name == 'pull_request' && ${FORK} == github.repository\n`), 'the checks job runs on same-repository PRs only');
+  const checks = jobBlock(workflow, 'checks');
   assert.match(checks, /^ {4}name: checks \(shared files\)$/m);
-  assert.match(checks, /- run: npm run check:shared\n {8}env:\n {10}TOWER_CRANE_CHANGE_BASE: \$\{\{ github\.event\.pull_request\.base\.sha \}\}/);
+  // A main push checks the pushed range.
+  assert.match(checks, /- run: npm run check:shared\n {8}env:\n {10}TOWER_CRANE_CHANGE_BASE: \$\{\{ github\.event\.pull_request\.base\.sha \|\| github\.event\.before \}\}/);
   assert.doesNotMatch(checks, /npm test/, 'the PR check does not run the suite');
   assert.match(testJob, /- run: npm run check:shared/);
   assert.match(testJob, /- run: npm test\n[\s\S]*TC_TEST_SHARD: \$\{\{ matrix\.shard \}\}/);
-  for (const id of ['gate-scratch', 'model-swap']) {
-    const job = workflow.split(`\n  ${id}:\n`)[1].split(/\n {2}[\w-]+:\n/)[0];
-    assert.match(job, /^ {4}if: github\.event_name != 'pull_request'$/m, `${id} skips pull requests`);
-    assert.match(job, /- run: node scripts\/probe-/);
-  }
+  for (const id of ['gate-scratch', 'model-swap']) assert.match(jobBlock(workflow, id), /- run: node scripts\/probe-/);
   // Flake repeat loops cost hosted Windows time on every PR; they run after merge and daily, in
   // their own job so the shards keep the share of the suite test/run.js measured for them.
   assert.doesNotMatch(testJob, /- name: Repeat /, 'the test shards run no repeat loops');
-  const repeatJob = workflow.split('\n  repeats:\n')[1].split(/\n {2}[\w-]+:\n/)[0];
-  assert.match(repeatJob, /^ {4}if: github\.event_name != 'pull_request'$/m, 'the repeats skip pull requests');
+  const repeatJob = jobBlock(workflow, 'repeats');
+  // A profile dispatch measures the suite and the mutation sample on hosted runners and runs nothing else.
+  assert.match(workflow, /^ {6}profile:\n {8}description: [^\n]+\n {8}type: boolean\n {8}default: false\n {6}profile_baseline:\n/m);
+  for (const [id, command] of [['profile', /- run: node scripts\/suite-profile\.js [^\n]*--baseline "\$BASELINE" --runs 3 [^\n]*\| tee /],
+    ['mutants', /- run: node scripts\/mutants\.js --no-full 2>&1 \| tee /]]) {
+    const job = workflow.split(`\n  ${id}:\n`)[1].split(/\n {2}[\w-]+:\n/)[0];
+    assert.match(job, /^ {4}if: github\.event_name == 'workflow_dispatch' && inputs\.profile$/m, `${id} runs on a profile dispatch only`);
+    assert.match(job, command, id);
+    assert.match(job, /\| tee [^\n]*\n(?: {8}#[^\n]*\n)* {8}shell: bash\n/, `${id}: pipefail keeps the exit status through tee`);
+    assert.match(job, /uses: actions\/upload-artifact@/, `${id} keeps its output`);
+  }
   assert.match(repeatJob, /^ {4}runs-on: windows-latest$/m);
   const repeats = [...repeatJob.matchAll(/- name: (Repeat [^\n]+)/g)].map((m) => m[1]);
   assert.deepEqual(repeats, ['Repeat Claude Code mod wakeup twenty times', 'Repeat Claude interrupted native worker ten times',
-    'Repeat lock-free reader and torn recovery tests thirty times', 'Repeat owner authority and board approval files ten times'],
+    'Repeat lock-free reader and torn recovery tests thirty times', 'Repeat owner authority and board approval files ten times',
+    'Repeat interrupt during backoff and origin read tests twenty times', 'Repeat mutation containment tests ten times'],
   'the wakeup loop runs first, on a fresh runner');
   // GitHub keeps one running and one pending run per group, and a newer run replaces the pending one.
-  // Main pushes share a group so only the newest pending head waits; scheduled and manual runs stay unique.
-  assert.match(workflow, /^concurrency:\n {2}group: \$\{\{ github\.event_name == 'pull_request' && format\('ci-pr-\{0\}', github\.event\.pull_request\.number\) \|\| github\.event_name == 'push' && 'ci-main-push' \|\| format\('ci-run-\{0\}', github\.run_id\) \}\}\n {2}cancel-in-progress: \$\{\{ github\.event_name == 'pull_request' \}\}\n/m,
-    'PR runs cancel per PR; main pushes share one group that never cancels a running run; scheduled and manual runs are unique');
+  // Main pushes share a group so only the newest pending head waits; tag, scheduled and manual runs stay unique.
+  assert.match(workflow, /^concurrency:\n {2}group: \$\{\{ github\.event_name == 'pull_request' && format\('ci-pr-\{0\}', github\.event\.pull_request\.number\) \|\| github\.ref == 'refs\/heads\/main' && github\.event_name == 'push' && 'ci-main-push' \|\| format\('ci-run-\{0\}', github\.run_id\) \}\}\n {2}cancel-in-progress: \$\{\{ github\.event_name == 'pull_request' \}\}\n/m,
+    'PR runs cancel per PR; main pushes share one group that never cancels a running run; tag, scheduled and manual runs are unique');
+});
+
+test('a shard reaches its deadline, and leaves a log, before the test step and job limits cancel it without one', () => {
+  const workflow = readWorkflow(path.resolve(__dirname, '..'));
+  const testJob = workflow.split('\n  test:\n')[1].split(/\n {2}[\w-]+:\n/)[0];
+  const limit = Number(/^ {4}timeout-minutes: (\d+)$/m.exec(testJob)?.[1]);
+  const step = testJob.split('- run: npm test\n')[1].split(/\n {6}- /)[0];
+  const stepLimit = Number(/^ {8}timeout-minutes: (\d+)$/m.exec(step)?.[1]);
+  const { SHARD_DEADLINE_MIN } = require('./run');
+  // The watchdog's process dump and stop take up to two minutes.
+  assert.ok(SHARD_DEADLINE_MIN <= stepLimit - 4, `shard deadline ${SHARD_DEADLINE_MIN} min against a ${stepLimit} min test step limit`);
+  // Checkout, Node setup and check:shared run before the step, and the upload after it.
+  assert.ok(stepLimit <= limit - 4, `test step limit ${stepLimit} min against a ${limit} min job limit`);
+  assert.match(step, /^ {10}TC_TEST_SHARD_LOG_DIR: \$\{\{ runner\.temp \}\}\/shard-log$/m);
+  const upload = testJob.split('- name: Save shard progress\n')[1];
+  assert.match(upload, /^ {8}if: always\(\)\n {8}uses: actions\/upload-artifact@/, 'the progress uploads on every outcome');
+  assert.match(upload, /^ {10}path: \$\{\{ runner\.temp \}\}\/shard-log$/m);
 });
 
 test('the stack section says hosted CI runs on every stack member at its own base', () => {
@@ -205,9 +279,9 @@ test('CI evidence records an empty-output gh startup failure', (t) => {
   assert.match(r.summary, /no output/);
 });
 
-test('documented fork PR job lists pass CI with Windows-only check runs', (t) => {
+test('documented fork PR job lists pass CI with the full matrix check runs', (t) => {
   const root = path.resolve(__dirname, '..');
-  const names = jobNames(workflowMatrix(readWorkflow(root), 'pull_request'));
+  const names = jobNames(workflowMatrix(readWorkflow(root)));
   const h = fixture(t);
   for (const file of ['docs/state.md', 'docs/cli.md']) {
     const text = fs.readFileSync(path.join(root, file), 'utf8');
@@ -358,7 +432,7 @@ test('required checks also apply to a submitted head without a PR', (t) => {
 test('a superseded failed run does not block: the latest run of each required check decides', (t) => {
   // T160 at f361335: one windows shard failed on 2026-10-09 and passed on a rerun the next day.
   const h = fixture(t);
-  const name = 'test (windows-latest, node 26, shard 2/3)';
+  const name = 'test (windows-latest, node 26, shard 2/4)';
   const failed = { ...run(name, 'failure'), id: 114055863456, started_at: '2026-10-09T22:36:00Z' };
   const passed = { ...run(name, 'success'), id: 114217721960, started_at: '2026-10-10T12:54:00Z' };
   const others = REQUIRED.filter((n) => n !== name).map((n) => run(n));
@@ -393,7 +467,7 @@ test('a superseded failed run does not block: the latest run of each required ch
 
 test('an unfinished or partly read suite blocks even when its runs were superseded', (t) => {
   const h = fixture(t);
-  const name = 'test (windows-latest, node 26, shard 2/3)';
+  const name = 'test (windows-latest, node 26, shard 2/4)';
   const old = { ...run(name, 'success'), id: 114055863456, started_at: '2026-10-09T22:36:00Z', check_suite: { id: 1 } };
   const current = { ...run(name, 'success'), id: 114217721960, started_at: '2026-10-10T12:54:00Z', check_suite: { id: 2 } };
   const others = REQUIRED.filter((n) => n !== name).map((n) => ({ ...run(n), check_suite: { id: 2 } }));
@@ -457,7 +531,7 @@ test('a newer failed workflow still blocks and its older passing run is recorded
 test('a queued rerun newer than a success is the current run: the gate waits for it', (t) => {
   // A queued run has no started_at yet, so the earlier success must not supersede it by its start time.
   const h = fixture(t);
-  const name = 'test (windows-latest, node 26, shard 2/3)';
+  const name = 'test (windows-latest, node 26, shard 2/4)';
   const passed = { ...run(name, 'success'), id: 114217721960, started_at: '2026-10-10T12:54:00Z' };
   const queued = { ...run(name, null, 'queued'), id: 114300000000 };
   const others = REQUIRED.filter((n) => n !== name).map((n) => run(n));

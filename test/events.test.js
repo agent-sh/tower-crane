@@ -1,8 +1,6 @@
 'use strict';
 
-const { fileWritten, stateEventLogged, HUNG_TEST_MS, killPid } = require('./signals');
-const StateFiles = require('./state-files');
-
+const { fileWritten, HUNG_TEST_MS, killPid } = require('./signals');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -10,54 +8,10 @@ const path = require('node:path');
 const cp = require('node:child_process');
 const http = require('node:http');
 const { once, EventEmitter } = require('node:events');
-const { cachedFixture, BIN, HOOKS, ROOT } = require('./helpers');
+const { BIN, ROOT } = require('./helpers');
 const { gateFixture, gateEvidence } = require('./gate-helpers');
-
-function log(h) {
-  const raw = StateFiles.logText(h.state);
-  // A concurrent append becomes readable only when its final newline arrives.
-  return raw.slice(0, raw.lastIndexOf('\n') + 1).split('\n').filter(Boolean).map(JSON.parse);
-}
-
-function setup(t, flags = []) {
-  const h = cachedFixture(null, JSON.stringify(flags), (h) => {
-    h.init(flags);
-    h.ok(['task', 'add', '--title', 'Change', '--acceptance', 'works']);
-  });
-  h.children = [];
-  h.workerPids = [];
-  t.after(async () => {
-    for (const pid of h.workerPids) {
-      try { killPid(pid, 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') throw e; }
-    }
-    for (const { p } of h.children) {
-      if (p.exitCode === null && p.signalCode === null) p.kill();
-    }
-    await Promise.all(h.children.map((c) => c.result));
-    // Windows keeps a running child's cwd open, so stop children first.
-    await h.cleanup();
-  });
-  return h;
-}
-
-function child(t, h, args, hooks = {}) {
-  const p = cp.spawn(process.execPath, ['--require', HOOKS, BIN, ...args], {
-    cwd: h.repo, env: { ...h.env, HOOK_STATE: h.state, ...hooks },
-  });
-  let stdout = '';
-  let stderr = '';
-  p.stdout.on('data', (d) => { stdout += d; });
-  p.stderr.on('data', (d) => { stderr += d; });
-  // A hung child cannot hold teardown beyond the suite backstop.
-  const timer = setTimeout(() => p.kill(), HUNG_TEST_MS);
-  const result = once(p, 'close').then(([code]) => {
-    clearTimeout(timer);
-    return { code, stdout, stderr };
-  });
-  const c = { p, result };
-  h.children.push(c);
-  return c;
-}
+const { log, setup, child, event } = require('./events-helpers');
+const StateFiles = require('./state-files');
 
 const created = (file) => fileWritten(file);
 
@@ -77,17 +31,6 @@ async function waiting(t, h, { automation, args = [], hooks = {}, seconds = HUNG
   return c;
 }
 
-async function event(result, type, task = 'T1') {
-  const r = await (result.result || result);
-  assert.equal(r.code, 0, r.stderr || r.stdout);
-  assert.equal(r.stdout.trim().split('\n').length, 1);
-  const e = JSON.parse(r.stdout);
-  assert.equal(e.type, type);
-  assert.equal(e.task, task);
-  assert.match(e.id, /^E/);
-  assert.ok(e.offset > 0);
-  return e;
-}
 
 function submit(h, extra = []) {
   h.ok(['claim', 'T1', '--agent', 'worker']);
@@ -220,45 +163,6 @@ test('confirmed merge gate wakes; a failed gate never produces merged', async (t
   assert.equal((await event(result, 'merged')).detail.ref, h.sha);
 });
 
-test('a manual merge racing the merge queue under another task\'s reaction: one merges, the other confirms', async (t) => {
-  const h = setup(t);
-  h.sha = gateFixture(h);
-  h.ok(['project', 'set', '--repo', 'acme/demo']);
-  h.env.FIXTURE_GH_LOG = path.join(h.base, 'gh.jsonl');
-  h.env.FIXTURE_MERGED_PER_PR = '1';
-  const rounds = 10;
-  h.ok(['plan', 'import', '-'], { input: JSON.stringify(Array.from({ length: rounds * 2 - 1 }, (_, i) => ({ title: `Change ${i + 2}`, acceptance: ['works'] }))) });
-  for (let i = 1; i <= rounds; i++) {
-    // The lower task's reaction drains the line, so the queue merges the
-    // upper task while holding only the lower task's reaction reservation.
-    const [lower, upper] = [`T${i * 2 - 1}`, `T${i * 2}`];
-    for (const [n, id] of [[i * 2 - 1, lower], [i * 2, upper]]) {
-      h.ok(['claim', id, '--agent', 'worker']);
-      h.ok(['submit', id, '--agent', 'worker', '--sha', h.sha, '--pr', String(n)]);
-      h.ok(['accept', id, '--agent', 'owner', '--reason', 'race fixture',
-        ...['tests', 'clean', 'review', 'ci'].flatMap((type) => ['--waive', type])]);
-    }
-    const after = String(StateFiles.logEnd(h.state));
-    // State call jitter spreads the two merges over each other's checks.
-    const jitter = { HOOK_JITTER_MS: '15' };
-    const automatic = child(t, h, ['wait', '--agent', 'orchestrator', '--after', after, '--task', upper, '--types', 'merged', '--timeout', '300'], jitter);
-    // Start near the queue's move from the lower task to the upper one.
-    await stateEventLogged(h.state, (event) => event.type === 'merged' && event.task === lower, { signal: t.signal });
-    await new Promise((resolve) => setTimeout(resolve, (i % 5) * 120)); // wait-allow: stagger concurrent operations to exercise both race orderings
-    const manual = await h.runAsync(['merge', upper], { hooks: jitter });
-    assert.equal(manual.code, 0, `${upper}: ${manual.stderr}`);
-    await event(automatic, 'merged', upper);
-    const stops = log(h).filter((e) => (e.cmd === 'merge queue' && (e.detail.blocked || e.detail.error))
-      || (e.cmd === 'automation' && [lower, upper].includes(e.task) && !['running', 'done'].includes(e.detail.phase)));
-    assert.deepEqual(stops, [], `${upper}: the queue never stops on the manual merge`);
-    const calls = fs.readFileSync(h.env.FIXTURE_GH_LOG, 'utf8').trim().split('\n').map(JSON.parse);
-    for (const [n, id] of [[i * 2 - 1, lower], [i * 2, upper]]) {
-      assert.equal(calls.filter((a) => a[0] === 'pr' && a[1] === 'merge' && a[2] === String(n)).length, 1, `${id}: GitHub merged once`);
-    }
-    const merges = h.readState('tasks.json').tasks.find((x) => x.id === upper).evidence.filter((e) => e.type === 'merge');
-    assert.ok(merges.length && merges.every((e) => e.ok), `${upper}: ${JSON.stringify(merges)}`);
-  }
-});
 
 test('a manual merge named by a lowercase id releases the reservation it took', (t) => {
   const h = setup(t);
@@ -273,45 +177,6 @@ test('a manual merge named by a lowercase id releases the reservation it took', 
   assert.equal(receipts[0].detail.source, receipts[1].detail.source);
 });
 
-test('a manual merge racing an automatic merge of the same task: one merges, the other confirms, 30 of 30', async (t) => {
-  const h = setup(t);
-  h.sha = gateFixture(h);
-  h.ok(['project', 'set', '--repo', 'acme/demo']);
-  h.env.FIXTURE_GH_LOG = path.join(h.base, 'gh.jsonl');
-  const winners = { automation: 0, manual: 0 };
-  h.ok(['plan', 'import', '-'], { input: JSON.stringify(Array.from({ length: 29 }, (_, i) => ({ title: `Change ${i + 2}`, acceptance: ['works'] }))) });
-  for (let i = 1; i <= 30; i++) {
-    const id = `T${i}`;
-    h.env.FIXTURE_MERGED = path.join(h.base, `merged-${i}`);
-    h.ok(['claim', id, '--agent', 'worker']);
-    h.ok(['submit', id, '--agent', 'worker', '--sha', h.sha, '--pr', String(i)]);
-    h.ok(['accept', id, '--agent', 'owner', '--reason', 'race fixture',
-      ...['tests', 'clean', 'review', 'ci'].flatMap((type) => ['--waive', type])]);
-    // The waiter's startup reconciliation merges the accepted task while the
-    // manual merge starts, so both reach the merge gate together. The cursor
-    // keeps a manual merge that finishes before the waiter starts visible.
-    // Odd rounds start together; even rounds stagger the manual merge, so
-    // either side reaches GitHub first.
-    const after = String(StateFiles.logEnd(h.state));
-    const automatic = child(t, h, ['wait', '--agent', 'orchestrator', '--after', after, '--task', id, '--types', 'merged', '--timeout', '300']);
-    await new Promise((resolve) => setTimeout(resolve, i % 2 ? 0 : (i % 10) * 20)); // wait-allow: stagger concurrent operations to exercise both race orderings
-    const manual = await h.runAsync(['merge', id]);
-    assert.equal(manual.code, 0, `${id}: ${manual.stderr}`);
-    const woke = await event(automatic, 'merged', id);
-    assert.equal(woke.detail.ref, h.sha);
-    const calls = fs.readFileSync(h.env.FIXTURE_GH_LOG, 'utf8').trim().split('\n').map(JSON.parse);
-    assert.equal(calls.filter((a) => a[0] === 'pr' && a[1] === 'merge' && a[2] === String(i)).length, 1, `${id}: GitHub merged once`);
-    const task = h.readState('tasks.json').tasks.find((x) => x.id === id);
-    const merges = task.evidence.filter((e) => e.type === 'merge');
-    assert.ok(merges.length && merges.every((e) => e.ok), `${id}: ${JSON.stringify(merges)}`);
-    assert.match(merges[0].summary, /^merged PR/);
-    if (merges.length > 1) assert.match(merges[1].summary, /already merged/, 'the later merge confirms the head');
-    winners[merges[0].via === 'automation' ? 'automation' : 'manual']++;
-    const receipts = log(h).filter((e) => e.cmd === 'automation' && e.task === id && e.detail.phase !== 'running');
-    assert.deepEqual(receipts.filter((e) => e.detail.phase !== 'done'), [], `${id}: no automatic failure`);
-  }
-  t.diagnostic(`merged first: automation ${winners.automation}, manual ${winners.manual}`);
-});
 
 test('worker messages use recipient and task filters, and can resume by id or offset', async (t) => {
   const h = setup(t);

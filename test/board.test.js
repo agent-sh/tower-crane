@@ -1235,11 +1235,11 @@ test('runaway rules: status and the board flag the same claim, from the project\
   assert.doesNotMatch(page(), /data-key="runaway-T11/);
   h.ok(['spend', 'T11', '--tokens', '3000000', '--agent', 'w-x']);
   const flags = status().runaways;
-  assert.deepEqual(flags.map((f) => [f.task, f.agent, f.rule]), [['T11', 'w-x', 'spend']]);
-  assert.match(h.ok(['status']), /runaway: T11 w-x: spent 12M tokens, 6 times the easy median of 2M; the rule is 5\.\d times$/m);
+  assert.deepEqual(flags.map((f) => [f.task, f.agent, f.rule]), [['T11', null, 'spend'], ['T11', 'w-x', 'worker-spend']]);
+  assert.match(h.ok(['status']), /runaway: T11: T11 has spent 12M tokens over 1 worker \(current w-x: 12M tokens\); cached share unknown, uncached tokens unknown; 6 times the easy M median of 2M; the rule is 5\.\d times$/m);
   const item = page().match(/<li class="qi" data-tier="now" data-kind="runaway" data-key="runaway-T11-spend">[\s\S]*?<\/li>/);
   assert.ok(item, 'the board shows the same flag as a Now item');
-  assert.match(item[0], /spent 12M tokens/);
+  assert.match(item[0], /T11 has spent 12M tokens/);
   assert.match(page(), /data-key="agent-T11"[\s\S]*?in the queue: spend/, 'the row keeps a marker');
   // Once the agent has exited, the queue says stuck, not runaway, and the row agrees.
   const at = new Date().toISOString();
@@ -1259,11 +1259,38 @@ test('runaway rules: status and the board flag the same claim, from the project\
   h.ok(['spend', 'T12', '--tokens', '13000000', '--agent', 'w-y']);
   assert.deepEqual(status().runaway_norms.tiers.hard, { median: 2e6, from: 'project', rate: null, samples: 0 });
   assert.equal(status().runaway_norms.tiers.easy.from, 'tier');
-  assert.match(h.ok(['status']), /runaway: T12 w-y: spent 13M tokens, 6\.5 times the project median of 2M \(hard has no accepted task with tokens\); the rule is 5\.\d times$/m);
+  assert.match(h.ok(['status']), /runaway: T12: T12 has spent 13M tokens over 1 worker \(current w-y: 13M tokens\); cached share unknown, uncached tokens unknown; 6\.5 times the project median of 2M \(hard has no accepted task with tokens\) \(hard M has no accepted task with tokens; needs 3\); the rule is 5\.\d times$/m);
   assert.match(page(), /data-key="runaway-T12-spend">[\s\S]*?6\.5 times the project median of 2M \(hard has no accepted task with tokens\)/, 'the Now item');
   assert.match(page(), /data-spend="top">[^\n]*?T12[^\n]*?\(project median 2M\)/, 'the spend line');
-  assert.match(page(), /data-key="top-T12">[\s\S]*?6\.5 times the project median of 2M \(hard has no accepted task with tokens\)<\/span>/, 'the Spend room');
+  assert.match(page(), /data-key="top-T12">[\s\S]*?6\.5 times the project median of 2M \(hard has no accepted task with tokens\) \(hard M has no accepted task with tokens; needs 3\)<\/span>/, 'the Spend room');
   assert.doesNotMatch(page(), /hard median/);
+});
+
+test('the board shows escalated questions as questions and only marked requests as approvals', (t) => {
+  const h = makeRepo(t);
+  useFixtureUserFile(t, h);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Waiting work', '--acceptance', 'the board distinguishes questions']);
+  for (const [kind, setting] of [['technical', 'sandbox'], ['credential', 'env'], ['technical', 'budget.raise']]) {
+    h.ok(['ask', '--kind', kind, '--setting', setting, '--question', `Question about ${setting}?`,
+      '--option', 'host', '--option', 'widen', '--blocks', 'T1', '--agent', 'worker-ask']);
+  }
+  assert.equal(h.run(['project', 'set', '--merge-admin', 'true', '--agent', 'orchestrator']).code, 1);
+  const st = require('../lib/state').loadState(h.state);
+  st.decisions.decisions[0].approval_request = false;
+  delete st.decisions.decisions[2].kind;
+  st.decisions.decisions[2].technical = false;
+  st.decisions.decisions[2].escalation.change = { scope: 'T1', what: 'tokens', limit: 10 };
+  const queue = require('../lib/board/model').build(st).queue;
+  for (const id of ['D1', 'D2', 'D3']) {
+    assert.equal(queue.find((q) => q.id === id).kind, 'decision');
+    const page = require('../lib/render').renderHtml(st);
+    assert.match(page, new RegExp(`data-kind=\"decision\" data-key=\"${id}\"`));
+    assert.doesNotMatch(page, new RegExp(`data-kind=\"approval\" data-key=\"${id}\"`));
+    assert.match(page, new RegExp(`Question ${id}`));
+  }
+  assert.equal(queue.find((q) => q.id === 'D4').kind, 'approval');
+  assert.match(require('../lib/render').renderHtml(st), /data-kind=\"approval\" data-key=\"D4\"/);
 });
 
 test('the queue orders Now before Your turn, and an approval reads as a sentence', (t) => {
@@ -1403,4 +1430,18 @@ test('the board marks a ready task without a brief until its brief is written', 
   assert.deepEqual(marks(), [[false], true]);
   h.ok(['brief', 'set', 'T1', '-'], { input: 'Context.\n' });
   assert.deepEqual(marks(), [[true], false]);
+});
+
+test('the board names days and months as English Intl does, in UTC', () => {
+  const { dayName, clock } = require('../lib/board/parts');
+  const day = new Intl.DateTimeFormat('en', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'UTC' });
+  const month = new Intl.DateTimeFormat('en', { month: 'short', timeZone: 'UTC' });
+  // A leap year at shifting hours, so a local-time slip or a wrong table entry shows.
+  for (let t = Date.UTC(2024, 0, 1, 0, 30); t < Date.UTC(2025, 0, 2); t += 86400000 * 0.85) {
+    const d = new Date(t);
+    assert.equal(dayName(d), day.format(d), d.toISOString());
+    const hm = d.toISOString().slice(11, 16);
+    assert.equal(clock(d.toISOString(), '2030-01-01T00:00:00Z'), `${month.format(d)} ${d.getUTCDate()} ${hm}`, d.toISOString());
+    assert.equal(clock(d.toISOString(), d.toISOString()), hm, 'the same day shows the time alone');
+  }
 });

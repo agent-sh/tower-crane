@@ -267,7 +267,7 @@ test('a later head race stops the chain and records only the accepted lower merg
   assert.equal(f.h.json(['task', 'show', 'T2']).evidence.some((e) => e.type === 'merge' && e.ok), false);
 });
 
-test('an unlinked dependent targets main and merges normally when its lower PR merges before submission', (t) => {
+test('an unlinked dependent submits against main after its lower merge retires the stack', (t) => {
   const f = setup(t);
   const wt = f.h.json(['worktree', 'T2']);
   f.h.ok(['claim', 'T2', '--agent', 'worker-T2']);
@@ -289,6 +289,10 @@ test('an unlinked dependent targets main and merges normally when its lower PR m
   assert.notEqual(f.h.git(['merge-base', f.sha, squash]), f.sha);
   assert.equal(f.h.git(['ls-remote', '--heads', 'origin', f.lower.branch]), '');
   assert.equal(f.h.json(['task', 'show', 'T2']).stack, undefined);
+  assert.equal(f.h.readState('tasks.json').tasks.find((t) => t.id === 'T2').stack, undefined);
+  assert.match(f.h.ok(['task', 'show', 'T2']), /Merge main.*before/);
+  // The worker follows the retirement note when updating its unrecorded PR.
+  f.write((d) => { d.prs[12].baseRefName = 'main'; });
   f.h.ok(['submit', 'T2', '--sha', sha, '--branch', wt.branch, '--pr', '12', '--agent', 'worker-T2']);
   f.h.ok(['stack', 'link', 'T2']);
   const task = f.h.json(['task', 'show', 'T2']);

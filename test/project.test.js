@@ -192,6 +192,7 @@ test('project set and show text print configured lists and their defaults alongs
   assert.match(defaults, /tests\.paths: default layouts/);
   assert.match(defaults, /ci\.ignore_apps: \[\]/);
   assert.match(defaults, /decision_delegation\.orchestrator_technical: true/);
+  assert.match(defaults, /decision_delegation\.orchestrator_escalated_questions: true/);
   assert.match(defaults, /ladder \(default harness /);
 
   const set = h.ok(['project', 'set', '--tests-paths', '["qa/"]', '--ci-ignore-apps', '["claude","cursor"]']);
@@ -212,15 +213,16 @@ test('project set and show text print configured lists and their defaults alongs
   assert.equal(cleared, defaults);
 });
 
-test('decision delegation accepts only its supported project rule', (t) => {
+test('decision delegation accepts only its supported project rules', (t) => {
   const initialized = makeRepo(t);
-  initialized.init(['--decision-delegation', '{"orchestrator_technical":true}', '--agent', 'owner']);
-  assert.deepEqual(initialized.json(['project', 'show']).decision_delegation, { orchestrator_technical: true });
+  initialized.init(['--decision-delegation', '{"orchestrator_technical":true,"orchestrator_escalated_questions":false}', '--agent', 'owner']);
+  assert.deepEqual(initialized.json(['project', 'show']).decision_delegation,
+    { orchestrator_technical: true, orchestrator_escalated_questions: false });
 
   const h = makeRepo(t);
   h.init();
   const before = StateFiles.stateText(h.state);
-  for (const value of ['[', '[]', 'true', '{"orchestrator_technical":1}', '{"unexpected":true}']) {
+  for (const value of ['[', '[]', 'true', '{"orchestrator_technical":1}', '{"orchestrator_escalated_questions":1}', '{"unexpected":true}']) {
     const result = h.run(['project', 'set', '--name', 'must not persist', '--decision-delegation', value, '--agent', 'owner']);
     assert.equal(result.code, 2, `${value}: ${result.stderr}`);
     assert.match(result.stderr, /--decision-delegation/);

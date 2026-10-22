@@ -1,5 +1,7 @@
 'use strict';
 
+const { scopeEnv, harnessArgv } = require('./containment-plan');
+
 const { HUNG_TEST_MS, waitOnRepo, killPid } = require('./signals');
 const StateFiles = require('./state-files');
 const { readPublished } = require('./atomic-file');
@@ -10,11 +12,12 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { makeRepo, makeTaskRepo, BIN, detachedAlive, TMP_ROOT } = require('./helpers');
 const Sessions = require('../lib/spawn-session');
-const windowsConcurrency = process.platform === 'win32' ? 2 : false;
+// Independent cases run two at a time on every platform: most of each one waits on its child processes.
+const caseConcurrency = 2;
 
 const events = (h) => StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
 
-describe('spawn resume integration cases', { concurrency: windowsConcurrency }, () => {
+describe('spawn resume integration cases', { concurrency: caseConcurrency }, () => {
 test('isolated Codex session lookup matches the recorded rollout id', (t) => {
   const h = makeRepo(t);
   const codexHome = path.join(h.base, 'homes', '.codex');
@@ -367,7 +370,8 @@ for (const harness of ['codex', 'claude']) {
     assert.equal(receipt.detail.harness, harness);
     sendBack(h);
     h.env.XDG_CACHE_HOME = path.join(h.base, 'another-cache');
-    const dry = h.json(['spawn', '--task', 'T1', '--dry-run']);
+    const dry = h.json(['spawn', '--task', 'T1', '--dry-run'], { env: scopeEnv(h) });
+    const argv = harnessArgv(dry.argv);
     assert.equal(dry.harness, harness);
     assert.equal(dry.resumed, harness === 'codex');
     if (harness === 'codex') assert.equal(dry.session_id, 'worker-session-1');
@@ -376,10 +380,10 @@ for (const harness of ['codex', 'claude']) {
       assert.notEqual(dry.session_id, first.session_id);
     }
     if (harness === 'codex') {
-      assert.deepEqual(dry.argv.slice(0, 5), ['codex', 'exec', '-p', 'fixture-main', 'resume']);
+      assert.deepEqual(argv.slice(0, 5), ['codex', 'exec', '-p', 'fixture-main', 'resume']);
       assert.ok(dry.argv.includes('--json'));
     } else {
-      assert.deepEqual(dry.argv.slice(0, 2), ['claude', '-p']);
+      assert.deepEqual(argv.slice(0, 2), ['claude', '-p']);
       assert.ok(!dry.argv.includes('--resume'));
       assert.ok(!dry.argv.includes('--fork-session'));
     }
@@ -707,6 +711,8 @@ test('an earlier attempt exit cannot collect or resume a live attempt with a reu
   fs.appendFileSync(script, `\nfs.writeFileSync(${JSON.stringify(ready)}, String(process.pid));\nsetInterval(() => {}, 1000);\n`);
   const live = h.json(['spawn', '--task', 'T1']);
   await waitOnRepo(h, () => fs.existsSync(ready) && readPublished(ready, 'utf8') === String(live.pid));
+  // The rework goes the respawn path checked here, not back to the live worker as the PR's owner.
+  h.ok(['project', 'set', '--owners', '0']);
   h.ok(['submit', 'T1', '--sha', 'cfed4d76efd3afe887bbbfc7f62c7d94158e3255', '--agent', live.agent]);
   h.ok(['rework', 'T1', '--reason', 'Finish next attempt']);
   // The earlier attempt's exit receipt names the live attempt's pid, as a reused pid would.

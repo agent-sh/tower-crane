@@ -10,10 +10,22 @@ let skew = 0;
 Date.now = () => now() + skew;
 const BIN = path.join(__dirname, '..', '..', 'bin', 'tower-crane.js');
 const { ownerKeyFile, ownerProject } = require('../../lib/authority');
-const { updateJson, readPublished } = require('../atomic-file');
+const { updateJson, readPublished, writeAtomic } = require('../atomic-file');
 
 if (process.env.TEST_STACK_DEFER_OBSERVE) {
   require('../../lib/stack').observe = () => {};
+}
+
+if (process.env.TEST_STACK_DIRTY_AFTER_MERGE) {
+  const C = require('../../lib/gates/common');
+  const git = C.git;
+  C.git = async (ctx, cwd, args, opts) => {
+    const result = await git(ctx, cwd, args, opts);
+    if (result.ok && args[0] === 'merge' && args.includes('--no-ff')) {
+      writeAtomic(process.env.TEST_STACK_DIRTY_AFTER_MERGE, 'pending edits\n');
+    }
+    return result;
+  };
 }
 
 // Holds a gh call open until the test releases it, so another command can run meanwhile.
@@ -48,7 +60,8 @@ cp.spawnSync = function stackGh(command, args, opts) {
   const file = process.env.TEST_STACK_DATA;
   const read = readPublished(file, 'utf8');
   const data = JSON.parse(read);
-  data.calls.push({ args, cwd: opts.cwd });
+  // pid names the CLI process making the call, as {pid} does below.
+  data.calls.push({ args, cwd: opts.cwd, pid: process.pid });
   const finish = (value = '', status = 0, stderr = '') => {
     // data.delayMs models a slow GitHub: every call takes that long to answer.
     if (data.delayMs) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, data.delayMs); // wait-allow: models GitHub's response time, not a readiness wait
@@ -68,8 +81,19 @@ cp.spawnSync = function stackGh(command, args, opts) {
   // The CLI drops TOWER_CRANE_OWNER_KEY before it runs gh, so these commands
   // present the owner's key from its file, as the owner would.
   const key = /\/merge-async$/.test(args[1] || '') ? 'merge-async' : args.slice(0, 2).join(' ');
-  const racing = !data.duringWhile?.[key] || fs.existsSync(data.duringWhile[key]);
-  for (const cli of (racing && data.during?.[key]) || []) {
+  // Observers link concurrently, so two calls can both read a once-only race
+  // before either writes the file back; the call that removes it under the
+  // file's lock is the one that runs it.
+  const whileFile = data.duringWhile?.[key];
+  let racing = whileFile && fs.existsSync(whileFile) ? data.during?.[key] || [] : [];
+  if (!whileFile && data.during?.[key]) {
+    updateJson(file, (current) => {
+      racing = current.during?.[key] || [];
+      if (current.during) delete current.during[key];
+      return current;
+    });
+  }
+  for (const cli of racing) {
     const project = ownerProject(path.join(data.repo, '.tower-crane'));
     const env = { ...process.env, TOWER_CRANE_OWNER_KEY: fs.readFileSync(ownerKeyFile(project), 'utf8').trim() };
     // {pid} names the CLI process making this gh call, so a test can count each observer's attempts;
@@ -78,7 +102,7 @@ cp.spawnSync = function stackGh(command, args, opts) {
     const r = original(process.execPath, [BIN, ...cli.map(fill)], { cwd: data.repo, env, encoding: 'utf8' });
     if (r.status !== 0) throw new Error(`tower-crane ${cli.join(' ')} failed: ${r.stderr}`);
   }
-  if (data.during && !(data.duringWhile?.[key] && fs.existsSync(data.duringWhile[key]))) delete data.during[key];
+  if (data.during && !(whileFile && fs.existsSync(whileFile))) delete data.during[key];
   if (key === 'pr view' && args[2] === process.env.TEST_STACK_PAUSE_VIEW) {
     pause(process.env.TEST_STACK_PAUSE_READY, process.env.TEST_STACK_PAUSE_RELEASE);
   }
@@ -113,7 +137,14 @@ cp.spawnSync = function stackGh(command, args, opts) {
     git(['push', 'origin', `${oid}:${pr.baseRefName}`]);
     pr.state = 'MERGED';
     pr.mergeCommit = { oid };
-    if (deleteBranch) git(['push', 'origin', `:${pr.headRefName}`]);
+    if (deleteBranch) {
+      git(['push', 'origin', `:${pr.headRefName}`]);
+      if (data.closeOnDelete) {
+        for (const child of Object.values(data.prs)) {
+          if (child.state === 'OPEN' && child.baseRefName === pr.headRefName) child.state = 'CLOSED';
+        }
+      }
+    }
     // GitHub rebases the PRs above the merged one onto the new base.
     const end = data.order.indexOf(pr.number);
     for (const n of end === -1 ? [] : data.order.slice(end + 1)) {
@@ -130,6 +161,7 @@ cp.spawnSync = function stackGh(command, args, opts) {
     }
     if (data.unavailable) return finish('', 9, 'Stacked pull requests are not enabled');
     if (args[1].includes('/stacks')) return finish(data.linked ? [{ id: 5, pull_requests: data.order.map((number) => ({ number })) }] : []);
+    if (/\/issues\/\d+\/comments/.test(args[1])) return finish(data.comments || []);
     // GitHub's asynchronous merge: the POST pins the head and returns at once; the merge
     // lands only when a later status poll finds it complete.
     if (posted) {
@@ -208,8 +240,24 @@ cp.spawnSync = function stackGh(command, args, opts) {
     return finish(pr);
   }
   if (args[0] === 'pr' && args[1] === 'edit') {
+    if (data.editError) return finish('', 1, data.editError);
     data.prs[args[2]].baseRefName = args[args.indexOf('--base') + 1];
     return finish();
+  }
+  if (args[0] === 'pr' && args[1] === 'list') {
+    const flag = (name) => args[args.indexOf(name) + 1];
+    return finish(Object.values(data.prs).filter((pr) => pr.state === 'OPEN'
+      && pr.headRefName === flag('--head') && pr.baseRefName === flag('--base')));
+  }
+  if (args[0] === 'pr' && args[1] === 'create') {
+    if (data.createError) return finish('', 1, data.createError);
+    const flag = (name) => args[args.indexOf(name) + 1];
+    const branch = flag('--head');
+    const number = Math.max(...Object.keys(data.prs).map(Number)) + 1;
+    data.prs[number] = { number, state: 'OPEN', headRefName: branch, baseRefName: flag('--base'),
+      headRefOid: git(['ls-remote', 'origin', `refs/heads/${branch}`]).split(/\s/)[0],
+      isCrossRepository: false, autoMergeRequest: null, title: flag('--title'), body: flag('--body') };
+    return finish(`https://github.com/acme/app/pull/${number}\n`);
   }
   if (args[0] === 'pr' && args[1] === 'merge') {
     const pr = data.prs[args[2]];
@@ -272,8 +320,8 @@ cp.spawnSync = function stackGh(command, args, opts) {
   }
   if (args[1] === 'sync') {
     if (process.env.TEST_STACK_SYNC_READY) {
-      // write-atomic: existence is the signal; no test reads the text.
-      fs.writeFileSync(process.env.TEST_STACK_SYNC_READY, 'ready');
+      require('../atomic-file').writeAtomic(process.env.TEST_STACK_SYNC_READY,
+        JSON.stringify({ pid: process.pid, phase: 'sync' }));
       const deadline = performance.now() + 300000;
       while (!fs.existsSync(process.env.TEST_STACK_SYNC_RELEASE)) {
         if (performance.now() > deadline) throw new Error('slow gh fixture was not released');
@@ -290,6 +338,18 @@ cp.spawnSync = function stackGh(command, args, opts) {
       git(['push', 'origin', pr.headRefName]);
     }
     if (data.syncError) return finish(data.syncOutput || '', 1, data.syncError);
+    if (data.restack) {
+      const { branch, oldParent, parent } = data.restack;
+      const previous = git(['rev-parse', branch]);
+      const tree = git(['worktree', 'list', '--porcelain']).split('\n\n')
+        .find((block) => block.includes(`branch refs/heads/${branch}\n`) || block.endsWith(`branch refs/heads/${branch}`));
+      const cwd = tree.match(/^worktree (.+)$/m)[1];
+      git(['-C', cwd, 'rebase', '--onto', parent, oldParent]);
+      git(['push', `--force-with-lease=refs/heads/${branch}:${previous}`, 'origin', branch]);
+      const head = git(['rev-parse', branch]);
+      Object.values(data.prs).find((pr) => pr.headRefName === branch).headRefOid = head;
+      delete data.restack;
+    }
     return finish();
   }
   throw new Error(`unexpected gh stack: ${args}`);

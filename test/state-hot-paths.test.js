@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const { execFileSync } = require('node:child_process');
 const { cachedFixture } = require('./helpers');
 const StateFiles = require('./state-files');
 const S = require('../lib/state');
@@ -53,6 +54,8 @@ test('hook polls, writes and waits read only their own events, not the whole log
     read('rework', ['rework', 'T1', '--reason', 'again', '--agent', 'owner']),
     // A worker waits on its own task from a cursor, as the work skill has it do.
     read('wait', ['wait', '--task', 'T1', '--after', cursor, '--timeout', '1', '--agent', agent]), // wait-allow: events past the cursor return at once; the bound only ends a wait that finds none
+    // An owner's wait decides from its task's events; this one owns nothing and exits at once.
+    read('wait --own', ['wait', '--own', '--task', 'T1', '--timeout', '1', '--agent', agent]), // wait-allow: the first check reports the exit; the bound only ends a wait that finds none
   ];
   for (const run of runs) assert.ok(run.rows < OTHER / 10, `${run.label} read ${run.rows} event rows of a ${OTHER}-event log`);
   assert.equal(runs.find((r) => r.label === 'hook poll').rows, 0, 'an empty poll reads no events');
@@ -65,9 +68,19 @@ const CLOSED_CMDS = ['check tests', 'spend live', 'hook report', 'automation', '
 function viewFixture(t) {
   return cachedFixture(t, 'view-paths', (h) => {
     h.init();
-    for (const title of ['Open task', 'Closed task']) h.ok(['task', 'add', '--title', title, '--acceptance', 'done']);
+    for (const title of ['Open task', 'Closed task', 'Submitted task', 'Accepted task']) h.ok(['task', 'add', '--title', title, '--acceptance', 'done']);
     h.ok(['brief', 'set', 'T1', '-'], { input: 'Do it.\n' });
     h.ok(['task', 'update', 'T2', '--status', 'cancelled']);
+    // A submitted task's gates, reviews and PR-body repair, and an accepted
+    // one's merge blockers, are read per task.
+    const sha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: h.repo, encoding: 'utf8' }).trim();
+    for (const [id, pr] of [['T3', '7'], ['T4', '8']]) {
+      h.ok(['claim', id, '--agent', 'worker']);
+      h.ok(['submit', id, '--sha', sha, '--pr', pr, '--branch', `fixture-${id}`, '--agent', 'worker']);
+    }
+    StateFiles.withDb(h.state, () => S.mutate({ stateDir: h.state, agent: 'owner' }, 'accept', (st) => {
+      st.tasks.tasks.find((task) => task.id === 'T4').status = 'accepted';
+    }));
     const events = Array.from({ length: OTHER }, (_, i) => {
       const cmd = CLOSED_CMDS[i % CLOSED_CMDS.length];
       const id = `E${crypto.randomUUID()}`;
@@ -94,9 +107,49 @@ test('status, inbox and an observing wait read only indexed rows, not the whole 
   };
   const runs = [
     read('status', ['status', '--json']),
+    read('status text', ['status']),
     read('inbox', ['inbox', '--json', '--agent', 'orchestrator']),
     // An observer refreshes the inbox at startup and records its snapshot.
     read('observer', ['wait', '--observe', '--inbox', '--timeout', '1', '--agent', 'orchestrator']), // wait-allow: the startup pass is what is measured; the bound ends the wait after it
   ];
   for (const run of runs) assert.ok(run.rows < OTHER / 10, `${run.label} read ${run.rows} event rows of a ${OTHER}-event log`);
+});
+
+// The gate queue folds a working set read by index. A merged task's merge
+// head can still be owed its reaction, and a request made for that task
+// moves it: the working set keeps the merged task's requests, so the queue
+// matches the fold over the whole log.
+test('the gate queue honours a request for a merged task\'s queued merge reaction', (t) => {
+  const h = cachedFixture(t, 'merged-request', (h) => {
+    h.init();
+    h.ok(['task', 'add', '--title', 'Merged task', '--acceptance', 'done']);
+    const sha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: h.repo, encoding: 'utf8' }).trim();
+    h.ok(['claim', 'T1', '--agent', 'worker']);
+    h.ok(['submit', 'T1', '--sha', sha, '--pr', '7', '--branch', 'fixture-T1', '--agent', 'worker']);
+  });
+  const ctx = { stateDir: h.state, agent: 'owner' };
+  const A = require('../lib/automation');
+  const T = require('../lib/tasks');
+  StateFiles.withDb(h.state, () => {
+    S.mutate(ctx, 'merge', (st, emit) => {
+      const task = st.tasks.tasks.find((x) => x.id === 'T1');
+      const merge = { type: 'merge', source: 'merge', ok: true, sha: task.sha, revision: task.revision, commands: ['gh pr merge 7'] };
+      task.status = 'accepted';
+      task.evidence.push({ ...merge, agent: 'owner', at: new Date().toISOString(), summary: 'merged' });
+      emit(task.id, merge);
+    });
+    const head = T.select(S.loadState(h.state).log, { tasks: ['T1'], taskCmds: ['merge'] })[0];
+    S.mutate(ctx, 'gates prioritize', (st, emit) => {
+      emit('T1', { source: head.id }, 'automation queued');
+      emit('T1', { reason: 'merge reaction first', queued: 1, sources: [head.id] });
+    });
+    const st = S.loadState(h.state);
+    assert.ok(st.log, 'the snapshot reads the log by index');
+    const queue = A.gateQueue(st);
+    assert.deepEqual(queue.queued, [{ id: 'T1', prioritized: { reason: 'merge reaction first', agent: 'owner', at: queue.queued[0]?.prioritized?.at } }]);
+    assert.ok(queue.queued[0].prioritized.at, 'the request moved the merge reaction');
+    const whole = S.loadState(h.state);
+    const events = whole.events;
+    assert.deepEqual(A.gateQueue({ ...whole, log: null, events }), queue, 'the working set gives the whole log\'s queue');
+  });
 });
