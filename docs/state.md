@@ -279,6 +279,7 @@ The owner is the resolved name `owner`, supplied explicitly by `--agent owner` o
 | `tasks.json` | every task and its status, evidence and spend |
 | `decisions.json` | questions for the owner and their answers |
 | `briefs/<task>.md` | shared task context and optional worker or reviewer sections, kept current by the orchestrator |
+| `hot-path-cache/<task>.json` | CLI-managed derived committed diff cache, keyed by verified base and head SHAs; invalid or changed pairs are recomputed, and dirty worktree paths are never reused across snapshots |
 | `reviews/<task>-<sha>.md` | the brief's reviewer sections, diff and software gate results prepared by review dispatch; large packets are read from this file to keep argv within Windows limits |
 | `events.jsonl` | log of every change, with time and agent; only appended to, except that lock recovery cuts off a torn append of an unfinished commit ([Durability and write order](#durability-and-write-order)) |
 | `events.cuts.jsonl` | one line per cut lock recovery made to `events.jsonl`: `{ "at", "id", "size", "from", "ends" }`, the last event id of the commit whose append it cut, the length it cut the log back to, the length before and the offsets where the removed lines ended, plus `"late": true` for a cut an older tool made that a later holder recorded; only appended to, so its length counts the cuts and is the generation byte cursors carry ([Durability and write order](#durability-and-write-order)) |
@@ -1497,13 +1498,15 @@ A task touches a hot glob when a repository path or glob in its brief's `## Scop
 
 Tasks in `in_progress`, `submitted`, `rework`, and accepted tasks awaiting merge hold their hot paths. A live unclaimed worker reservation also holds them. Lease expiry frees a worker slot but does not release an in-progress task's hot paths against new todo work. A new todo task waits with `waits on hot path <glob> held by T<n>`, shown by `status`, `ready --all`, and the blocked views. Claims, expired-lease renewals, and worker dispatch enforce hot-path waits under the state lock, using git snapshots prepared before taking it. An eligible dependent stack may share its parent chain's hot paths; holders outside that chain still block new work.
 
+Readiness snapshots are prepared only for transactions that check readiness: new claims, expired renewals, worker dispatch, and rework owner handoffs. Notes, spend, evidence and live lease renewals do not prepare them. Snapshots read refs together, index one base tree, and reuse each task's parsed Scope within a view. Base selection uses origin when it contains the local base; a local base that is ahead or diverged is retained. Explicit `origin/` refs use that remote ref. Committed diffs are cached by base/head SHA pairs, while staged, unstaged and untracked worktree paths are read freshly for each snapshot. A newly loaded state cannot run git while a mutation holds the lock.
+
 Recovery of a `rework` task or expired claim waits only on overlapping live worker leases and unclaimed worker reservations. Submitted, accepted, rework, and expired-lease peers without a live worker slot do not block recovery, including stacked descendants. This prevents two waiting tasks from blocking each other's recovery or a submitted child from blocking its stack parent's rework. Once one recovery candidate claims a live lease, it blocks overlapping recovery claims and renewals until its worker slot is freed. Active stacked descendants also block parent recovery while they are editing.
 
 A dispatched worker claiming its own unclaimed reservation also resumes work past passive holders. Overlapping unclaimed reservations are consumed in their recorded dispatch order: an earlier reservation blocks a later claimant, and a granted live lease blocks every overlapping claimant. This lets pending dispatches claim without creating a cycle with passive rework tasks or with each other.
 
 Merge evidence or cancellation releases the holder. Automatic refill skips waiting tasks and dispatches other ready work; later passes reconsider the waiting task after release.
 
-Tower Crane's own project seeds the measured hot paths with `["docs/state.md", "docs/state/*", "docs/cli.md", "bin/tower-crane.js", "lib/automation.js"]`. The two state-document patterns cover the current file and a future split. The orchestrator can replace this list through `project set`.
+After merge, the orchestrator seeds Tower Crane's own project with the measured hot paths `["docs/state.md", "docs/state/*", "docs/cli.md", "bin/tower-crane.js", "lib/automation.js"]`. The two state-document patterns cover the current file and a future split. The orchestrator can replace this list through `project set`.
 
 ### Release for a decision
 
