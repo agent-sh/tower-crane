@@ -420,8 +420,8 @@ test('incremental markdown coverage includes the repository suites that read it'
   for (const [file, expected] of [
     ['skills/tower-crane-work/SKILL.md', ['test/host-probes.test.js', 'test/broker.test.js', 'test/shared-files.test.js']],
     ['agents/tower-crane-orchestrator.md', ['test/host-probes.test.js']],
-    ['skills/tower-crane/SKILL.md', ['test/isolation.test.js']],
-    ['docs/ladder.md', ['test/isolation.test.js', 'test/ci-required.test.js', 'test/shared-files.test.js']],
+    ['skills/tower-crane/SKILL.md', ['test/isolation-broker.test.js']],
+    ['docs/ladder.md', ['test/isolation-broker.test.js', 'test/ci-required.test.js', 'test/shared-files.test.js']],
   ]) {
     const readers = files.filter((suite) => {
       const source = fs.readFileSync(path.join(ROOT, suite), 'utf8');
