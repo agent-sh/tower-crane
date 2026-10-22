@@ -298,7 +298,7 @@ test('in a real codex sandbox the agent\'s tower-crane still answers after the d
 });
 
 test('in a real claude sandbox the agent\'s tower-crane still answers after the dispatching checkout is retired', { skip, timeout: 600000 }, async (t) => {
-  const h = login(makeRepo(t));
+  const h = login(t, makeRepo(t));
   h.init();
   h.ok(['task', 'add', '--title', 'Retired engine probe', '--acceptance', 'the CLI answers']);
   const dir = results(h);

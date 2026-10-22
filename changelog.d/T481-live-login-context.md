@@ -1,0 +1,1 @@
+- Pass the test context through every live Claude login fixture so short cache cleanup is registered and the retired-checkout probe reaches the sandbox.
