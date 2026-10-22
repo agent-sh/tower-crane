@@ -31,12 +31,14 @@ function fixture(t) {
 function refusedStack(t) {
   const f = fixture(t);
   const wt = f.h.json(['worktree', 'T2']);
+  const oldParent = f.h.json(['task', 'show', 'T2']).stack.parent_sha;
   fs.writeFileSync(path.join(wt.path, 'T2.txt'), 'own work\n');
   f.h.git(['add', 'T2.txt'], wt.path);
   f.h.git(['commit', '-qm', 'upper work'], wt.path);
-  const sha = resubmit(f, false);
+  // A rewritten parent requires restacking even when a clean child can merge a descendant.
+  const sha = resubmit(f, true);
   f.h.ok(['task', 'update', 'T2', '--priority', 'urgent']);
-  return { ...f, wt, sha };
+  return { ...f, wt, sha, oldParent };
 }
 
 function probe(f, body) {
@@ -84,14 +86,14 @@ for (const dispatch of ['refill', 'spawn --ready']) {
     const result = dispatch === 'refill'
       ? probe(f, 'await A.refillWorkers(ctx, {});')
       : f.h.run(['spawn', '--ready', '--agent', 'orchestrator']);
-    assert.match(result.stdout + result.stderr, /T2.*holds its own changes on T1 .*resubmitted/);
+    assert.match(result.stdout + result.stderr, /T2.*(?:holds its own changes|child has its own commits)/);
     await waitFor(path.join(f.h.base, 'T3'), { what: 'second ready task claims a slot' });
     await waitFor(path.join(f.h.base, 'T4'), { what: 'third ready task claims a slot' });
     const workers = f.h.logs().filter((e) => e.cmd === 'spawn' && e.detail.role === 'worker');
     assert.deepEqual(workers.map((e) => e.task), ['T3', 'T4']);
     const status = f.h.json(['status']);
-    assert.match(status.not_dispatched.find((b) => b.id === 'T2').reason, /holds its own changes on T1 .*resubmitted/);
-    assert.match(f.h.ok(['status']), /not dispatched: T2 .*holds its own changes/);
+    assert.match(status.not_dispatched.find((b) => b.id === 'T2').reason, /holds its own changes|child has its own commits/);
+    assert.match(f.h.ok(['status']), /not dispatched: T2 .*(?:holds its own changes|child has its own commits)/);
   });
 }
 
@@ -111,6 +113,11 @@ await A.refillWorkers(ctx, attempt);
 assert.equal(calls, 1, 'unchanged refusal does not dispatch each minute');
 `);
   assert.equal(f.h.logs().filter((e) => e.cmd === 'spawn refused').length, 1);
+  const detachedState = path.join(f.h.base, 'state-without-repo');
+  fs.cpSync(f.h.state, detachedState, { recursive: true });
+  const detachedStatus = f.h.json(['status', '--state', detachedState], { cwd: f.h.base });
+  assert.match(detachedStatus.not_dispatched.find((b) => b.id === 'T2').reason,
+    /holds its own changes|child has its own commits/);
   probe(f, `
 let calls = 0;
 Spawn.spawn = async () => { calls++; throw new Error('cached task was attempted'); };
@@ -123,7 +130,7 @@ const task = st.tasks.tasks.find(t => t.id === 'T2');
 const key = Spawn.readyRefusalKey(ctx, st, task);
 const repo = S.findRepo;
 S.findRepo = () => null;
-assert.match(Spawn.readyRefusal(ctx, st, task), /holds its own changes/, 'status can read a lasting receipt without a repository');
+assert.match(Spawn.readyRefusal(ctx, st, task), /holds its own changes|child has its own commits/, 'status can read a lasting receipt without a repository');
 assert.equal(Spawn.readyRefusal(ctx, st, task, true), null, 'dispatch still needs a repository');
 S.findRepo = repo;
 for (const [name, changes, same] of [
@@ -144,7 +151,7 @@ for (const [name, changes, same] of [
   assert.equal(Spawn.readyRefusalKey(ctx, changed, changed.tasks.tasks[1]) === key, same, name);
 }
 `);
-  f.h.git(['merge', '-q', '--no-edit', f.sha], f.wt.path);
+  f.h.git(['rebase', '--onto', f.sha, f.oldParent], f.wt.path);
   assert.equal(f.h.json(['status']).not_dispatched.some((b) => b.id === 'T2'), false);
   probe(f, 'await A.refillWorkers(ctx, {});');
   await waitFor(path.join(f.h.base, 'T2'), { what: 'repaired child claims its slot' });
@@ -207,7 +214,7 @@ test('a lasting worker refusal leaves deferred reviewers runnable with free or f
 const R = require(${JSON.stringify(path.resolve(__dirname, '../lib/reviewer'))});
 const T = require(${JSON.stringify(path.resolve(__dirname, '../lib/tasks'))});
 const st = S.loadState(ctx.stateDir);
-assert.match(Spawn.readyRefusal(ctx, st, T.getTask(st, 'T2')), /holds its own changes/);
+assert.match(Spawn.readyRefusal(ctx, st, T.getTask(st, 'T2')), /holds its own changes|child has its own commits/);
 assert.ok(require(${JSON.stringify(path.resolve(__dirname, '../lib/inbox'))}).dispatchable(st, true).some(t => t.id === 'T2'));
 R.deferredDispatches = () => [{ id: 'T1' }];
 R.softwareReport = () => ({ ok: true });
