@@ -12,6 +12,30 @@ const { shellQuote } = require('../lib/gates/common');
 const SHA = 'a'.repeat(40);
 const ERROR = 'Error: shared fixture is missing';
 const failedLog = (name = 'base test', error = ERROR) => `✖ ${name} (1ms)\n  ${error}\n`;
+const stampedLog = (text) => text.split('\n').map((line) => `2026-10-22T08:00:00.1234567Z ${line}`).join('\n');
+const nestedSpecLog = (name = 'base test', parentError = '') => `▶ suite
+  ✖ ${name} (1ms)
+    ${ERROR}
+✖ suite (2ms)
+${parentError ? `  ${parentError}\n` : ''}
+✖ failing tests:
+
+test at test/a.test.js:3:3
+✖ ${name} (1ms)
+  ${ERROR}
+`;
+const nestedTapLog = (name = 'base test') => `# Subtest: suite
+    # Subtest: ${name}
+    not ok 1 - ${name}
+      ---
+      error: '${ERROR}'
+      ...
+not ok 1 - suite
+  ---
+  failureType: 'subtestsFailed'
+  error: '1 subtest failed'
+  ...
+`;
 const run = (id, event, hours, extra = {}) => ({ id, workflow_id: 5, head_branch: 'main', head_sha: SHA,
   event, status: 'completed', conclusion: 'failure', created_at: `2026-10-21T${hours}:00:00Z`, ...extra });
 
@@ -170,6 +194,88 @@ test('hosted CI excludes an explained failing test job but keeps a new failure',
     const entry = JSON.parse(result.stdout);
     if (!newFailure) assert.equal(entry.base_failure[0].base_run.id, 200);
     else assert.equal(entry.confirmed_failure, true);
+  }
+});
+
+test('hosted CI base exclusions handle nested plain, stamped and escaped logs without excusing new failures', (t) => {
+  for (const [label, baseLog, headLog, excluded] of [
+    ['plain spec', nestedSpecLog(), nestedSpecLog(), true],
+    ['stamped spec', stampedLog(nestedSpecLog()), stampedLog(nestedSpecLog()), true],
+    ['stamped TAP', stampedLog(nestedTapLog()), stampedLog(nestedTapLog()), true],
+    ['escaped stamped spec', stampedLog(nestedSpecLog()), stampedLog(nestedSpecLog().replaceAll('✖', '\x1b[31m✖\x1b[0m')), true],
+    ['stamped spec new leaf', stampedLog(nestedSpecLog()), stampedLog(nestedSpecLog('new test')), false],
+    ['stamped TAP new leaf', stampedLog(nestedTapLog()), stampedLog(nestedTapLog('new test')), false],
+    ['stamped parent hook failure', stampedLog(nestedSpecLog()), stampedLog(nestedSpecLog('base test', 'Error: new hook failure')), false],
+  ]) {
+    const h = fixture(t);
+    baseState(h);
+    h.submit();
+    const state = h.github();
+    state.checks = [{ id: 300, name: 'test', app: 'github-actions', suite: 3, status: 'completed', conclusion: 'failure',
+      url: 'https://github.com/acme/demo/actions/runs/300/job/301' }];
+    state.suites = [{ id: 3, app: 'github-actions', status: 'completed', conclusion: 'failure', runs: 1 }];
+    state.workflows = [{ ...run(300, 'pull_request', '12'), head_sha: h.sha, check_suite_id: 3 }];
+    state.jobLogs = { 201: baseLog, 301: headLog };
+    h.saveGithub(state);
+    const result = h.run(['check', 'ci', 'T1', '--agent', 'orchestrator', '--json']);
+    assert.equal(result.code, excluded ? 0 : 1, `${label}: ${result.stderr}${result.stdout}`);
+    const entry = JSON.parse(result.stdout);
+    assert.equal(entry.confirmed_failure === true, !excluded, label);
+    if (excluded) {
+      assert.equal(entry.base_failure.length, 1, label);
+      assert.equal(entry.base_failure[0].name, 'base test', label);
+      assert.equal(entry.base_failure[0].base_run.id, 200, label);
+      assert.ok(entry.base_failure[0].fix_task, label);
+    }
+  }
+});
+
+test('base failures redact head and base errors in gate output, evidence, events and fix-task notes and briefs', (t) => {
+  const token = 'ghp_A1b2C3d4E5A1b2C3d4E5A1b2C3d4E5zZyYxX';
+  const literal = 't498-private-diagnostic-value';
+  for (const gate of ['ci', 'tests']) {
+    for (const [label, value, shown, marker] of [
+      ['shaped token', token, token, '[redacted:GITHUB_TOKEN]'],
+      ['escaped token', token, token.slice(0, 12) + '\x1b[31m' + token.slice(12) + '\x1b[0m', '[redacted:GITHUB_TOKEN]'],
+      ['configured literal', literal, literal, '[redacted:T498_TEST_SECRET]'],
+    ]) {
+      const h = fixture(t);
+      h.env.T498_TEST_SECRET = literal;
+      const error = `Error: auth failed with ${shown}`;
+      baseState(h);
+      const state = h.github();
+      state.jobLogs[201] = stampedLog(failedLog('base test', error));
+      if (gate === 'tests') {
+        const script = path.join(h.base, 'secret-failure.js');
+        fs.writeFileSync(script, `console.log(${JSON.stringify(failedLog('base test', error))}); process.exit(1);\n`);
+        h.ok(['project', 'set', '--tests-cmd', `node ${shellQuote(script)}`]);
+      }
+      h.saveGithub(state);
+      h.submit();
+      if (gate === 'ci') {
+        state.checks = [{ id: 300, name: 'test', app: 'github-actions', suite: 3, status: 'completed', conclusion: 'failure',
+          url: 'https://github.com/acme/demo/actions/runs/300/job/301' }];
+        state.suites = [{ id: 3, app: 'github-actions', status: 'completed', conclusion: 'failure', runs: 1 }];
+        state.workflows = [{ ...run(300, 'pull_request', '12'), head_sha: h.sha, check_suite_id: 3 }];
+        state.jobLogs[301] = stampedLog(failedLog('base test', error));
+        h.saveGithub(state);
+      }
+      const result = h.run(['check', gate, 'T1', '--agent', 'orchestrator', '--json']);
+      const context = `${gate}: ${label}`;
+      assert.equal(result.code, 0, `${context}: ${result.stderr}`);
+      const entry = JSON.parse(result.stdout);
+      assert.equal(entry.base_failure[0].error, `Error: auth failed with ${marker}`, context);
+      assert.equal(entry.base_failure[0].base_run.error, `Error: auth failed with ${marker}`, context);
+      const tasks = h.readState('tasks.json').tasks;
+      const fix = tasks.find((task) => task.id === entry.base_failure[0].fix_task);
+      assert.ok(fix.notes.some((note) => note.text.includes(marker)), context);
+      const brief = fs.readFileSync(path.join(h.state, 'briefs', `${fix.id}.md`), 'utf8');
+      assert.ok(brief.includes(marker), context);
+      for (const text of [result.stdout, result.stderr, JSON.stringify(tasks), JSON.stringify(h.logs()), brief]) {
+        assert.equal(text.includes(value), false, context);
+        assert.equal(text.includes(shown), false, context);
+      }
+    }
   }
 });
 

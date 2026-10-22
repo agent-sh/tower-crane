@@ -390,3 +390,41 @@ test('submit and CI compare base evidence without losing new-failure diagnostics
     }
   }
 });
+
+test('submit reports redact explained base errors with or without another failing job', (t) => {
+  const token = 'ghp_A1b2C3d4E5A1b2C3d4E5A1b2C3d4E5zZyYxX';
+  const literal = 't498-private-submit-diagnostic';
+  for (const mixed of [false, true]) {
+    for (const [label, value, shown, marker] of [
+      ['shaped token', token, token, '[redacted:GITHUB_TOKEN]'],
+      ['escaped token', token, token.slice(0, 12) + '\x1b[31m' + token.slice(12) + '\x1b[0m', '[redacted:GITHUB_TOKEN]'],
+      ['configured literal', literal, literal, '[redacted:T498_TEST_SECRET]'],
+    ]) {
+      const h = fixture(t);
+      h.env.T498_TEST_SECRET = literal;
+      const created = new Date(Date.parse(h.git(['show', '-s', '--format=%cI', h.sha])) + 1000).toISOString();
+      const raw = `2026-10-22T08:00:00.1234567Z ✖ base test (1ms)\n2026-10-22T08:00:00.1234567Z   Error: auth failed with ${shown}\n`;
+      const data = {
+        runs: [checkRun('test (windows-latest)', { id: 456, conclusion: 'failure', url: JOB_LOG }),
+          ...(mixed ? [checkRun('build', { conclusion: 'failure', url: 'https://github.com/acme/app/actions/runs/9/job/457' })] : [])],
+        suites: [suite(1, { runs: mixed ? 2 : 1, conclusion: 'failure' })],
+        workflows: [{ id: 9, workflow_id: 5, event: 'pull_request', head_sha: h.sha, check_suite_id: 1,
+          created_at: created, status: 'completed', conclusion: 'failure' }],
+        logs: { 456: raw, 457: 'Error: build failed' },
+        baseRuns: [{ id: 200, workflow_id: 5, head_branch: 'main', head_sha: h.sha,
+          event: 'push', status: 'completed', conclusion: 'failure', created_at: created }],
+        baseJobs: { 200: [{ id: 201, name: 'test (windows-latest)', status: 'completed', conclusion: 'failure' }] },
+        apiLogs: { 201: raw, 456: raw, 457: 'Error: build failed' },
+      };
+      const result = submitPr(h, data);
+      const context = `${label}, mixed=${mixed}`;
+      assert.equal(result.status, mixed ? 1 : 0, `${context}: ${result.stderr}`);
+      if (!mixed) assert.ok(result.stdout.includes(`Error: auth failed with ${marker}`), context);
+      for (const text of [result.stdout, result.stderr, JSON.stringify(h.readState('tasks.json')),
+        fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8')]) {
+        assert.equal(text.includes(value), false, context);
+        assert.equal(text.includes(shown), false, context);
+      }
+    }
+  }
+});
