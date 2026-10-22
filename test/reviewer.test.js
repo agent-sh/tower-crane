@@ -8,7 +8,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { makeRepo, makeProjectRepo, cachedFixture, pinRung, BIN, runPty, PTY_AVAILABLE } = require('./helpers');
 const { gateFixture, gateEvidence, changeKind } = require('./gate-helpers');
-const { harnessArgv } = require('./containment-plan');
+const { harnessArgv, scopeEnv } = require('./containment-plan');
 
 const prices = {
   'fixture-light': { input: 0.10, cache_write: 0.125, cache_read: 0.01, output: 0.50 },
@@ -423,12 +423,13 @@ test('Codex profile builders share canonical identity with provider spend and pr
     ['medium', 'fixture-main', 'fixture-main', 'hard', 'fixture-large', 'fixture-large'],
   ]) {
     const h = setup(t, tier, provider, profile, { gated: true });
+    const scoped = scopeEnv(h);
     // A later self-reported model and ladder edit cannot rename the builder route.
     h.ok(['spend', 'T1', '--agent', h.builder, '--tokens', '1', '--rung', tier, '--model', 'wrong-model']);
-    assert.deepEqual([choice(h).review_rung, model(choice(h))], [tier, profile]);
+    assert.deepEqual([choice(h, scoped).review_rung, model(choice(h, scoped))], [tier, profile]);
     sample(h, provider, 1000000, 0, 0);
     sample(h, promotedProvider, 0, 0, 1);
-    const out = choice(h);
+    const out = choice(h, scoped);
     assert.deepEqual([out.review_rung, model(out)], [promotedTier, promotedModel]);
     const prompt = out.argv.find((arg) => arg.includes('## Task'));
     assert.ok(prompt.includes(`builder model ${provider}`), prompt);
@@ -494,7 +495,7 @@ test('Codex review pricing follows the user origin from a private caller home', 
   assert.equal(choice(h, userEnv).review_rung, 'hard');
   const privateEnv = { ...userEnv, HOME: privateHome, USERPROFILE: privateHome };
   assert.equal(choice(h, privateEnv).review_rung, 'hard');
-  const dispatch = h.json(['spawn', '--task', 'T1', '--dry-run'], { env: { ...h.reviewEnv, ...privateEnv } });
+  const dispatch = h.json(['spawn', '--task', 'T1', '--dry-run'], { env: { ...h.reviewEnv, ...privateEnv, ...scopeEnv(h) } });
   assert.equal(dispatch.harness, 'codex');
   const argv = harnessArgv(dispatch.argv);
   assert.equal(argv[argv.indexOf('-p') + 1], 'origin-review');
