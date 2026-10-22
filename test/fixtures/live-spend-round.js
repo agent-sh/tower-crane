@@ -1,8 +1,9 @@
 'use strict';
 
-// One stress round of test/live-spend.test.js: COPIES runs of the file at
-// once (default 12), so supervisors, harnesses and CLI calls of different
-// copies compete for the machine as they do on a loaded CI runner. The runner
+// One stress round of the live-spend files, test/live-spend.test.js and
+// test/live-spend-board.test.js: COPIES runs of the pair at once (default
+// 12), so supervisors, harnesses and CLI calls of different copies compete
+// for the machine as they do on a loaded CI runner. The runner
 // caps its own file workers at 4, so the copies are separate runs. Exits 1,
 // with each failing copy's failures, when any copy fails.
 //   node test/fixtures/live-spend-round.js [--round N] [--copies COPIES]
@@ -23,7 +24,8 @@ if (!Number.isSafeInteger(copies) || copies < 1) {
 }
 const root = path.join(__dirname, '..', '..');
 const runs = Array.from({ length: copies }, (_, copy) => new Promise((resolve) => {
-  const child = cp.spawn(process.execPath, [path.join(root, 'test', 'run.js'), '--test-concurrency=12', 'test/live-spend.test.js'],
+  const child = cp.spawn(process.execPath, [path.join(root, 'test', 'run.js'), '--test-concurrency=12', 'test/live-spend.test.js',
+    'test/live-spend-board.test.js'],
     { cwd: root, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
   let out = '';
   child.stdout.on('data', (d) => { out += d; });
