@@ -21,6 +21,8 @@ const path = require('node:path');
 const os = require('node:os');
 const cp = require('node:child_process');
 const { makeRepo, ACCOUNT_HOME, pinLiveRung } = require('./helpers');
+const { configureClaudeCache } = require('./claude-probe-cache');
+const { harnessFits } = require('../lib/gate-tmp');
 
 const PROBE = `'use strict';
 const cp = require('node:child_process');
@@ -194,6 +196,9 @@ test('from a real claude sandbox a worker cannot write the shared git config or 
     input: `Sandbox probe set up by the owner. Run exactly these two commands with the Bash tool, as two separate Bash calls in this order, the second only after the first has finished. Then reply with their exit codes and stop. Do not use tower-crane.\n\n1. ${command(f.spec('claude-1', { out: first, steps: ['git'], wait: ready }))}\n\n2. ${command(f.spec('claude-2', { out: second, steps: ['late'] }))}\n`,
   });
   pinLiveRung(f.h, 'claude', 'hard');
+  configureClaudeCache(t, f.h.env);
+  const plan = f.h.json(['spawn', '--role', 'hard', '--task', 'T1', '--dry-run']);
+  assert.ok(harnessFits(plan.env.TMPDIR), `Claude proxy temp path is too long: ${plan.env.TMPDIR}`);
   const spawned = f.h.runAsync(['spawn', '--role', 'hard', '--task', 'T1', '--wait']);
   // Once the first command has written its result, add the worktree and let it finish.
   let added = false;
@@ -206,6 +211,6 @@ test('from a real claude sandbox a worker cannot write the shared git config or 
   let r;
   try { r = await spawned; } finally { clearInterval(timer); }
   assert.equal(r.code, 0, r.stderr || r.stdout);
-  assert.ok(added, 'the late worktree was added while the agent ran');
+  assert.ok(added, `the late worktree was added while the agent ran\n${r.stderr}\n${r.stdout.slice(-4000)}`);
   check(f, 'claude', [first, second]);
 });

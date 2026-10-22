@@ -1,0 +1,1 @@
+- Live Claude sandbox probes use bounded private cache roots for their proxy sockets. The Git probe checks its planned temp path before launch and includes the agent output when the first command does not run.
