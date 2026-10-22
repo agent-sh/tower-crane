@@ -2,6 +2,66 @@
 
 Tasks may carry `stack: { parent, base, parent_sha, repo, linked, synced_base }`. `parent` is the lower task id, `base` is the PR's current target branch, `parent_sha` is the dependency head used for dispatch or the last synchronization, `repo` is the same GitHub repository as the project, and `synced_base` is the last observed main commit. `linked` records successful `gh stack link`. One unmerged dependency chain forms one stack; outstanding sibling branches are not appended to that chain.
 
+Before worker or reviewer dispatch, acceptance, or a software gate, a child
+whose parent has resubmitted refreshes under the worktree lock, whether its
+stack is linked or still prepared. The
+engine merges the verified submitted parent head into a child with its own
+commits in a detached scratch worktree,
+with commit subject `Merge <parent>'s resubmitted head into <child>`. A clean
+merge is pushed to the child branch before the local branch moves, then updates
+`stack.parent_sha` and emits `stack sync` with the parent and child heads.
+Existing child commits are preserved. A submitted or accepted child returns to
+rework to submit the refreshed branch and rerun gates; its former submitted sha
+stays recorded until then.
+An untouched child adopts the parent head directly, including a rewritten
+parent, so commits dropped by the parent are not restored. If the child head
+exactly equals its old `parent_sha`, a rewritten parent can replace that head
+on origin with `--force-with-lease=refs/heads/<child>:<old-head>` after a normal
+push is rejected. The explicit lease rejects concurrent remote work. A failed
+lease preserves the local branch and stack metadata, records a stable rework
+note and stops refresh until the orchestrator reconciles the moved remote.
+
+A child with its own commits is not merged across a parent history rewrite.
+It records a restack note and keeps its branch and submitted head. Linked
+stacks use the existing `gh stack sync` rebase and guarded publication while
+idle; an unlinked recorded PR must be linked before `stack sync`. A child
+without a PR requires the orchestrator to arrange its restack. The restacked
+branch needs a new submission before gates can run at it. A parent refresh
+that is inapplicable or has a recoverable failure falls through to ordinary
+linked sync. A guarded-lease failure or an actual merge conflict stops that
+pass instead.
+
+A conflict aborts the scratch merge and leaves the child branch and checkout
+unchanged. A rework note names the parent sha and conflicting files, and the
+worker dispatches to resolve them. The `stack sync` conflict receipt permits
+that dispatch only while the child head and submitted parent head are unchanged.
+A gate waits until the child's submitted head contains the latest submitted
+parent head. Gate freshness uses that head across parent rework and active
+claims. Dispatch and merge still apply their lifecycle checks. Acceptance
+checks freshness before reusing gate receipts, and reviewer dispatch checks
+it before starting a model. Current independent FAIL recovery runs before
+these parent checks and keeps `from_review: true`. A submitted dry-run review
+checks ancestry without publishing; an unsubmitted review previews its fallback
+command without an ancestry check. Acceptance and reviewer startup
+compare the parent inputs again in their final state transactions.
+Live workers and dirty checkouts defer parent refresh, with one
+`stack sync deferred` event per parent head. A dirty child can dispatch its worker on the
+unchanged branch and checkout; its brief names the parent head it must include
+before resubmitting. A dirty submitted or accepted child returns to rework so
+that worker can be scheduled. This recovery also runs when the same parent
+head already has a deferral receipt; repeated checks while rework is pending
+do not advance its revision again. Gates still wait for the parent head. A child
+branch that already contains the parent head needs no merge, so a live worker or
+dirty checkout does not defer it: refresh records the parent head in
+`stack.parent_sha` and emits `stack sync` without touching the checkout, and a
+submitted head that contains the parent keeps its status. Stopped Git operations
+keep their worktree operation checks and prevent automatic refresh. Merged
+parents take the completed-chain retirement path before any parent branch fetch.
+Refresh only merges a newer submitted or accepted head from an unmerged parent
+without a retirement reservation. Blocked-parent dispatch and merge-base
+validation keep their existing lifecycle checks; a gate does not retire a
+completed stack before validating its PR base.
+
 `stack_disabled: true` records an unavailable stacks capability, explicit `stack unstack`, or a replacement middle PR awaiting confirmation of its new chain. It selects ordinary merges, which wait for lower merge evidence before retargeting an existing upper PR. An accepted dependency can still use the ordinary main-based dispatch flow when the repository cannot stack; a submitted dependency requires an available chain.
 
 A successful `stack link` clears fallback markers for its linked members and restores the stack merge gate, including its refusal of admin merges.
@@ -231,13 +291,13 @@ The owner is the resolved name `owner`, supplied explicitly by `--agent owner` o
 | `logs/<task>-<agent>-startup-failed-<time>.log` | the output of a supervisor that did not report its start, kept when it wrote any or when the dispatch's startup wait ran out. Its last line is `tower-crane: startup phases in ms: ` and the JSON of the spawn event's `startup_ms`, with the phases that finished; the refusal prints its path and last lines. The newest 5 per task, by modification time, are kept; each new or moved-aside one counts as the newest and removes the older ones |
 | `logs/ci-<task>-<sha>-<unique>/output.log` | one local CI run's stdout and stderr joined by whole lines, escapes removed and redacted; the newest 5 runs per task are kept ([Local CI output](#local-ci-output)) |
 | `ci-artifacts/<run>/` | the files a failed local CI run named, copied out of the gate worktree before removal, text redacted; hidden from every agent sandbox; `ci-artifacts/.gitignore` ignores everything ([Local CI output](#local-ci-output)) |
-| `homes/<agent>/` | the home `tower-crane spawn` builds fresh for each claude, codex and agy agent: its harness config directory with generated settings, instructions and permission profile, `git` and `gh` shims, links to the user's credentials, for a sandboxed claude agent `tmp`, its `CLAUDE_CODE_TMPDIR` ([agent files and homes](ladder.md#agent-files-and-homes)), and `home/`, the agent's `HOME`, which for a sandboxed codex agent also holds the shims it runs, `home/.tower-crane-shims/` (`bin/`, `policy.json` and a copy of `lib/`), since its sandbox hides the rest of `homes/<agent>/`; plus what the harness writes there (transcripts). Private to the user; `homes/.gitignore` ignores everything. A spawn removes a home only after the agent and every live controller using its tool snapshot have exited. `homes/.codex/<agent>/sessions/` keeps that agent's codex sessions for usage after its home is gone ([Agent files and homes](ladder.md#agent-files-and-homes)) |
+| `homes/<agent>/` | the home `tower-crane spawn` builds fresh for each claude, codex and agy agent: its harness config directory with generated settings, instructions and permission profile, `git` and `gh` shims, links to the user's credentials, for a sandboxed claude agent `tmp`, its `CLAUDE_CODE_TMPDIR` ([agent files and homes](ladder.md#agent-files-and-homes)), and `home/`, the agent's `HOME`, which for a sandboxed codex agent also holds the shims it runs, `home/.tower-crane-shims/` (`bin/`, `policy.json` and `tool/`, a copy of the snapshot), since its sandbox hides the rest of `homes/<agent>/`; plus what the harness writes there (transcripts). Private to the user; `homes/.gitignore` ignores everything. A spawn removes a home only after the agent and every live controller using its tool snapshot have exited. `homes/.codex/<agent>/sessions/` keeps that agent's codex sessions for usage after its home is gone ([Agent files and homes](ladder.md#agent-files-and-homes)) |
 | `brokers/<agent>/` | `broker.json`, the [state broker](ladder.md#state-broker)'s address and token for a sandboxed agent (and its `broker.sock` for claude), while the agent runs; only that agent's sandbox can read it. The broker writes `brokers/<agent>/.gitignore` when it creates that directory, never in an existing directory or its parent. Closing removes a directory it created; an existing directory keeps its other files |
 | `push/` | the [state broker](ladder.md#state-broker)'s repository for the pushes sandboxed agents ask for: `cache.git`, which holds only objects git hashed on arrival and stays between pushes, and the `cache.lock` directory while a push uses it; no sandbox can write here. `push/.gitignore` ignores everything |
 | `skills/<key>/` | the role skills every spawned agent is told to read: a copy of `skills/` from `TOWER_CRANE_PLUGIN_ROOT` or the dispatching package, named by the first 16 hex digits of the SHA-256 of its file names and contents. Spawn copies the skills to a temporary directory beside it and renames that to the key, retrying a rename the system refuses for a moment (EPERM, EACCES or EBUSY, as Windows does while a scanner holds new files) for up to 2 s; a key another dispatch wrote first is kept, and the retry stops once it is there. Spawn writes a key once and never removes it, so a path an agent was given stays valid after any agent exits. Prompts, home instructions, the codex, opencode and agy skill links, pi's `--skill` and `reviews/<task>-<sha>.md` name it. It is outside `homes/`, so the claude and codex sandboxes, which open the state directory read-only, can read it |
 | `gitconfig/<agent>` | the global git config of a sandboxed claude or codex agent and its harness (`GIT_CONFIG_GLOBAL`), rendered from the user's global git config ([Shared git directory](ladder.md#shared-git-directory)); their sandboxes read it and never write it. A spawn removes it with the agent's home. `gitconfig/.gitignore` ignores everything |
 
-Each spawn pins its tool runtime in `homes/<agent>/tool/`. `homes/<agent>/tool.json` and the `spawn` event's `detail.tool` record `{sha, version, path}`. `sha` is the tool checkout's HEAD, or null for an installed package without Git metadata; `version` is the package version. The snapshot copies `bin/`, `lib/`, `agents/`, `skills/`, `standards/` and `package.json`, without links back to the checkout. Skill paths the agent is given name the skill store (`skills/<key>/`), not this snapshot, which its sandbox cannot read. The generated Git and gh shims, harness hooks, notify command and supervisor resolve this snapshot. Its policy is generated by the same tool version. Supervisors, containment keepers and host CLI controllers hold the snapshot they execute, even when it belongs to another agent. The engine writes PID identity holds under `tool/.users/`; launchers register child holds before releasing their own, and pruning removes dead holds only after verifying exit. An unobservable user keeps its hold. A home rebuild preserves a held `tool/` and its holds. After all users exit, a later spawn prunes it with the home, and a new dispatch gets the tool version then installed.
+Each spawn pins its tool runtime in `homes/<agent>/tool/`. `homes/<agent>/tool.json` and the `spawn` event's `detail.tool` record `{sha, version, path}`. `sha` is the tool checkout's HEAD, or null for an installed package without Git metadata; `version` is the package version. The snapshot copies `bin/`, `lib/`, `agents/`, `skills/`, `standards/` and `package.json`, without links back to the checkout. Skill paths the agent is given name the skill store (`skills/<key>/`), not this snapshot, which claude's Read tool and codex's sandbox cannot read. The generated Git and gh shims, a sandboxed agent's `tower-crane`, harness hooks, notify command, claude's credential helper and supervisor resolve this snapshot. A sandboxed agent's sandbox reads it (codex a copy in `home/.tower-crane-shims/tool/`) and no Tower Crane checkout, so retiring the checkout a dispatch ran from leaves live agents working. Its policy is generated by the same tool version. Supervisors, containment keepers and host CLI controllers hold the snapshot they execute, even when it belongs to another agent. The engine writes PID identity holds under `tool/.users/`; launchers register child holds before releasing their own, and pruning removes dead holds only after verifying exit. An unobservable user keeps its hold. A home rebuild preserves a held `tool/` and its holds. After all users exit, a later spawn prunes it with the home, and a new dispatch gets the tool version then installed.
 
 Pinning keeps upgrades independent of live dispatches. On 2026-10-08, moving the orchestrator checkout to T112 (`33d7eb5`) made existing shims read new requirements against policies without `branch` or `repo`. Pushes from T30 and T79 had to be completed by hand. Copying the runtime at dispatch prevents a checkout move from changing a live agent's policy reader or hook protocol. Upgrades take effect on the next dispatch, with no feature flag.
 
@@ -249,7 +309,7 @@ Codex model and auth-store fields also require their expected scalar types in ba
 
 A brief without role headings is shared by worker dispatch and role-filtered brief readers. A brief can add level-two headings `## Shared`, `## Worker` and `## Reviewer`; matching is case-insensitive and headings inside fenced code blocks are ignored. Text before the first role heading is shared; each section ends at the next role heading. The `## Rework notes` heading is also a shared section boundary, so corrections appended by `rework` stay visible to each role. Worker dispatch and `brief get` send shared text followed by the matching role section, and omit the other role's section. Review dispatch sends only reviewer sections alongside the diff, acceptance and gate results. `brief get` infers the role from a `worker-` or `reviewer-` agent name, or accepts an explicit `--role`; owner and orchestrator identities see the full brief by default. `brief set` warns on stderr when it finds a reviewer section without a worker section.
 
-All JSON files carry `"version": 1`. Writes go to a temp file in the same directory, synced, and are renamed into place; the directory is then synced so the rename survives a power loss. Windows cannot open a directory to sync it, so there the rename is as durable as the file system makes it; file systems that refuse a directory sync are treated the same way. Windows refuses to open or stat a state file while another process renames a new copy over it, with EPERM, EACCES or EBUSY, until that process closes it. A writer retries such a refused rename, and a reader retries such a refused read, for up to 2 s before it fails. A lock-free read can therefore wait up to 2 s per file on Windows; the supervisor's periodic read is one, so a concurrent commit does not stop its worker. On other platforms these codes are a permission failure, and a read fails on the first one. A refused state mutation writes nothing. `accept` can record software gate results before refusing acceptance.
+All JSON files carry `"version": 1`. Writes go to a temp file in the same directory, synced, and are renamed into place; the directory is then synced so the rename survives a power loss. Windows cannot open a directory to sync it, so there the rename is as durable as the file system makes it; file systems that refuse a directory sync are treated the same way. Windows refuses to open or stat a state file while another process renames a new copy over it, or while a scanner or the indexer holds it, with EPERM, EACCES or EBUSY, until that process closes it. A writer retries such a refused rename, and a reader retries such a refused stat, open or read of `project.json`, `tasks.json`, `decisions.json`, `events.jsonl`, `events.cuts.jsonl`, a commit's staged files, an agent's progress file or its harness log, with backoff from 5 ms to 100 ms between attempts, for up to 2 s. A refusal that lasts longer fails the command with its code and path and `(still refused after 2000 ms; another process holds the file)`; it never reads as a missing file or an empty event log. A lock-free read can therefore wait up to 2 s per file on Windows; the supervisor's periodic read, `wait` and the gates' state reads are such reads, so a concurrent commit or a scan does not stop a worker. On other platforms these codes are a permission failure, and a read fails on the first one. A refused state mutation writes nothing. `accept` can record software gate results before refusing acceptance.
 
 ### Durability and write order
 
@@ -358,7 +418,7 @@ If an expired pre-claim already belongs to the generated worker, dispatch renews
 
 `gates.clean_paths` is an optional JSON array of absolute or `~/` paths, set by the orchestrator or owner with `init --clean-paths JSON` or `project set --clean-paths JSON`; `[]` removes the extra paths and `null` clears the setting. At dispatch, sandboxed Claude and Codex agents can read existing absolute executable paths and direct script arguments to Node, Python, shell, Ruby or Perl in `gates.clean_cmd` and `gates.tests_proof_cmd` commands, their containing directories, and declared dependency files or directories outside the task worktree. Paths resolve on the host, and `~/` declarations use the spawning user's home. These tool paths are read-only so workers cannot change the cleanup or proof implementation. Automatic detection covers executable files and the first argument of a recognized interpreter before any shell expansion when the script has its language suffix or a shebang. Non-executable command prefixes and unrecognized data arguments are excluded. Script paths after interpreter options, expanded paths and wrapper dependencies require declarations. Command pins and dependency declarations share operational authority because they select the code gates run on the host; workers and reviewers cannot change them. Wrapper scripts must declare any dependencies outside their own directory; spawn does not execute wrappers to discover dependencies. Missing declared paths, hidden credential stores, directories holding the user's home or worktree, and writable paths inside tool directories refuse dispatch. Use dedicated tool directories and separate writable caches. Worktree tools retain the task's normal permissions.
 
-`gates.executors` is a positive integer, default 2, that caps automation executors running at once on this host ([events.jsonl](#eventsjsonl)). The default fits one full suite at tests concurrency 3, about 6 processes, so two keep tests under half the cores of a 24-core box. The orchestrator or the owner raises it with `project set --executors N` on a larger machine.
+`gates.executors` is a positive integer, default 2, that caps the CPU work automation runs at once on this host ([events.jsonl](#eventsjsonl)). Only work that runs the project's commands here takes an executor: the tests gate with its host probes, the clean gate, local CI (`ci.local`) and the merge line's head check. Review dispatch, a reaction waiting on a reviewer, hosted CI reads and the ci gate's waits for GitHub take none and never wait for one. A tests gate in mode `none` runs nothing and takes none. The default fits one full suite at tests concurrency 3, about 6 processes, so two keep tests under half the cores of a 24-core box. The orchestrator or the owner raises it with `project set --executors N` on a larger machine.
 
 `gates.tests_timeout_min` and `gates.clean_timeout_min` set positive minutes per test or cleanup shell invocation. Fractions are allowed; the rounded duration must be at least 1 ms and the duration cannot exceed Node's 2147483647 ms timer range. Each defaults to 20 minutes when absent or null, preserving the original gate budget for existing projects. Set a budget that fits the project's measured suite under local load. `init` and `project set` accept `--tests-timeout-min MIN` and `--clean-timeout-min MIN`; `null` clears either setting. Both are operational, and `project show` prints their effective values. Tests uses its budget separately for the full suite, scoped head proof and reverted proof. Automation uses these same settings for gate executors and the merged-head suite. A budget change applies to the next invocation and does not invalidate successful command evidence.
 
@@ -422,7 +482,7 @@ Locked registrations, paths whose resolved location leaves the managed root, run
 
 Worker scratch is recorded as the task's `scratch` path on spawn: `tower-crane/tasks/<state hash>/<task id>` under the spawning user's cache root. Every later worker attempt, including rework, mounts that path read-write and sets `XDG_CACHE_HOME` there; Go and npm caches also stay inside it. The recorded path is reused even when a later dispatch changes its cache-root environment. Worker prompts and command-harness brief copies name the path, including resume prompts. Homes and reviewer caches remain per spawn and can be pruned independently. A sandboxed codex or claude agent's temp directory is `tmp` inside its writable cache: the task scratch for a worker, its own agent cache for other roles. `TMPDIR`, `TMP` and `TEMP` name it (Windows programs, and codex's Windows sandbox, read the last two), and `JAVA_TOOL_OPTIONS` gains `-Djava.io.tmpdir=<it>`, since the JVM otherwise uses `/tmp`. The JVM splits that variable on whitespace, so a path with whitespace or a quote gets no `java.io.tmpdir`. These four win over the project's `env` and `env_file`; other options in a `JAVA_TOOL_OPTIONS` there stay. A browser that the agent or its MCP server starts makes its singleton socket in that directory, and Playwright's Chromium fails with "Socket path too long" when the directory is over 62 bytes (Chrome: 66). So when `tmp` in the cache is longer, the agent gets `tc/<12 hex>` under the cache root instead, named from the resolved cache path (a root behind a link, such as `/home` to `/var/home`, names the same directory when it is made and when it is removed), the same for every attempt and removed with the cache. It fits for a cache root of up to 46 bytes; under a deeper one, such as a test fixture's, a browser the agent starts fails. A file or link left at either path is replaced by a directory, never followed; the directory is made without recursion and must then be a directory of this user's, or spawn refuses. The permission profile names the directory and never `:tmpdir`, which codex resolves from the `TMPDIR` it starts with, nor `:slash_tmp`, the host's `/tmp`. So a caller temp directory under the home or at `/tmp`, which can hold other tasks' scratch and test fixtures, is not in the sandbox. One elsewhere, such as `/var/tmp/x` on Linux or macOS's `/var/folders/...` under `/private`, would be readable through the entry of `/` that holds it, so the profile hides it, together with macOS's `/private/tmp`. It stays readable only when a path the agent needs, such as its worktree, lies inside it. codex keeps its `codex-bwrap-synthetic-mount-targets-<uid>` directory in the agent's temp directory too. claude makes its proxy bridge sockets there, which its sandbox reads and writes; socat takes at most 73 bytes there, so a claude agent under a cache root deeper than 57 bytes keeps the caller's `TMPDIR`, and spawn prints a notice. Successful task worktree retirement removes scratch, including read-only module trees, and clears `scratch`; each reason that keeps the worktree also keeps scratch. Superseding a task uses cancellation and the same retirement rules.
 
-On POSIX, each sandboxed spawn also gets a short writable socket leaf, `tc-<12 hex of its home path>`. Spawn tries `XDG_RUNTIME_DIR`, then `tc` in the account's own `.cache` (from the password database, not `HOME` or `XDG_CACHE_HOME`, which can name a deep agent home or test root; made 0700 when missing), then the leaf an enclosing sandbox granted in `TOWER_CRANE_SOCKET_DIR`. It selects the first writable root whose resolved leaf and a `tc-XXXXXX/s` child fit 103 UTF-8 bytes. No socket, socket directory or fallback goes under `/tmp` or `TMPDIR`. When none fits, a rung whose sandboxed routes are all codex spawns without a leaf, since its broker listens on loopback TCP; any other refuses, naming each path tried with its length in bytes or the error that passed it over. Only the leaf is granted read-write, and `TOWER_CRANE_SOCKET_DIR` names it for tests and commands. The monitor receives it as `agent_socket_dir`; Claude and mixed-route brokers listen at its `s`, and Codex-only brokers retain loopback TCP. The broker removes its socket and owner record, then the empty leaf when it closes. Before listening it sweeps the leaf's root and each socket root for old directories whose owner record proves their monitor exited. A direct broker caller without this grant listens at `broker.sock` in its broker directory when that fits, otherwise in a fresh `tower-crane-XXXXXX` directory under the same roots; with none it refuses, naming its own path and each root path with their lengths. Windows brokers use named pipes.
+On POSIX, each sandboxed spawn also gets a short writable socket leaf, `tc-<12 hex of its home path>`. Spawn tries `XDG_RUNTIME_DIR`, then `tc` in the account's own `.cache` (from the password database, not `HOME` or `XDG_CACHE_HOME`, which can name a deep agent home or test root; made 0700 when missing), then the leaf an enclosing sandbox granted in `TOWER_CRANE_SOCKET_DIR`. It selects the first writable root whose resolved leaf and a `tc-XXXXXX/s` child fit 103 UTF-8 bytes. No socket, socket directory or fallback goes under `/tmp` or `TMPDIR`. When none fits, a rung whose sandboxed routes are all codex spawns without a leaf, since its broker listens on loopback TCP; any other refuses, naming each path tried with its length in bytes or the error that passed it over. Only the leaf is granted read-write, and `TOWER_CRANE_SOCKET_DIR` names it for tests and commands. The monitor receives it as `agent_socket_dir`; Claude and mixed-route brokers listen at its `s`, and Codex-only brokers retain loopback TCP. The broker removes its socket and owner record, then the empty leaf when it closes. Before listening it sweeps the leaf's root and each socket root for old directories whose owner record proves their monitor exited and whose socket, when there, refuses connections. The owner record names the monitor's pid namespace (`pidns`, the target of `/proc/self/ns/pid`), and a pid recorded in another namespace, or checked by a caller that cannot read its own, is never judged exited: inside a sandbox's pid namespace a live monitor outside it is missing. The socket answers for a record from before records named the namespace. A direct broker caller without this grant listens at `broker.sock` in its broker directory when that fits, otherwise in a fresh `tower-crane-XXXXXX` directory under the same roots; with none it refuses, naming its own path and each root path with their lengths. Windows brokers use named pipes.
 
 On POSIX, an inherited `XDG_CACHE_HOME` is recognized only when it names the exact `tower-crane/{tasks,agents}/<state hash>/<id>` cache leaf. An explicit test cache below that leaf remains an explicit root, so fixtures inside worker scratch can select their own cache directories.
 
@@ -918,11 +978,105 @@ Each closed window is appended to `HOST.windows.jsonl` beside the registry, whic
 
 Pressure defers as well: memory `some` avg10 at or over `psi_memory_defer`, CPU `some` avg10 at or over `psi_cpu_defer`, or load at or over `load_defer` times the cores. Admission and the registry write that records the unit are one locked step, so two projects cannot both take the last room.
 
+#### Live-window replay, 2026-10-21 (T451)
+
+The first day's log does not call for tightening the p99 rule or its largest-unit floor. Of 1338 closed windows, 25 grew past their reservation (1.87%). The highest `actual` among those crossings was 20.712 GiB, 57.53% of the limit; their highest `slice_peak`, including later admissions and other sessions, was 21.702 GiB, 60.28%. These leave 13.488 and 12.498 GiB to the 95% stop line. No crossing reached 90% of the limit, the threshold five percentage points below that line. None reached 95% of the stop line either (90.25% of the limit).
+
+The orchestrator supplied a snapshot of `avifenesh.windows.jsonl` from the live host cache, SHA-256 `f6017f7cb6cb3418081250c9024f74d67150150b0d735f9f13c5c59eb6545290`. Its windows cover 2026-10-20 13:57:26.523 through 2026-10-21 14:07:02.286 Jerusalem time (UTC+03:00), 24 h 9 min 35.763 s from first opening to last close. The last closed window opened at 13:07:01.684 on October 21; windows still open at snapshot time are absent. All rows followed `agents.slice` with a 36 GiB limit, a 30.6 GiB default defer line and a 34.2 GiB default stop line. The replay used the shipped defaults: 60-minute windows, 20 samples before measured growth, nearest-rank p99 over the last 200 closed ratios, a largest-unit floor, and a 60-minute raise after a crossing.
+
+Replaying closes before openings at the same timestamp through `observe` and `reserve` in `lib/governor.js` reproduced every logged reservation, ratio, rule and sample count, with zero mismatches. There were 76 sum-rule, 1048 measured-rule and 214 raised-rule openings. All 1338 windows had room and a non-null ratio. Their nearest-rank p50 was **0.06144242** and p99 **0.26344686** (`grew / sum`, ranks 669 and 1325). These are full-log descriptive percentiles; the live reservation uses only ratios already closed at an opening. Overlapping windows are correlated observations.
+
+The admission comparison below asks whether one hypothetical candidate fits at each logged opening: `used + reserved + need <= 0.85 * limit`, versus `used + sum + need <= 0.85 * limit`. It sets `others_room` to zero and checks only the logged binding level, with no PSI or load deferral. The log has no dispatch attempts, learned candidate sizes, other-session peak history, pressure or other levels, so these are memory-only opportunities on the recorded workload, not counts of actual dispatches or a simulation of the workload after extra admissions. Candidate sizes 1, 1.5 and 2 GiB are the configured defaults for reviewers, workers and tests; 4 and 8 GiB show sensitivity to larger learned sizes.
+
+| Candidate `need` (GiB) | Ratio rule admits / 1338 | Plain sum admits / 1338 |
+| --- | --- | --- |
+| 0 (running-work budget only) | 1290 | 229 |
+| 1 | 1271 | 166 |
+| 1.5 | 1270 | 151 |
+| 2 | 1267 | 135 |
+| 4 | 1241 | 80 |
+| 8 | 968 | 2 |
+
+The worst logged `predicted` (`used + reserved`, before candidate and other-session room) was **33.753 GiB**, 93.76% of the limit, leaving **0.447 GiB** to the stop line. It opened on October 20 at 14:40:39.184 Jerusalem time under the startup sum rule, exceeded the defer line, and did not cross its reservation. With the hypothetical 2 GiB candidate, the worst projection was 35.753 GiB, 1.553 GiB above the stop line, and was rejected by the defer check. The highest projection that admitted that candidate was 30.599 GiB, leaving 3.601 GiB to the stop line. Across all windows, the highest `actual` was 23.777 GiB (66.05%) and highest `slice_peak` 23.514 GiB (65.32%). `actual` holds other use at its opening value and adds the original set's peak growth; `slice_peak` measures the level over time, so either can be larger.
+
+Every reservation crossing is listed below by opening time in Jerusalem (UTC+03:00). Reservation and growth are GiB; `actual` and `slice_peak` are percentages of the 36 GiB limit. Adjacent rows can follow much of the same set.
+
+| Opened | Reserved | Grew | Actual / limit | Slice peak / limit |
+| --- | --- | --- | --- | --- |
+| 2026-10-20 20:35:45.460 | 5.756 | 6.101 | 45.67% | 50.60% |
+| 2026-10-20 20:37:07.441 | 5.811 | 5.936 | 45.77% | 50.60% |
+| 2026-10-20 20:38:12.325 | 5.759 | 6.026 | 46.13% | 50.60% |
+| 2026-10-20 20:39:12.846 | 5.622 | 6.016 | 46.03% | 50.60% |
+| 2026-10-20 20:41:15.875 | 5.708 | 5.753 | 46.02% | 50.60% |
+| 2026-10-20 20:42:16.705 | 5.786 | 5.900 | 46.31% | 50.60% |
+| 2026-10-20 20:59:45.127 | 4.928 | 5.566 | 52.41% | 50.60% |
+| 2026-10-21 01:30:10.318 | 5.713 | 6.202 | 43.80% | 49.15% |
+| 2026-10-21 01:31:10.331 | 5.770 | 6.306 | 44.51% | 49.15% |
+| 2026-10-21 01:33:10.363 | 5.673 | 6.550 | 43.20% | 49.15% |
+| 2026-10-21 01:34:11.381 | 5.653 | 6.622 | 43.17% | 49.15% |
+| 2026-10-21 01:35:13.266 | 5.650 | 6.174 | 42.99% | 49.15% |
+| 2026-10-21 01:36:15.171 | 5.723 | 5.837 | 43.19% | 49.15% |
+| 2026-10-21 01:37:15.193 | 5.810 | 6.328 | 44.53% | 49.15% |
+| 2026-10-21 01:38:17.064 | 5.796 | 5.851 | 43.26% | 49.15% |
+| 2026-10-21 04:15:26.330 | 7.778 | 9.542 | 57.40% | 60.28% |
+| 2026-10-21 04:17:27.629 | 7.768 | 7.816 | 57.23% | 60.28% |
+| 2026-10-21 04:19:30.682 | 6.808 | 7.827 | 57.39% | 60.28% |
+| 2026-10-21 04:20:30.827 | 6.805 | 7.816 | 57.53% | 60.28% |
+| 2026-10-21 04:23:34.261 | 7.448 | 7.807 | 53.23% | 60.28% |
+| 2026-10-21 12:39:33.797 | 2.937 | 3.925 | 44.06% | 57.23% |
+| 2026-10-21 12:40:33.812 | 2.987 | 3.239 | 45.34% | 57.23% |
+| 2026-10-21 12:41:35.206 | 3.005 | 4.132 | 44.54% | 57.23% |
+| 2026-10-21 12:42:36.661 | 2.975 | 4.296 | 48.67% | 57.23% |
+| 2026-10-21 12:45:38.741 | 2.986 | 3.267 | 51.47% | 57.23% |
+
+To reproduce from this snapshot, run the following from the repository root, replacing `SNAPSHOT` with its path. Synthetic units partition each logged `sum` into rooms no larger than `largest`; `reserve` needs only their sum and maximum. Closed windows feed their recorded totals through `observe`. This snapshot starts with zero samples and lasts less than the seven-day sample expiry.
+
+```sh
+node - SNAPSHOT <<'NODE'
+const fs = require('node:fs'), assert = require('node:assert/strict');
+const crypto = require('node:crypto'), G = require('./lib/governor');
+const text = fs.readFileSync(process.argv[2], 'utf8');
+const rows = text.trim().split('\n').map(JSON.parse), s = G.settings({});
+const reg = { units: [], windows: [], growth: [], raised: null };
+const events = rows.flatMap((w, i) => [[Date.parse(w.at), 1, i, w], [Date.parse(w.end), 0, i, w]])
+  .sort((a, b) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2]);
+for (const [now, opening, , w] of events) {
+  reg.units = [];
+  if (!opening) {
+    reg.windows = [{ ...w }];
+    G.observe(reg, { binding: w.level, levels: [{ name: w.level, limit: w.limit, used: w.used }] }, s, now);
+    continue;
+  }
+  for (let left = w.sum; left > 0;) {
+    assert(w.largest > 0);
+    const room = Math.min(left, w.largest);
+    reg.units.push({ expected: room, measured: 0 });
+    left -= room;
+  }
+  const r = G.reserve(reg, s, now);
+  assert.deepEqual([r.bytes, r.ratio, r.samples, r.rule],
+    [w.reserved, w.reserved_ratio, w.samples, w.rule]);
+}
+const ratios = rows.map(w => w.ratio).filter(r => r !== null).sort((a, b) => a - b);
+const percentile = p => ratios[Math.ceil(p * ratios.length) - 1];
+console.log({ sha256: crypto.createHash('sha256').update(text).digest('hex'), windows: rows.length,
+  hours: (Math.max(...rows.map(w => Date.parse(w.end))) - Math.min(...rows.map(w => Date.parse(w.at)))) / 3600000,
+  p50: percentile(.5), p99: percentile(.99) });
+console.table([0, 1, 1.5, 2, 4, 8].map(need => ({ need,
+  ratio: rows.filter(w => w.used + w.reserved + need * 2 ** 30 <= s.defer_at * w.limit).length,
+  sum: rows.filter(w => w.used + w.sum + need * 2 ** 30 <= s.defer_at * w.limit).length })));
+console.table(rows.filter(w => w.crossed).map(w => ({ at: w.at, reserved: w.reserved / 2 ** 30,
+  grew: w.grew / 2 ** 30, actual_pct: 100 * w.actual / w.limit, peak_pct: 100 * w.slice_peak / w.limit })));
+console.log(Object.fromEntries(['predicted', 'actual', 'slice_peak'].map(key =>
+  [key, Math.max(...rows.map(w => w[key])) / 2 ** 30])));
+NODE
+```
+
 ### Stopping
 
 Past the stop line, Tower Crane stops its own work: any level's use at or over `stop_at * limit`, or memory `full` avg10 at or over `psi_memory_stop`. It stops one unit at a time: the next only once no stopped unit is left in the registry (its holder exited and released it), or five seconds after the stop, while the line is still crossed. The order is gates and suites first, then reviewers and small agents, then workers, the newest started first within each: a gate reruns from its inputs, a reviewer or small agent starts its job again, and a worker loses its session's context, so the newest of a class loses the least. Orchestrators are never stopped: they run the loop that resumes the rest.
 
-The governor signals only processes the registry recorded when Tower Crane started them, and only while their start time (Linux `start_ticks`) or, on Windows, their creation time still matches, so a reused pid is left alone; every other process on the host, and every session in the slice, is never touched. Windows gives a freed pid to a new process within seconds and its signal check cannot tell the two apart. There a unit's own process is recorded with its creation time (`created`, UTC epoch ms, read once per process), and every other process with the time it was seen running (`seen`, epoch ms): reading another process's creation time costs a PowerShell call of about a second, and these records are made under the state, dispatch or registry lock. A process created later than `seen` (with 100 ms for clock rounding) took the pid after the recorded one ended. Before each stop, and before it takes the registry lock, the governor reads the creation times of the pids it would signal: a recorded command that exited and whose pid another process took is skipped, a unit that started before that read and whose holders all show as reused is removed as one whose holders exited, and a Windows pid recorded with neither time is never signalled. A read that fails proves nothing: it removes no unit and sends no signal. An agent whose harness has exited is never a victim, even before its supervisor's removal of the unit lands: the stop would free nothing and would kill the supervisor's gate reactions. A stopped worker or reviewer records `spawn phase` `blocked` with reason `supervisor stopped by the host governor: REASON` and a `spawn exit` marked `availability_failure`, so neither the respawn cap nor the reviewer cap counts it. Its claim is released as a dead claim and its worktree kept; the next dispatch, by `spawn` or a wait's refill once there is room, resumes the task there. A stopped gate or suite records no verdict: its command reports `TASK: tests gate stopped by the host governor: REASON; it runs again once there is room`, and its reaction is deferred and retried.
+The governor signals only processes the registry recorded when Tower Crane started them, and only while their start time (Linux `start_ticks`) or, on Windows, their creation time still matches, so a reused pid is left alone, and on Linux only from the pid namespace that recorded them (`pidns`); every other process on the host, and every session in the slice, is never touched. Windows gives a freed pid to a new process within seconds and its signal check cannot tell the two apart. There a unit's own process is recorded with its creation time (`created`, UTC epoch ms, read once per process), and every other process with the time it was seen running (`seen`, epoch ms): reading another process's creation time costs a PowerShell call of about a second, and these records are made under the state, dispatch or registry lock. A process created later than `seen` (with 100 ms for clock rounding) took the pid after the recorded one ended. Before each stop, and before it takes the registry lock, the governor reads the creation times of the pids it would signal: a recorded command that exited and whose pid another process took is skipped, a unit that started before that read and whose holders all show as reused is removed as one whose holders exited, and a Windows pid recorded with neither time is never signalled. A read that fails proves nothing: it removes no unit and sends no signal. An agent whose harness has exited is never a victim, even before its supervisor's removal of the unit lands: the stop would free nothing and would kill the supervisor's gate reactions. A stopped worker or reviewer records `spawn phase` `blocked` with reason `supervisor stopped by the host governor: REASON` and a `spawn exit` marked `availability_failure`, so neither the respawn cap nor the reviewer cap counts it. Its claim is released as a dead claim and its worktree kept; the next dispatch, by `spawn` or a wait's refill once there is room, resumes the task there. A stopped gate or suite records no verdict: its command reports `TASK: tests gate stopped by the host governor: REASON; it runs again once there is room`, and its reaction is deferred and retried.
 
 ### Deferral and resumption
 
@@ -1000,7 +1154,7 @@ Every `wait` that runs reactions, every supervisor and every process running a g
 
 `last_event` is the id of the last event of the commit that last changed tasks.json; a commit that logs no event keeps the previous value. It sits right after `next`. Older files omit it, and null is accepted. `validate` reports drift when `events.jsonl` has no event with that id.
 
-Optional `orphan_retirements` records orphan removals in progress as an array of `{reservation_id, path, branch, since, pid, host, start_ticks}`. `branch` may be null; `start_ticks` is present where the platform reports it. Under the state lock, `worktree prune --orphans` checks current task ownership and appends its reservation before any destructive Git operation. A task whose `branch` names the worktree's branch owns it even before the task records the worktree. Claim, rework, submit and preparation use the same path/branch guard as task retirement. `worktree orphan retiring` audits reservation acquisition; `worktree orphan cleanup` releases only the matching `reservation_id` and records the outcome. Failed cleanup also releases its reservation. A reservation whose process has exited holds nothing, and the next orphan reservation discards exited entries. The index is omitted when empty.
+Optional `orphan_retirements` records orphan removals in progress as an array of `{reservation_id, path, branch, since, pid, host, start_ticks, pidns}`. `branch` may be null; `start_ticks` and `pidns` are present where the platform reports them. Under the state lock, `worktree prune --orphans` checks current task ownership and appends its reservation before any destructive Git operation. A task whose `branch` names the worktree's branch owns it even before the task records the worktree. Claim, rework, submit and preparation use the same path/branch guard as task retirement. `worktree orphan retiring` audits reservation acquisition; `worktree orphan cleanup` releases only the matching `reservation_id` and records the outcome. Failed cleanup also releases its reservation. A reservation whose process has exited holds nothing, and the next orphan reservation discards exited entries. The index is omitted when empty.
 
 ### Already-merged hotfixes
 
@@ -1265,7 +1419,7 @@ The format is additive within schema 1. A pinned older tool reads and preserves 
 - `scratch`: optional absolute path to the worker cache shared across this task's attempts. Spawn records it; successful worktree retirement removes the directory and clears the field.
 - `worktree`: optional path, branch, base, creation time and last observed head record; retirement adds `state` (`stale` or `removed`), a failure `reason` and any recovery `saved` path.
 - `superseded_by`: optional replacement task id; superseding stores status `cancelled`.
-- `retiring`: null, or `{ "since": "...", "pid": 4242, "host": "...", "start_ticks": "...", "path": "...", "branch": "..." }` while the process that wrote it removes the task's worktree after a merge or cancel. `start_ticks` is set where the platform reports it. Claim, rework, submit and worktree preparation refuse the reserved task, path or branch while that process runs; a marker whose process has exited holds nothing, so a crash cannot strand the task. The removal clears the marker when it ends, whether or not it removed the worktree.
+- `retiring`: null, or `{ "since": "...", "pid": 4242, "host": "...", "start_ticks": "...", "pidns": "pid:[4026531836]", "path": "...", "branch": "..." }` while the process that wrote it removes the task's worktree after a merge or cancel. `start_ticks` and `pidns` are set where the platform reports them. Claim, rework, submit and worktree preparation refuse the reserved task, path or branch while that process runs; a marker whose process has exited holds nothing, so a crash cannot strand the task. The removal clears the marker when it ends, whether or not it removed the worktree.
 - `submitted_by`: the agent that submitted the current `sha`. Submission clears `claim`; while the task is `submitted`, only this agent can replace the submitted head. A spawned worker whose submit took ownership goes on waiting on the task ([PR owners](#pr-owners)).
 - `sha`: null before submission and after a release moves the task to another PR, then the full lowercase commit SHA: 40 characters for SHA-1, 64 for SHA-256. Full IDs are accepted as given without a local lookup, since the commit may exist only in another checkout. Abbreviations are resolved by `submit` with `git rev-parse --verify <sha>^{commit}` in the task repository, first locally and then after fetching the supplied or recorded task branch from origin. A prefix that remains unknown or ambiguous, or resolves to a non-commit object, is refused. Sandboxed workers resolve before forwarding to the host broker, which accepts only the full SHA and runs no Git. Legacy abbreviated submitted SHAs remain stored as written and match evidence and active reviewer dispatches by prefix on read.
 - `evidence`: entries `{ "type", "ok", "sha", "agent", "at", "summary", "ref", "revision" }`, plus `"waived": true` on an owner waiver and `"via": "broker"` on evidence the state broker recorded for the agent it names (provenance, not proof: an unsandboxed process can write the same). Types: `tests`, `clean`, `sources`, `review`, `ci`, `merge`, `note`, `final-review`. Failed review evidence also carries `areas`, the sorted normalized locations from structured `findings[].path` when present, otherwise parsed from blocking findings. Rework preserves those structured locations, including PR-body claims. `rework --from-review` replaces these areas with those from the complete fetched review. Full reviews supply areas only from finding entries in their blocking section. Earlier-blocker status, reproduction references, follow-ups and fenced examples do not supply areas. Standalone evidence summaries use `file:line - finding` entries, optionally prefixed by a blocking count. Legacy evidence without `areas` uses its summary. Review evidence requires `--sha` for the commit reviewed. A spawned reviewer's verdict carries its dispatch revision, even when the brief, acceptance or rework changes the task before the verdict arrives. Review evidence from a reviewer spawn did not start carries the `--revision` it names, which is required and may not exceed the current revision. Other manual evidence records `--revision` when given and the current revision otherwise; `note` can default to the submitted sha. Software gates record the sha and revision they checked.
@@ -1409,7 +1563,7 @@ Successful tests evidence counts only when its audited `tests_mode` matches the 
 
 Before acceptance, `accept ID` runs missing or stale software gates in order: tests and clean for code, sources for research kind on every tier, then CI for every task with a PR. Tests and clean use the pinned commands. Without a test pin, missing tests in prove or run-only mode block acceptance. None mode records its audited tests result without a command. Optional `--cmd` and `--proof-cmd` must match the pins. Expensive prove uses the pinned template with the `{tests}` placeholder. Eligible current successful receipts are reused. Stale successful receipts, including local CI for an older submitted head or merged tree, run again through the same gate runner under the host governor. Current failures or unaudited attempted receipts require an explicit `check` rerun. The progress message names the software gate being run and lists review separately. Results are recorded even if a later gate refuses acceptance. A head, revision or status change during a gate refuses the attempt. Review dispatch is guarded again under the state lock.
 
-A gate that runs a command on this host (`tests`, `clean`, the [final review](#final-review), and `ci` with `ci.local` outside a hotfix) runs once per task, head and revision at a time. Before its command starts, it records a `gate run` event with `{type, sha, revision, source, phase: "running", deadline, pid, host, start_ticks}`, where `source` is `gate:<uuid>` and `deadline` is the start plus, for every timed command the run may start, its full timeout and one minute for the metadata queries around it (one minute when it plans none). A tests run in `prove` mode plans the head run, the scoped proof when `tests.expensive` is true, the reverted run and a wait budget plus a command budget per test file tracked at the head; each of the first three adds one command per `tests.host_only` file tracked at the head, and each of those commands one [rerun](#gate-reruns). Base-file planning uses `tests.paths` or the default layouts, excludes support files and falls back to the checkout when git cannot list the head. It budgets at least one base file for the full-command fallback. The lease conservatively budgets a command timeout plus a metadata minute for joining a cache holder and the same allowance for worktree setup and a fresh run, for each counted base file. The actual selected commands share one base-step timeout budget. When `git ls-tree` fails twice, the count falls back to the matching files in the checkout on disk under each glob's leading directories, skipping `.git` and `node_modules`. A `run-only` tests run plans the head run, its host-only commands, one rerun of each and the same base-file budget; `none` plans no test command. Each declared host probe adds one command at `gates.host_probe_timeout_min`, plus a metadata minute, in every mode. Head, proof and reverted commands each get `gates.tests_timeout_min`; selected base commands receive the remaining base-step budget. Clean plans one command at `gates.clean_timeout_min` and the final review one at `gates.final_review.timeout`. Local CI plans its command and its [rerun](#local-ci-reruns) (one command when `ci.local.rerun` is false), twice for a merged tree that moves, each at its resolved `timeout`. The same write that records its evidence records `phase: "done"` with `evidence_at`, the evidence's `at`, and `interrupted: true` when `wait` shutdown interrupted the run. A run that throws first records `phase: "error"` with `error`. When the orchestrator guard refuses that write because the orchestrator lease changed, the process records it as an engine write, or else with its next lease. `accept`, `check`, `gates retry` and automation reactions that reach the same gate while such a run is live join it instead of starting a second copy: they print `[TYPE] joining the TYPE run ...` naming its agent, pid, host and start, and, for a holder that cannot be observed, its deadline and the minutes left to it, follow the event log's tail for the lease's end, read its evidence and continue as if they had run it. `check --json` then carries the joined run as `joined: {source, agent, via, pid, host, at}`. A holder whose pid and Linux start ticks show it alive is waited for however long it runs, since a prove-mode tests gate runs several timed commands. A holder that cannot be observed (another host, macOS or Windows where no start ticks are recorded, no permission to signal it) is waited for until its deadline, so a healthy run of any length within its plan is joined, not run twice; past it, the caller prints that it treats the run as ended, runs the gate and records `replaces` with the old lease's source. A holder whose process has exited, a run that ended without evidence, and an interrupted run leave the gate to the caller. Hosted CI and `sources` read remote state and take no lease. `gate run` events are quiet bookkeeping: they wake no `wait` and do not count as stack state changes.
+A gate that runs a command on this host (`tests`, `clean`, the [final review](#final-review), and `ci` with `ci.local` outside a hotfix) runs once per task, head and revision at a time. Before its command starts, it records a `gate run` event with `{type, sha, revision, source, phase: "running", deadline, pid, host, start_ticks, pidns}`, where `source` is `gate:<uuid>` and `deadline` is the start plus, for every timed command the run may start, its full timeout and one minute for the metadata queries around it (one minute when it plans none). A tests run in `prove` mode plans the head run, the scoped proof when `tests.expensive` is true, the reverted run and a wait budget plus a command budget per test file tracked at the head; each of the first three adds one command per `tests.host_only` file tracked at the head, and each of those commands one [rerun](#gate-reruns). Base-file planning uses `tests.paths` or the default layouts, excludes support files and falls back to the checkout when git cannot list the head. It budgets at least one base file for the full-command fallback. The lease conservatively budgets a command timeout plus a metadata minute for joining a cache holder and the same allowance for worktree setup and a fresh run, for each counted base file. The actual selected commands share one base-step timeout budget. When `git ls-tree` fails twice, the count falls back to the matching files in the checkout on disk under each glob's leading directories, skipping `.git` and `node_modules`. A `run-only` tests run plans the head run, its host-only commands, one rerun of each and the same base-file budget; `none` plans no test command. Each declared host probe adds one command at `gates.host_probe_timeout_min`, plus a metadata minute, in every mode. Head, proof and reverted commands each get `gates.tests_timeout_min`; selected base commands receive the remaining base-step budget. Clean plans one command at `gates.clean_timeout_min` and the final review one at `gates.final_review.timeout`. Local CI plans its command and its [rerun](#local-ci-reruns) (one command when `ci.local.rerun` is false), twice for a merged tree that moves, each at its resolved `timeout`. The same write that records its evidence records `phase: "done"` with `evidence_at`, the evidence's `at`, and `interrupted: true` when `wait` shutdown interrupted the run. A run that throws first records `phase: "error"` with `error`. When the orchestrator guard refuses that write because the orchestrator lease changed, the process records it as an engine write, or else with its next lease. `accept`, `check`, `gates retry` and automation reactions that reach the same gate while such a run is live join it instead of starting a second copy: they print `[TYPE] joining the TYPE run ...` naming its agent, pid, host and start, and, for a holder that cannot be observed, its deadline and the minutes left to it, follow the event log's tail for the lease's end, read its evidence and continue as if they had run it. `check --json` then carries the joined run as `joined: {source, agent, via, pid, host, at}`. A holder whose pid and Linux start ticks show it alive is waited for however long it runs, since a prove-mode tests gate runs several timed commands. A holder that cannot be observed (another host, macOS or Windows where no start ticks are recorded, no permission to signal it) is waited for until its deadline, so a healthy run of any length within its plan is joined, not run twice; past it, the caller prints that it treats the run as ended, runs the gate and records `replaces` with the old lease's source. A holder whose process has exited, a run that ended without evidence, and an interrupted run leave the gate to the caller. Hosted CI and `sources` read remote state and take no lease. `gate run` events are quiet bookkeeping: they wake no `wait` and do not count as stack state changes.
 
 When software gates pass and no review has been attempted at the current head and revision, `accept` dispatches a reviewer and exits 0 with `review_pending: true` and its agent name in JSON; the task stays submitted. A repeated accept reuses a live review dispatch. Call accept again after review evidence arrives. A current independent FAIL makes `accept` and a real `spawn --role review` run `rework --from-review` and exit 1 before software gates or another review dispatch, except the PR-body correction path below. If the linked findings cannot be fetched or matched, they refuse and keep the submission unchanged. `spawn --role review` otherwise refuses until all software gates pass; `--dry-run` checks them for a submitted task without reworking it. For an unsubmitted task a dry run previews the fallback command only, and cannot dispatch a review.
 
@@ -1694,8 +1848,11 @@ rechecked once a minute by the trusted `wait` watcher, as described below.
 
 `automation` events record `{source, phase}` keyed by the triggering event
 ID, or a stable digest for older records without IDs.
-`running` adds executor `pid`, `host` and Linux `start_ticks`. `done`
-deduplicates completed work. `deferred` keeps unknown or moved heads,
+`running` adds the reaction's `pid`, `host` and Linux `start_ticks` and `pidns`. `done`
+deduplicates completed work. `executor` records a reaction that reached CPU
+work while every executor was busy, or while an older reaction already waited
+for one, with the gate as `kind` and the wait as `error`; its source stays
+owed. `deferred` keeps unknown or moved heads,
 unknown mergeability and failed merge attempts retryable; `error` records
 an exception. Terminal receipts include `error`, null without an exception.
 Startup can retry deferred or errored work without a new lifecycle event.
@@ -1728,13 +1885,40 @@ in the owed queue but does not hold an executor or block later reactions whose
 work can run. Once admissible, it takes its original turn among runnable sources.
 Other kinds of deferral
 still rely on startup reconciliation or a new lifecycle event.
-A task has at most one observable executor.
-An exited executor's start can be retried, while an unobservable executor
-remains busy. At most `gates.executors` executors run on one host across
-every watcher and supervisor. The running receipt in the event log is the
-executor's lease: its terminal receipt releases it on exit, and its PID
-identity releases it when the process dies. Running receipts from other
-hosts do not count against this host's cap.
+A task has at most one observable reaction. Its running receipt holds the
+task, not an executor: an exited reaction's start can be retried, while an
+unobservable one remains busy. A reaction starts at once and takes an
+executor only when it reaches CPU work: the tests gate with its host probes,
+the clean gate, local CI, or the merge line's head check. It keeps that
+executor across tests and clean and releases it before its next GitHub read
+and at its end, so review dispatch, accept, CI reads and the merge itself
+hold none. At most `gates.executors` executors are in use on one host across
+every watcher and supervisor. `executor` events are their leases:
+`{lease, phase: "running", kind, source, pid, host, start_ticks}` with `kind`
+one of `tests`, `clean`, `ci` or `head check`, then `{lease, phase: "done"}`.
+A lease that moves from tests to clean, or from one head check to the next,
+records another `running` with its new `kind` and task. The done event releases
+it, and its PID identity releases it when the process dies. Leases from other
+hosts do not count against this host's cap. A reaction that finds the cap full,
+or an older waiter ahead of it, still runs its hosted CI read, so a CI failure
+sends the task back before its suite runs, then ends with `phase: "executor"`
+and stays owed. One such waiter keeps a task's place: a later notification for
+the same task that reaches the same CPU work ends `done`, since the waiting
+reaction advances the task from its current state. A waiter is retried only
+once a slot is free and no older waiter ranks ahead, so retries read nothing
+from GitHub while the cap is full. A command run by hand (`merge --accepted`,
+`gates retry --from-rework`) that reaches this CPU work waits for a free
+executor instead; `check` and `gates retry` run their gate at once and take
+none. Reactions in one process still run one after another; concurrency comes
+from separate watchers, supervisors and CLI calls.
+Rechecks of pending CI share one GitHub checks read per task per minute
+across every process. `ci poll` events `{sha, revision, scheduled}` record
+each read automation makes, with `scheduled` the time of the event that
+scheduled it (the reconcile or notification), not the read. A recheck of
+pending CI at the same head scheduled within a minute of the last read's
+schedule skips its read, so one watcher's minute-apart rechecks always read
+however late each reaction reaches its ci gate. A first read at a head and a
+`ci completed` notification read at once.
 SIGTERM or SIGINT to `wait` stops new reservations and gates while its active
 gate finishes and records evidence. The interrupted reaction records
 `phase: "deferred"` with an interruption reason, releasing its executor lease
@@ -1767,8 +1951,8 @@ no further stack step or task; the second kills it. A `gh stack sync` that
 ran records its outcome either way, so moved heads still go to rework.
 Stopped steps record no deferral; the next refresh retries them.
 `automation queued` records a blocked notification's source, with
-`executors` set to the cap when the cap blocked it rather than another
-executor of the same task. Queued notifications for accepted, unmerged PR
+`executors` set to the cap when it waits for an executor rather than for
+another reaction of the same task. Queued notifications for accepted, unmerged PR
 tasks run first, in the order of their current `accept` events. This includes
 older notifications that now run a merge and any merged-tree test the merge
 needs. Running reactions are never preempted.
@@ -1776,8 +1960,8 @@ Submitted tasks follow in submission order, except that the queued
 notifications a `gates prioritize` event names run first among submitted
 work, the most recent request first. An explicit request cannot move
 submitted work ahead of accepted merges or change acceptance order.
-While higher-ranked work waits, a later notification queues behind it even
-if a slot is free. A notification queued after a priority request keeps
+While a higher-ranked reaction waits for an executor, a later one that reaches
+CPU work waits behind it even if a slot is free. A notification queued after a priority request keeps
 submission order unless its task becomes accepted.
 `gates prioritize ID --reason R` is operational ([Authority](#authority)); it
 records a `gates prioritize` event with `reason`, `sources` (the sources of
@@ -1786,16 +1970,22 @@ the task's queued notifications at that moment), `queued` (their count) and
 an accepted, unmerged PR task, whose merge already runs first, and when the
 task has no queued notification, since either would change nothing. A notification queued
 behind the task's own running reaction counts, but the running reaction does
-not: its receipt is running and its executor is live, so it is no longer
-queued. A dead executor's notification stays queued for its retry. `status`
-lists the gate queue: running tasks, then the queued tasks in the order a free
-executor takes them, then the tasks whose notification waits behind their own
-running reaction, marked as blocked. `--json` carries it as `gate_queue` with
+not: its receipt is running and its process is live, so it is no longer
+queued. A dead reaction's notification stays queued for its retry. `status`
+lists `gate executors: N of CAP in use: TASK KIND, ...` for this host's CPU
+executors, then the gate queue: running tasks, then the queued tasks in the
+order a free executor takes them, then the tasks whose notification waits
+behind their own running reaction, marked as blocked. It lists apart the tasks
+that hold no executor while they wait: `waiting on GitHub checks: TASKS` for
+pending, unstalled CI at the head and revision, and `waiting on review: TASKS`
+for submitted tasks whose software gates pass and whose review is missing.
+`--json` carries these as `gate_executors: {cap, in_use: [{task, kind}]}` and
+`waiting_on: {github, review}`. `--json` carries it as `gate_queue` with
 `running`, `queued`, `blocked` and `deferred`, each queued, blocked or deferred task with its
 `prioritized` request or `null`. An accepted task shows `null`, since its
 acceptance sets its place. `deferred` lists the owed tasks held by the governor,
 including those still in their retry interval; the text gate queue line appends
-`deferred by the governor: TASKS`. `inbox` carries the same `gate_queue`. Each executor drains the queue after releasing its slot; watchers
+`deferred by the governor: TASKS`. `inbox` carries the same `gate_queue`. Each reaction drains the queue when it ends, after releasing its executor; watchers
 also retry their pending notifications on their next check. State locks cover only
 reservation and receipts, never Git, GitHub, gates or model calls.
 Changing the resolved tests or cleanup gate policy, an affected task's
@@ -1876,7 +2066,9 @@ over pending runs and over unknown mergeability. Pending CI with no run queued
 or in progress also records `not_running: true`. The trusted `wait` host
 schedules reconciliation of pending CI once per minute without a completion
 notification, reusing current tests and cleanup passes. It skips a task whose
-executor is running or whose earlier reconcile is still queued. A recheck whose
+reaction is running or whose earlier reconcile is still queued, unless that
+reconcile only waits for an executor, since it already read GitHub. Rechecks
+share the poll budget of one checks read per task per minute. A recheck whose
 pending result has the same summary, flags, ref and CI policy at the same head
 and revision records no evidence and no `check ci` event; the earlier entry
 stays the receipt. Pending CI with nothing queued or running for 30 minutes at
@@ -1904,7 +2096,7 @@ stalled, pending and missing gates, including the gate name.
 A busy state lock defers the request to the existing watch notification
 or fallback tick without holding the wait timeout.
 `merge queue` events have no task and record `{phase}`: `running` with the
-executor `pid`, `host` and Linux `start_ticks`, `requested` from a reaction
+executor `pid`, `host` and Linux `start_ticks` and `pidns`, `requested` from a reaction
 that found a live executor, then `done`, or `error` with `error`. `done` and
 `error` also record `blocked`: `null` when the line drained, or
 `{task, reason}` naming the first head of the pass that did not merge, and
@@ -1969,7 +2161,7 @@ The served board applies live state changes in place. Its fragment route, visibl
 
 The initial view's animation frame resets fragment scrolling only if the route, page scroll and main scroll still match their positions at load. A delayed frame cannot overwrite the reader's subsequent scrolling or live restoration.
 
-A `spawn` detail includes `role`, `rung`, `agent`, `harness`, `model`, `profile`, `billing`, `pid`, `host`, `start_ticks`, `cwd` and `log`. `billing` is the route's `api` or `subscription` (see `spend.entries`), or null for a harness without billing, a local Codex provider or a Codex route that cannot be resolved. `model` and `profile` may be null; `start_ticks` is the Linux process identity when available. Codex adds `codex_home` to find its exact session under a custom `CODEX_HOME`; legacy events fall back to the current `CODEX_HOME` or `~/.codex`. Both foreground and detached output has a log. A `spend` detail is the entry above; automatic entries name the spawned agent; the audit event names the collector or waiter that recorded them. `spawn exit` records the foreground exit code and rung, and `output_held` when its output stayed open after the harness exited (see the process group shutdown below). A release of an exited spawned claim records `{ reason, holder, status, exited_spawn }`, where `exited_spawn` contains only `{ pid, log, code, size }` observed at release. Unknown exit codes and unavailable log sizes are null. No log text is copied into task notes, release events or worker-exited events. The shared observer records exit wakeups and spend without releasing the claim.
+A `spawn` detail includes `role`, `rung`, `agent`, `harness`, `model`, `profile`, `billing`, `pid`, `host`, `start_ticks`, `pidns`, `cwd` and `log`. `billing` is the route's `api` or `subscription` (see `spend.entries`), or null for a harness without billing, a local Codex provider or a Codex route that cannot be resolved. `model` and `profile` may be null; `start_ticks` and `pidns` are the Linux process identity when available. `pidns` is the recorder's pid namespace (`/proc/self/ns/pid`), where the recorded pid names the process; every record that names a process this way carries it, and a reader in another pid namespace, or one that cannot read its own, never takes such a pid for exited, since a sandbox's namespace hides live processes outside it. Codex adds `codex_home` to find its exact session under a custom `CODEX_HOME`; legacy events fall back to the current `CODEX_HOME` or `~/.codex`. Both foreground and detached output has a log. A `spend` detail is the entry above; automatic entries name the spawned agent; the audit event names the collector or waiter that recorded them. `spawn exit` records the foreground exit code and rung, and `output_held` when its output stayed open after the harness exited (see the process group shutdown below). A release of an exited spawned claim records `{ reason, holder, status, exited_spawn }`, where `exited_spawn` contains only `{ pid, log, code, size }` observed at release. Unknown exit codes and unavailable log sizes are null. No log text is copied into task notes, release events or worker-exited events. The shared observer records exit wakeups and spend without releasing the claim.
 
 Gate events have `{ "type", "ok", "sha", "ref", "revision", "source", "commands" }` in `detail`, plus optional `confirmed_failure` matching the evidence entry. Acceptance, merge, task views and the sketch match software evidence against these events; a missing or unreadable log supplies no gate proof, while malformed lines are skipped. Keep the log with tasks.json when copying or restoring state.
 
@@ -2077,7 +2269,7 @@ Agy homes place native settings and the rendered `agents/gishra-<job>.md` below 
 
 ## Orchestrator inbox
 
-`inbox` derives a snapshot from one state read and cached GitHub observations. It does not change tasks or consume messages. JSON has `items`, live gate `executors` and `gate_queue`, the same queue `status` shows; text ends with the executor count and a `gate queue` line. Each item has a stable `id`, `kind`, nullable `task`, finding data, and `action: {command, argv}`. Text output includes the same findings and command. A ready or rework task without a brief gets `brief_missing` instead of `ready` or `rework_ready`; `brief set` clears it. A `rework_ready` item for a task automation sent back for a failed gate, unchanged and untaken since, also has `gate` and `restore`, the `gates retry ID --from-rework` command that undoes the rework once the cause is fixed, and `hold_until` while automatic refill holds it (`gates.rework_hold_min`). A task held for its waiting PR owner also has `owner`, and its action is the restore, since the owner takes the task when the hold ends. When the PR is not open, or its head or the local branch moved, `restore` is left out and `restore_blocked` says why. Kinds include `gate_failed`, `ci_stalled`, `review_failed`, `review_body_stuck`, `review_held`, `review_exit_missing`, `review_churn`, `rework_ready`, `ready`, `dead_claim`, `decision`, `accepted_unmerged`, `revuto_failed`, `codeql_alert`, `head_changed`, `main_ci_failed`, `main_ci_flaky`, `message`, `stall`, `decision_answer`, `owner_comment`, `governor_deferred`, `governor_stopped`, `github_pending` and `github_error`. `governor_deferred` (id `governor_deferred:TASK:UNIT`) and `governor_stopped` carry the unit kind, its reason and its times, with `status` as their action; they clear on their own ([Host resource governor](#host-resource-governor)). Open decisions carry their question and options. A technical decision is answered by the orchestrator under the existing answer authority; an owner-only decision (see the decision rules above: an approval request, an escalated question with delegation disabled, an `owner_required` reason, a spend, credential, setting or crisis kind the owner has not lifted, or a technical decision the owner unmarked) needs the owner's supplied choice. A decision's action argv ends in `<answer>` when the orchestrator answers it and `<owner answer>` when only the owner does. Answered decisions retain their choice, note, author and blocked tasks until acknowledged or expired from the view under the closed-task rule below. Owner task and decision comments retain their text and target until acknowledged; a later comment creates a new item.
+`inbox` derives a snapshot from one state read and cached GitHub observations. It does not change tasks or consume messages. JSON has `items`, the live CPU executor leases as `executors` and `gate_queue`, the same queue `status` shows; text ends with the executor count and a `gate queue` line. Each item has a stable `id`, `kind`, nullable `task`, finding data, and `action: {command, argv}`. Text output includes the same findings and command. A ready or rework task without a brief gets `brief_missing` instead of `ready` or `rework_ready`; `brief set` clears it. A `rework_ready` item for a task automation sent back for a failed gate, unchanged and untaken since, also has `gate` and `restore`, the `gates retry ID --from-rework` command that undoes the rework once the cause is fixed, and `hold_until` while automatic refill holds it (`gates.rework_hold_min`). A task held for its waiting PR owner also has `owner`, and its action is the restore, since the owner takes the task when the hold ends. When the PR is not open, or its head or the local branch moved, `restore` is left out and `restore_blocked` says why. Kinds include `gate_failed`, `ci_stalled`, `review_failed`, `review_body_stuck`, `review_held`, `review_exit_missing`, `review_churn`, `rework_ready`, `ready`, `dead_claim`, `decision`, `accepted_unmerged`, `revuto_failed`, `codeql_alert`, `head_changed`, `main_ci_failed`, `main_ci_flaky`, `message`, `stall`, `decision_answer`, `owner_comment`, `governor_deferred`, `governor_stopped`, `github_pending` and `github_error`. `governor_deferred` (id `governor_deferred:TASK:UNIT`) and `governor_stopped` carry the unit kind, its reason and its times, with `status` as their action; they clear on their own ([Host resource governor](#host-resource-governor)). Open decisions carry their question and options. A technical decision is answered by the orchestrator under the existing answer authority; an owner-only decision (see the decision rules above: an approval request, an escalated question with delegation disabled, an `owner_required` reason, a spend, credential, setting or crisis kind the owner has not lifted, or a technical decision the owner unmarked) needs the owner's supplied choice. A decision's action argv ends in `<answer>` when the orchestrator answers it and `<owner answer>` when only the owner does. Answered decisions retain their choice, note, author and blocked tasks until acknowledged or expired from the view under the closed-task rule below. Owner task and decision comments retain their text and target until acknowledged; a later comment creates a new item.
 
 `gate_failed` items report the latest audited failure for each software gate (`tests`, `clean`, `sources`, `ci`) at the current head and revision of an unmerged submitted or accepted task. They include the gate name, summary, ref, audited `confirmed_failure` flag and any `test_failure` names and output tail. Confirmed code failures resolve through rework carrying the failure summary and its test names. A change the worker must fix (`worker_failure`) offers rework with the gate summary. Pending checks, observation failures and infrastructure failures offer `check GATE ID`; infrastructure findings also retain their timeout metadata, and a failure the base shares carries its `main_failure: {base, names}`. Stalled CI is not a `gate_failed` item: it is a `ci_stalled` item addressed to the orchestrator with the gate summary and `since`, offering `check ci ID`. A missing or uninstalled pinned command is not a `gate_failed` item: it is a `gate_config` item addressed to the orchestrator, naming `gates.KEY` and offering `project set` with the pinned command, and `gates retry` follows once it is set. A hotfix whose changed host-only tests only skipped gets the same item naming `tests.host_env` and offering `project set --tests-host-env <JSON>`. A later pass, rework, a new head or revision, or a confirmed merge clears the finding. Failed gates cannot be acknowledged away. On an open mergeable accepted PR, a stale or unconfirmed failed required software gate offers its check command instead of `merge --accepted`; confirmed code failures offer rework instead; after that rerun passes, the inbox advances to the next blocker or merge. Review blockers still require rework.
 
