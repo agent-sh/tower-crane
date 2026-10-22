@@ -167,9 +167,12 @@ test('a window whose set grew past its reservation raises the next reservation f
     ['measured, under 100 windows', ratios(0.5, 0.5, 0.5), 'measured', 2, 3, 3],
     // The new 1.125 joins 199 others; the percentile stays at 1 while the window's own ratio holds.
     ['measured, from 100 windows on', ratios(...Array.from({ length: 197 }, () => 0.5), 1, 1, 1), 'measured', 4, 4.5, 4.5],
-    ['a raise already in force', ratios(0.5, 0.5, 0.5), 'raised', 3, 3.5, 3.5, { ratio: 0.75, at, until: new Date(t0 + 30 * 60000).toISOString() }],
+    ['a raise already in force', ratios(0.5, 0.5, 0.5), 'raised', 3, 3.5, 3.5, { ratio: 0.75, at, until: new Date(t0 + 30 * 60000).toISOString(), units: ['worker-1', 'worker-2'] }],
+    // A raise recorded before raises named their set covers every unit, and so does the raise that extends it.
+    ['a raise from before raises named their set, from 100 windows on', ratios(...Array.from({ length: 197 }, () => 0.5), 1, 1, 1), 'raised', 4.2, 4.5, 4.5,
+      { ratio: 1.05, at, until: new Date(t0 + 90 * 60000).toISOString() }, true],
   ];
-  for (const [name, growth, rule, reserved, grew, next, raised = null] of cases) {
+  for (const [name, growth, rule, reserved, grew, next, raised = null, every = false] of cases) {
     const a = unit('worker', 1, { expected: 3 * GiB, measured: GiB });
     const b = unit('worker', 2, { expected: 3 * GiB, measured: GiB });
     const reg = { ...registry([a, b]), windows: [], growth, raised };
@@ -179,17 +182,18 @@ test('a window whose set grew past its reservation raises the next reservation f
     b.measured = GiB + grew * GiB / 2;
     const [w] = G.observe(reg, reading({ limit: 36, used: 18 }), small, t0 + 60 * 60000);
     assert.deepEqual([w.grew / GiB, w.crossed], [grew, true], `${name}: the window crossed`);
-    assert.deepEqual(reg.raised.units, [a.id, b.id], `${name}: the raise names the set that crossed`);
+    assert.deepEqual(reg.raised.units, every ? undefined : [a.id, b.id], `${name}: the raise names the set that crossed, or none when it covers every unit`);
     // The set gives its growth back and has the same room again.
     a.measured = GiB;
     b.measured = GiB;
     const after = G.reserve(reg, small, t0 + 60 * 60000 + 1000);
     assert.ok(after.bytes > reserved * GiB, `${name}: the next reservation is higher`);
     assert.equal(after.bytes / GiB, next, `${name}: at least what the set grew into`);
-    // Units of another project admitted since, with the same room, keep the ratio the percentile gives.
+    // Units of another project admitted since, with the same room, keep the ratio the percentile gives,
+    // unless the raise covers every unit.
     const fresh = [unit('worker', 4, { expected: 3 * GiB, measured: GiB, project: '/other' }), unit('worker', 5, { expected: 3 * GiB, measured: GiB, project: '/other' })];
-    assert.equal(G.reserve({ ...reg, units: fresh }, small, t0 + 60 * 60000 + 1000).bytes, G.reserve({ ...reg, units: fresh, raised: null }, small, t0 + 60 * 60000 + 1000).bytes,
-      `${name}: the raise does not cover units outside its set`);
+    assert.equal(G.reserve({ ...reg, units: fresh }, small, t0 + 60 * 60000 + 1000).bytes / GiB, every ? next : G.reserve({ ...reg, units: fresh, raised: null }, small, t0 + 60 * 60000 + 1000).bytes / GiB,
+      `${name}: the raise covers units outside its set only when it covers every unit`);
     assert.equal(G.reserve(reg, small, t0 + 120 * 60000).rule === 'raised', false, `${name}: the raise lasts growth_window_min`);
   }
 });
