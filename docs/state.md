@@ -2060,16 +2060,25 @@ and git there never reads a config the agent wrote in its home. When the
 project sets `gates.tmp_root`, these gates run under it rather than the
 dispatcher's `TOWER_CRANE_TMP`. Agent commands retain their restrictive Git
 and GitHub shims. This provenance does not replace gate command receipts.
-`merge ID` takes the same reservation with source `merge:<uuid>`, waits
-while a running executor is observable and records `done`, or `error` when
+For an accepted task with an audited, successful, non-waived merge receipt
+at its current head and revision, `merge ID` prints `already merged at <ref>`
+and returns the recorded result locally. It makes no GitHub lookup, validates
+no merge text or method, takes no reservation and writes no evidence or events.
+If there is no such receipt at entry, `merge ID` takes the same reservation
+with source `merge:<uuid>`, waits while a running executor is observable
+and records `done`, or `error` when
 it refuses, as its release. It drains reactions queued behind it, as an
-executor does. The merge queue takes the head of the line's reservation
+executor does. If another executor records the merge while it waits, the
+merge gate returns that receipt without a GitHub lookup or new merge evidence
+or `merged` event; this call still records its reservation and release.
+The merge queue takes the head of the line's reservation
 with source `queue:<uuid>` around its merge, unless its own process
 already holds it. Stack head checks ignore `automation`,
 `automation queued`, `automation reconcile` and `gates prioritize` events,
 which change no task state.
-An accepted PR already merged remotely goes through the merge gate's
-confirmation path. It records the matching accepted head and the PR's merge
+An accepted PR already merged remotely without a local merge receipt goes
+through the merge gate's confirmation path. It records the matching
+accepted head and the PR's merge
 commit without merging again, including after an executor dies before
 writing its receipt. A PR GitHub reports merged at the accepted head needs
 no current gate evidence or CI receipt base, so tasks accepted before merge
@@ -2078,8 +2087,9 @@ same path: confirmation reads only the member's own PR, runs no merge, retarget
 or stack sync, writes no receipts for other tasks, and an open lower PR does
 not block it. A lower member's failing review or stale CI receipt does not
 block it either.
-The confirmation lookup validates merge text and method before calling
-GitHub. Failed current gates permit this read-only lookup; an open PR still
+For a merge without a recorded receipt, the confirmation lookup validates
+merge text and method before calling GitHub. Failed current gates permit
+this read-only lookup; an open PR still
 requires passing gates. Confirmation evidence records the lookup that
 proved the accepted head merged, without querying and merging it again.
 Waiters retain automatic events even when their actor matches the waiter.
