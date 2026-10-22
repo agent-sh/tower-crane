@@ -24,6 +24,41 @@ test('first error blocks select the detailed occurrence and stop at the next cas
   }
 });
 
+test('diagnostic fan-out stays within its JSON byte budget across reporters and encodings', () => {
+  const log = 'logs/tests-T1-sample/1-head.log';
+  for (const reporter of ['spec', 'tap']) {
+    for (const payload of ['x'.repeat(2400), 'é💡"\\'.repeat(600)]) {
+      for (const count of [0, 1, 15, 16, 300]) {
+        const names = Array.from({ length: count }, (_, i) => `failure ${i}`);
+        const text = names.map((name, i) => reporter === 'spec'
+          ? `✖ ${name} (1ms)\n  Error: own ${i}\n    at ${payload}\n`
+          : `not ok ${i + 1} - ${name}\n  ---\n  error: own ${i}\n  stack: ${payload}\n  ...\n`).join('');
+        const result = Logs.diagnostics(text, log);
+        const label = `${reporter}/${count}/${payload[0]}`;
+        assert.deepEqual(result.names, names, label);
+        assert.equal(result.blocks.length + result.blocks_omitted, count, label);
+        assert.ok(Buffer.byteLength(JSON.stringify(result.blocks)) <= 32 * 1024, label);
+        for (const block of result.blocks) {
+          assert.ok(Buffer.byteLength(block.block) <= Logs.BLOCK_BYTES, label);
+          assert.ok(block.block.split('\n').length <= Logs.BLOCK_LINES, label);
+          assert.ok(block.block.includes(`own ${names.indexOf(block.name)}`), label);
+        }
+        const all = Logs.blocks(text).map((b) => ({ name: b.name, ...Logs.cap(b.block, log) }));
+        if (Buffer.byteLength(JSON.stringify(all)) <= 32 * 1024) assert.equal(result.blocks_omitted, 0, label);
+        else assert.ok(result.blocks_omitted > 0, label);
+        if (result.blocks_omitted) assert.equal(result.log, log, label);
+      }
+    }
+  }
+  // A name alone can exceed the aggregate budget; smaller later cases still fit.
+  const huge = 'long ' + 'é'.repeat(32 * 1024);
+  const result = Logs.diagnostics(`✖ ${huge} (1ms)\n  Error: huge\n✖ small (1ms)\n  Error: small\n`, log);
+  assert.deepEqual(result.names, [huge, 'small']);
+  assert.deepEqual(result.blocks.map((b) => b.name), ['small']);
+  assert.equal(result.blocks_omitted, 1);
+  assert.ok(Buffer.byteLength(JSON.stringify(result.blocks)) <= 32 * 1024);
+});
+
 test('test logs redact before byte limits, report cuts and prune only old runs of their task', (t) => {
   const h = makeRepo(t);
   const ctx = { stateDir: h.state, task: { id: 'T1', sha: 'a'.repeat(40) } };

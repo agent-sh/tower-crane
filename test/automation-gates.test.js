@@ -324,6 +324,50 @@ process.exit(1);
   assert.match(h.run(['gate', 'log', 'T1']).stderr, /missing or was pruned/);
 });
 
+test('many failing tests bound rework diagnostics and keep omitted blocks readable through the broker', async (t) => {
+  const h = setup(t, { ci: 'pending' });
+  const script = path.join(h.base, 'many-errors.js');
+  fs.writeFileSync(script, `const fs = require('node:fs');
+if (!fs.readFileSync('value.js', 'utf8').includes('1')) process.exit(0);
+for (let i = 0; i < 300; i++) {
+  console.log('✖ noisy ' + i + ' (1ms)');
+  console.log('  Error: own error ' + i);
+  for (let frame = 0; frame < 8; frame++) console.log('    at ' + 'x'.repeat(250) + ' (test/noisy.test.js:2:1)');
+}
+for (let i = 0; i < 100; i++) console.log('runner finished');
+process.exitCode = 1;
+`);
+  h.ok(['project', 'set', '--tests-cmd', `node ${shellQuote(script)}`, '--tests-mode', 'run-only']);
+  h.submit();
+  h.consume();
+  const task = require('../lib/state').loadState(h.state).tasks.tasks[0];
+  assertReworked(h, task);
+  const failure = task.evidence.findLast((e) => e.type === 'tests').test_failure;
+  assert.ok(Buffer.byteLength(JSON.stringify(failure.blocks)) <= 32 * 1024);
+  assert.equal(failure.names.length, 300);
+  assert.ok(failure.blocks_omitted > 0);
+  assert.equal(failure.blocks.length + failure.blocks_omitted, failure.names.length);
+  const event = h.logs().findLast((e) => e.cmd === 'check tests');
+  assert.deepEqual(event.detail.test_failure.blocks, failure.blocks);
+  const reason = h.logs().findLast((e) => e.cmd === 'rework').detail.reason;
+  assert.match(reason, new RegExp(`${failure.blocks_omitted} more failing tests; see logs/tests-T1-`));
+  assert.match(reason, /- noisy 299/);
+  assert.doesNotMatch(reason, /Error: own error 299/);
+  const B = require('../lib/broker');
+  const agent = 'worker-T1-many';
+  const broker = await B.start({ state: h.state, task: 'T1', agent, role: 'worker', harness: 'codex',
+    cwd: h.repo, broker: path.join(h.base, 'brokers', agent, B.FILE) });
+  try {
+    const read = await h.runAsync(['gate', 'log', 'T1', '--test', 'noisy 299'], {
+      env: { ...broker.env, TOWER_CRANE_AGENT: agent, TOWER_CRANE_TASK: 'T1' },
+    });
+    assert.equal(read.code, 0, read.stderr);
+    assert.match(read.stdout, /Error: own error 299/);
+  } finally {
+    broker.close();
+  }
+});
+
 test('a timed-out test run retries once at its head and the passing retry keeps the task submitted', (t) => {
   const h = setup(t, { ci: 'pending' });
   const marker = path.join(h.base, 'timed-out-once');
