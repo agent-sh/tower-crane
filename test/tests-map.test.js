@@ -94,6 +94,23 @@ for (const [reason, settings, flags] of [
   });
 }
 
+const ciLocal = { command: ['node', '-e', 'process.exit(0)'], timeout: 60 };
+for (const [setting, extra, ok] of [
+  ['inputs', { inputs: ['package.json'] }, true],
+  ['receipts', { receipts: ['out/*.json'] }, true],
+  ['artifacts', { artifacts: ['out/*.json'] }, true],
+  ['artifact_pattern', { artifact_pattern: '^Receipt: (.+)$' }, true],
+  ['timeout', { timeout: 61 }, false],
+]) {
+  test(`ci.local ${setting} ${ok ? 'keeps' : 'invalidates'} mapped tests evidence`, (t) => {
+    const h = fixture(t);
+    h.ok(['project', 'set', '--ci-local', JSON.stringify(ciLocal)]);
+    check(h);
+    h.ok(['project', 'set', '--ci-local', JSON.stringify({ ...ciLocal, ...extra })]);
+    assert.equal(h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'tests').ok, ok);
+  });
+}
+
 test('tests map validates paths and is operational at init, set, clear and unchanged values', (t) => {
   const h = makeRepo(t);
   const denied = h.run(['init', '--name', 'demo', '--goal', 'work', '--tests-map', '{}', '--agent', 'worker']);
