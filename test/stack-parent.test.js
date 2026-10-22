@@ -732,6 +732,25 @@ test('a failed refresh push leaves the child branch and stack metadata for retry
   f.h.ok(['spawn', '--task', 'T2', '--wait']);
 });
 
+test('a tool behind the engine refuses before a parent refresh merges or pushes the child', (t) => {
+  const f = setup(t);
+  const top = child(f, true, false);
+  newerParent(f, false);
+  const remote = f.h.git(['rev-parse', `origin/${top.wt.branch}`]);
+  // A newer engine's gate record makes this checkout's tool the stale one.
+  fs.appendFileSync(path.join(f.h.state, 'events.jsonl'), `${JSON.stringify({ at: new Date().toISOString(), agent: 'orchestrator',
+    cmd: 'check tests', task: 'T1', detail: { tool: { sha: 'f'.repeat(40), version: '99.0.0', committed: null } } })}\n`);
+  for (const args of [['check', 'clean', 'T2'], ['spawn', '--role', 'review', '--task', 'T2']]) {
+    const result = f.h.run(args);
+    assert.equal(result.code, 1, `${args.join(' ')}: ${result.stderr}`);
+    assert.equal(f.h.git(['rev-parse', 'HEAD'], top.wt.path), top.sha, args.join(' '));
+    f.h.git(['fetch', '-q', 'origin', top.wt.branch]);
+    assert.equal(f.h.git(['rev-parse', `origin/${top.wt.branch}`]), remote, args.join(' '));
+    assert.match(result.stderr, /T2: stack parent refresh refused: this tool \(.+\) is behind the project's engine \(99\.0\.0 ffffffff\)/, args.join(' '));
+  }
+  assert.equal(events(f).some((e) => e.task === 'T2' && e.cmd === 'stack sync'), false);
+});
+
 for (const conflict of [false, true]) {
   test(`a gate ${conflict ? 'defers the conflicting' : 'syncs then waits for resubmission of the'} child instead of running its old head`, (t) => {
     const f = setup(t);
