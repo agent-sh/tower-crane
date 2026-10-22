@@ -4,8 +4,8 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { waitOnRepo, waitUntil } = require('./signals');
-const { BIN, cachedFixture } = require('./helpers');
+const { waitOnRepo, waitUntil, HUNG_TEST_MS } = require('./signals');
+const { BIN, ROOT, cachedFixture } = require('./helpers');
 const { readPublished } = require('./atomic-file');
 const { gateEvidence } = require('./gate-helpers');
 const { waitFor } = require('./canary');
@@ -71,9 +71,15 @@ fs.writeFileSync('generated.txt', rows + '\\n');
   h.github = () => JSON.parse(fs.readFileSync(h.env.AUTOMATION_GITHUB, 'utf8'));
   h.saveGithub = (state) => fs.writeFileSync(h.env.AUTOMATION_GITHUB, JSON.stringify(state));
   h.logs = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
-  h.consume = () => {
+  h.consume = (options = {}) => {
     h.ok(['project', 'set', '--paused', 'manual generated conflict probe']);
-    return h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
+    // A zero deadline can leave the first reaction pending. Observe a fresh
+    // reconciliation after its drain instead of asserting on unfinished work.
+    const result = h.run(['wait', '--after', 'now', '--types', 'automation reconcile',
+      '--timeout', String(HUNG_TEST_MS / 1000), '--agent', 'orchestrator'], options);
+    assert.equal(result.code, 0, JSON.stringify(result));
+    assert.equal(JSON.parse(result.stdout).type, 'automation reconcile');
+    return result;
   };
   h.submit = () => {
     h.ok(['claim', 'T1', '--agent', 'worker']);
@@ -272,35 +278,63 @@ test('an accepted generated-only conflict returns to submitted with old review k
   assert.equal(h.logs().some((e) => e.cmd === 'rework'), false);
 });
 
-test('the queue defers real generated conflicts while GitHub still reports the accepted head clean', (t) => {
-  const h = generatedSetup(t);
-  const github = h.github();
-  Object.assign(github.prs['7'], { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' });
-  github.ci[h.sha] = 'success';
-  h.saveGithub(github);
-  h.submit();
-  for (const type of ['tests', 'clean', 'ci']) gateEvidence(h, type, 'orchestrator');
-  h.reviewer('T1', 'reviewer');
-  h.ok(['evidence', 'T1', '--type', 'review', '--sha', h.sha, '--ok', '--agent', 'reviewer']);
-  h.ok(['accept', 'T1', '--agent', 'orchestrator']);
-  h.consume();
-  const deferred = h.readState('tasks.json').tasks[0];
-  assert.equal(deferred.status, 'accepted');
-  assert.equal(deferred.sha, h.sha);
-  assert.equal(h.git(['rev-parse', 'HEAD']), h.sha);
-  assert.equal(h.git(['status', '--porcelain']), '');
-  assert.equal(h.logs().some((e) => e.cmd === 'rework' || e.cmd === 'generated merge' || e.cmd === 'head check'), false);
-  assert.equal(h.github().calls.some((args) => args[0] === 'pr' && args[1] === 'merge'), false);
-  const confirmed = h.github();
-  Object.assign(confirmed.prs['7'], { mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY' });
-  h.saveGithub(confirmed);
-  h.consume();
-  const repaired = h.readState('tasks.json').tasks[0];
-  assert.equal(repaired.status, 'submitted');
-  assert.notEqual(repaired.sha, h.sha);
-  assert.equal(h.git(['--git-dir', h.remote, 'rev-parse', 'fixture-change']), repaired.sha);
-  assert.equal(h.logs().some((e) => e.cmd === 'rework'), false);
-});
+for (const [initial, confirmed, deferred] of [
+  [['MERGEABLE', 'CLEAN'], ['CONFLICTING', 'DIRTY'], false],
+  [['MERGEABLE', 'CLEAN'], ['CONFLICTING', 'DIRTY'], true],
+  [['UNKNOWN', 'UNKNOWN'], ['CONFLICTING', 'CLEAN'], true],
+  [['MERGEABLE', 'CLEAN'], ['MERGEABLE', 'DIRTY'], true],
+]) {
+  test(`the queue defers real generated conflicts until GitHub confirms ${confirmed.join('/')} after ${initial.join('/')} (${deferred ? 'deferred' : 'immediate'} startup pass)`, (t) => {
+    const h = generatedSetup(t);
+    const github = h.github();
+    Object.assign(github.prs['7'], { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' });
+    github.ci[h.sha] = 'success';
+    h.saveGithub(github);
+    h.submit();
+    for (const type of ['tests', 'clean', 'ci']) gateEvidence(h, type, 'orchestrator');
+    h.reviewer('T1', 'reviewer');
+    h.ok(['evidence', 'T1', '--type', 'review', '--sha', h.sha, '--ok', '--agent', 'reviewer']);
+    h.ok(['accept', 'T1', '--agent', 'orchestrator']);
+    const initialView = h.github();
+    Object.assign(initialView.prs['7'], { mergeable: initial[0], mergeStateStatus: initial[1] });
+    h.saveGithub(initialView);
+    h.consume();
+    const waiting = h.readState('tasks.json').tasks[0];
+    assert.equal(waiting.status, 'accepted');
+    assert.equal(waiting.sha, h.sha);
+    assert.equal(h.git(['rev-parse', 'HEAD']), h.sha);
+    assert.equal(h.git(['status', '--porcelain']), '');
+    assert.equal(h.logs().some((e) => e.cmd === 'rework' || e.cmd === 'generated merge' || e.cmd === 'head check'), false);
+    assert.equal(h.github().calls.some((args) => args[0] === 'pr' && args[1] === 'merge'), false);
+    const remote = h.github();
+    Object.assign(remote.prs['7'], { mergeable: confirmed[0], mergeStateStatus: confirmed[1] });
+    h.saveGithub(remote);
+    const marker = path.join(h.base, 'reconcile-deferred');
+    const preload = path.join(h.base, 'reconcile-deferral.cjs');
+    if (deferred) fs.writeFileSync(preload, `
+const fs = require('node:fs');
+const automation = require(${JSON.stringify(path.join(ROOT, 'lib', 'automation.js'))});
+const consume = automation.consume;
+automation.consume = async function(ctx, events, ...args) {
+  if (!fs.existsSync(${JSON.stringify(marker)})) {
+    fs.writeFileSync(${JSON.stringify(marker)}, 'deferred');
+    await new Promise(setImmediate);
+    return events;
+  }
+  return consume.call(this, ctx, events, ...args);
+};
+`);
+    const result = h.consume(deferred ? { pre: ['--require', preload] } : {});
+    if (deferred) assert.equal(fs.existsSync(marker), true, 'the first startup pass deferred its work');
+    const repaired = h.readState('tasks.json').tasks[0];
+    assert.equal(repaired.status, 'submitted', JSON.stringify({
+      result, reactions: h.logs().filter(e => e.cmd === 'automation').slice(-5).map(e => e.detail),
+    }));
+    assert.notEqual(repaired.sha, h.sha);
+    assert.equal(h.git(['--git-dir', h.remote, 'rev-parse', 'fixture-change']), repaired.sha);
+    assert.equal(h.logs().some((e) => e.cmd === 'rework'), false);
+  });
+}
 
 for (const mergeable of ['MERGEABLE', 'UNKNOWN']) {
   test(`a post-merge sweep defers mixed generated conflicts with ${mergeable} mergeability until GitHub confirms them`, (t) => {
