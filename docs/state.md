@@ -1922,7 +1922,9 @@ merges rather than reordering the line: the task already heads the line when its
 rerun starts, and what leaves it behind is a merge that lands while it runs, by
 `merge ID` or by the queue after the task is passed over. While the hold stands,
 the queue passes over every other entry whose members merge to that base, and
-the merge gate refuses `merge ID` for any other task merging to it, both with
+the merge gate refuses `merge ID` for any other task with an unmerged stack
+member merging to it (a stack merge lands its bottom member there while the
+task's own base is still a lower branch), both with
 `ID: merges to BASE are held for HOLDER until its local CI lands: REASON`;
 members of the holder's own stack are not held, and a confirmation of a PR that
 already landed is not refused. The hold ends when the holder merges, or leaves
