@@ -26,7 +26,8 @@ const flag = (name, fallback) => {
 };
 const WINDOWS = Number(flag('--windows', 3));
 const WINDOW_MS = Number(flag('--window-s', 60)) * 1000;
-const WARMUP_MS = 20000;
+// Past the supervisor's first usage sample, 30 s after launch, so no window holds an event.
+const WARMUP_MS = 40000;
 const EXIT_BOUND_MS = 120000;
 const LOG_BYTES = 116 * 1024 * 1024;
 const LOG_LINES = 135000;
