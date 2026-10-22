@@ -392,7 +392,7 @@ test('submit and CI compare base evidence without losing new-failure diagnostics
 });
 
 test('submit reports redact explained base errors with or without another failing job', (t) => {
-  const token = 'ghp_A1b2C3d4E5A1b2C3d4E5A1b2C3d4E5zZyYxX';
+  const token = 'ghp_' + 'A1b2C3d4E5'.repeat(3) + 'zZyYxX';
   const literal = 't498-private-submit-diagnostic';
   for (const mixed of [false, true]) {
     for (const [label, value, shown, marker] of [

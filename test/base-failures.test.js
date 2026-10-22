@@ -231,7 +231,7 @@ test('hosted CI base exclusions handle nested plain, stamped and escaped logs wi
 });
 
 test('base failures redact head and base errors in gate output, evidence, events and fix-task notes and briefs', (t) => {
-  const token = 'ghp_A1b2C3d4E5A1b2C3d4E5A1b2C3d4E5zZyYxX';
+  const token = 'ghp_' + 'A1b2C3d4E5'.repeat(3) + 'zZyYxX';
   const literal = 't498-private-diagnostic-value';
   for (const gate of ['ci', 'tests']) {
     for (const [label, value, shown, marker] of [

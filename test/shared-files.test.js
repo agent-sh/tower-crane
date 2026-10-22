@@ -9,6 +9,22 @@ const { makeRepo, ROOT } = require('./helpers');
 const { readText, escapeTableCell } = require('../scripts/text');
 const { fakeAgentEnvFindings } = require('../scripts/fake-agent-env');
 
+test('gate command contracts describe recorded failure exclusions and preserve proof and required-check limits', () => {
+  const { COMMANDS } = require('../bin/tower-crane');
+  const docs = readText(path.join(ROOT, 'docs/cli.md'));
+  for (const [name, requirements] of [
+    ['check ci', [/base_failure/, /every leaf failure/, /same workflow and job matrix/, /missing required checks/]],
+    ['check tests', [/base_failure/, /known_flake/, /both failed runs/, /cannot supply reverted-test proof/]],
+  ]) {
+    const command = COMMANDS.find((command) => command.name === name);
+    const row = docs.split('\n').find((line) => line.startsWith(`| \`${name} ID`));
+    for (const requirement of requirements) {
+      assert.match(command.description, requirement, `${name} command contract`);
+      assert.match(row, requirement, `${name} generated contract`);
+    }
+  }
+});
+
 test('the shared check rejects CLI-running fake fixtures without the env helper', (t) => {
   const lines = [
     "const cp = require('node:child_process');",
