@@ -176,9 +176,12 @@ function baseEnv(home) {
   env.USERPROFILE = env.HOME;
   env.LOCALAPPDATA = path.join(env.HOME, 'AppData', 'Local');
   env.XDG_CACHE_HOME = path.join(env.HOME, '.cache');
-  // A child exiting after teardown must not recreate its fixture with a compile-cache write.
-  env.NODE_DISABLE_COMPILE_CACHE = '1';
+  // A child exiting after teardown must not recreate its fixture with a compile-cache write,
+  // so a CLI shares only the run's cache from test/global-setup.js, which no fixture holds.
   delete env.NODE_COMPILE_CACHE;
+  delete env.NODE_DISABLE_COMPILE_CACHE;
+  if (process.env.TC_TEST_COMPILE_CACHE) env.NODE_COMPILE_CACHE = process.env.TC_TEST_COMPILE_CACHE;
+  else env.NODE_DISABLE_COMPILE_CACHE = '1';
   // A gate's worktree and temp directories stay in the fixture, so a gate the test kills
   // cannot leave them in the shared temporary directory.
   env.TOWER_CRANE_TMP = path.join(home, 'gate-tmp');
