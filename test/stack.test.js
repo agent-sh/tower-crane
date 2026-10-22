@@ -212,11 +212,11 @@ test('worktree replaces a rewritten dependency head under an untouched prepared 
   assert.equal(f.h.json(['task', 'show', 'T2']).stack.parent_sha, sha);
 });
 
-test('a prepared dependent with its own work refuses a resubmitted dependency until it merges the new head', (t) => {
+test('dispatch merges a resubmitted dependency into a prepared dependent with its own work', (t) => {
   const f = setup(t);
   const wt = f.h.json(['worktree', 'T2']);
-  fs.writeFileSync(path.join(wt.path, 'T2.txt'), 'T2\n');
-  f.h.git(['add', 'T2.txt'], wt.path);
+  fs.writeFileSync(path.join(wt.path, 'early.txt'), 'T2\n');
+  f.h.git(['add', 'early.txt'], wt.path);
   f.h.git(['commit', '-qm', 'early T2'], wt.path);
   const head = f.h.git(['rev-parse', 'HEAD'], wt.path);
   const sha = resubmit(f, false);
@@ -225,11 +225,11 @@ test('a prepared dependent with its own work refuses a resubmitted dependency un
   assert.match(r.stderr, /holds its own changes on T1 .* resubmitted/);
   assert.equal(f.h.git(['rev-parse', 'HEAD'], wt.path), head);
   worker(f);
-  assert.notEqual(f.h.run(['spawn', '--task', 'T2', '--wait']).code, 0);
-  assert.equal(f.h.json(['task', 'show', 'T2']).status, 'todo');
-  f.h.git(['merge', '-q', '--no-edit', sha], wt.path);
-  f.h.json(['worktree', 'T2']);
-  assert.equal(f.h.git(['rev-parse', 'HEAD^2'], wt.path), sha);
+  f.h.ok(['spawn', '--task', 'T2', '--wait']);
+  const task = f.h.json(['task', 'show', 'T2']);
+  assert.equal(task.status, 'submitted');
+  assert.equal(task.stack.parent_sha, sha);
+  assert.equal(f.h.git(['rev-parse', 'HEAD^^2'], wt.path), sha);
 });
 
 test('concurrent sibling dispatch on one submitted dependency records a single stack child', async (t) => {
