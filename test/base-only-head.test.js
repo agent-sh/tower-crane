@@ -9,7 +9,8 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { cachedFixture } = require('./helpers');
-const { setup, attach } = require('./automation-helpers');
+const { setup, attach, holdSuite } = require('./automation-helpers');
+const { waitUntil, fileWritten } = require('./signals');
 
 const write = (h, file, text) => {
   fs.mkdirSync(path.dirname(path.join(h.repo, file)), { recursive: true });
@@ -18,8 +19,9 @@ const write = (h, file, text) => {
 
 // Gated green at head A: tests, clean and an independent review pass. The own
 // change holds shared.txt, whose second line upstream's later edit touches.
-function gated(t) {
-  const h = cachedFixture(t, 'base-only-head:gated', (repo) => {
+// running leaves tests and review to start at A later, as runs still going there.
+function gated(t, { running = false } = {}) {
+  const h = cachedFixture(t, `base-only-head:gated:${running}`, (repo) => {
     const h = setup(null, { repo });
     h.git(['switch', '-q', 'main']);
     write(h, 'shared.txt', 'one\ntwo\nthree\n');
@@ -38,9 +40,9 @@ function gated(t) {
     h.ok(['project', 'set', '--tests-proof-cmd', 'node {tests}', '--tests-expensive', 'true', '--ci-required', '["test"]',
       '--tests-map', JSON.stringify({ 'value.js': ['test/value.test.js'], 'shared.txt': ['test/shared.test.js'] })]);
     h.submit();
-    for (const gate of ['tests', 'clean']) h.ok(['check', gate, 'T1']);
+    for (const gate of running ? ['clean'] : ['tests', 'clean']) h.ok(['check', gate, 'T1']);
     h.reviewer('T1', 'reviewer');
-    h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha, '--ok', '--agent', 'reviewer']);
+    if (!running) h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha, '--ok', '--agent', 'reviewer']);
     return { sha: h.sha };
   });
   return attach(h);
@@ -173,4 +175,41 @@ test('a head that changes one line of the own change gets the normal gates', (t)
   h.consume();
   assert.equal(atHead(h, head, 'check tests').length, 1, 'the tests gate runs at the changed head');
   assert.equal(atHead(h, head, 'check clean').length, 1, 'the clean gate runs at the changed head');
+});
+
+test('a tests run and a review still going at the earlier head pass for the base-only head when they land', async (t) => {
+  const h = gated(t, { running: true });
+  const { stalled, release } = holdSuite(h);
+  const earlier = h.sha;
+  const first = h.runAsync(['check', 'tests', 'T1', '--agent', 'orchestrator']);
+  let joiner;
+  let joinerErr = '';
+  try {
+    await fileWritten(stalled, { what: 'the tests run at the earlier head started' });
+    const head = advance(h);
+    assert.equal(gate(h, 'tests').ok, false, 'nothing passed at the earlier head yet');
+    // A check at the new head joins the run at the earlier head instead of starting a second suite.
+    let child;
+    joiner = h.runAsync(['check', 'tests', 'T1', '--agent', 'orchestrator'], { onSpawn: (c) => {
+      child = c;
+      c.stderr.on('data', (d) => (joinerErr += d));
+    } });
+    await waitUntil(() => joinerErr.includes('joining the tests run'), { alive: child, what: 'the check at the new head joined the earlier run' });
+    fs.writeFileSync(release, '');
+    const [ran, joined] = await Promise.all([first, joiner]);
+    assert.equal(ran.code, 0, ran.stderr);
+    assert.equal(joined.code, 0, joined.stderr);
+    assert.equal(h.logs().filter((e) => e.cmd === 'gate run' && e.detail.type === 'tests' && e.detail.phase === 'running').length, 1, 'one suite ran');
+    const tests = gate(h, 'tests');
+    assert.equal(tests.ok, true, tests.reason);
+    assert.equal(tests.carried, `carried from ${earlier.slice(0, 7)}: base-only head`);
+    assert.equal(h.logs().findLast((e) => e.cmd === 'check tests').detail.carried_to, head);
+    // The reviewer dispatched at the earlier head records its verdict there; it counts for the new head.
+    h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', earlier, '--ok', '--agent', 'reviewer']);
+    assert.equal(gate(h, 'review').ok, true);
+    assert.equal(h.logs().findLast((e) => e.cmd === 'evidence').detail.carried_to, head);
+  } finally {
+    fs.writeFileSync(release, '');
+    await Promise.all([first, joiner].filter(Boolean));
+  }
 });
