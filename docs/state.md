@@ -347,14 +347,18 @@ The observer's startup pass and the merge queue's executor read the same way. A 
 
 ### View latency
 
-On a copy of the live state (446 tasks, 77,333 events, 2026-10-20), run from its repository with GitHub reads left out, 90 runs of each command per tree:
+On a copy of the live state (446 tasks, 77,333 events, 2026-10-20), run from its repository with GitHub reads left out, 90 runs of each command per tree, against the T267 head this work started from (3c47f3c):
 
-| command | T267 head p50 / p95 ms | now p50 / p95 ms | CPU ms per run |
-|---|---|---|---|
-| `status` | 1002 / 1159 | 195 / 226 | 1527 to 260 |
-| `inbox` | 1014 / 1080 | 271 / 299 | 1479 to 333 |
+| command | date, load on 24 cores | T267 p50 / p95 ms | now p50 / p95 ms | CPU ms per run |
+|---|---|---|---|---|
+| `status` | 2026-10-20, 18 to 33 | 1002 / 1159 | 195 / 226 | 1527 to 260 |
+| `status` | 2026-10-22, 21 to 24 | 1069 / 1677 | 230 / 431 | 1634 to 308 |
+| `inbox` | 2026-10-20, 18 to 33 | 1014 / 1080 | 271 / 299 | 1479 to 333 |
+| `inbox` | 2026-10-22, 21 to 24 | 1136 / 1778 | 264 / 531 | 1612 to 342 |
 
-`inbox` keeps more fixed cost than `status`: Node start and module loading (about 55 ms), the `git rev-parse` that finds the repository for its worktree inventory (40 to 50 ms), and the unacknowledged messages it lists, 2451 on that copy. `research/storage-eval/views.js` measures it and `research/storage-eval/results/t442.md` has the runs.
+The second rows are after T267's later commits merged in; the head before that merge measures the same beside it, so the lower p95 ratio there is the host's load. Over all 360 runs per tree on 2026-10-22, at load 12 to 31, `status` p50 is 5.0 times and its CPU 5.5 times lower, and its p95 4.1 times.
+
+`inbox` keeps more fixed cost than `status`: Node start and module loading (about 55 ms), the `git rev-parse` that finds the repository for its worktree inventory (40 to 80 ms with load), and the unacknowledged messages it lists. `status` reads every task's `task_bulk` row, 8 MB on that copy, since its spend totals share that row with the evidence. `research/storage-eval/views.js` measures them and `research/storage-eval/results/t442.md` has the runs.
 
 ### Migration and export
 
