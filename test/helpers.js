@@ -175,9 +175,12 @@ function baseEnv(home) {
   env.USERPROFILE = env.HOME;
   env.LOCALAPPDATA = path.join(env.HOME, 'AppData', 'Local');
   env.XDG_CACHE_HOME = path.join(env.HOME, '.cache');
-  // A child exiting after teardown must not recreate its fixture with a compile-cache write.
-  env.NODE_DISABLE_COMPILE_CACHE = '1';
+  // A child exiting after teardown must not recreate its fixture with a compile-cache write,
+  // so a CLI shares only the run's cache from test/global-setup.js, which no fixture holds.
   delete env.NODE_COMPILE_CACHE;
+  delete env.NODE_DISABLE_COMPILE_CACHE;
+  if (process.env.TC_TEST_COMPILE_CACHE) env.NODE_COMPILE_CACHE = process.env.TC_TEST_COMPILE_CACHE;
+  else env.NODE_DISABLE_COMPILE_CACHE = '1';
   // A gate's worktree and temp directories stay in the fixture, so a gate the test kills
   // cannot leave them in the shared temporary directory.
   env.TOWER_CRANE_TMP = path.join(home, 'gate-tmp');
@@ -517,7 +520,7 @@ function context(t, base, options = {}) {
               let socket;
               try { ({ socket } = JSON.parse(readPublished(file, 'utf8'))); }
               catch (error) { if (error.code === 'ENOENT' || error instanceof SyntaxError) continue; throw error; }
-              if (typeof socket === 'string' && path.basename(socket) === 's' && /^tower-crane-[A-Za-z0-9]{6}$/.test(path.basename(path.dirname(socket)))) {
+              if (typeof socket === 'string' && path.basename(socket) === 's' && /^(?:tower-crane-[A-Za-z0-9]{6}|tc-[0-9a-f]{12})$/.test(path.basename(path.dirname(socket)))) {
                 fs.rmSync(path.dirname(socket), { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
               }
             }

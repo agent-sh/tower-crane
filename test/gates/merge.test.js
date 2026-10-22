@@ -37,7 +37,7 @@ function ctx(gh, { task = {}, args = {}, project = {} } = {}) {
   return { root: '/repo', worktree: null, task: { id: 'T4', title: 'Change', acceptance: ['works'], kind: 'code', sha: SHA, pr: 42, status: 'accepted', ...task }, project: { repo: REPO, base: 'main', ...project }, args, exec: gh.exec, log() {} };
 }
 
-test('release merges require green completed push CI even with a newer pending run', async () => {
+test('release merges require green completed push CI for a workflow without full runs, even with a newer pending run', async () => {
   const listings = [[{ path: 'package.json' }], Array.from({ length: 100 }, (_, i) => ({ path: `lib/file-${i}.js` }))];
   for (const [files, conclusion] of listings.flatMap((files) => ['failure', 'cancelled', 'timed_out', 'neutral', 'skipped', 'success'].map((c) => [files, c]))) {
     let merged = false;
@@ -50,20 +50,64 @@ test('release merges require green completed push CI even with a newer pending r
         filename: 'package.json', patch: '-  "version": "0.1.6",\n+  "version": "0.1.7",',
       }));
       if (args[0] === 'api' && args[1].includes('/actions/workflows?')) return result(JSON.stringify({ id: 11, state: 'active', path: 'dynamic/github-code-scanning/codeql' }));
+      if (args[0] === 'api' && args[1].endsWith('/branches/main')) return result(JSON.stringify({ sha: MERGED }));
+      if (args[0] === 'api' && args[1].includes('/actions/workflows/11/runs?')) return result('');
       if (args[0] === 'api' && args[1].includes('/actions/runs?')) return result([
         { id: 101, workflow_id: 11, name: 'CI', run_number: 51, event: 'push', status: 'in_progress', conclusion: null },
         { id: 100, workflow_id: 11, name: 'CI', run_number: 50, event: 'push', status: 'completed', conclusion, html_url: 'https://github.com/acme/app/actions/runs/100' },
-        { id: 102, workflow_id: 11, name: 'CI', run_number: 52, event: 'schedule', status: 'completed', conclusion: 'success' },
         { id: 99, workflow_id: 12, name: 'Removed CI', run_number: 49, event: 'push', status: 'completed', conclusion: 'failure' },
       ].map(JSON.stringify).join('\n'));
       if (args[0] === 'pr' && args[1] === 'merge') { merged = true; return result(''); }
       return null;
     });
-    const r = await gate.run(ctx(gh));
+    const context = ctx(gh);
+    context.inboxExec = () => { throw new Error('release CI must not read the inbox cache'); };
+    const r = await gate.run(context);
     const green = ['success', 'neutral', 'skipped'].includes(conclusion);
     assert.equal(r.ok, green, r.summary);
     assert.equal(merged, green);
     if (!r.ok) assert.match(r.summary, new RegExp(`main push CI.*run 100.*${conclusion}`));
+  }
+});
+
+// Main pushes run no test matrix (.github/workflows/ci.yml), so a workflow with schedule or manual
+// runs is judged by the newest of them: green, and at or after the base head the release merges onto.
+test('a release merge requires a green full run at or after the base head, whatever push CI says', async () => {
+  const HEAD = 'a'.repeat(40);
+  const BEHIND = 'b'.repeat(40);
+  const AHEAD = 'f'.repeat(40);
+  const full = (id, number, event, conclusion, sha) => ({ id, workflow_id: 11, name: 'CI', path: '.github/workflows/ci.yml', run_number: number,
+    event, status: 'completed', conclusion, head_sha: sha, html_url: `https://github.com/acme/app/actions/runs/${id}` });
+  const push = { id: 90, workflow_id: 11, name: 'CI', run_number: 40, event: 'push', status: 'completed', conclusion: 'failure', head_sha: HEAD };
+  for (const [name, runs, ok, reason] of [
+    ['a green daily run at the head', [full(100, 50, 'schedule', 'success', HEAD)], true],
+    ['a green manual run after the head', [full(100, 50, 'workflow_dispatch', 'success', AHEAD)], true],
+    ['a green daily run before the head', [full(100, 50, 'schedule', 'success', BEHIND)], false, /schedule run 100 \(\S+\) is at bbbbbbbbbb, before main head aaaaaaaaaa; run it on main \(gh workflow run ci\.yml --ref main -R acme\/app\)/],
+    ['a red daily run at the head', [full(100, 50, 'schedule', 'failure', HEAD)], false, /schedule run 100.*: failure/],
+    ['a newer red manual run over a green daily run', [full(100, 50, 'schedule', 'success', HEAD), full(101, 51, 'workflow_dispatch', 'failure', HEAD)], false, /run 101.*: failure/],
+    ['a cancelled newer run over a green daily run', [full(100, 50, 'schedule', 'success', HEAD), full(101, 51, 'workflow_dispatch', 'cancelled', HEAD)], true],
+  ]) {
+    let merged = false;
+    const gh = fakeExec((args) => {
+      if (args[0] === 'pr' && args[1] === 'view') return result(JSON.stringify({ state: merged ? 'MERGED' : 'OPEN', headRefOid: SHA, baseRefName: 'main',
+        title: 'Release 0.2.0', files: [{ path: 'CHANGELOG.md' }], mergeCommit: merged ? { oid: MERGED } : null }));
+      if (args[0] === 'api' && args[1].includes('/actions/workflows?')) return result(JSON.stringify({ id: 11, state: 'active', path: '.github/workflows/ci.yml' }));
+      if (args[0] === 'api' && args[1].endsWith('/branches/main')) return result(JSON.stringify({ sha: HEAD }));
+      // gh prints a string --jq result raw.
+      if (args[0] === 'api' && args[1].endsWith(`/compare/${HEAD}...${AHEAD}?per_page=1`)) return result('ahead\n');
+      if (args[0] === 'api' && args[1].endsWith(`/compare/${HEAD}...${BEHIND}?per_page=1`)) return result('behind\n');
+      if (args[0] === 'api' && args[1].includes('/actions/runs?')) {
+        const event = new URL(`https://x/${args[1]}`).searchParams.get('event');
+        return result([push, ...runs].filter((r) => r.event === event).map(JSON.stringify).join('\n'));
+      }
+      if (args[0] === 'pr' && args[1] === 'merge') { merged = true; return result(''); }
+      return null;
+    });
+    const r = await gate.run(ctx(gh, { task: { title: 'Release 0.2.0' } }));
+    assert.equal(r.ok, ok, `${name}: ${r.summary}`);
+    assert.equal(merged, ok, name);
+    if (reason) assert.match(r.summary, reason, name);
+    assert.doesNotMatch(r.summary, /push CI/, name);
   }
 });
 

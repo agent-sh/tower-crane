@@ -9,11 +9,20 @@ if (/^repos\/[^/]+\/[^/]+\/branches\//.test(args[1] || '')) {
   console.log(JSON.stringify({ sha: data.main_head || data.main_runs?.[0]?.head_sha || data.prs?.[7]?.headRefOid }));
   return;
 }
+// A release compares its full run's head with the base head: data.compare names BASE...HEAD pairs.
+// gh prints a string --jq result raw, not as JSON.
+const compare = /^repos\/[^/]+\/[^/]+\/compare\/([^.]+)\.\.\.([^?]+)/.exec(args[1] || '');
+if (compare) {
+  const data = JSON.parse(readPublished(file, 'utf8'));
+  console.log(data.compare?.[`${compare[1]}...${compare[2]}`] || (compare[1] === compare[2] ? 'identical' : 'diverged'));
+  return;
+}
 // Base CI reads run alongside the PR reads, so they only append to their own call log
 // and never rewrite the shared file a concurrent PR read updates.
 if (/^repos\/[^/]+\/[^/]+\/actions\//.test(args[1] || '')) {
   const data = JSON.parse(readPublished(file, 'utf8'));
   fs.appendFileSync(`${file}.actions`, `${JSON.stringify(args)}\n`);
+  delay(data);
   const endpoint = args[1];
   const id = endpoint.split('/')[5];
   const print = (rows) => { for (const row of rows) console.log(JSON.stringify(row)); };
@@ -47,11 +56,17 @@ if (/^repos\/[^/]+\/[^/]+\/actions\//.test(args[1] || '')) {
 let result;
 let failed = false;
 let review = null;
+let pause = 0;
+let delaySignal = null;
 updateJson(file, (data) => {
   data.calls.push(args);
+  pause = data.delayMs && (!data.delayEndpoint || args[1]?.includes(data.delayEndpoint)) ? data.delayMs : 0;
+  delaySignal = data.delaySignal;
   answer(data);
   return data;
 });
+if (pause && delaySignal) fs.writeFileSync(delaySignal, '');
+if (pause) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, pause); // wait-allow: stall GitHub to verify foreground inbox reads never launch network requests
 // The review lands while this fetch is in flight, after the lock is released: the
 // evidence command may run gh, which takes the same lock.
 if (review) {
@@ -62,7 +77,7 @@ if (review) {
   ], { env: require('../agent-env').fakeAgentEnv(process.env), stdio: 'pipe' });
 }
 if (failed) {
-  console.error('GitHub unavailable');
+  console.error(JSON.parse(readPublished(file, 'utf8')).failMessage || 'GitHub unavailable');
   process.exitCode = 1;
 } else if (Array.isArray(result)) {
   for (const row of result) console.log(JSON.stringify(row));
@@ -104,5 +119,11 @@ function answer(data) {
     result = [{ name: 'test', suite: 1, id: 1, runs: 1, app: 'fixture',
       status: data.ci === 'pending' ? 'in_progress' : 'completed', conclusion: data.ci === 'pending' ? null : data.ci || 'success' }];
     if (args[1].includes('/check-runs') && data.revuto) result.push(data.revuto);
+  }
+}
+
+function delay(data) {
+  if (data.delayMs && (!data.delayEndpoint || args[1]?.includes(data.delayEndpoint))) {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, data.delayMs); // wait-allow: stall base CI to verify foreground inbox reads never launch network requests
   }
 }

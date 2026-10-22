@@ -29,6 +29,22 @@ function accepted(t, settings = [], tier = null) {
 
 const map = JSON.stringify({ 'value.js': ['test/value.test.js'] });
 const localCI = JSON.stringify({ command: [process.execPath, '-e', 'process.exit(0)'], timeout: 5 });
+for (const json of [false, true]) {
+  test(`project set preserves scope warnings while queuing gate refreshes (${json ? 'JSON' : 'text'})`, (t) => {
+    const h = accepted(t);
+    const args = ['project', 'set', '--tests-mode', 'run-only', '--scope', '{"MemoryMax":"4G"}'];
+    const warning = 'scope MemoryMax: containment replaces this on every real launch; set the caps with tower-crane project set --tasks-max N --memory-max-bytes N';
+    if (json) assert.deepEqual(h.json(args).warnings, [warning]);
+    else {
+      const output = h.ok(args);
+      assert.ok(output.includes(`warning: ${warning}`));
+      assert.match(output, /queued gate re-checks: T1 \(tests\)/);
+    }
+    assert.deepEqual(h.json(['status']).gate_queue.queued.map((q) => q.id), ['T1']);
+    assert.deepEqual(h.logs().findLast((e) => e.cmd === 'automation reconcile').detail.gates, ['tests']);
+  });
+}
+
 const policyChanges = [
   ['paths', [], ['--tests-paths', '["test/*.test.js"]']],
   ['keep', [], ['--tests-keep', '["README.md"]']],

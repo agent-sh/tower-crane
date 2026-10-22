@@ -195,10 +195,10 @@ process.exit(r.status ?? 1);
 
 test('the base lease budgets both joining a cache holder and a fresh run', () => {
   const cases = [
-    [{ mode: 'run-only' }, 0, 3, 7],
-    [{ mode: 'run-only' }, 2, 1, 5],
-    [{ mode: 'prove' }, 0, 1, 4],
-    [{ mode: 'prove', expensive: true }, 1, 2, 10],
+    [{ mode: 'run-only' }, 0, 3, 8],
+    [{ mode: 'run-only' }, 2, 1, 6],
+    [{ mode: 'prove' }, 0, 1, 5],
+    [{ mode: 'prove', expensive: true }, 1, 2, 11],
     [{ mode: 'none' }, 2, 3, 0],
   ];
   for (const [tests, hosts, files, expected] of cases) {
