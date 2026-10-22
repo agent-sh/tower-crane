@@ -252,7 +252,17 @@ if (shard && !flags.some((flag) => flag.startsWith('--test-reporter'))) {
 }
 args.push(...startOrder(run, concurrency));
 
-const env = { ...process.env };
+let env = { ...process.env };
+// TC_TEST_COVERAGE_DIR builds the coverage map tests.map pins (scripts/tests-coverage-map.js): each
+// test file's coverage, the CLI processes it starts included, is kept apart and folded into
+// DIR/tests-coverage-map.json when the run ends. CI sets it on the daily and manual full runs.
+const coverageDir = process.env.TC_TEST_COVERAGE_DIR ? path.resolve(process.env.TC_TEST_COVERAGE_DIR) : null;
+const ROOT = path.join(__dirname, '..');
+if (coverageDir) {
+  env = require('../scripts/tests-coverage-map').scopeEnv(env, coverageDir, ROOT, false);
+  args.splice(args.length - run.length, 0, `--require=${path.join(ROOT, 'lib', 'tests-coverage-scope.js')}`);
+}
+delete env.TC_TEST_COVERAGE_DIR;
 delete env.TC_TEST_SHARD;
 delete env.TC_TEST_SHARD_DEADLINE_MIN;
 delete env.TC_TEST_SHARD_LOG_DIR;
@@ -301,6 +311,12 @@ child.on('error', (error) => {
 child.on('exit', (status, signal) => {
   if (signal) process.exitCode = 128 + (os.constants.signals[signal] || 0);
   else process.exitCode = status ?? 1;
+  if (coverageDir) {
+    const Map = require('../scripts/tests-coverage-map');
+    const map = require('../lib/tests-coverage').collect(coverageDir, ROOT, process.env.GITHUB_SHA || Map.headSha(ROOT));
+    Map.write(path.join(coverageDir, 'tests-coverage-map.json'), map);
+    console.error(`tower-crane: coverage map of ${map.tests.length} test files, ${Object.keys(map.map).length} covered files, in ${coverageDir}`);
+  }
 });
 // Test only: a runner whose event loop never returns, the hang the watchdog must outlive.
 if (process.env.TC_TEST_SHARD_HANG === '1') Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0); // wait-allow: blocks this runner until its shard watchdog stops it
