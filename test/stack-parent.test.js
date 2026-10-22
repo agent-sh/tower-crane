@@ -235,6 +235,9 @@ for (const status of ['submitted', 'accepted']) {
         const reworks = () => events(f).filter((e) => e.task === 'T2' && e.cmd === 'rework');
         assert.equal(reworks().length, 1);
         assert.match(reworks()[0].detail.reason, new RegExp(parent));
+        const named = `submitted ${parent}`;
+        assert.equal(task.notes.filter((n) => n.text.includes(named)).length, 1, 'the reason is noted once');
+        assert.equal(f.h.run(['brief', 'get', 'T2']).stdout.split(named).length - 1, 1, 'the brief names the reason once');
         f.h.run(['check', 'clean', 'T2']);
         assert.equal(reworks().length, 1, 'repeated gates do not advance rework again');
         const inbox = f.h.json(['inbox', '--agent', 'orchestrator']);
@@ -272,6 +275,66 @@ for (const status of ['submitted', 'accepted']) {
     assert.equal(events(f).filter((e) => e.task === 'T2' && e.cmd === 'rework').length, 1);
     assert.equal(f.h.git(['rev-parse', 'HEAD'], top.wt.path), top.sha);
   });
+}
+
+// The worker merges the parent itself and resubmits with leftovers in its checkout.
+function submitWithParent(f, top, parent) {
+  f.h.git(['merge', '--no-ff', '--no-edit', parent], top.wt.path);
+  f.h.git(['push', 'origin', top.wt.branch], top.wt.path);
+  const sha = f.h.git(['rev-parse', 'HEAD'], top.wt.path);
+  f.write((d) => { d.prs[12].headRefOid = sha; });
+  f.h.ok(['submit', 'T2', '--sha', sha, '--branch', top.wt.branch, '--pr', '12', '--agent', 'worker-T2']);
+  return sha;
+}
+
+for (const cycle of [false, true]) {
+  for (const dirty of ['unstaged', 'staged', 'untracked']) {
+    for (const entry of ['accept', 'check clean']) {
+      test(`dirty submitted child whose head holds the parent keeps its status through ${entry} with ${dirty} edits${cycle ? ' after a dirty rework' : ''}`, (t) => {
+        const f = setup(t);
+        const top = upper(f);
+        const file = dirty === 'untracked' ? 'pr-body.md' : 'T2.txt';
+        const dirt = () => {
+          fs.writeFileSync(path.join(top.wt.path, file), 'pending edits\n');
+          if (dirty === 'staged') f.h.git(['add', file], top.wt.path);
+        };
+        let parent;
+        if (cycle) {
+          dirt();
+          parent = resubmit(f, false);
+          assert.equal(f.h.run(['check', 'clean', 'T2']).code, 1);
+          assert.equal(f.h.json(['task', 'show', 'T2']).status, 'rework');
+          f.h.ok(['claim', 'T2', '--agent', 'worker-T2']);
+          // The leftover outlives the worker's merge, which needs a clean index.
+          f.h.git(['reset', '-q', '--hard'], top.wt.path);
+          fs.rmSync(path.join(top.wt.path, file), { force: true });
+          submitWithParent(f, top, parent);
+          dirt();
+        } else {
+          parent = resubmit(f, false);
+          submitWithParent(f, top, parent);
+          dirt();
+        }
+        const before = f.h.json(['task', 'show', 'T2']);
+        const status = f.h.git(['status', '--porcelain'], top.wt.path);
+        const reworks = () => events(f).filter((e) => e.task === 'T2' && e.cmd === 'rework').length;
+        const offset = reworks();
+        const args = entry === 'accept' ? ['accept', 'T2', '--waive', 'review', '--waive', 'ci', '--reason', 'offline stack fixture']
+          : ['check', 'clean', 'T2'];
+        f.h.run(args);
+        const task = f.h.json(['task', 'show', 'T2']);
+        assert.equal(reworks(), offset, 'a head that holds the parent is not sent back');
+        assert.equal(task.status, entry === 'accept' ? 'accepted' : 'submitted');
+        assert.equal(task.revision, before.revision);
+        assert.equal(task.sha, before.sha);
+        assert.equal(task.stack.parent_sha, parent);
+        assert.equal(f.h.git(['rev-parse', 'HEAD'], top.wt.path), before.sha);
+        assert.equal(f.h.git(['status', '--porcelain'], top.wt.path), status);
+        const deferred = events(f).filter((e) => e.task === 'T2' && e.cmd === 'stack sync deferred' && e.detail.parent_sha === parent);
+        assert.equal(deferred.length, cycle ? 1 : 0, 'a head that holds the parent records no deferral');
+      });
+    }
+  }
 }
 
 for (const busy of ['live', 'dirty']) {

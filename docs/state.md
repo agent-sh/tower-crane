@@ -50,7 +50,11 @@ unchanged branch and checkout; its brief names the parent head it must include
 before resubmitting. A dirty submitted or accepted child returns to rework so
 that worker can be scheduled. This recovery also runs when the same parent
 head already has a deferral receipt; repeated checks while rework is pending
-do not advance its revision again. Gates still wait for the parent head. Stopped Git operations
+do not advance its revision again. Gates still wait for the parent head. A child
+branch that already contains the parent head needs no merge, so a live worker or
+dirty checkout does not defer it: refresh records the parent head in
+`stack.parent_sha` and emits `stack sync` without touching the checkout, and a
+submitted head that contains the parent keeps its status. Stopped Git operations
 keep their worktree operation checks and prevent automatic refresh. Merged
 parents take the completed-chain retirement path before any parent branch fetch.
 Refresh only merges a newer submitted or accepted head from an unmerged parent
