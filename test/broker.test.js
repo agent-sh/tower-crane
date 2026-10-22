@@ -835,6 +835,65 @@ test('a live broker keeps its socket directory and answers through another broke
   assert.equal(h.readState('tasks.json').tasks[0].notes.length, isolated ? 4 : 2, 'the first broker answered after each start');
 });
 
+// What a test run from a tree older than the pid namespace check did to a live
+// agent's socket directory from the agent's sandbox (seen 2026-10-22): its
+// broker sweep saw the monitor's pid as exited, unlinked each entry, and its
+// rmdir failed, as the sandbox binds the directory. Where a mount namespace
+// can be made the removal runs in one with the directory bound; elsewhere
+// this process unlinks the entries.
+function sweptInSandbox(dir) {
+  const cp = require('node:child_process');
+  const unlink = "const fs = require('node:fs'), path = require('node:path'); const dir = process.argv[1]; for (const name of fs.readdirSync(dir).sort()) fs.unlinkSync(path.join(dir, name));";
+  const bind = ['--user', '--map-root-user', '--mount', 'sh', '-c', 'mount --bind "$1" "$1" && exec "$2" -e "$3" "$1"', 'sh', dir, process.execPath];
+  const mounted = process.platform === 'linux' && cp.spawnSync('unshare', [...bind, 'true'], { stdio: 'ignore' }).status === 0;
+  if (!mounted) {
+    for (const name of fs.readdirSync(dir)) fs.unlinkSync(path.join(dir, name));
+    return;
+  }
+  const r = cp.spawnSync('unshare', [...bind, `${unlink} try { fs.rmdirSync(dir); process.stdout.write('removed'); } catch (e) { process.stdout.write(e.code); }`], { encoding: 'utf8', timeout: 30000, killSignal: 'SIGKILL' }); // wait-allow: a hung removal fails this test at its bound
+  assert.equal(r.stdout, 'EBUSY', r.stderr);
+}
+
+test('a live broker whose socket and owner record its agent\'s sandbox removed listens there again and answers; one whose directory is gone reports it lost', { skip: process.platform === 'win32' && 'Windows uses a named pipe' }, async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'leaf', '--acceptance', 'noted']);
+  // The granted leaf a spawn makes for a sandboxed worker (agentDir).
+  const leaf = path.join(socketDir(t, 40), `tc-${require('node:crypto').randomBytes(6).toString('hex')}`);
+  const job = { state: h.state, task: 'T1', agent: 'worker-T1-1', role: 'worker', harness: 'claude', broker_harnesses: ['claude'],
+    cwd: h.repo, broker: path.join(h.base, 'brokers', 'worker-T1-1', B.FILE), agent_socket_dir: leaf };
+  const logged = [];
+  const write = process.stderr.write;
+  t.mock.method(process.stderr, 'write', function (chunk, ...rest) {
+    logged.push(String(chunk));
+    return write.call(this, chunk, ...rest);
+  });
+  const broker = await B.start(job);
+  t.after(() => broker.close());
+  const socket = path.join(leaf, 's');
+  const owner = path.join(leaf, 'owner.json');
+  assert.equal(JSON.parse(fs.readFileSync(job.broker, 'utf8')).socket, socket);
+  sweptInSandbox(leaf);
+  assert.deepEqual(fs.readdirSync(leaf), [], 'the sandbox removed the socket and the owner record');
+  const bound = AbortSignal.timeout(10000); // wait-allow: a broker that does not listen again never will; the bound turns that into a prompt failure
+  const back = await waitUntil(() => fs.existsSync(owner) && !!fs.lstatSync(socket, { throwIfNoEntry: false })?.isSocket(), { paths: [leaf], signal: bound, what: 'the broker listens again' })
+    .then(() => true, () => false);
+  assert.ok(back, `the broker listens at ${socket} again and rewrote its owner record: ${fs.readdirSync(leaf)}`);
+  assert.equal(JSON.parse(fs.readFileSync(owner, 'utf8')).pid, process.pid, 'the record names the broker\'s monitor');
+  const r = await B.forward(job.broker, ['task', 'note', 'T1', 'after the sweep'], h.state);
+  assert.equal(r.code, 0, r.stderr);
+  assert.deepEqual(h.readState('tasks.json').tasks[0].notes.map((n) => n.text), ['after the sweep']);
+  assert.ok(logged.some((line) => line.includes(`the state broker's socket ${socket} was removed; listening there again`)), logged.join(''));
+  assert.equal(broker.lost(), null);
+  // Removed outside the sandbox, which may still hold the old directory: lost.
+  fs.renameSync(leaf, `${leaf}.gone`);
+  const gone = AbortSignal.timeout(10000); // wait-allow: a broker that misses its directory never reports it; the bound turns that into a prompt failure
+  const lost = await waitUntil(() => broker.lost(), { paths: [path.dirname(leaf)], signal: gone, what: 'the broker reports its directory gone' })
+    .catch(() => null);
+  assert.equal(lost, `its socket directory ${leaf} is gone`);
+  assert.ok(logged.some((line) => line.includes(`the state broker is lost: its socket directory ${leaf} is gone`)), logged.join(''));
+});
+
 test('an agent that reaches its broker at no address hears each address\'s error, the socket\'s first', { skip: process.platform === 'win32' && 'Windows uses a named pipe' }, async (t) => {
   const s = scratch(t);
   const file = path.join(s.base, B.FILE);
