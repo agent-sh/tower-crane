@@ -763,16 +763,22 @@ test('gate commands run with gc.autoDetach=false after the caller\'s own GIT_CON
 
 test('timeouts at head, scoped proof and reversion are infrastructure failures, never proof', async () => {
   const sha = task({ 'lib/add.js': FIX, 'test/add.test.js': ADD_TEST });
-  for (const stage of [1, 2, 3]) {
+  // The reverted run goes beside the head in a checkout of its own, so each command is told by what
+  // it runs and where: the head checkout holds the fix, the reverted one the base's lib/add.js.
+  const stageOf = (command, cwd) => (command === CMD ? 'head'
+    // read-published: a file the gate checked out for this command; nothing replaces it while it runs.
+    : fs.readFileSync(path.join(cwd, 'lib/add.js'), 'utf8') === FIX ? 'proof' : 'reverted');
+  for (const [stage, where] of [['head', /` at \w+: timed out/], ['proof', /` scoped proof at \w+: timed out/], ['reverted', /` with 1 non-test file reverted to \w+ \(lib\/add\.js\): timed out/]]) {
     const context = ctx(sha, { project: {
       tests: { expensive: true },
       gates: { tests_cmd: CMD, tests_proof_cmd: `${CMD} {tests}`, tests_timeout_min: 0.05 },
     } });
-    let calls = 0;
+    const ran = [];
     context.exec = (command, args, opts) => {
       if (!opts.shell) return require('node:child_process').spawnSync(command, args, opts);
       assert.equal(opts.timeout, 3000);
-      if (++calls !== stage) return { status: 0, stdout: '', stderr: '' };
+      ran.push(stageOf(command, opts.cwd));
+      if (ran.at(-1) !== stage) return { status: ran.at(-1) === 'reverted' ? 1 : 0, stdout: '', stderr: '' };
       return { status: 1, error: Object.assign(new Error('deadline'), { code: 'ETIMEDOUT' }),
         stdout: 'not ok 1 - cut off', stderr: '', timeoutOutput: '# Subtest: test/slow.test.js\n' };
     };
@@ -782,8 +788,9 @@ test('timeouts at head, scoped proof and reversion are infrastructure failures, 
     assert.equal(r.confirmed_failure, undefined);
     assert.equal(r.test_failure, undefined);
     assert.match(r.summary, /timed out after 0\.05 min/);
+    assert.match(r.summary, where);
     assert.deepEqual(r.timeout.running_files, ['test/slow.test.js']);
-    assert.equal(calls, stage);
+    assert.ok(ran.includes(stage), `${stage} ran: ${ran}`);
     assertCleanedUp();
   }
 });
@@ -1066,6 +1073,82 @@ test('expensive prove needs a pinned scoped command that passes at head, fails a
   const r = await gate.run(ctx(sha, { project: expensive(`${NODE} proof.js {tests}`) }));
   assert.equal(r.ok, true, r.summary);
   assert.match(r.summary, /kept a scoped proof/);
+  assertCleanedUp();
+});
+
+// The head holds until the reverted run has started, so a gate that ran them one after another
+// would fail its head. A full head command keeps the scoped proof at head.
+test('a scoped reverted run starts beside the head in its own checkout, and the receipt times each step', async () => {
+  const sha = task({ 'lib/add.js': FIX, 'test/add.test.js': ADD_TEST });
+  const dir = fs.mkdtempSync(path.join(tmp, 'beside-'));
+  const marker = path.join(dir, 'reverted-started');
+  const wait = path.join(dir, 'wait.js');
+  fs.writeFileSync(wait, `const fs = require('fs');
+const deadline = Date.now() + 20000; // wait-allow: ends the head when the gate runs the reverted run only after it
+(function poll() {
+  if (fs.existsSync(process.argv[2])) {
+    process.argv.length = 2;
+    require(require('path').resolve('run-tests.js'));
+  } else if (Date.now() > deadline) {
+    console.log('the reverted run did not start beside the head');
+    process.exit(1);
+  } else setTimeout(poll, 50); // wait-allow: the head polls for the file the reverted run writes
+})();
+`);
+  const mark = path.join(dir, 'mark.js');
+  fs.writeFileSync(mark, `const fs = require('fs');
+const path = require('path');
+// read-published: the gate's checkout; nothing replaces it while this command runs.
+if (fs.readFileSync('lib/add.js', 'utf8') !== ${JSON.stringify(FIX)}) fs.writeFileSync(process.argv[2], '');
+for (const file of process.argv.slice(3)) require(path.resolve(file));
+`);
+  const head = `${NODE} ${quote(wait)} ${quote(marker)}`;
+  const r = await gate.run(ctx(sha, { args: { cmd: head }, project: {
+    tests: { expensive: true }, gates: { tests_cmd: head, tests_proof_cmd: `${NODE} ${quote(mark)} ${quote(marker)} {tests}` },
+  } }));
+  assert.equal(r.ok, true, r.summary);
+  assert.match(r.summary, /Scoped proof at \w+: `.*mark\.js.*`: exit 0/);
+  assert.match(r.summary, /with 1 non-test file reverted to \w+ \(lib\/add\.js\) \(beside the head, in a worktree of its own\): exit 1/);
+  for (const step of ['head', 'proof', 'reverted', 'total']) assert.ok(Number.isInteger(r.receipt.phases[step]), `${step}: ${JSON.stringify(r.receipt.phases)}`);
+  assertCleanedUp();
+});
+
+test('a failing head stops the reverted run beside it and reports the head', { skip: process.platform === 'win32' && 'POSIX process checks' }, async () => {
+  const sha = task({ 'lib/add.js': FIX, 'test/add.test.js': ADD_TEST });
+  const dir = fs.mkdtempSync(path.join(tmp, 'stopped-'));
+  const pidFile = path.join(dir, 'reverted.pid');
+  const done = path.join(dir, 'reverted-ended-on-its-own');
+  const slow = path.join(dir, 'slow.js');
+  fs.writeFileSync(slow, `const fs = require('fs');
+fs.writeFileSync(process.argv[2], String(process.pid));
+setTimeout(() => { // wait-allow: a reverted run that writes its marker only if no stop ends it first
+  fs.writeFileSync(${JSON.stringify(done)}, '');
+  process.exit(1);
+}, 60000);
+`);
+  const broken = path.join(dir, 'broken.js');
+  fs.writeFileSync(broken, `const fs = require('fs');
+const deadline = Date.now() + 20000; // wait-allow: ends the head when the gate runs no reverted run beside it
+(function poll() {
+  if (fs.existsSync(process.argv[2]) || Date.now() > deadline) {
+    console.log('head broke');
+    process.exit(1);
+  }
+  setTimeout(poll, 50); // wait-allow: the head fails only once the reverted run is running
+})();
+`);
+  const head = `${NODE} ${quote(broken)} ${quote(pidFile)}`;
+  const r = await gate.run(ctx(sha, { args: { cmd: head }, project: {
+    tests: { expensive: true }, gates: { tests_cmd: head, tests_proof_cmd: `${NODE} ${quote(slow)} ${quote(pidFile)} {tests}` },
+  } }));
+  assert.equal(r.ok, false);
+  assert.match(r.summary, /broken\.js.*` at \w+: exit 1/);
+  assert.doesNotMatch(r.summary, /reverted to/);
+  // read-published: the reverted run wrote its pid once, before the head failed.
+  const pid = Number(fs.readFileSync(pidFile, 'utf8'));
+  // A stopped process can take a moment to be reaped; one left running writes its marker first.
+  await waitUntil(() => !detachedAlive({ pid }), { what: 'the stopped reverted run exits' });
+  assert.equal(fs.existsSync(done), false, 'the gate did not wait for the reverted run to end on its own');
   assertCleanedUp();
 });
 

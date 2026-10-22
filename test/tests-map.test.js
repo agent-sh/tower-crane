@@ -57,11 +57,13 @@ test('mapped head suites preserve scoped proof and policy-bound evidence through
   assert.equal(receipt.receipt.head_mode, 'mapped');
   assert.deepEqual(receipt.receipt.head_tests, ['test/mapped.test.js', 'test/value.test.js']);
   assert.deepEqual(receipt.receipt.proof_tests, ['test/value.test.js']);
-  assert.equal(runs.length, 3);
+  // The mapped head already ran the changed test through the proof template; the reverted proof runs
+  // beside it and may finish first.
+  assert.equal(runs.length, 2);
   assert.ok(runs.every((c) => !c.command.includes('*.test.js')));
-  assert.equal(runs[0].status, 0);
-  assert.equal(runs[1].status, 0);
-  assert.notEqual(runs[2].status, 0);
+  const headRun = runs.find((c) => c.command.includes('mapped.test.js'));
+  assert.equal(headRun.status, 0);
+  assert.notEqual(runs.find((c) => c !== headRun).status, 0);
   assert.match(receipt.summary, /Head suite mode mapped/);
   assert.equal(h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'tests').ok, true);
   h.ok(['project', 'set', '--tests-map', '{}']);
@@ -69,7 +71,8 @@ test('mapped head suites preserve scoped proof and policy-bound evidence through
   const fallback = check(h);
   assert.equal(fallback.receipt.head_mode, 'full');
   assert.match(fallback.summary, /unmapped.*value.js/);
-  assert.equal(fallback.commands.find((c) => c.command !== 'git').command, fullCommand);
+  // The reverted proof runs beside the head, so either can come first.
+  assert.deepEqual(fallback.commands.filter((c) => c.command !== 'git' && !c.command.endsWith(' test/value.test.js')).map((c) => c.command), [fullCommand]);
   assert.deepEqual(fallback.receipt.proof_tests, receipt.receipt.proof_tests);
   h.ok(['project', 'set', '--tests-map', JSON.stringify(map)]);
   check(h);
@@ -157,7 +160,8 @@ test('a task without a PR runs the full head suite because hosted CI is not requ
   const result = check(h);
   assert.equal(result.receipt.head_mode, 'full');
   assert.match(result.receipt.head_reason, /no PR/);
-  assert.equal(result.commands.find((c) => c.command !== 'git').command, fullCommand);
+  // The reverted proof runs beside the head, so either can come first.
+  assert.deepEqual(result.commands.filter((c) => c.command !== 'git' && !c.command.endsWith(' test/value.test.js')).map((c) => c.command), [fullCommand]);
 });
 
 test('a change only to test/browser.js runs the full head suite with run-only semantics', (t) => {
@@ -206,7 +210,9 @@ setTimeout(() => process.exit(0), 10000); // wait-allow: mapping diagnostics mus
   assert.deepEqual(result.timeout.running_files, ['test/mapped.test.js']);
   assert.match(result.summary, /timed out after 0\.05 min/);
   assert.doesNotMatch(result.summary, /Failing tests|Make the tests pass|Promise resolution/);
-  const commands = result.commands.filter((c) => c.command !== 'git');
+  // The reverted proof beside the head is stopped once the head fails, and counts for nothing.
+  const proofCommand = `node ${shellQuote(script)} test/value.test.js`;
+  const commands = result.commands.filter((c) => c.command !== 'git' && c.command !== proofCommand);
   assert.equal(commands.length, 1);
   const selectedTests = ['test/mapped.test.js', 'test/value.test.js'];
   assert.deepEqual(result.receipt.head_tests, selectedTests);
