@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
 const { makeRepo, ROOT } = require('./helpers');
+const { HUNG_TEST_MS } = require('./signals');
 const { gitDenied } = require('../lib/shim');
 
 const MESSAGE = 'commit work in progress on the task branch instead';
@@ -56,7 +57,7 @@ test('the git shim refuses stash in a CLI task worktree and leaves shared stashe
   fs.writeFileSync(policy, JSON.stringify({ gitPush: 'branch', branch: h.git(['branch', '--show-current'], wt), repo: 'acme/app' }));
   const shim = (...args) => cp.spawnSync(process.execPath,
     [path.join(ROOT, 'lib', 'shim.js'), policy, shimDir, 'git', ...args],
-    { cwd: wt, env: h.env, encoding: 'utf8', timeout: 10000 });
+    { cwd: wt, env: h.env, encoding: 'utf8', timeout: HUNG_TEST_MS });
   for (const args of REFUSED) {
     const result = shim(...args);
     assert.equal(result.status, 126, `${args.join(' ')}: ${result.stderr}`);
