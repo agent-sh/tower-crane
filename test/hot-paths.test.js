@@ -87,6 +87,25 @@ test('hot_paths is a validated operational project setting with show and clear',
   assert.deepEqual(h.json(['project', 'show']).hot_paths, []);
 });
 
+test('hot-path and PR ownership settings retain their values, summaries and usage together', (t) => {
+  const h = fixture(t);
+  for (const { paths, owners, idle } of [
+    { paths: ['lib/hot.js'], owners: 2, idle: 20 },
+    { paths: ['lib/*.js'], owners: 0, idle: 60 },
+  ]) {
+    h.ok(['project', 'set', '--hot-paths', JSON.stringify(paths), '--owners', String(owners), '--owner-idle-minutes', String(idle)]);
+    const project = h.json(['project', 'show']);
+    assert.deepEqual(project.hot_paths, paths);
+    assert.equal(project.limits.owners, owners);
+    assert.equal(project.limits.owner_idle_minutes, idle);
+    const summary = h.ok(['project', 'show']);
+    assert.ok(summary.includes(`hot_paths: ${JSON.stringify(paths)}`));
+    assert.ok(summary.includes(`${owners} PR owners idle up to ${idle} min`));
+  }
+  const help = h.ok(['project', 'set', '--help']);
+  for (const flag of ['[--hot-paths JSON]', '[--owners N]', '[--owner-idle-minutes MIN]']) assert.ok(help.includes(flag), flag);
+});
+
 function merged(h, id) {
   const doc = h.readState('tasks.json'), task = doc.tasks.find((x) => x.id === id);
   task.status = 'accepted';
