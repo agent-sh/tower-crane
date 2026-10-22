@@ -561,7 +561,9 @@ test('a native child crash reruns only the failing file once: a one-off passes w
   const unreadable = path.join(tmp, 'gdb-bad');
   fs.writeFileSync(unreadable, "#!/bin/sh\necho 'not a core dump: file format not recognized' >&2\nexit 1\n", { mode: 0o755 });
   const spec = `${NODE} --test --test-reporter=spec`;
-  const project = { gates: { tests_cmd: `${spec} test/counted.test.js test/crash.test.js`, tests_proof_cmd: `${spec} {tests}` } };
+  // A crucial head is the file selector over a known list, so a rerun can narrow to the crashed file.
+  const project = { tests: { expensive: true, crucial: ['test/crash.test.js'], map: {} },
+    gates: { tests_cmd: `${spec} test/counted.test.js test/crash.test.js`, tests_proof_cmd: `${spec} {tests}` } };
   const rerun = (ok) => [{ step: 'head', files: ['test/crash.test.js'], ok }];
   const flaky = ['test/crash.test.js > child crashes natively'];
   for (const [name, options, want] of [
@@ -621,21 +623,38 @@ test('a native child crash reruns only the failing file once: a one-off passes w
 test('a failing test reruns once: one that then passes is flaky with both runs, one that fails twice keeps the failure, and a reverted failure is not rerun', async () => {
   const spec = `${NODE} --test --test-reporter=spec --test-concurrency=1`;
   const suite = `${spec} test/*.test.js`;
-  for (const [name, { times, mode = 'run-only', selector = true, cut = false }, want] of [
+  // The head runs the full suite command, the file selector over the crucial list, or a chain whose
+  // second part never runs when the first fails.
+  const heads = {
+    suite: { cmd: suite, run: suite },
+    crucial: { cmd: suite, run: `${spec} ${['test/counted.test.js', 'test/flaky.test.js'].map(shellQuote).join(' ')}`,
+      tests: { mode: 'prove', expensive: true, crucial: ['test/flaky.test.js'], map: {} } },
+    chain: { cmd: `${spec} test/flaky.test.js && ${spec} test/broken.test.js` },
+  };
+  heads.chain.run = heads.chain.cmd;
+  const whole = (reason) => new RegExp(`reran the whole command \\(${reason}\\) once in the same checkout`);
+  const unnamed = whole('the command is not gates\\.tests_proof_cmd over a known file list, so it may have stopped before its later parts');
+  for (const [name, { times, head = 'crucial', mode = 'run-only', selector = true, cut = false }, want] of [
     ['fails once', { times: 1 }, { ok: true, flaky: true, runs: 2, counted: 1, rerun: ['test/flaky.test.js'], note: /Rerun: reran test\/flaky\.test\.js once in the same checkout: exit 0; flaky: test\/flaky\.test\.js > sometimes fails\./ }],
-    ['fails twice', { times: 2 }, { ok: false, flaky: false, runs: 2, counted: 1, rerun: ['test/flaky.test.js'], note: /Rerun: reran test\/flaky\.test\.js once in the same checkout: exit 1; the failure stands\./ }],
-    ['fails once with no file selector', { times: 1, selector: false }, { ok: true, flaky: true, runs: 2, counted: 2, rerun: [], note: /reran the whole command \(the pinned runner has no file selector \(gates\.tests_proof_cmd with \{tests\}\)\) once in the same checkout: exit 0/ }],
+    ['fails twice', { times: 2 }, { ok: false, flaky: false, runs: 2, counted: 1, rerun: ['test/flaky.test.js'], note: /Rerun: reran test\/flaky\.test\.js once in the same checkout: exit 1; the failure stands\. Failing on the rerun: sometimes fails\./ }],
+    ['fails once under the full suite command', { times: 1, head: 'suite' }, { ok: true, flaky: true, runs: 2, counted: 2, rerun: [], note: unnamed }],
+    // The first part's flaky failure stops the chain, so only a whole rerun reaches the broken part.
+    ['fails once before a part that always fails', { times: 1, head: 'chain' }, { ok: false, flaky: false, runs: 2, counted: 0, broken: 1, rerun: [], note: new RegExp(`${unnamed.source}: exit 1; the failure stands\\. Failing on the rerun: test/broken\\.test\\.js`) }],
+    ['fails once with no file selector', { times: 1, head: 'suite', selector: false }, { ok: true, flaky: true, runs: 2, counted: 2, rerun: [], note: whole('the pinned runner has no file selector \\(gates\\.tests_proof_cmd with \\{tests\\}\\)') }],
     // A failure printed before the kept tail would go unnamed, so the whole command reruns.
-    ['fails once with its output cut', { times: 1, cut: true }, { ok: true, flaky: true, runs: 2, counted: 2, rerun: [], note: /reran the whole command \(the first run's output was cut to its last \d+ characters\) once in the same checkout: exit 0/ }],
+    ['fails once with its output cut', { times: 1, cut: true }, { ok: true, flaky: true, runs: 2, counted: 2, rerun: [], note: whole("the first run's output was cut to its last \\d+ characters") }],
     // The reverted run fails test/add.test.js as the proof wants, and that failure is not rerun.
-    ['fails once in prove mode', { times: 1, mode: 'prove' }, { ok: true, flaky: true, runs: 3, counted: 2, rerun: ['test/flaky.test.js'], note: /flaky: test\/flaky\.test\.js > sometimes fails\./ }],
+    ['fails once in prove mode', { times: 1, head: 'suite', mode: 'prove' }, { ok: true, flaky: true, runs: 3, counted: 3, rerun: [], note: /flaky: test\/flaky\.test\.js > sometimes fails\./ }],
   ]) {
     const marker = path.join(tmp, `flaky-${branches}`);
     const counted = path.join(tmp, `flaky-counted-${branches}`);
+    const broken = path.join(tmp, `flaky-broken-${branches}`);
+    const { cmd, run, tests = { mode } } = heads[head];
     const sha = task({
-      'lib/add.js': FIX,
-      'test/add.test.js': ADD_TEST,
+      // A crucial head of a test-only diff runs the selector alone, with no proof runs.
+      ...(head === 'crucial' ? {} : { 'lib/add.js': FIX, 'test/add.test.js': ADD_TEST }),
       'test/counted.test.js': `require('fs').appendFileSync(${JSON.stringify(counted)}, 'x');\n`,
+      ...(head === 'chain' ? { 'test/broken.test.js': `require('fs').appendFileSync(${JSON.stringify(broken)}, 'x');\nthrow new Error('always broken');\n` } : {}),
       'test/flaky.test.js': `const { test } = require('node:test');
 const assert = require('node:assert');
 const fs = require('node:fs');
@@ -648,28 +667,32 @@ test('sometimes fails', () => {
 });
 `,
     });
-    const project = { tests: { mode }, gates: { tests_cmd: suite, ...(selector ? { tests_proof_cmd: `${spec} {tests}` } : {}) } };
-    const r = await gate.run(ctx(sha, { args: { cmd: suite }, project }));
+    const project = { tests, gates: { tests_cmd: cmd, ...(selector ? { tests_proof_cmd: `${spec} {tests}` } : {}) } };
+    const r = await gate.run(ctx(sha, { args: { cmd }, project }));
     assert.equal(r.ok, want.ok, `${name}: ${r.summary}`);
     assert.match(r.summary, want.note, name);
     assert.deepEqual(r.receipt.reruns, [{ step: 'head', files: want.rerun, ok: want.ok }], name);
     assert.equal(!!r.confirmed_failure, !want.ok, name);
-    assert.equal(readPublished(marker, 'utf8').length, want.runs, `${name}: flaky test runs`);
-    assert.equal(readPublished(counted, 'utf8').length, want.counted, `${name}: passing file runs`);
+    const count = (file) => (fs.existsSync(file) ? readPublished(file, 'utf8').length : 0);
+    assert.equal(count(marker), want.runs, `${name}: flaky test runs`);
+    assert.equal(count(counted), want.counted, `${name}: passing file runs`);
+    assert.equal(count(broken), want.broken ?? 0, `${name}: broken file runs`);
     if (!want.flaky) {
       assert.equal(r.flaky, undefined, name);
       continue;
     }
+    // The head line gives the first run's exit beside the rerun's.
+    assert.match(r.summary, /: exit 1, then exit 0 on its rerun\n/, name);
     assert.equal(r.flaky.length, 1, name);
     const [flaky] = r.flaky;
     assert.equal(flaky.test, 'test/flaky.test.js > sometimes fails', name);
     assert.equal(flaky.step, 'head', name);
     assert.deepEqual(flaky.files, ['test/flaky.test.js'], name);
-    assert.equal(flaky.first_failure.command, suite, name);
+    assert.equal(flaky.first_failure.command, run, name);
     assert.equal(flaky.first_failure.status, 1, name);
     assert.match(flaky.first_failure.error, /flaked on run 0/, name);
     assert.match(flaky.first_failure.excerpt, /^✖ sometimes fails[^\n]*\n[\s\S]*flaked on run 0/, name);
-    assert.equal(flaky.rerun.command, selector && !cut ? `${spec} ${shellQuote('test/flaky.test.js')}` : suite, name);
+    assert.equal(flaky.rerun.command, want.rerun.length ? `${spec} ${shellQuote('test/flaky.test.js')}` : run, name);
     assert.equal(flaky.rerun.status, 0, name);
     assert.ok(flaky.rerun.duration_ms >= 0 && flaky.first_failure.duration_ms >= 0, name);
     assertCleanedUp();

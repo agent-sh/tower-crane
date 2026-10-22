@@ -48,9 +48,9 @@ test('base runs only the file holding both failing names, then a later gate reus
   const first = await gate.run(context());
   assert.deepEqual(first.main_failure?.names, ['first failure', 'second failure'], first.summary);
   assert.equal(first.confirmed_failure, undefined);
-  // The head, its one rerun of the failing file, then the base run of that file.
-  assert.deepEqual(rows().map((r) => r.files), [['test/fail.test.js', 'test/pass.test.js'], ['test/fail.test.js'], ['test/fail.test.js']]);
-  assert.deepEqual(first.receipt.reruns, [{ step: 'head', files: ['test/fail.test.js'], ok: false }]);
+  // The head, its one rerun (whole, since the head is not the file selector), then the base run of the failing file.
+  assert.deepEqual(rows().map((r) => r.files), [['test/fail.test.js', 'test/pass.test.js'], ['test/fail.test.js', 'test/pass.test.js'], ['test/fail.test.js']]);
+  assert.deepEqual(first.receipt.reruns, [{ step: 'head', files: [], ok: false }]);
   assert.deepEqual(first.receipt.base_rerun.files, ['test/fail.test.js']);
   assert.equal(first.receipt.base_rerun.results[0].cached, false);
   assert.equal(first.receipt.base_rerun.base, baseSha);
@@ -68,8 +68,9 @@ test('two concurrent gates share one base file and host settings invalidate the 
   contexts[1].task.id = 'T2';
   const results = await Promise.all(contexts.map((c) => gate.run(c)));
   const newRows = rows().slice(before);
-  // Each gate's rerun of its failing file, and one base run the two share.
-  assert.equal(newRows.filter((r) => r.files.length === 1).length, 3);
+  // Each gate's head and whole rerun, and one base run of the failing file the two share.
+  assert.equal(newRows.filter((r) => r.files.length === 2).length, 4);
+  assert.equal(newRows.filter((r) => r.files.length === 1).length, 1);
   assert.deepEqual(results.map((r) => r.receipt.base_rerun.results[0].cached).sort(), [false, true]);
   assert.ok(newRows.every((r) => r.host === undefined && r.exclude === '[]' && r.sandbox === '0'));
 });
@@ -158,7 +159,7 @@ test('nested spec failures keep the base run scoped for suites and subtests', as
     assert.equal(result.receipt.base_rerun.mode, 'files', label);
     assert.deepEqual(result.receipt.base_rerun.files, ['test/fail.test.js'], label);
     assert.deepEqual(rows().slice(before).map((r) => r.files),
-      [['test/fail.test.js', 'test/pass.test.js'], ['test/fail.test.js'], ['test/fail.test.js']], label);
+      [['test/fail.test.js', 'test/pass.test.js'], ['test/fail.test.js', 'test/pass.test.js'], ['test/fail.test.js']], label);
   }
 });
 
