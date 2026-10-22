@@ -484,8 +484,9 @@ test('the suite profile records each test of a real run with its CPU', { skip: p
   fs.writeFileSync(fixture, `
 const assert = require('node:assert/strict');
 require('node:test')('waits', () => { assert.equal(Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 400), 'timed-out'); }); // wait-allow: the profile measures a timer wait
-require('node:test')('spins', () => { const end = Date.now() + 400; let n = 0; while (Date.now() < end) n++; assert.ok(n > 0); }); // wait-allow: the profile measures CPU work
+require('node:test')('spins', () => { const cpu = () => { const u = process.cpuUsage(); return (u.user + u.system) / 1000; }; const end = cpu() + 400; let n = 0; while (cpu() < end) n++; assert.ok(n > 0); }); // wait-allow: the profile measures CPU work
 `);
+  // The spin counts its own CPU, not wall time, so a loaded host still gives it 400 ms of CPU.
   const out = path.join(h.base, 'profile.json');
   // This checkout stands in for the baseline, so the verdict is a coin toss; the exit follows it.
   // The request is over any core count, so the report must name the runner's capped workers.
@@ -527,8 +528,8 @@ test('the suite profile runs a baseline commit from a worktree it removes afterw
   h.git(['add', '.']);
   h.git(['commit', '-qm', 'baseline suite']);
   const baseline = h.git(['rev-parse', 'HEAD']);
-  // The head's test spins, so its file CPU is the larger whatever the load.
-  one("const end = Date.now() + 400; let n = 0; while (Date.now() < end) n++; require('node:assert/strict').ok(n > 0);"); // wait-allow: the profile measures CPU work
+  // The head's test spins until it has used 400 ms of CPU, so its file CPU is the larger whatever the load.
+  one("const cpu = () => { const u = process.cpuUsage(); return (u.user + u.system) / 1000; }; const end = cpu() + 400; let n = 0; while (cpu() < end) n++; require('node:assert/strict').ok(n > 0);"); // wait-allow: the profile measures CPU work
   const out = path.join(h.base, 'profile.json');
   const r = cp.spawnSync(process.execPath, [path.join(h.repo, 'scripts', 'suite-profile.js'), '--test-concurrency=1', '--baseline', baseline, '--json', out, 'test/one.test.js'],
     { cwd: h.repo, env: { ...h.env, TOWER_CRANE_TEST_TMP: h.base, TOWER_CRANE_SANDBOX: '0' }, encoding: 'utf8', timeout: 300000 });
