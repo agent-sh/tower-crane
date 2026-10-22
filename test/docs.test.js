@@ -48,7 +48,7 @@ test('the eight state areas, compatibility redirects and every docs link resolve
   assert.deepEqual(fs.readdirSync(path.join(ROOT, 'docs', 'state')).sort(), areas.map((area) => `${area}.md`));
   const index = fs.readFileSync(path.join(ROOT, 'docs', 'state.md'), 'utf8');
   for (const area of areas) assert.ok(index.includes(`](state/${area}.md)`), area);
-  for (const anchor of ['agent-identity', 'authority', 'tasksjson', 'acceptance-gates', 'final-review', 'lock', 'repeated-review-failures']) {
+  for (const anchor of ['agent-identity', 'authority', 'tasksjson', 'pr-owners', 'acceptance-gates', 'final-review', 'lock', 'repeated-review-failures']) {
     assert.ok(index.includes(`<a id="${anchor}"></a>`), anchor);
   }
   check(ROOT);

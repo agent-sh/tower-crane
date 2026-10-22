@@ -4,7 +4,7 @@
 
 Trusted watchers and dispatch supervisors consume lifecycle events as
 software reactions. They run submission gates, dispatch review after the
-tracked worker exits, accept independent passing review, merge accepted
+tracked worker exits or while it waits as the PR's owner, accept independent passing review, merge accepted
 PRs with green gates, and detect conflicting outstanding PRs after merges.
 Conflict rework names the hand-written files. Generated-file repair can
 advance the worker branch or leave a mixed merge prepared. Native

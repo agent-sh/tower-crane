@@ -75,9 +75,10 @@ A prepared receipt retries the same commit after a failed push, or confirms
 it after a push whose executor stopped before updating state.
 The following automatic `submit` changes the sha and returns an accepted
 task to `submitted`, preserving `submitted_by`, revision and historical
-evidence. Its event adds `generated` and `base_sha`; gates and review at the
-old sha no longer count. `generated merge` then records `phase: pushed`.
-Mixed conflicts produce rework and a `phase: mixed` receipt with
+evidence. Its event adds `generated` and `base_sha`, and `owner` with the name of an
+owner waiting on the old head, which keeps the PR ([PR owners](tasks.md#pr-owners));
+gates and review at the old sha no longer count. `generated merge` then records `phase: pushed`.
+Mixed conflicts produce rework, handed back to a waiting owner as any rework is, and a `phase: mixed` receipt with
 `{sha, revision, base_sha, branch, path, generated, remaining, regenerated, commands}`.
 Its `revision` is the new revision returned by rework; the executor refuses
 the receipt if the task changes again before that receipt is recorded.
