@@ -363,3 +363,111 @@ test('test/run.js with TC_TEST_COVERAGE_DIR writes the coverage map of the files
   // The CLI the test starts counts: bin/tower-crane.js only runs in those processes.
   assert.deepEqual(artifact.map['bin/tower-crane.js'], ['test/commands.test.js']);
 });
+
+test('coverage preloads follow child launch variants through both map runners', async (t) => {
+  const h = makeRepo(t);
+  for (const file of ['test/run.js', 'test/signals.js', 'test/atomic-file.js', 'test/tmp-root.js',
+    'test/global-setup.js', 'test/repo-seed.js', 'test/host.js',
+    'test/fixtures/user-config-guard.js', 'test/fixtures/report-guard.js', 'test/fixtures/no-fsync.js', 'scripts/tests-coverage-map.js',
+    'lib/tests-coverage.js', 'lib/tests-coverage-scope.js', 'lib/tests-coverage-reads.js']) {
+    fs.mkdirSync(path.dirname(path.join(h.repo, file)), { recursive: true });
+    fs.copyFileSync(path.join(ROOT, file), path.join(h.repo, file));
+  }
+  fs.mkdirSync(path.join(h.repo, 'test/gates'), { recursive: true });
+  const launches = {
+    'spawn-sync': "const r = cp.spawnSync(process.execPath, [file]); assert.equal(r.status, 0, String(r.stderr));",
+    'exec-file-sync': "cp.execFileSync(process.execPath, [file]);",
+    spawn: "await new Promise((resolve, reject) => { const child = cp.spawn(process.execPath, [file], { stdio: 'inherit' }); child.on('error', reject); child.on('exit', (code) => { assert.equal(code, 0); resolve(); }); });",
+    'exec-file': "await new Promise((resolve, reject) => cp.execFile(process.execPath, [file], (err) => err ? reject(err) : resolve()));",
+    fork: "await new Promise((resolve, reject) => { const child = cp.fork(file, [], { stdio: 'inherit' }); child.on('error', reject); child.on('exit', (code) => { assert.equal(code, 0); resolve(); }); });",
+    esm: "cp.execFileSync(process.execPath, [file]);",
+    grandchild: "cp.execFileSync(process.execPath, ['-e', \"require('node:child_process').execFileSync(process.execPath, [process.argv[1]])\", file]);",
+  };
+  const suites = [];
+  for (const [name, launch] of Object.entries(launches)) {
+    const file = `child-${name}.${name === 'esm' ? 'mjs' : 'js'}`;
+    const imports = name === 'esm'
+      ? "import { readFileSync } from 'node:fs'; import assert from 'node:assert/strict';"
+      : "const { readFileSync } = require('node:fs'), assert = require('node:assert/strict');";
+    fs.writeFileSync(path.join(h.repo, file), `${imports}
+assert.ok(process.env.NODE_OPTIONS.includes('--no-warnings'));
+assert.equal(JSON.parse(readFileSync('${name}.json', 'utf8')).value, 1);
+`);
+    fs.writeFileSync(path.join(h.repo, `${name}.json`), '{"value":1}\n');
+    const suite = `test/${name}.test.js`;
+    suites.push(suite);
+    fs.writeFileSync(path.join(h.repo, suite), `
+const cp = require('node:child_process'), assert = require('node:assert/strict');
+require('node:test')('${name}', async () => { const file = './${file}'; ${launch} });
+`);
+  }
+  h.git(['add', '.']);
+  h.git(['commit', '-qm', 'child launch fixture']);
+  for (const mode of ['ci', 'script']) {
+    const dir = path.join(h.base, mode);
+    const args = mode === 'ci'
+      ? ['test/run.js', '--test-concurrency=2', ...suites]
+      : ['scripts/tests-coverage-map.js', 'run', '--dir', dir, '--', process.execPath, '--test', '--test-concurrency=2', ...suites];
+    const r = cp.spawnSync(process.execPath, args, { cwd: h.repo,
+      env: { ...h.env, NODE_OPTIONS: '--no-warnings', TC_TEST_COVERAGE_DIR: mode === 'ci' ? dir : '' }, encoding: 'utf8' });
+    assert.equal(r.status, 0, `${mode}: ${r.stderr}${r.stdout}`);
+    const artifact = JSON.parse(fs.readFileSync(path.join(dir, 'tests-coverage-map.json'), 'utf8'));
+    for (const name of Object.keys(launches)) {
+      await t.test(`${mode}: ${name}`, () => {
+        assert.deepEqual(artifact.map[`${name}.json`], [`test/${name}.test.js`]);
+      });
+    }
+  }
+});
+
+test('coverage open flag variants count default reads and exclude failed or write-only opens', async (t) => {
+  const h = makeRepo(t);
+  fs.mkdirSync(path.join(h.repo, 'test'), { recursive: true });
+  const rows = [
+    ['sync-default', "fs.openSync(file)", true],
+    ['sync-undefined', "fs.openSync(file, undefined)", true],
+    ['sync-read', "fs.openSync(file, 'r')", true],
+    ['sync-read-write', "fs.openSync(file, 'r+')", true],
+    ['sync-numeric-read', 'fs.openSync(file, fs.constants.O_RDONLY)', true],
+    ['sync-write', "fs.openSync(file, 'w')", false],
+    ['sync-numeric-write', 'fs.openSync(file, fs.constants.O_WRONLY)', false],
+    ['callback-default', 'await open(file)', true],
+    ['callback-undefined', 'await open(file, undefined)', true],
+    ['callback-read', "await open(file, 'r')", true],
+    ['callback-write', "await open(file, 'w')", false],
+    ['promise-default', 'await fs.promises.open(file)', true],
+    ['promise-undefined', 'await fs.promises.open(file, undefined)', true],
+    ['promise-read', "await fs.promises.open(file, 'r')", true],
+    ['promise-write', "await fs.promises.open(file, 'w')", false],
+    ['sync-missing', 'fs.openSync(file)', false, true],
+    ['callback-missing', 'await open(file)', false, true],
+    ['promise-missing', 'await fs.promises.open(file)', false, true],
+  ];
+  const code = [];
+  for (const [name, call, measured, missing] of rows) {
+    if (!missing) fs.writeFileSync(path.join(h.repo, `${name}.json`), '{"value":1}\n');
+    const body = missing ? `await assert.rejects(async () => { ${call}; });` : `
+const handle = ${call};
+const fd = typeof handle === 'number' ? handle : handle.fd;
+try { ${measured ? "assert.equal(JSON.parse(fs.readFileSync(fd, 'utf8')).value, 1);" : ''} }
+finally { if (typeof handle === 'number') fs.closeSync(handle); else await handle.close(); }`;
+    code.push(`test('${name}', async () => { const file = '${name}.json'; ${body} });`);
+  }
+  fs.writeFileSync(path.join(h.repo, 'test/open.test.js'), `
+const test = require('node:test'), fs = require('node:fs'), assert = require('node:assert/strict');
+const open = (...args) => new Promise((resolve, reject) => fs.open(...args, (err, fd) => err ? reject(err) : resolve(fd)));
+${code.join('\n')}
+`);
+  h.git(['add', '.']);
+  h.git(['commit', '-qm', 'open flags fixture']);
+  const dir = path.join(h.base, 'coverage');
+  const r = cp.spawnSync(process.execPath, [path.join(ROOT, 'scripts/tests-coverage-map.js'), 'run', '--dir', dir, '--',
+    process.execPath, '--test', 'test/open.test.js'], { cwd: h.repo, env: h.env, encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  const artifact = JSON.parse(fs.readFileSync(path.join(dir, 'tests-coverage-map.json'), 'utf8'));
+  for (const [name, , measured] of rows) {
+    await t.test(name, () => {
+      assert.deepEqual(artifact.map[`${name}.json`], measured ? ['test/open.test.js'] : undefined);
+    });
+  }
+});
