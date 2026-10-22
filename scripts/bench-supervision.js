@@ -169,7 +169,9 @@ async function measure() {
     const exitStart = performance.now();
     while (alive(monitor) && performance.now() - exitStart < EXIT_BOUND_MS) await pause(100);
     const monitorExitS = alive(monitor) ? null : (performance.now() - exitStart) / 1000;
-    return { windows, monitor_exit_s: monitorExitS, log_bytes: fs.statSync(log).size, stderr: stderr.trim().slice(-2000) };
+    // The governor's measuring tick reads every process on the host, so its cost scales with this count.
+    const hostProcs = fs.readdirSync('/proc').filter((name) => /^\d+$/.test(name)).length;
+    return { windows, monitor_exit_s: monitorExitS, log_bytes: fs.statSync(log).size, host_procs: hostProcs, stderr: stderr.trim().slice(-2000) };
   } finally {
     if (host && host.exitCode === null) { host.kill('SIGINT'); await closed; }
     fs.writeFileSync(finish, '');

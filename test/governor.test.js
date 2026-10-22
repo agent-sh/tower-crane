@@ -770,6 +770,28 @@ test('a dispatch from an orchestrator\'s own scope is not deferred by room a wai
   assert.deepEqual(G.read(host.env).others.map((o) => [o.level, o.bytes]), [['host', 14 * GiB]], 'the sample names its level');
 });
 
+test('a supervisor leaves the measuring tick to a process that leads while that one keeps ticking', (t) => {
+  const rows = [
+    ['a lead ticked 2.5 s ago: a supervisor waits', { lead: true }, 2500, false, 2, false],
+    ['a lead ticked 4.5 s ago: a supervisor takes the turn', { lead: true }, 4500, false, 2, true],
+    ['a supervisor ticked 2.5 s ago: another supervisor takes the turn', { lead: false }, 2500, false, 2, true],
+    ['a registry from before ticked_by: a supervisor takes the turn', null, 2500, false, 2, true],
+    ['a lead ticked 2.5 s ago: another lead takes the turn', { lead: true }, 2500, true, 2, true],
+    ['a lead ticked 1 s ago: a lead waits', { lead: true }, 1000, true, 2, false],
+    ['past the stop line a supervisor ticks at once', { lead: true }, 100, false, 9.7, true],
+  ];
+  for (const [name, by, age, lead, used, ticks] of rows) {
+    const host = fakeHost(t, { limit: 10, used });
+    fs.mkdirSync(G.dir(host.env), { recursive: true });
+    const at = new Date(Date.now() - age).toISOString();
+    fs.writeFileSync(G.registryFile(host.env), JSON.stringify({ version: 1, units: [], ticked_at: at, ...(by && { ticked_by: { pid: 1, ...by } }) }));
+    G.tick(host.env, null, { lead });
+    const reg = G.read(host.env);
+    assert.equal(reg.ticked_at !== at, ticks, `${name}: ticked`);
+    if (ticks) assert.deepEqual(reg.ticked_by, { pid: process.pid, lead }, `${name}: the tick names its process`);
+  }
+});
+
 // A worker unit whose holder is a live stand-in supervisor, past the stop line.
 function stoppable(t, host, unit) {
   fs.mkdirSync(G.dir(host.env), { recursive: true });
