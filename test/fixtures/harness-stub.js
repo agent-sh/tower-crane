@@ -163,6 +163,8 @@ module.exports = function stub(harness) {
     report.mcp = Object.fromEntries(Object.keys(config.mcp_servers || {}).map((k) => [k, true]));
     report.auth = read(path.join(dir, 'auth.json'));
     report.env = read(path.join(dir, '.env'));
+    // Names only: what codex would hand its commands, before its policy.
+    report.envNames = Object.keys(process.env).sort();
     // codex resolves :tmpdir from the TMPDIR it starts with.
     report.tmpdir = process.env.TMPDIR || null;
     report.tmpEnv = { TMP: process.env.TMP || null, TEMP: process.env.TEMP || null, JAVA_TOOL_OPTIONS: process.env.JAVA_TOOL_OPTIONS || null };
