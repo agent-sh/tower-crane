@@ -9,19 +9,37 @@ const fs = require('node:fs');
 
 const BASE = 2n ** 63n;
 
+// Ids a test chooses, whatever id the runner hands out. Past 2^63 a Number
+// keeps multiples of 2^11: `exact` ids are such multiples and survive a Number
+// unchanged, `rounds` ids sit one past one and always round. The low 48 bits
+// of a real id (an NTFS file record number, a Unix inode) keep live files apart.
+const INJECTED = {
+  exact: (ino) => BASE + (ino % 2n ** 48n) * 2n ** 12n,
+  rounds: (ino) => BASE + (ino % 2n ** 48n) * 2n ** 12n + 1n,
+};
+
 // `exact` maps a file's real inode to its simulated exact id.
 function windowsFileIds(exact = (ino) => BASE + ino) {
   const originals = { statSync: fs.statSync, lstatSync: fs.lstatSync, fstatSync: fs.fstatSync };
   for (const [name, original] of Object.entries(originals)) {
-    fs[name] = function windowsIds(...args) {
-      const st = original.apply(this, args);
-      if (st) st.ino = typeof st.ino === 'bigint' ? exact(st.ino) : Number(exact(BigInt(st.ino)));
+    fs[name] = function windowsIds(target, options, ...rest) {
+      const st = original.call(this, target, options, ...rest);
+      if (!st) return st;
+      if (typeof st.ino === 'bigint') st.ino = exact(st.ino);
+      else {
+        // Node rounds a Number ino from the exact id once. A Windows runner's
+        // real id is already past 2^53, so shifting the rounded Number would
+        // round twice and can land on another value than the exact id does.
+        const big = original.call(this, target, { ...options, bigint: true }, ...rest);
+        st.ino = Number(exact(big ? big.ino : BigInt(st.ino)));
+      }
       return st;
     };
   }
   return () => Object.assign(fs, originals);
 }
 
-if (process.env.TOWER_CRANE_TEST_WINDOWS_IDS) windowsFileIds();
+const preload = process.env.TOWER_CRANE_TEST_WINDOWS_IDS;
+if (preload) windowsFileIds(INJECTED[preload]);
 
-module.exports = { windowsFileIds, BASE };
+module.exports = { windowsFileIds, BASE, INJECTED };
