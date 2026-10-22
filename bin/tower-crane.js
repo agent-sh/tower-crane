@@ -24,6 +24,7 @@ for (const stream of [process.stdout, process.stderr]) {
 const { TowerCraneError, usage, refuse, readStdin } = require('../lib/util');
 const { isatty } = require('node:tty');
 const S = require('../lib/state');
+const T = require('../lib/tasks');
 
 const { str, bool } = require('../lib/commands-specs');
 
