@@ -181,3 +181,51 @@ test('budget alert questions cannot reuse setting-approval decisions', () => {
   assert.equal(repeated.opened, false);
   assert.equal(emitted.length, 1);
 });
+
+test('generated spend questions retain budget authority and reuse only matching question kinds', () => {
+  const D = require('../lib/decisions');
+  for (const scope of ['project', 'T1']) {
+    for (const what of ['hours', 'tokens']) {
+      for (const row of [
+        { name: 'new question' },
+        { name: 'spend question', kind: 'spend', reuse: true },
+        { name: 'legacy question', legacy: true },
+        { name: 'technical question', kind: 'technical' },
+        { name: 'approval request', kind: 'spend', approval: true },
+        { name: 'owner-lifted spend question', kind: 'spend', reuse: true, technical: true },
+      ]) {
+        const label = `${scope}/${what}/${row.name}`;
+        const escalation = { settings: ['budget.raise'], change: { scope, what, limit: 10 } };
+        const existing = row.kind || row.legacy ? {
+          id: 'D1', status: 'open', options: [], answerers: [], technical: !!row.technical,
+          ...(row.kind ? { kind: row.kind } : {}),
+          ...(row.approval ? { approval_request: true } : {}), escalation,
+        } : null;
+        const before = existing && structuredClone(existing);
+        const st = { project: {}, events: [], decisions: { next: existing ? 2 : 1, decisions: existing ? [existing] : [] } };
+        const emitted = [];
+        const result = Authority.escalateQuestion('worker', st, (task, detail, cmd) => emitted.push({ task, detail, cmd }),
+          escalation, 'Budget crossed', 'Choose a limit', scope === 'project' ? [] : [scope], { kind: 'spend' });
+        assert.equal(result.opened, !row.reuse, label);
+        assert.equal(result.decision.kind, 'spend', label);
+        assert.notEqual(result.decision.approval_request, true, label);
+        assert.equal(D.orchestratorAnswers(st, result.decision), !!row.technical, label);
+        if (!row.technical) {
+          assert.throws(() => D.answerRule(st, result.decision, { agent: 'orchestrator', agentExplicit: true, env: {} }),
+            /only the owner/, label);
+        }
+        if (row.reuse) assert.equal(emitted.length, 0, label);
+        else {
+          assert.equal(emitted.length, 1, label);
+          assert.equal(emitted[0].detail.kind, 'spend', label);
+        }
+        if (existing) assert.deepEqual(existing, before, `${label}: existing delegation is retained`);
+        if (row.legacy) {
+          assert.equal(D.orchestratorAnswers(st, existing), false, `${label}: the old alert remains owner-only`);
+          assert.throws(() => D.answerRule(st, existing, { agent: 'orchestrator', agentExplicit: true, env: {} }),
+            /only the owner/, label);
+        }
+      }
+    }
+  }
+});

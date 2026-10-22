@@ -153,7 +153,7 @@ if (env.HOOK_WATCH_READY || env.HOOK_NO_WATCH || env.HOOK_SILENT_WATCH) {
 }
 const STATE = env.HOOK_STATE ? path.resolve(env.HOOK_STATE) : null;
 const LOCK = STATE ? path.join(STATE, 'lock') : null;
-const WRAPPED = ['openSync', 'closeSync', 'readFileSync', 'readSync', 'writeFileSync', 'writeSync', 'appendFileSync', 'fsyncSync', 'renameSync', 'unlinkSync', 'rmdirSync', 'rmSync', 'linkSync', 'statSync', 'readdirSync', 'mkdirSync', 'existsSync', 'utimesSync'];
+const WRAPPED = ['openSync', 'closeSync', 'readFileSync', 'readSync', 'writeFileSync', 'writeSync', 'appendFileSync', 'fsyncSync', 'renameSync', 'unlinkSync', 'rmdirSync', 'rmSync', 'linkSync', 'statSync', 'lstatSync', 'readdirSync', 'mkdirSync', 'existsSync', 'utimesSync'];
 // Calls that remove or move what is at their first argument.
 const CHANGES = ['renameSync', 'unlinkSync', 'rmdirSync', 'rmSync', 'linkSync'];
 const BUSY = ['EEXIST', 'ENOTEMPTY', 'ENOTDIR', 'EPERM', 'EACCES'];
@@ -199,11 +199,16 @@ function barrier() {
 
 const once = {};
 let busyRenames = 0;
+// HOOK_SHARING_WINDOW: when the first refusal came, and each file's refusals
+// left before its next access goes through.
+let sharingFrom = null;
+const sharingLeft = new Map();
 const descriptors = new Map();
-// The loaded state module treats EPERM as Windows does, as a sharing refusal.
+// The loaded module that lists the sharing refusals (lib/sharing.js, or
+// lib/state.js in older versions) treats EPERM as Windows does.
 function windowsSharing() {
   for (const m of Object.values(require.cache)) {
-    const busy = m.filename.endsWith(path.join('lib', 'state.js')) && m.exports.SHARING_BUSY;
+    const busy = path.basename(path.dirname(m.filename)) === 'lib' && m.exports?.SHARING_BUSY;
     if (Array.isArray(busy) && !busy.includes('EPERM')) busy.push('EPERM');
   }
 }
@@ -231,7 +236,7 @@ if (env.HOOK_DISPATCH_EXPIRE) {
   Object.defineProperty(performance, 'now', { value: () => now() + monotonicSkew, configurable: true });
 }
 
-function before(name, args) {
+function before(name, args, raw = args) {
   const target = args[0];
   // Stdin is read with readStdin (readSync) or a bare readFileSync(0).
   if (env.HOOK_STDIN_READY && (name === 'readFileSync' || name === 'readSync') && target === 0) {
@@ -275,6 +280,33 @@ function before(name, args) {
     && path.basename(process.argv[1] || '') === 'spawn-monitor.js' && real.existsSync(env.HOOK_BUSY_READ) && first(`busy-${name}`)) {
     windowsSharing();
     throw Object.assign(new Error(`EPERM: operation not permitted, ${name === 'statSync' ? 'stat' : 'open'} '${target}'`), { code: 'EPERM' });
+  }
+  // HOOK_SHARING_WINDOW=FILE: once FILE exists, in the process running the
+  // script HOOK_SHARING_IN names, a stat, lstat, open or read by name of a
+  // state file, the event log, its cuts or a progress file fails with EPERM,
+  // as on Windows while a scanner or the indexer holds it. After each access
+  // that goes through, the next HOOK_SHARING_REFUSALS (default 2; 0: every
+  // one) to that file fail, so every place that reads it meets a refusal
+  // first. It lasts HOOK_SHARING_WINDOW_MS (default 1000; 0: for good) from
+  // the first refusal. The process's sharing module then treats EPERM as
+  // Windows does. Each refusal appends "CALL NAME" to FILE.
+  if (env.HOOK_SHARING_WINDOW && ['statSync', 'lstatSync', 'openSync', 'readFileSync'].includes(name) && typeof raw[0] === 'string'
+    && inState(target) && !inLock(target) && path.basename(process.argv[1] || '') === env.HOOK_SHARING_IN) {
+    const rel = path.relative(STATE, path.resolve(target)).split(path.sep).join('/');
+    const windowMs = Number(env.HOOK_SHARING_WINDOW_MS ?? 1000);
+    if (/^((project|tasks|decisions)\.json|events(\.cuts)?\.jsonl|progress\/[^/]+\.jsonl)$/.test(rel) && real.existsSync(env.HOOK_SHARING_WINDOW)
+      && (sharingFrom === null || !windowMs || systemNow() - sharingFrom < windowMs)) {
+      const refusals = Number(env.HOOK_SHARING_REFUSALS ?? 2);
+      const left = sharingLeft.get(rel) ?? refusals;
+      if (!refusals || left > 0) {
+        sharingLeft.set(rel, left - 1);
+        sharingFrom ??= systemNow();
+        windowsSharing();
+        real.appendFileSync(env.HOOK_SHARING_WINDOW, `${name} ${rel}\n`);
+        throw Object.assign(new Error(`EPERM: operation not permitted, ${name === 'openSync' || name === 'readFileSync' ? 'open' : name.replace('Sync', '')} '${target}'`), { code: 'EPERM' });
+      }
+      sharingLeft.delete(rel);
+    }
   }
   // HOOK_DIE_RECORDING_CUT=1: a lock holder is killed as it opens
   // events.cuts.jsonl, after recovery cut the log and before it recorded the cut.
@@ -432,7 +464,7 @@ if (STATE) {
     const lockArg = { openSync: 0, renameSync: 1 }[name];
     fs[name] = function hooked(...args) {
       const observed = typeof args[0] === 'number' && descriptors.has(args[0]) ? [descriptors.get(args[0]), ...args.slice(1)] : args;
-      before(name, observed);
+      before(name, observed, args);
       let out;
       try {
         out = orig.apply(this, args);
@@ -540,6 +572,23 @@ if (env.HOOK_FETCH_ERROR) {
       const e = new Error('git fetch failed');
       e.stderr = env.HOOK_FETCH_ERROR;
       e.status = 1;
+      throw e;
+    }
+    return orig.call(this, file, args, options);
+  };
+}
+
+// HOOK_ORIGIN_READ_FAIL=once|always: git remote get-url origin fails as a
+// config read Windows refuses while a scanner holds the file; once fails the
+// first call only.
+if (env.HOOK_ORIGIN_READ_FAIL) {
+  const orig = cp.execFileSync;
+  cp.execFileSync = function originReadError(file, args, options) {
+    const read = file === 'git' && args[0] === 'remote' && args[1] === 'get-url' && args[2] === 'origin';
+    if (read && (env.HOOK_ORIGIN_READ_FAIL === 'always' || first('origin-read'))) {
+      const e = new Error('git remote get-url origin failed');
+      e.stderr = "warning: unable to access '.git/config': Permission denied\nfatal: unable to access '.git/config': Permission denied\n";
+      e.status = 128;
       throw e;
     }
     return orig.call(this, file, args, options);
