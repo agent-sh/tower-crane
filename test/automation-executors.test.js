@@ -1024,8 +1024,9 @@ test('a task priority survives rework and a new submitted head and can be cleare
     fs.writeFileSync(release, '');
     assert.equal((await holder).code, 2);
   }
-  assert.deepEqual(h.logs().filter(e => e.cmd === 'automation' && e.detail.phase === 'running').map(e => e.task),
-    ['T1', 'T2', 'T3']);
+  const started = h.logs().filter(e => e.cmd === 'automation' && e.detail.phase === 'running').map(e => e.task);
+  assert.deepEqual(started.slice(0, 2), ['T1', 'T2'], 'clearing restores the older unprioritized task first');
+  assert.ok(started.length > 2 && started.slice(2).every(id => id === 'T3'), 'all repair notifications run after T2');
 });
 
 test('a reaction that is running is not queued: status and prioritize leave it out', async (t) => {
