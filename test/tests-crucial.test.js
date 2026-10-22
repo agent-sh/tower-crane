@@ -386,7 +386,7 @@ test('coverage preloads follow child launch variants through both map runners', 
     'exec-file': "await new Promise((resolve, reject) => cp.execFile(process.execPath, [file], (err) => err ? reject(err) : resolve()));",
     fork: "await new Promise((resolve, reject) => { const child = cp.fork(file, [], { stdio: 'inherit' }); child.on('error', reject); child.on('exit', (code) => { assert.equal(code, 0); resolve(); }); });",
     esm: "cp.execFileSync(process.execPath, [file]);",
-    grandchild: "cp.execFileSync(process.execPath, ['-e', \"require('node:child_process').execFileSync(process.execPath, [process.argv[1]])\", file]);",
+    grandchild: "cp.execFileSync(process.execPath, ['-e', \"require('node:child_process').execFileSync(process.execPath, ['./child-grandchild.js'])\"]);",
   };
   const suites = [];
   for (const [name, launch] of Object.entries(launches)) {
