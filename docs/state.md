@@ -94,3 +94,5 @@ Existing links use these anchors. Follow the link to the contract in its area.
 <a id="fallback-route-grants"></a>[fallback-route-grants](state/decisions.md#fallback-route-grants)
 
 <a id="native-crashes"></a>[native-crashes](state/tasks.md#native-crashes)
+
+<a id="final-review"></a>[final-review](state/gates.md#final-review)

@@ -61,6 +61,7 @@ Workers, reviewers and every other identity are refused both. For an operational
 | `gates.tests_timeout_min`, `gates.clean_timeout_min`, `gates.host_probe_timeout_min` | operational | `project set --tests-timeout-min`, `--clean-timeout-min`, `--host-probe-timeout-min` |
 | `gates.tmp_root` | operational | `project set --tmp-root` |
 | `gates.rework_hold_min` | operational | `project set --rework-hold-min` |
+| `gates.final_review` | operational | `project set --final-review`: the external reviewer command `accept` runs on the host |
 | `gates.priority` | operational | `gates prioritize ID --reason R`: a task's queued submitted gate reactions run before older submitted work; accepted merges stay first |
 | `ci.required`, `ci.ignore_apps`, `ci.capped_review` | operational | `project set --ci-required`, `--ci-ignore-apps`, `--ci-capped-review` |
 | `ci.local` | operational | `project set --ci-local`, `task update --ci-local` |
