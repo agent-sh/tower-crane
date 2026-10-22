@@ -698,6 +698,18 @@ test('repository seed maps docs contract checks from docs paths', () => {
   assert.deepEqual(seed['docs/**'], ['test/ci-required.test.js', 'test/shared-files.test.js']);
 });
 
+test('repository seed declares suites consuming JSON data that V8 cannot measure', () => {
+  const seed = require('../tools/tests-map.json');
+  for (const [file, suite] of [
+    ['tools/model-literals.json', 'test/model-config.test.js'],
+    ['tools/tests-map.json', 'test/tests-map.test.js'],
+  ]) {
+    assert.deepEqual(seed[file], [suite], file);
+    const data = JSON.parse(fs.readFileSync(path.join(ROOT, file), 'utf8'));
+    assert.ok(data && typeof data === 'object', file);
+  }
+});
+
 test('repository seed matches the current generated coverage', () => {
   const generated = require('node:child_process').execFileSync(process.execPath,
     [path.join(ROOT, 'tools/tests-map.js')], { cwd: ROOT, encoding: 'utf8', maxBuffer: Infinity });

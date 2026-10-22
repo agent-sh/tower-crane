@@ -48,6 +48,9 @@ for (const file of ['bin/tower-crane.js', 'lib/commands.js', 'lib/state.js', 'li
 }
 // The CLI loads handlers by path and starts modules in child processes, beyond static imports.
 for (const source of sources.filter(p => /^(bin|lib|hooks)\//.test(p))) map[source] = new Set(suites);
+// Data read from disk has no executed ranges in V8 coverage.
+map['tools/model-literals.json'] = new Set(['test/model-config.test.js']);
+map['tools/tests-map.json'] = new Set(['test/tests-map.test.js']);
 // npm discovers packed markdown at runtime, including files the test never names.
 map['**/*.md'] = new Set(['test/package.test.js']);
 map['docs/**'] = new Set(['test/ci-required.test.js', 'test/shared-files.test.js']);
