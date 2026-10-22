@@ -828,10 +828,12 @@ test('accepted merges take the next executor in acceptance order before queued s
   assert.match(text, /^gate queue: T5, T4, T3 \(prioritized: submitted gate request\), T2$/m);
   assert.deepEqual(queue.queued.map((q) => q.id), ['T5', 'T4', 'T3', 'T2']);
   const log = h.logs();
-  // T5's reaction checks and merges the whole line, so T4's head check moves T5's lease to T4.
+  // T5's reaction checks and merges the whole line; each head check takes a lease of its own.
   const holders = log.filter((e) => e.cmd === 'executor' && e.detail.phase === 'running').map((e) => e.task)
     .filter((id, i, all) => id !== all[i - 1]);
   assert.deepEqual(holders, ['T1', 'T5', 'T4', 'T3', 'T2']);
+  const checks = log.filter((e) => e.cmd === 'executor' && e.detail.kind === 'head check');
+  assert.equal(new Set(checks.map((e) => e.detail.lease)).size, 2, 'T5 and T4 hold separate head-check leases');
   assert.deepEqual(log.filter((e) => e.cmd === 'head check').map((e) => [e.task, e.detail.ok]),
     [['T5', true], ['T4', true]], 'merged-tree tests keep merge priority');
   assert.deepEqual(h.github().calls.filter((a) => a[1] === 'merge').map((a) => a[2]), ['8', '7']);
