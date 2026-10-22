@@ -316,7 +316,7 @@ test('default retry budget waits beyond the observed ten-minute outage and remai
     try { killPid(spawned.monitor_pid, 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') throw e; }
   });
   let elapsed = 0;
-  // Advance only the retry clock; process sampling and startup keep real deadlines.
+  // Advance the retry clock; process sampling and startup timers stay real.
   for (const [index, delay] of [30000, 60000, 120000, 240000, 480000].entries()) {
     await waitOnRepo(h, () => log(h).filter((e) => e.cmd === 'spawn phase' && e.detail.phase === 'retrying').length === index + 1,
       `retry ${index + 1} was not recorded`);
