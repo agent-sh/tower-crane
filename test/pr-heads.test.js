@@ -2,6 +2,8 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const { countHeads } = require('../lib/pr-heads');
 
 const old = 'a'.repeat(40);
@@ -40,3 +42,31 @@ test('invalid relevant history is unavailable rather than a zero count', () => {
   }
   assert.throws(() => countHeads([{}], { sha, branch, pr: 7, previous }), /invalid entry in PR head history/);
 });
+
+test('run creation time can place replaced heads in a later submit interval', () => {
+  const boundary = { at: '2026-10-01T10:00:05.500Z', detail: { sha: old } };
+  const lateRun = (head, extra = {}) => run(head, { created_at: '2026-10-01T11:00:00Z', ...extra });
+  for (const row of [
+    { name: 'late run of a head replaced before submit can overcount',
+      runs: [lateRun(intermediate, { event: 'push', created_at: '2026-10-01T10:00:06Z', pull_requests: [] }), lateRun(sha)], count: 2 },
+    { name: 'late workflows and reruns of that head still count once',
+      runs: [lateRun(intermediate), lateRun(intermediate, { event: 'push' }), lateRun(sha)], count: 2 },
+    { name: 'late run of the previous submitted head is excluded',
+      runs: [lateRun(old), lateRun(sha)], count: 1 },
+    { name: 'a replaced head without a run can be missed',
+      runs: [lateRun(sha)], count: 1 },
+    { name: 'a run created before the boundary is excluded',
+      runs: [lateRun(intermediate, { created_at: '2026-10-01T10:00:05Z' }), lateRun(sha)], count: 1 },
+  ]) {
+    assert.equal(countHeads(row.runs, { sha, branch, pr: 7, previous: boundary }), row.count, row.name);
+  }
+});
+
+for (const file of ['docs/state.md', 'docs/cli.md', 'changelog.d/T497.md']) {
+  test(`push history timing uncertainty in ${file}`, () => {
+    const text = fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
+    assert.ok(!/observed lower bound/i.test(text), 'the observed count is not a lower bound');
+    assert.ok(/heads that start no Actions run can be missed/.test(text), 'missing runs can undercount pushes');
+    assert.ok(/late run.*head replaced before the previous submit can be counted/i.test(text), 'late runs can overcount pushes');
+  });
+}
