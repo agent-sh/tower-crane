@@ -2,6 +2,66 @@
 
 Tasks may carry `stack: { parent, base, parent_sha, repo, linked, synced_base }`. `parent` is the lower task id, `base` is the PR's current target branch, `parent_sha` is the dependency head used for dispatch or the last synchronization, `repo` is the same GitHub repository as the project, and `synced_base` is the last observed main commit. `linked` records successful `gh stack link`. One unmerged dependency chain forms one stack; outstanding sibling branches are not appended to that chain.
 
+Before worker or reviewer dispatch, acceptance, or a software gate, a child
+whose parent has resubmitted refreshes under the worktree lock, whether its
+stack is linked or still prepared. The
+engine merges the verified submitted parent head into a child with its own
+commits in a detached scratch worktree,
+with commit subject `Merge <parent>'s resubmitted head into <child>`. A clean
+merge is pushed to the child branch before the local branch moves, then updates
+`stack.parent_sha` and emits `stack sync` with the parent and child heads.
+Existing child commits are preserved. A submitted or accepted child returns to
+rework to submit the refreshed branch and rerun gates; its former submitted sha
+stays recorded until then.
+An untouched child adopts the parent head directly, including a rewritten
+parent, so commits dropped by the parent are not restored. If the child head
+exactly equals its old `parent_sha`, a rewritten parent can replace that head
+on origin with `--force-with-lease=refs/heads/<child>:<old-head>` after a normal
+push is rejected. The explicit lease rejects concurrent remote work. A failed
+lease preserves the local branch and stack metadata, records a stable rework
+note and stops refresh until the orchestrator reconciles the moved remote.
+
+A child with its own commits is not merged across a parent history rewrite.
+It records a restack note and keeps its branch and submitted head. Linked
+stacks use the existing `gh stack sync` rebase and guarded publication while
+idle; an unlinked recorded PR must be linked before `stack sync`. A child
+without a PR requires the orchestrator to arrange its restack. The restacked
+branch needs a new submission before gates can run at it. A parent refresh
+that is inapplicable or has a recoverable failure falls through to ordinary
+linked sync. A guarded-lease failure or an actual merge conflict stops that
+pass instead.
+
+A conflict aborts the scratch merge and leaves the child branch and checkout
+unchanged. A rework note names the parent sha and conflicting files, and the
+worker dispatches to resolve them. The `stack sync` conflict receipt permits
+that dispatch only while the child head and submitted parent head are unchanged.
+A gate waits until the child's submitted head contains the latest submitted
+parent head. Gate freshness uses that head across parent rework and active
+claims. Dispatch and merge still apply their lifecycle checks. Acceptance
+checks freshness before reusing gate receipts, and reviewer dispatch checks
+it before starting a model. Current independent FAIL recovery runs before
+these parent checks and keeps `from_review: true`. A submitted dry-run review
+checks ancestry without publishing; an unsubmitted review previews its fallback
+command without an ancestry check. Acceptance and reviewer startup
+compare the parent inputs again in their final state transactions.
+Live workers and dirty checkouts defer parent refresh, with one
+`stack sync deferred` event per parent head. A dirty child can dispatch its worker on the
+unchanged branch and checkout; its brief names the parent head it must include
+before resubmitting. A dirty submitted or accepted child returns to rework so
+that worker can be scheduled. This recovery also runs when the same parent
+head already has a deferral receipt; repeated checks while rework is pending
+do not advance its revision again. Gates still wait for the parent head. A child
+branch that already contains the parent head needs no merge, so a live worker or
+dirty checkout does not defer it: refresh records the parent head in
+`stack.parent_sha` and emits `stack sync` without touching the checkout, and a
+submitted head that contains the parent keeps its status. Stopped Git operations
+keep their worktree operation checks and prevent automatic refresh. Merged
+parents take the completed-chain retirement path before any parent branch fetch.
+Refresh only merges a newer submitted or accepted head from an unmerged parent
+without a retirement reservation. Blocked-parent dispatch and merge-base
+validation keep their existing lifecycle checks; a gate does not retire a
+completed stack before validating its PR base.
+
 `stack_disabled: true` records an unavailable stacks capability, explicit `stack unstack`, or a replacement middle PR awaiting confirmation of its new chain. It selects ordinary merges, which wait for lower merge evidence before retargeting an existing upper PR. An accepted dependency can still use the ordinary main-based dispatch flow when the repository cannot stack; a submitted dependency requires an available chain.
 
 A successful `stack link` clears fallback markers for its linked members and restores the stack merge gate, including its refusal of admin merges.
