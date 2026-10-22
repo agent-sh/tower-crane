@@ -47,10 +47,73 @@ function oldTool(h) {
   const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
   fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ ...pkg, version: OLD.version }));
   fs.writeFileSync(path.join(dir, 'tool.json'), JSON.stringify(OLD));
-  return (args) => {
+  return Object.assign((args) => {
     const r = cp.spawnSync(process.execPath, [path.join(dir, 'bin', 'tower-crane.js'), ...args], { cwd: h.repo, env: h.env, encoding: 'utf8' });
     return { code: r.status, stdout: r.stdout, stderr: r.stderr };
-  };
+  }, { dir });
+}
+
+// The project's newest engine record names the current tool once this runs.
+function engineRecord() {
+  return { at: new Date().toISOString(), agent: 'orchestrator', cmd: 'check tests', task: 'T1', detail: { tool: Tool.current() } };
+}
+
+// A newer engine records its tool while an older supervisor's reaction runs:
+// during a gate run, or in the merge line after the task is accepted.
+const midReaction = [
+  ['a gate run', (h) => {
+    const scanner = path.join(h.base, 'tools', 'scanner.js');
+    fs.writeFileSync(scanner, `const fs = require('node:fs');
+if (!fs.existsSync(__filename + '.done')) {
+  fs.writeFileSync(__filename + '.done', '');
+  fs.appendFileSync(${JSON.stringify(path.join(h.state, 'events.jsonl'))}, ${JSON.stringify(`${JSON.stringify(engineRecord())}\n`)});
+}
+console.log(JSON.stringify({ items: [] }));\n`);
+  }, ['tests', 'clean']],
+  ['the merge line', (h) => {
+    h.reviewer('T1', 'reviewer');
+    h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha, '--ok', '--agent', 'reviewer']);
+    h.saveGithub({ ...h.github(), appendAfter: { cmd: 'accept', event: engineRecord() } });
+  }, ['tests', 'clean', 'ci', 'review']],
+];
+
+for (const [name, arrange, before] of midReaction) {
+  test(`a supervisor whose tool goes stale during ${name} requeues its reaction for a current executor`, (t) => {
+    const h = setup(t);
+    h.submit();
+    arrange(h);
+    const old = oldTool(h);
+    const script = path.join(h.base, 'supervisor.js');
+    fs.writeFileSync(script, `const lib = ${JSON.stringify(path.join(old.dir, 'lib'))};
+const stateDir = ${JSON.stringify(h.state)};
+const events = require(lib + '/state').readEvents(stateDir).filter((e) => e.cmd === 'submit' && e.task === 'T1');
+require(lib + '/automation').consume({ stateDir, cwd: ${JSON.stringify(h.repo)}, env: process.env, agent: 'orchestrator',
+  flags: {}, pos: [], reactionTask: 'T1' }, events, true).then(() => {}, (e) => { console.error(e); process.exit(1); });
+`);
+    const run = cp.spawnSync(process.execPath, [script], { cwd: h.repo, env: h.env, encoding: 'utf8' });
+    assert.equal(run.status, 0, run.stderr);
+    assert.match(run.stderr, /this tool \(0\.0\.0 a79075ad\) is behind the project's engine/);
+    const submit = h.logs().find((e) => e.cmd === 'submit');
+    const receipts = h.logs().filter((e) => e.cmd === 'automation' && e.detail.source === submit.id);
+    assert.deepEqual(receipts.map((e) => e.detail.phase), ['running', 'stale'], JSON.stringify(receipts));
+    assert.deepEqual(receipts[1].detail.engine_tool, Tool.current());
+    const queued = h.logs().filter((e) => e.cmd === 'automation queued' && e.detail.source === submit.id);
+    assert.equal(queued.length, 1, JSON.stringify(queued));
+    assert.equal(queued[0].detail.tool.version, OLD.version);
+    assert.deepEqual(queued[0].detail.engine_tool, Tool.current());
+    assert.deepEqual(h.logs().filter((e) => e.cmd === 'queue skipped'), [], 'the line did not pass the head over');
+    assert.deepEqual(h.readState('tasks.json').tasks[0].evidence.map((e) => e.type).sort(), [...before].sort());
+    assert.deepEqual(h.json(['status']).gate_queue.queued.map((q) => q.id), ['T1'], 'the reaction is owed');
+    // A current wait host takes the queued reaction and finishes it.
+    h.consume();
+    const after = h.logs().filter((e) => e.cmd === 'automation' && e.detail.source === submit.id);
+    assert.equal(after.length, 4, JSON.stringify(after));
+    assert.deepEqual(after[2].detail.tool, Tool.current());
+    assert.notEqual(after[3].detail.phase, 'stale');
+    const task = h.readState('tasks.json').tasks[0];
+    if (name === 'a gate run') assert.ok(task.evidence.some((e) => e.type === 'ci' && e.ok), JSON.stringify(task.evidence));
+    else assert.equal(h.github().prs['7'].state, 'MERGED');
+  });
 }
 
 test('an executor on an older tool leaves queued work for a current one; receipts and accepts record the tool', (t) => {

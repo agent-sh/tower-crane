@@ -73,6 +73,14 @@ function answer(state) {
         ? { ...view, url: `https://github.com/${state.pushRepository}/pull/${args[2]}`,
           headRepository: { nameWithOwner: state.pushRepository } } : view;
       out = pr.invalidView ? '{' : JSON.stringify(destination);
+      // appendAfter writes its event once, on the first view after an event of its cmd.
+      if (state.appendAfter) {
+        const events = path.join(state.root, '.tower-crane', 'events.jsonl');
+        if (fs.readFileSync(events, 'utf8').trim().split('\n').some((line) => JSON.parse(line).cmd === state.appendAfter.cmd)) {
+          fs.appendFileSync(events, `${JSON.stringify(state.appendAfter.event)}\n`);
+          delete state.appendAfter;
+        }
+      }
       if (state.becomeMergeableAfterView) {
         pr.mergeable = 'MERGEABLE';
         pr.mergeStateStatus = 'CLEAN';

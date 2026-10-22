@@ -535,10 +535,11 @@ head, it releases the line with a queued `automation reconcile` handoff for
 that head, which the wait host runs. An executor whose tool is
 behind the project's engine tool ([state.md](state.md#executor-tool)) runs
 no reaction: it queues the notifications it read for a current executor and
-says so once on stderr. Its `check`, `accept`, `merge`, `merge --accepted`
-and `spawn` refuse with `refused: this tool (VERSION SHA) is behind the
-project's engine (VERSION SHA)`, and its refill dispatches nothing and says
-so once. Restart a wait host after upgrading.
+says so once on stderr. A reaction that a newer engine overtakes while it
+runs is queued the same way at its next gate, accept or merge. The older
+executor's `check`, `accept`, `merge`, `merge --accepted` and `spawn` refuse
+with `refused: this tool (VERSION SHA) is behind the project's engine
+(VERSION SHA)`, and its refill dispatches nothing and says so once. Restart a wait host after upgrading.
 
 The trusted `wait` host refills worker slots on its own path, beside its
 event reactions: at startup, on every state change, on the fallback tick and
