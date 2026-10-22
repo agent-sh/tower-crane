@@ -54,6 +54,33 @@ function controlledBackoff(h) {
   };
 }
 
+function assertClaimPreserved(previous, current) {
+  const { until: previousUntil, ...previousIdentity } = previous;
+  const { until: currentUntil, ...currentIdentity } = current;
+  assert.deepEqual(currentIdentity, previousIdentity);
+  assert.ok(Date.parse(currentUntil) >= Date.parse(previousUntil), 'supervision can extend the same claim');
+}
+
+test('retry claim preservation allows renewals but rejects changed identity or shorter expiry', () => {
+  const first = { agent: 'worker-T1-1', since: '2026-10-22T00:10:13.877Z', from: 'spawn',
+    until: '2026-10-22T00:11:14.434Z' };
+  const renewed = { ...first, until: '2026-10-22T00:11:44.568Z' };
+  for (const [name, previous, current, valid] of [
+    ['unchanged', first, { ...first }, true],
+    ['Windows renewal', first, renewed, true],
+    ['another renewal', renewed, { ...renewed, until: '2026-10-22T00:12:14.568Z' }, true],
+    ['changed agent', first, { ...renewed, agent: 'worker-T1-2' }, false],
+    ['changed since', first, { ...renewed, since: '2026-10-22T00:10:14.877Z' }, false],
+    ['changed from', first, { ...renewed, from: 'replacement' }, false],
+    ['shorter expiry', first, { ...first, until: '2026-10-22T00:11:14.433Z' }, false],
+    ['expiry lost after renewal', renewed, first, false],
+  ]) {
+    const check = () => assertClaimPreserved(previous, current);
+    if (valid) assert.doesNotThrow(check, name);
+    else assert.throws(check, assert.AssertionError, name);
+  }
+});
+
 function setup(t, { failures = 1, error = '75', records = null, hold = 0, waitForFinish = false, config = {}, env = {}, busy = false, claimDelay = 0, claim = true, sessionReceipt = false, publishBarrier = false } = {}) {
   const h = makeTaskRepo(t, [{
     args: ['--title', 'Supervise an outage', '--tier', 'easy', '--acceptance', 'same session reruns'],
@@ -248,7 +275,8 @@ test('a recorded Bedrock outage reruns with the session and claim kept', (t) => 
   assert.equal(result.code, 0, result.stderr);
   const attempts = h.readAttempts();
   assert.equal(attempts.length, 2);
-  for (const key of ['agent', 'session', 'cwd', 'claim']) assert.deepEqual(attempts[1][key], attempts[0][key]);
+  for (const key of ['agent', 'session', 'cwd']) assert.deepEqual(attempts[1][key], attempts[0][key]);
+  assertClaimPreserved(attempts[0].claim, attempts[1].claim);
   assert.equal(log(h).filter((e) => e.cmd === 'spawn retry').length, 1);
   assert.equal(h.json(['task', 'show', 'T1']).run.phase, 'waiting');
 });
@@ -278,8 +306,11 @@ test('a recovered rate-limit reconnect does not retry a later permanent failure'
 test('default retry budget waits beyond the observed ten-minute outage and remains bounded', async (t) => {
   const h = setup(t, { failures: 5 });
   const backoff = controlledBackoff(h);
+  const clockFile = path.join(h.base, 'renewal-clock');
+  const now = Date.now();
+  fs.writeFileSync(clockFile, String(now));
   h.ok(['ladder', 'set', 'easy', '--clear', 'supervision']);
-  const spawned = h.json(['spawn', '--task', 'T1'], { env: backoff.env });
+  const spawned = h.json(['spawn', '--task', 'T1'], { env: { ...backoff.env, HOOK_CLOCK_FILE: clockFile } });
   // Advancing the clock leaves earlier real wake timers pending after exit.
   h.teardown.push(() => {
     try { killPid(spawned.monitor_pid, 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') throw e; }
@@ -289,6 +320,11 @@ test('default retry budget waits beyond the observed ten-minute outage and remai
   for (const [index, delay] of [30000, 60000, 120000, 240000, 480000].entries()) {
     await waitOnRepo(h, () => log(h).filter((e) => e.cmd === 'spawn phase' && e.detail.phase === 'retrying').length === index + 1,
       `retry ${index + 1} was not recorded`);
+    if (index === 0) {
+      // Renew during held backoff on every platform, without waiting half a lease.
+      fs.writeFileSync(clockFile, String(now + 40000));
+      await waitOnRepo(h, () => log(h).some((e) => e.cmd === 'renew'), 'the held retry did not renew its claim');
+    }
     elapsed += delay;
     backoff.advance(elapsed);
   }
@@ -298,7 +334,9 @@ test('default retry budget waits beyond the observed ten-minute outage and remai
   assert.equal(exit.detail.code, 0);
   const attempts = h.readAttempts();
   assert.equal(attempts.length, 6);
-  for (const attempt of attempts) assert.deepEqual(attempt.claim, attempts[0].claim);
+  for (let i = 1; i < attempts.length; i++) assertClaimPreserved(attempts[i - 1].claim, attempts[i].claim);
+  assert.ok(Date.parse(attempts[1].claim.until) > Date.parse(attempts[0].claim.until), 'the next attempt sees the renewed lease');
+  assert.equal(log(h).filter((e) => e.cmd === 'claim' && !e.detail.renewed).length, 1);
   const delays = log(h).filter((e) => e.cmd === 'spawn phase' && e.detail.phase === 'retrying').map((e) => e.detail.backoff_ms);
   assert.deepEqual(delays, [30000, 60000, 120000, 240000, 480000]);
   assert.equal(delays.reduce((sum, delay) => sum + delay, 0), 930000);
@@ -318,10 +356,7 @@ for (const error of ['75', 'outage', 'codex-error', 'signal']) {
     assert.equal(attempts.length, 2);
     assert.equal(attempts[0].agent, 'worker-T1-1');
     for (const key of ['agent', 'session', 'cwd']) assert.deepEqual(attempts[1][key], attempts[0][key]);
-    const { until: firstUntil, ...firstClaim } = attempts[0].claim;
-    const { until: nextUntil, ...nextClaim } = attempts[1].claim;
-    assert.deepEqual(nextClaim, firstClaim);
-    assert.ok(Date.parse(nextUntil) >= Date.parse(firstUntil), 'supervision can renew the same claim');
+    assertClaimPreserved(attempts[0].claim, attempts[1].claim);
     assert.equal(attempts[1].retry, '1');
     assert.equal(log(h).filter((e) => e.cmd === 'spawn').length, 1);
     assert.equal(log(h).filter((e) => e.cmd === 'claim' && !e.detail.renewed).length, 1);
