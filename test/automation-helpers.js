@@ -30,6 +30,8 @@ function setup(t, { kind = 'code', ci = 'success', repo } = {}) {
   // The offline GitHub settles at once; automation keeps its UNKNOWN re-reads without their pauses.
   h.env.NODE_OPTIONS = `--require=${JSON.stringify(MERGEABILITY_PAUSE)}`;
   h.env.HOOK_MERGEABILITY_PAUSE_MS = '10';
+  // Each fixture step is a fresh wait that rechecks CI within seconds.
+  h.env.HOOK_CI_POLL_MS = '0';
   if (process.platform === 'win32') {
     fs.writeFileSync(path.join(tools, 'gh.cmd'), `@"${process.execPath}" "${ghStub}" %*\r\n`);
     const preload = path.join(h.base, 'offline-gh.js');

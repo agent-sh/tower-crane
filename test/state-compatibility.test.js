@@ -9,6 +9,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { makeTaskRepo, dispatch } = require('./helpers');
 const S = require('../lib/state');
+const Sharing = require('../lib/sharing');
+const { performance } = require('node:perf_hooks');
 
 // A document written as a newer tool writes it; `locked` inside a lock the test holds.
 const writeState = (h, file, value, locked = false) => StateFiles.writeDoc(h.state, file, value, { locked });
@@ -298,3 +300,111 @@ test(`${change} drains the supervisor without killing an edit`, async (t) => {
     'an incompatible supervisor does not write a final live-spend snapshot');
 });
 }
+
+// Windows refuses a file a scanner or the indexer holds open with EPERM,
+// EBUSY or EACCES. The table runs with those codes taken as Windows takes them.
+test('a sharing refusal is waited out with backoff and a lasting one fails at the bound', () => {
+  const busy = Sharing.SHARING_BUSY.splice(0);
+  Sharing.SHARING_BUSY.push('EPERM', 'EBUSY', 'EACCES');
+  const refusal = (code) => Object.assign(new Error(`${code}: refused, stat 'events.jsonl'`), { code });
+  try {
+    for (const row of [
+      { name: 'transient EPERM', code: 'EPERM', refusals: 3, calls: 4 },
+      { name: 'transient EBUSY', code: 'EBUSY', refusals: 3, calls: 4 },
+      { name: 'transient EACCES', code: 'EACCES', refusals: 1, calls: 2 },
+      { name: 'missing file', code: 'ENOENT', refusals: Infinity, calls: 1, fails: true },
+      { name: 'lasting EPERM', code: 'EPERM', refusals: Infinity, fails: true, bound: 200 },
+      { name: 'lasting EBUSY', code: 'EBUSY', refusals: Infinity, fails: true, bound: 200 },
+    ]) {
+      let calls = 0;
+      const started = performance.now();
+      const read = () => Sharing.sharingRetry(() => {
+        if (++calls <= row.refusals) throw refusal(row.code);
+        return 'read';
+      }, row.bound);
+      if (!row.fails) assert.equal(read(), 'read', row.name);
+      else assert.throws(read, (e) => e.code === row.code
+        && (!row.bound || e.message.includes(`still refused after ${row.bound} ms`)), row.name);
+      const elapsed = performance.now() - started;
+      if (row.calls) assert.equal(calls, row.calls, row.name);
+      if (row.bound) {
+        // Backoff spaces the attempts out instead of spinning, and the wait ends at the bound.
+        assert.ok(calls > 2 && calls < row.bound / 5, `${row.name}: ${calls} attempts`);
+        assert.ok(elapsed >= row.bound && elapsed < row.bound + 1000, `${row.name}: ${elapsed} ms`); // wait-allow: the retry's time bound is the contract under test
+      }
+    }
+  } finally {
+    Sharing.SHARING_BUSY.splice(0, Infinity, ...busy);
+  }
+  if (process.platform !== 'win32') {
+    // Elsewhere these codes are a permission failure, which no wait ends.
+    let calls = 0;
+    assert.throws(() => Sharing.sharingRetry(() => { calls++; throw refusal('EPERM'); }), { code: 'EPERM' });
+    assert.equal(calls, 1);
+  }
+});
+
+// A lease about to run out makes the supervisor read the state, and renew it
+// through the event log, while every state file is held.
+function holdStateFiles(h, scanner) {
+  S.withLock(h.state, () => {
+    fs.writeFileSync(scanner, '');
+    const tasks = h.readState('tasks.json');
+    assert.ok(tasks.tasks[0].claim, 'the supervisor holds the lease');
+    tasks.tasks[0].claim.until = new Date(Date.now() + 1000).toISOString();
+    writeState(h, 'tasks.json', tasks, true);
+    StateFiles.appendLog(h.state, JSON.stringify({
+      at: new Date().toISOString(), cmd: 'scanner holds', task: 'T1', detail: {},
+    }) + '\n', { locked: true });
+  });
+}
+
+test('the supervisor waits out a scanner holding its state files and log', async (t) => {
+  const h = fixture(t);
+  const worker = heldWorker(h);
+  const scanner = path.join(h.base, 'scanner');
+  const { run: running, until, signal } = dispatch(t, h, { hooks: { HOOK_SHARING_WINDOW: scanner, HOOK_SHARING_IN: 'spawn-monitor.js' } });
+  try {
+    await signal(worker.ready);
+    holdStateFiles(h, scanner);
+    await until(() => S.readEvents(h.state).some((e) => e.cmd === 'renew'), 'the supervisor renews the lease through the refusals');
+  } finally {
+    fs.writeFileSync(worker.finish, '');
+  }
+  const result = await running;
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(fs.readFileSync(worker.edited, 'utf8'), 'edit finished');
+  assert.doesNotMatch(result.stderr, /supervisor failed|is gone/);
+  const refused = fs.readFileSync(scanner, 'utf8');
+  // The tasks and the log are in state.db, which SQLite opens; the marker is
+  // the state file the supervisor reads by name.
+  for (const call of ['statSync project.json', 'readFileSync project.json']) {
+    assert.ok(refused.includes(`${call}\n`), `the supervisor met a refused ${call}:\n${refused}`);
+  }
+});
+
+test('the supervisor fails at the bound, naming the refusal, when a scanner keeps its state', async (t) => {
+  const h = fixture(t);
+  const worker = heldWorker(h);
+  const scanner = path.join(h.base, 'scanner');
+  // The refusals end after the failure, so the supervisor still records its exit.
+  const hooks = { HOOK_SHARING_WINDOW: scanner, HOOK_SHARING_IN: 'spawn-monitor.js', HOOK_SHARING_REFUSALS: '0', HOOK_SHARING_WINDOW_MS: String(Sharing.SHARING_RETRY_MS + 1500) };
+  const { run: running, until, signal, output } = dispatch(t, h, { hooks });
+  let elapsed;
+  try {
+    await signal(worker.ready);
+    holdStateFiles(h, scanner);
+    await until(() => fs.readFileSync(scanner, 'utf8'), 'the first refusal');
+    const started = performance.now();
+    await until(() => /supervisor failed/.test(output()), 'the supervisor gives up');
+    elapsed = performance.now() - started;
+  } finally {
+    fs.writeFileSync(worker.finish, '');
+  }
+  const result = await running;
+  assert.notEqual(result.code, 0);
+  assert.match(result.stderr, new RegExp(`supervisor failed: EPERM: operation not permitted, \\w+ '[^']+' \\(still refused after ${Sharing.SHARING_RETRY_MS} ms`));
+  assert.doesNotMatch(result.stderr, /is gone/);
+  // One wait, not one per read that met the refusal.
+  assert.ok(elapsed < 2 * Sharing.SHARING_RETRY_MS, `the supervisor failed ${elapsed} ms after the first refusal`); // wait-allow: the retry's time bound is the contract under test
+});
