@@ -404,11 +404,12 @@ test('a spawned claude agent imports the user\'s global rules by path, loads non
 // Claude's commands can connect to any socket they see. A private TMPDIR
 // keeps the host sockets hidden even when the cache path is deep.
 test('a sandboxed claude keeps private temp and hides host sockets across dispatcher and project temp settings', { skip: (NO_STUBS || process.platform !== 'linux') && 'Linux only' }, (t) => {
+  const hasHostTemp = fs.existsSync('/tmp');
   for (const source of ['dispatcher', 'env', 'env_file']) {
     for (const hostTemp of [false, true]) {
       const { h, u } = setup(t);
       isolated(h, 'small', 'claude');
-      const tmp = fs.realpathSync('/tmp');
+      const tmp = hasHostTemp ? fs.realpathSync('/tmp') : '/tmp';
       const caller = path.join(h.base, 'caller-tmp');
       fs.mkdirSync(caller);
       const selected = hostTemp ? tmp : caller;
@@ -425,10 +426,12 @@ test('a sandboxed claude keeps private temp and hides host sockets across dispat
       assert.ok(seen.tmpdir && seen.tmpdir !== tmp && seen.tmpdir !== caller, `${label}: private temp replaces inherited settings`);
       assert.ok(seen.tmpdir.startsWith(u.home + path.sep), `${label}: private temp stays in the user cache`);
       const box = seen.settings.sandbox.filesystem;
-      assert.ok(box.denyRead.includes(tmp), `${label}: host temp is hidden whole`);
-      for (const p of ['.X11-unix/X0', 'dbus-probe/socket']) assert.equal(commandsRead(seen, path.join(tmp, p)), false, `${label}: ${p}`);
-      assert.ok(!box.allowRead.some((p) => p === tmp || p.startsWith(tmp + path.sep)), `${label}: no host temp socket is allowed back`);
-      assert.ok(!seen.settings.permissions.deny.some((rule) => rule.includes(`(/${tmp})`) || rule.includes(`(/${tmp}/**)`)), `${label}: file tools keep host temp`);
+      if (hasHostTemp) {
+        assert.ok(box.denyRead.includes(tmp), `${label}: host temp is hidden whole`);
+        for (const p of ['.X11-unix/X0', 'dbus-probe/socket']) assert.equal(commandsRead(seen, path.join(tmp, p)), false, `${label}: ${p}`);
+        assert.ok(!box.allowRead.some((p) => p === tmp || p.startsWith(tmp + path.sep)), `${label}: no host temp socket is allowed back`);
+        assert.ok(!seen.settings.permissions.deny.some((rule) => rule.includes(`(/${tmp})`) || rule.includes(`(/${tmp}/**)`)), `${label}: file tools keep host temp`);
+      }
       assert.deepEqual(fs.readdirSync(caller), [], `${label}: caller sentinel stays empty`);
     }
   }
