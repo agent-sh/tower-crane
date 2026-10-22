@@ -219,20 +219,26 @@ test(`hot-path recovery ${c.candidate} ${c.verb || 'claim'} against ${c.peerFirs
 });
 }
 
-for (const descendant of ['submitted', 'accepted', 'rework', 'live']) {
-test(`stack parent recovery with ${descendant} hot-path descendant`, (t) => {
+for (const { descendant, depth } of ['submitted', 'accepted', 'rework', 'live']
+  .flatMap((descendant) => [1, 2].map((depth) => ({ descendant, depth })))) {
+test(`stack parent recovery with ${descendant} hot-path descendant at depth ${depth}`, (t) => {
   const f = StackFixture.stacked(t), h = f.h;
+  let child = { id: 'T2', sha: f.upper.sha, wt: f.upper.wt, pr: '12' };
+  if (depth === 2) {
+    const id = f.add('grandchild', 'T2'), wt = h.json(['worktree', id]);
+    child = { id, wt, sha: f.submit(id, 13, wt), pr: '13' };
+  }
   h.ok(['project', 'set', '--hot-paths', '["T1.txt"]']);
-  for (const id of ['T1', 'T2']) h.ok(['brief', 'set', id, '-'], { input: '## Scope\n\nT1.txt\n' });
+  for (const id of new Set(['T1', 'T2', child.id])) h.ok(['brief', 'set', id, '-'], { input: '## Scope\n\nT1.txt\n' });
   h.ok(['rework', 'T1', '--reason', 'recover lower stack']);
   const doc = h.readState('tasks.json');
-  recoveryState(doc.tasks[1], descendant, 'worker-T2');
+  recoveryState(doc.tasks.find((task) => task.id === child.id), descendant, `worker-${child.id}`);
   h.writeState('tasks.json', doc);
   const result = h.run(['claim', 'T1', '--agent', 'worker-T1']);
   assert.equal(result.code, descendant === 'live' ? 1 : 0, result.stderr);
   if (descendant === 'live') {
-    assert.match(result.stderr, /waits on hot path T1.txt held by T2/);
-    h.ok(['submit', 'T2', '--sha', f.upper.sha, '--branch', f.upper.wt.branch, '--pr', '12', '--agent', 'worker-T2']);
+    assert.match(result.stderr, new RegExp(`waits on hot path T1.txt held by ${child.id}`));
+    h.ok(['submit', child.id, '--sha', child.sha, '--branch', child.wt.branch, '--pr', child.pr, '--agent', `worker-${child.id}`]);
     h.ok(['claim', 'T1', '--agent', 'worker-T1']);
   }
 });
