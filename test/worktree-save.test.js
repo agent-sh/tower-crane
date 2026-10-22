@@ -52,6 +52,26 @@ function sparse(file, bytes) {
   try { fs.ftruncateSync(fd, bytes); } finally { fs.closeSync(fd); }
 }
 
+function recoverySnapshot(dir) {
+  const rows = [];
+  function visit(relative) {
+    const entries = fs.readdirSync(path.join(dir, relative), { withFileTypes: true })
+      .sort((a, b) => a.name.localeCompare(b.name));
+    for (const entry of entries) {
+      const child = path.join(relative, entry.name);
+      if (entry.isDirectory()) visit(child);
+      else {
+        // Size and digest must describe the same read, even if a file changes.
+        const content = fs.readFileSync(path.join(dir, child));
+        rows.push({ path: child, bytes: content.length,
+          digest: createHash('sha256').update(content).digest('hex') });
+      }
+    }
+  }
+  visit('');
+  return rows;
+}
+
 test('a save preserves source and ignored notes, skips ignored build trees and lists storage bytes', (t) => {
   const h = fixture(t);
   const wt = h.json(['worktree', 'T1']);
@@ -138,20 +158,7 @@ test('worktree measurement replays recovery data and rejects incomplete or unsaf
   assert.ok(fs.statSync(path.join(saved, 'tracked.patch')).size > 0);
   const baseline = h.git(['rev-parse', 'HEAD'], ROOT);
   const command = path.join(__dirname, 'worktree-save-measure.js');
-  function snapshot(dir) {
-    const rows = [];
-    function visit(relative) {
-      const file = path.join(dir, relative);
-      const stat = fs.lstatSync(file);
-      if (stat.isDirectory()) {
-        for (const name of fs.readdirSync(file).sort()) visit(path.join(relative, name));
-      } else rows.push({ path: relative, bytes: stat.size,
-        digest: createHash('sha256').update(fs.readFileSync(file)).digest('hex') });
-    }
-    visit('');
-    return rows;
-  }
-  const original = snapshot(saved);
+  const original = recoverySnapshot(saved);
   for (const row of [
     { name: 'valid', valid: true },
     { name: 'arguments', noArgs: true, error: /usage: node test\/worktree-save-measure.js/ },
@@ -188,7 +195,39 @@ test('worktree measurement replays recovery data and rejects incomplete or unsaf
         assert.deepEqual(sample, report.runs[0], 'replaying the same checkout must give stable counts');
       }
     } else assert.match(result.stderr, row.error, row.name);
-    assert.deepEqual(snapshot(saved), original, `${row.name} must leave the source recovery directory intact`);
+    assert.deepEqual(recoverySnapshot(saved), original, `${row.name} must leave the source recovery directory intact`);
+  }
+});
+
+test('recovery snapshots keep sizes and digests consistent when files change before reading', (t) => {
+  const h = fixture(t);
+  const read = fs.readFileSync;
+  for (const row of [
+    { name: 'growth', before: 'old', after: 'longer contents' },
+    { name: 'shrinkage', before: 'long contents', after: 'x' },
+    { name: 'same length', before: 'old', after: 'new' },
+    { name: 'path replacement', before: 'old', after: 'replacement contents', replace: true },
+  ]) {
+    const dir = path.join(h.base, `snapshot-${row.name}`);
+    const relative = path.join('nested', 'notes.txt');
+    const file = path.join(dir, relative);
+    write(dir, relative, row.before);
+    let changed = false;
+    const mock = t.mock.method(fs, 'readFileSync', function (input, ...args) {
+      if (input === file && !changed) {
+        changed = true;
+        if (row.replace) {
+          write(h.base, 'replacement.txt', row.after);
+          fs.renameSync(path.join(h.base, 'replacement.txt'), file);
+        } else fs.writeFileSync(file, row.after);
+      }
+      return read.call(this, input, ...args);
+    });
+    try {
+      assert.deepEqual(recoverySnapshot(dir), [{ path: relative, bytes: Buffer.byteLength(row.after),
+        digest: createHash('sha256').update(row.after).digest('hex') }], row.name);
+      assert.equal(changed, true, row.name);
+    } finally { mock.mock.restore(); }
   }
 });
 
