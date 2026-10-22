@@ -38,6 +38,26 @@ test('agent git policies refuse every stash form except list', () => {
   }
 });
 
+test('published shim policies agree on shared stash refusal and the branch alternative', async (t) => {
+  const copies = [
+    'docs/ladder.md',
+    'skills/tower-crane-work/SKILL.md',
+    'skills/tower-crane-review/SKILL.md',
+    'changelog.d/T510.md',
+  ];
+  for (const file of copies) {
+    await t.test(file, () => {
+      const source = fs.readFileSync(path.join(ROOT, file), 'utf8');
+      const rule = source.split('\n').find((line) => line.includes('`git stash list`'));
+      assert.ok(rule, `${file} must document the allowed list command`);
+      assert.match(rule, /refus\w*|Never use/);
+      assert.match(rule, /except `git stash list`/);
+      assert.match(rule, /shared stash|every worktree shares/);
+      assert.match(rule, /commit work in progress on (?:the|their) task branch/);
+    });
+  }
+});
+
 test('the git shim refuses stash in a CLI task worktree and leaves shared stashes and WIP intact', (t) => {
   const h = makeRepo(t);
   h.ok(['init', '--name', 'fixture', '--goal', 'stash isolation']);
