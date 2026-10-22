@@ -99,6 +99,12 @@ test('running units reserve their summed room until enough windows exist, then t
     assert.deepEqual([r.rule, Math.round(r.bytes / GiB * 100) / 100, r.samples, r.sum, r.largest], [rule, gib, samples, 4 * GiB, 2 * GiB], name);
     assert.equal(G.assess(reading({ limit: 100 }), reg, s, 0, null, now).budget.growth, r.bytes, `${name}: the budget reserves it`);
   }
+  // Status names the raised room and the rest apart.
+  const split = { ...registry([unit('worker', 1, { expected: 3 * GiB, measured: GiB }), unit('worker', 2, { expected: 3 * GiB, measured: GiB })]),
+    growth: ratios(...many(20, 0.6)), raised: { ...raised(0.9, 30), units: ['worker-1'] } };
+  const view = { state: 'open', reasons: [], budget: G.assess(reading({ limit: 100 }), split, s, 0, null, now).budget, settings: s,
+    reading: { pressure: {}, load: 0, cores: 8, degraded: [] }, deferred: [], stops: [] };
+  assert.match(G.lines(view)[0], /may grow 3\.0 GiB \(ratio 0\.90 after a crossed window, until \S+, times 2\.0 GiB of its units' room and ratio 0\.60 times 2\.0 GiB of the rest\);/);
   assert.equal(G.reserve({ ...registry([unit('worker', 1, { expected: 3 * GiB })]), growth: ratios(...many(20, 0.2)) }, s, now).bytes, 3 * GiB,
     'a unit admitted a moment ago and not yet measured keeps its whole room');
   assert.deepEqual(G.reserve(registry(), s, now), { sum: 0, largest: 0, ratio: 1, base: 1, raised_sum: 0, samples: 0, min: 20, rule: 'sum', raised_until: null, bytes: 0 },
