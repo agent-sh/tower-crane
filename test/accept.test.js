@@ -6,8 +6,10 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { makeRepo, cachedFixture } = require('./helpers');
+const { makeRepo, cachedFixture, BIN, ROOT } = require('./helpers');
 const { gateFixture, gateEvidence } = require('./gate-helpers');
+const Actions = require('../lib/actions');
+const Reviewer = require('../lib/reviewer');
 
 // A submitted task, built once per process for each submit shape and kind.
 function submitted(t, extra = [], kind = 'code') {
@@ -173,6 +175,78 @@ test('other kinds need only a review from another agent', async (t) => {
   await reviewerExited(h);
   ev(h, 'review', 'r-1');
   acceptAfterReview(h);
+});
+
+for (const retry of ['unchanged', 'override', 'head', 'revision']) {
+  test(`accept does not repeat a failed review without a new input: ${retry}`, async (t) => {
+    const h = submitted(t, [], 'docs');
+    silentReviewer(h);
+    assert.equal(h.json(['accept', 'T1', '--agent', 'orchestrator']).review_pending, true);
+    await reviewerExited(h);
+    const reviewer = reviewerSpawns(h)[0].detail.agent;
+    h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', h.sha, '--agent', reviewer,
+      '--summary', '1 blocker: value.md:1 - missing behavior',
+      '--findings', JSON.stringify([{ kind: 'defect', path: 'value.md', claim: 'missing behavior' }])]);
+    const failed = h.run(['accept', 'T1', '--agent', 'orchestrator', '--json']);
+    assert.equal(failed.code, 1, failed.stderr);
+    const result = JSON.parse(failed.stdout);
+    assert.equal(result.review_failed, true);
+    assert.equal(result.status, 'submitted');
+    assert.equal(result.review.agent, reviewer);
+    assert.equal(result.inbox.id, 'review_failed:T1');
+    assert.deepEqual(result.inbox.action.argv, ['rework', '--from-review', 'T1']);
+    assert.equal(reviewerSpawns(h).length, 1, 'two accepts start one review');
+    if (retry === 'unchanged') return;
+    if (retry === 'head') {
+      fs.writeFileSync(path.join(h.repo, 'retry.md'), 'Changed implementation.\n');
+      h.git(['add', '.']);
+      h.git(['commit', '-qm', 'Fix behavior']);
+      h.sha = h.git(['rev-parse', 'HEAD']);
+      h.ok(['submit', 'T1', '--sha', h.sha, '--agent', 'w-1']);
+    } else if (retry === 'revision') {
+      h.ok(['task', 'update', 'T1', '--acceptance', 'it works with retries', '--agent', 'orchestrator']);
+    } else {
+      const denied = h.run(['accept', 'T1', '--retry-review', '--agent', 'w-1']);
+      assert.equal(denied.code, 1);
+      assert.match(denied.stderr, /operational|orchestrator/);
+      assert.equal(reviewerSpawns(h).length, 1);
+    }
+    assert.equal(h.json(['accept', 'T1', '--agent', 'orchestrator',
+      ...(retry === 'override' ? ['--retry-review'] : [])]).review_pending, true);
+    assert.equal(reviewerSpawns(h).length, 2);
+    if (retry === 'override') assert.equal(reviewerSpawns(h).at(-1).detail.review_retry.sha, h.sha);
+    await reviewerExited(h);
+    if (retry === 'override') {
+      h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
+      const task = h.json(['task', 'show', 'T1']);
+      assert.equal(task.status, 'submitted', 'automation must let the explicit retry finish without replaying the old failure');
+      assert.equal(reviewerSpawns(h).length, 2);
+      const held = h.json(['inbox', '--agent', 'orchestrator']).items.find((i) => i.kind === 'review_held');
+      assert.deepEqual(held.action.argv, ['accept', 'T1', '--retry-review']);
+    }
+  });
+}
+
+test('an explicit retry snapshot survives governor deferral only at its failed head and revision', () => {
+  const sha = 'a'.repeat(40);
+  const review = { type: 'review', ok: false, sha, revision: 1, agent: 'owner', summary: 'Missing behavior' };
+  const task = { id: 'T1', status: 'submitted', sha, revision: 1, evidence: [review] };
+  const retry = { sha, revision: 1, review };
+  for (const row of [
+    { name: 'deferred explicit retry', cmd: 'review dispatch deferred', valid: true },
+    { name: 'started explicit retry', cmd: 'spawn', valid: true },
+    { name: 'updated explicit retry context', cmd: 'review dispatch context', valid: true },
+    { name: 'new head', cmd: 'review dispatch deferred', sha: 'b'.repeat(40), valid: false },
+    { name: 'new revision', cmd: 'review dispatch deferred', revision: 2, valid: false },
+    { name: 'new verdict', cmd: 'review dispatch deferred', review: { ...review, summary: 'Different failure' }, valid: false },
+    { name: 'ordinary deferred review', cmd: 'review dispatch deferred', ordinary: true, valid: false },
+  ]) {
+    const current = { ...task, sha: row.sha || sha, revision: row.revision || 1, evidence: [row.review || review] };
+    const st = { tasks: { tasks: [current] }, events: [{ task: task.id, cmd: row.cmd,
+      detail: { role: 'reviewer', sha, revision: 1, ...(row.ordinary ? {} : { review_retry: retry }) } }] };
+    assert.equal(Actions.pendingRetry(st, current, current.evidence[0]), row.valid, row.name);
+    assert.equal(Reviewer.deferredDispatches(st).length, row.cmd === 'review dispatch deferred' && row.valid ? 1 : 0, row.name);
+  }
 });
 
 test('review evidence counts only from a reviewer spawned for that head and revision, or the owner', async (t) => {
@@ -342,6 +416,98 @@ for (const [state, makeOut] of [['capped', reviewerCapped], ['down', reviewerDow
     assert.equal(h.readState('decisions.json').decisions.length, 1);
   });
 }
+
+for (const row of [
+  { name: 'capped reviewer', out: reviewerCapped },
+  { name: 'earlier no-verdict exit', out: reviewerDown },
+  { name: 'owner waiver of live review', agent: 'owner' },
+  { name: 'false PR-body claim', out: reviewerDown, kind: 'false-claim', path: 'PR body' },
+  { name: 'title follow-up alongside a body blocker', out: reviewerDown, kind: 'false-claim', path: 'PR body', title: true },
+  { name: 'false changelog claim', out: reviewerDown, kind: 'false-claim', path: 'changelog.d/T1.md' },
+  { name: 'mixed waivers', out: reviewerDown, agent: 'owner', extra: ['--waive', 'clean'] },
+  { name: 'retry combined with waiver', out: reviewerDown, extra: ['--retry-review'] },
+  { name: 'failed verdict during software gates', out: reviewerDown, late: true },
+  { name: 'failed verdict during archive preparation', out: reviewerDown, archive: true },
+]) {
+  test(`review waivers cannot clear a failed verdict: ${row.name}`, async (t) => {
+    const h = submitted(t);
+    if (row.out) row.out(h);
+    h.reviewer('T1', 'failing-reviewer', h.sha);
+    const recordFailure = () => h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', h.sha,
+      '--agent', 'failing-reviewer', '--summary', '1 blocking finding: incorrect behavior',
+      '--findings', JSON.stringify([{ kind: row.kind || 'defect', path: row.path || 'value.js',
+        claim: 'Incorrect behavior or false claim' },
+      ...(row.title ? [{ kind: 'defect', path: 'PR title', claim: 'Overstated title' }] : [])])]);
+    const args = ['accept', 'T1', '--waive', 'review', '--reason', 'reviewer unavailable',
+      '--agent', row.agent || 'orchestrator', '--json', ...(row.extra || [])];
+    let result;
+    if (row.archive) {
+      const hook = path.join(h.base, 'waiver-archive-hook.js');
+      const findings = [{ kind: 'defect', path: 'value.js', claim: 'Incorrect behavior' }];
+      fs.writeFileSync(hook, `
+const cp = require('node:child_process');
+const { fakeAgentEnv } = require(${JSON.stringify(path.join(__dirname, 'agent-env.js'))});
+const archive = require(${JSON.stringify(path.join(ROOT, 'lib/archive.js'))});
+const original = archive.onAccept;
+archive.onAccept = async (...args) => {
+  const r = cp.spawnSync(process.execPath, ${JSON.stringify([BIN, 'evidence', 'T1', '--type', 'review', '--fail',
+    '--sha', h.sha, '--agent', 'failing-reviewer', '--summary', 'Late failure',
+    '--findings', JSON.stringify(findings)])}, { env: fakeAgentEnv(process.env), encoding: 'utf8' });
+  if (r.status !== 0) throw new Error(r.stderr);
+  return original(...args);
+};
+`);
+      result = h.run(args, { env: { NODE_OPTIONS: `${h.env.NODE_OPTIONS || ''} --require=${JSON.stringify(hook)}` } });
+    } else if (row.late) {
+      const started = path.join(h.base, 'waiver-gate-started');
+      const release = path.join(h.base, 'waiver-gate-release');
+      const script = path.join(h.base, 'waiver-gate.js');
+      fs.writeFileSync(script, `
+const fs = require('node:fs');
+fs.writeFileSync(process.argv[2], '');
+const end = Date.now() + 60000; // wait-allow: bounded fixture wait for the explicit gate release signal
+while (!fs.existsSync(process.argv[3])) {
+  if (Date.now() >= end) process.exit(1);
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20); // wait-allow: release signal with a 60-second deadline
+}
+`);
+      h.ok(['project', 'set', '--tests-mode', 'run-only',
+        '--tests-cmd', [process.execPath, script, started, release].map(require('../lib/gates/common').shellQuote).join(' ')]);
+      const pending = h.runAsync(args);
+      try {
+        await waitOnRepo(h, () => fs.existsSync(started), 'accept never entered the software gate', { signal: t.signal });
+        recordFailure();
+      } finally {
+        fs.writeFileSync(release, '');
+      }
+      result = await pending;
+    } else {
+      recordFailure();
+      result = h.run(args);
+    }
+    assert.equal(result.code, 1, result.stderr);
+    const refusal = JSON.parse(result.stdout);
+    assert.equal(refusal.review_failed, true);
+    assert.equal(refusal.review.agent, 'failing-reviewer');
+    const task = h.readState('tasks.json').tasks[0];
+    assert.equal(task.status, 'submitted');
+    assert.equal(task.revision, 1);
+    assert.equal(task.sha, h.sha);
+    assert.equal(task.evidence.filter((e) => e.waived).length, 0);
+    assert.ok(!events(h).some((e) => e.cmd === 'accept'));
+  });
+}
+
+test('a title-only follow-up does not block an authorized review waiver', (t) => {
+  const h = submitted(t);
+  reviewerDown(h);
+  h.reviewer('T1', 'title-reviewer', h.sha);
+  h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', h.sha, '--agent', 'title-reviewer',
+    '--findings', JSON.stringify([{ kind: 'defect', path: 'PR title', claim: 'Overstated title' }])]);
+  h.ok(['accept', 'T1', '--waive', 'review', '--reason', 'Only a title follow-up', '--agent', 'orchestrator']);
+  assert.equal(h.readState('tasks.json').tasks[0].status, 'accepted');
+  assert.equal(reviewerSpawns(h).length, 2, 'no additional full review for the title');
+});
 
 test('rework sends the task back with the reason in the brief, and it can be claimed again', (t) => {
   const h = submitted(t);
