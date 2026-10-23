@@ -110,3 +110,9 @@ Existing links use these anchors. Follow the link to the contract in its area.
 <a id="credentials"></a>[credentials](state/tasks.md#credentials)
 
 <a id="broker-verbs"></a>[broker-verbs](state/containment.md#broker-verbs)
+
+<a id="local-ci-reruns"></a>[local-ci-reruns](state/ci.md#local-ci-reruns)
+
+<a id="gate-reruns"></a>[gate-reruns](state/gates.md#gate-reruns)
+
+<a id="flake-ledger"></a>[flake-ledger](state/gates.md#flake-ledger)
