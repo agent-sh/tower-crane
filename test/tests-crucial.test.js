@@ -135,23 +135,28 @@ for (const [name, settings, valueTest, ok, pattern] of [
   });
 }
 
-// The coverage run expands the proof template on the changed tests, so a native crash it reruns is
-// recorded as the proof step, never as the head command.
-test('a native crash in the coverage run is rerun as the proof step', { skip: process.platform === 'win32' && 'POSIX signals' }, (t) => {
-  const marker = path.join(fs.mkdtempSync(path.join(process.env.TOWER_CRANE_TEST_TMP || require('node:os').tmpdir(), 'crucial-crash-')), 'runs');
-  t.after(() => fs.rmSync(path.dirname(marker), { recursive: true, force: true }));
-  const crashOnce = `require('node:assert/strict').equal(require('../value'), 1);
-if (process.env.NODE_V8_COVERAGE) {
+// Shard coverage also reaches the head command; only the gate's own coverage directory should
+// trigger the proof crash.
+for (const inherited of [false, true]) {
+  test(`a native crash in the coverage run is rerun as the proof step (${inherited ? 'inherited coverage' : 'no inherited coverage'})`, { skip: process.platform === 'win32' && 'POSIX signals' }, (t) => {
+    const marker = path.join(fs.mkdtempSync(path.join(process.env.TOWER_CRANE_TEST_TMP || require('node:os').tmpdir(), 'crucial-crash-')), 'runs');
+    t.after(() => fs.rmSync(path.dirname(marker), { recursive: true, force: true }));
+    const inheritedCoverage = path.join(path.dirname(marker), 'inherited');
+    const crashOnce = `require('node:assert/strict').equal(require('../value'), 1);
+if (process.env.NODE_V8_COVERAGE && process.env.NODE_V8_COVERAGE !== ${JSON.stringify(inheritedCoverage)}) {
 ${nativeCrashTest({ marker })}}
 `;
-  const h = fixture(t, { '**/*.md': [] }, crashOnce);
-  const result = check(h);
-  assert.equal(result.ok, true, result.summary);
-  assert.deepEqual(result.receipt.coverage_gaps, ['value.js']);
-  assert.deepEqual(result.receipt.native_rerun, { step: 'proof', files: ['test/value.test.js'], ok: true });
-  assert.equal(fs.readFileSync(marker, 'utf8'), 'xx', 'only the coverage run and its rerun reach the crash');
-  assert.equal(counts(h), true);
-});
+    const h = fixture(t, { '**/*.md': [] }, crashOnce);
+    // Node copies the parent's coverage setting when the child environment omits it.
+    h.env.NODE_V8_COVERAGE = inherited ? inheritedCoverage : '';
+    const result = check(h);
+    assert.equal(result.ok, true, result.summary);
+    assert.deepEqual(result.receipt.coverage_gaps, ['value.js']);
+    assert.deepEqual(result.receipt.reruns, [{ step: 'proof', files: ['test/value.test.js'], ok: true }]);
+    assert.equal(fs.readFileSync(marker, 'utf8'), 'xx', 'only the coverage run and its rerun reach the crash');
+    assert.equal(counts(h), true);
+  });
+}
 
 // The import-derived seed (tools/tests-map.js) missed code a test reaches only through the CLI it
 // spawns or loads by name: T427's reviewer planted a bug in lib/gates/merge.js that every
