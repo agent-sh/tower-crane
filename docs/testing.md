@@ -50,6 +50,31 @@ On a host, `node test/proof-breaks.js scratch` plants a surviving gate parent an
 
 Proof scratch may be deep: socket paths use the runner's private runtime directory and the broker's short socket roots, independently of `TMPDIR`. Both proofs preserve a supplied `TOWER_CRANE_SOCKET_DIR`, so a sandbox's granted short leaf remains available when the runtime root is missing or overlong. The scratch regression table starts real brokers through the CLI gate with deep scratch and account caches, covering short, missing and overlong runtime roots and cleanup after each run.
 
+## Gate scratch proof profile
+
+These historical complete cleanup proofs predate T436 and ran at three file workers. Their `suite_time.wall_ms` measurements were:
+
+| CI run | Proof job | Head | Suite wall time (min) | Result |
+| --- | --- | --- | ---: | --- |
+| [39454500694](https://github.com/agent-sh/tower-crane/actions/runs/39454500694) | 118749985028 | ea10d584 | 38.39 | pass |
+| [39458982921](https://github.com/agent-sh/tower-crane/actions/runs/39458982921) | 118768970608 | f7cf4652 | 43.72 | pass |
+| [39513151860](https://github.com/agent-sh/tower-crane/actions/runs/39513151860) | 118938847381 | bbed5d5f | 45.01 | software-gate timeout |
+
+Successful proof receipts retain no per-file output. The failed receipt keeps only its output tail and names `test/worktree.test.js` as still running: its 39 completed worktree tests sum to 78.15 seconds. A file still active at the suite deadline does not mean that file alone took 45 minutes.
+
+The [generated profile](testing-gate-scratch-profile.json) records the per-file rows from the successful Linux Node 26 shards in the first two runs. Normalize each job log to its timestamp and message, then use `fileTimes` and `titles` from `scripts/test-durations.js` to match top-level test results to their defining files and sum their reported durations. The matching used the declarations in `0881d0fb`, including the dispatch titles ending in `slow base fetch`. These are per-file sums of test wall time from the shards, not per-file wall measurements of the nested cleanup proof; file startup and teardown are excluded. The source jobs are 118749984784, 118749984860 and 118749985059 for run 39454500694, and 118768970446, 118768970539 and 118768970467 for run 39458982921.
+
+Each run has 133 matched files. Their summed test times are 6498.95 and 6531.30 seconds. Unmatched top-level results add 74.95 and 67.56 seconds. At those revisions, even the matched times alone needed about 36.1 to 36.3 minutes at three workers. Trimming one file whose tests total 82 to 85 seconds could not supply the margin for a 30-minute proof target. These figures do not measure the suite after T436.
+
+The dispatch tests in `test/worktree.test.js` originally used a 15-second fake upload-pack wait for each of their two variants. T436 (`3e8eb58b`) cut the fake upload-pack wait from 15 seconds to 2 seconds per variant. T472 removes the remaining 2 seconds per variant, saving 4 seconds of intentional waiting against its merge base. Their assertions count exactly one fetch while preparing six tasks, check every fresh HEAD and, for the spawn variant, check that all six workers reuse those worktrees without another fetch.
+
+Three scoped Linux Node 26 runs of `npm test -- test/worktree.test.js --test-name-pattern="one dispatch prepares six"` measured the following times on a shared host. Every sample passed both tests. The baseline samples compiled the unmodified test file from `0881d0fb` through a preload under its original module path, keeping the same fixtures and CLI paths. The samples compare the original 15-second waits with no waits: they show the combined removal of the original waits since `0881d0fb`, not T472's incremental saving against its merge base. These measurements cover only the two dispatch tests. The orchestrator verifies the whole-suite proof target on main after T436.
+
+| Version | Sample 1 (s) | Sample 2 (s) | Sample 3 (s) | Median (s) | Min (s) | Max (s) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Original 15 s waits (`0881d0fb`) | 42.606 | 51.197 | 48.150 | 48.150 | 42.606 | 51.197 |
+| No waits (combined change since `0881d0fb`) | 12.634 | 35.961 | 12.271 | 12.634 | 12.271 | 35.961 |
+
 ## Writing tests
 
 - One integration test per piece of functionality and one end-to-end test per full feature. A unit test is only for pure logic nothing else reaches.
