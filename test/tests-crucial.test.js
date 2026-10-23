@@ -203,22 +203,31 @@ test('the coverage gap run measures a new JSON file read by the changed test', (
 
 // Shard coverage also reaches the head command; only the gate's own coverage directory should
 // trigger the proof crash.
-for (const inherited of [false, true]) {
-  test(`a native crash in the coverage run is rerun as the proof step (${inherited ? 'inherited coverage' : 'no inherited coverage'})`, { skip: process.platform === 'win32' && 'POSIX signals' }, (t) => {
+for (const [source, load, settings] of [
+  ['value.js', "require('../value')", { '**/*.md': [] }],
+  ['payload.json', "JSON.parse(require('node:fs').readFileSync('payload.json', 'utf8')).value", map],
+]) for (const inherited of [false, true]) {
+  test(`a native crash in the coverage run is rerun as the proof step (${source}, ${inherited ? 'inherited coverage' : 'no inherited coverage'})`, { skip: process.platform === 'win32' && 'POSIX signals' }, (t) => {
     const marker = path.join(fs.mkdtempSync(path.join(process.env.TOWER_CRANE_TEST_TMP || require('node:os').tmpdir(), 'crucial-crash-')), 'runs');
     t.after(() => fs.rmSync(path.dirname(marker), { recursive: true, force: true }));
     const inheritedCoverage = path.join(path.dirname(marker), 'inherited');
-    const crashOnce = `require('node:assert/strict').equal(require('../value'), 1);
+    const crashOnce = `require('node:assert/strict').equal(${load}, 1);
 if (process.env.NODE_V8_COVERAGE && process.env.NODE_V8_COVERAGE !== ${JSON.stringify(inheritedCoverage)}) {
 ${nativeCrashTest({ marker })}}
 `;
-    const h = fixture(t, { '**/*.md': [] }, crashOnce);
+    const h = fixture(t, settings, crashOnce);
+    if (source === 'payload.json') {
+      fs.writeFileSync(path.join(h.repo, source), '{"value":1}\n');
+      h.git(['add', '.']);
+      h.git(['commit', '-qm', 'data coverage crash fixture']);
+      h.ok(['submit', 'T1', '--sha', h.git(['rev-parse', 'HEAD']), '--agent', 'worker']);
+    }
     // Node copies the parent's coverage setting when the child environment omits it.
     h.env.NODE_V8_COVERAGE = inherited ? inheritedCoverage : '';
     const result = check(h);
     assert.equal(result.ok, true, result.summary);
-    assert.deepEqual(result.receipt.coverage_gaps, ['value.js']);
-    assert.deepEqual(result.receipt.native_rerun, { step: 'proof', files: ['test/value.test.js'], ok: true });
+    assert.deepEqual(result.receipt.coverage_gaps, [source]);
+    assert.deepEqual(result.receipt.reruns, [{ step: 'proof', files: ['test/value.test.js'], ok: true }]);
     assert.equal(fs.readFileSync(marker, 'utf8'), 'xx', 'only the coverage run and its rerun reach the crash');
     assert.equal(counts(h), true);
   });
