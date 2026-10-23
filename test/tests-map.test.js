@@ -395,7 +395,7 @@ const fs = require('node:fs');
 test('sometimes fails', () => {
   if (require('../value.js') === 0) return;
   const file = ${JSON.stringify(marker)};
-  const attempts = fs.existsSync(file) ? Number(fs.readFileSync(file, 'utf8')) : 0;
+  const attempts = fs.existsSync(file) ? Number(fs.readFileSync(file, 'utf8')) : 0; // read-published: the gate starts each counter writer only after the previous writer exits
   fs.writeFileSync(file, String(attempts + 1));
   assert.ok(attempts >= ${failures}, 'first attempts fail');
 });
