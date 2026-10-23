@@ -522,13 +522,22 @@ test('the suite profile compares the medians of interleaved baseline and head ru
   assert.match(files.text, /^median of 1: CPU seconds \(file processes\) head 3999\.0 vs baseline 4999\.0/m, 'without a cgroup the file processes are summed');
 });
 
-test('the suite profile records each test of a real run with its CPU', { skip: process.platform !== 'linux' && 'CPU comes from /proc' }, (t) => {
+// Wall deadlines cannot guarantee CPU work when the scheduler pauses a process.
+function profileCpuWork(pauseMs) {
+  return `const start = process.cpuUsage();
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ${pauseMs}); // wait-allow: the profile measures CPU work and pauses
+    let used;
+    do { used = process.cpuUsage(start); } while (used.user + used.system < 400000);`;
+}
+
+for (const pauseMs of [0, 350]) {
+test(`the suite profile records each test of a real run with its CPU (pause ${pauseMs} ms)`, { skip: process.platform !== 'linux' && 'CPU comes from /proc' }, (t) => {
   const h = makeRepo(t);
   const fixture = path.join(h.base, 'profiled.test.js');
   fs.writeFileSync(fixture, `
 const assert = require('node:assert/strict');
 require('node:test')('waits', () => { assert.equal(Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 400), 'timed-out'); }); // wait-allow: the profile measures a timer wait
-require('node:test')('spins', () => { const cpu = () => { const u = process.cpuUsage(); return (u.user + u.system) / 1000; }; const end = cpu() + 400; let n = 0; while (cpu() < end) n++; assert.ok(n > 0); }); // wait-allow: the profile measures CPU work, 400 ms of this process's own whatever else runs beside it
+require('node:test')('spins', () => { ${profileCpuWork(pauseMs)} });
 `);
   const out = path.join(h.base, 'profile.json');
   // This checkout stands in for the baseline, so the verdict is a coin toss; the exit follows it.
@@ -555,8 +564,10 @@ require('node:test')('spins', () => { const cpu = () => { const u = process.cpuU
   assert.match(r.stdout, /^serial tests: .* waiting$/m);
   assert.deepEqual(fs.readdirSync(h.base).filter((name) => name.startsWith('suite-profile-')), [], 'the record directory is removed');
 });
+}
 
-test('the suite profile runs a baseline commit from a worktree it removes afterwards', { skip: process.platform !== 'linux' && 'CPU comes from /proc' }, (t) => {
+for (const pauseMs of [0, 350]) {
+test(`the suite profile runs a baseline commit from a worktree it removes afterwards (pause ${pauseMs} ms)`, { skip: process.platform !== 'linux' && 'CPU comes from /proc' }, (t) => {
   const h = makeRepo(t);
   // The runner and what it loads, so the repository's own suite runs at both commits.
   for (const file of ['scripts/suite-profile.js', 'test/run.js', 'test/signals.js', 'test/atomic-file.js', 'test/global-setup.js', 'test/host.js', 'test/repo-seed.js', 'test/tmp-root.js',
@@ -571,8 +582,8 @@ test('the suite profile runs a baseline commit from a worktree it removes afterw
   h.git(['add', '.']);
   h.git(['commit', '-qm', 'baseline suite']);
   const baseline = h.git(['rev-parse', 'HEAD']);
-  // The head's test spins, so its file CPU is the larger whatever the load.
-  one("const end = Date.now() + 400; let n = 0; while (Date.now() < end) n++; require('node:assert/strict').ok(n > 0);"); // wait-allow: the profile measures CPU work
+  // The head spends 400 ms of CPU, so its file CPU is larger under contention too.
+  one(profileCpuWork(pauseMs));
   const out = path.join(h.base, 'profile.json');
   const r = cp.spawnSync(process.execPath, [path.join(h.repo, 'scripts', 'suite-profile.js'), '--test-concurrency=1', '--baseline', baseline, '--json', out, 'test/one.test.js'],
     { cwd: h.repo, env: { ...h.env, TOWER_CRANE_TEST_TMP: h.base, TOWER_CRANE_SANDBOX: '0' }, encoding: 'utf8', timeout: 300000 });
@@ -586,3 +597,4 @@ test('the suite profile runs a baseline commit from a worktree it removes afterw
   assert.deepEqual(h.git(['worktree', 'list', '--porcelain']).split('\n').filter((line) => line.startsWith('worktree ')).length, 1, 'the baseline worktree is removed');
   assert.deepEqual(fs.readdirSync(h.base).filter((name) => name.startsWith('suite-baseline-')), [], 'its directory is removed');
 });
+}
