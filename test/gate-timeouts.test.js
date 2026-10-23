@@ -4,10 +4,12 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const cp = require('node:child_process');
 const vm = require('node:vm');
 const { createRequire } = require('node:module');
 const { EventEmitter } = require('node:events');
 const { makeRepo, ROOT } = require('./helpers');
+const { HUNG_TEST_MS } = require('./signals');
 const { shellQuote } = require('../lib/gates/common');
 
 test('timeout validation and runner interruption formats', () => {
@@ -132,7 +134,7 @@ test('late gate deadlines preserve newly delivered output in either callback ord
           : realRequire(name),
     }, { filename });
     const C = mod.exports;
-    const pending = C.exec({ exec: C.treeExec }, process.execPath, ['-e', 'fixture'], { timeout: 300 });
+    const pending = C.exec({ exec: C.treeExec }, process.execPath, ['-e', 'fixture'], { timeout: 300 }); // wait-allow: deterministic gate deadline under a virtual clock
     const deliver = () => child[row.stream].emit('data', 'progress\n');
     if (row.order === 'stale') { now = 100; deliver(); }
     now = row.late ? 1500 : 300;
@@ -158,14 +160,28 @@ test('late gate deadlines preserve newly delivered output in either callback ord
 
 // inbox reads PRs with synchronous gh calls while its base CI read runs in the background, so a
 // timer can come due while the event loop is blocked, before the child's exit or output is seen.
-test('a timeout that comes due during a blocked event loop stops only a child with nothing to show', async () => {
+test('a timeout that comes due during a blocked event loop stops only a child with nothing to show', async (t) => {
+  const h = makeRepo(t);
   const C = require('../lib/gates/common');
-  const run = (script) => C.exec({ exec: C.treeExec }, process.execPath, ['-e', script], { timeout: 300 }); // wait-allow: the gate timeout itself is under test
+  let next = 0;
+  const run = (script) => {
+    const ready = path.join(h.base, `child-${next++}.ready`);
+    const prefix = "const fs = require('node:fs'); const ready = () => fs.writeFileSync(process.argv[1], 'ready'); ";
+    const pending = C.exec({ exec: C.treeExec }, process.execPath, ['-e', prefix + script, ready], { timeout: 300 }); // wait-allow: the gate timeout itself is under test
+    // A synchronous observer keeps the parent from draining the child's pipe
+    // until the child has reached the state this row needs.
+    const observed = cp.spawnSync(process.execPath, ['-e',
+      "require('./test/signals').fileWritten(process.argv[1]).catch(e => { console.error(e); process.exitCode = 1; });", ready],
+    { cwd: ROOT, env: h.env, encoding: 'utf8', timeout: HUNG_TEST_MS });
+    assert.equal(observed.status, 0, observed.stderr);
+    return pending;
+  };
   const block = () => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1500); // wait-allow: blocks the event loop past the gate timeout, the condition under test
   const cases = [
-    ['exited', "process.stdout.write('done')", (r) => assert.equal(r.stdout, 'done')],
+    ['exited', "fs.writeSync(1, 'done'); ready();", (r) => assert.equal(r.stdout, 'done')],
+    ['delayed startup', "Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2000); fs.writeSync(1, 'done'); ready();", (r) => assert.equal(r.stdout, 'done')], // wait-allow: startup exceeds the old immediate block, so the readiness signal must be observed
     // More than a pipe buffer: the child cannot exit until the parent reads.
-    ['waiting on its pipe', "process.stdout.write('x'.repeat(1 << 20))", (r) => assert.equal(r.stdout.length, 1 << 20)],
+    ['waiting on its pipe', "fs.writeSync(1, 'x'); ready(); process.stdout.write('x'.repeat((1 << 20) - 1));", (r) => assert.equal(r.stdout.length, 1 << 20)],
   ];
   for (const [what, script, check] of cases) {
     const pending = run(script);
@@ -175,7 +191,7 @@ test('a timeout that comes due during a blocked event loop stops only a child wi
     assert.equal(r.ok, true, `${what}: ${r.stderr}`);
     check(r);
   }
-  const pending = run('setTimeout(() => {}, 30000)'); // wait-allow: a child that outlives the gate timeout under test
+  const pending = run('ready(); setTimeout(() => {}, 30000)'); // wait-allow: a child that outlives the gate timeout under test
   block();
   const r = await pending;
   assert.equal(r.timedOut, true);
