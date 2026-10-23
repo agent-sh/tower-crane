@@ -146,25 +146,87 @@ test('changed failing output resets the consecutive count', (t) => {
   }
 });
 
-test('external file and environment failures escalate on the first attempt', (t) => {
-  for (const output of ['README.md:1: invalid link', 'ModuleNotFoundError: missing dependency']) {
-    const h = fixture(t);
+test('code regressions remain locally retryable despite unchanged callers and environment words', (t) => {
+  for (const output of [
+    "src/b.ts:1:14 - error TS2305: Module './a' has no exported member 'x'.",
+    'src/b.go:1:14: undefined: a.X',
+    'error[E0432]: unresolved import\n --> src/b.rs:1:14',
+    "Error: Cannot find module './lib/helpr'",
+    "Error: ENOENT: no such file or directory, open 'confg.json'",
+    "ModuleNotFoundError: No module named 'helpr'",
+    "Error: permission denied opening 'confg.json'",
+  ]) {
+    const h = cachedFixture(t, 'presubmit-callers', (h) => {
+      h.init(['--base', 'main']);
+      h.ok(['task', 'add', '--title', 'Change callee', '--acceptance', 'src/a.ts exports x']);
+      fs.mkdirSync(path.join(h.repo, 'src'));
+      for (const file of ['a.ts', 'b.ts', 'b.go', 'b.rs']) {
+        fs.writeFileSync(path.join(h.repo, 'src', file), '// base source\n');
+      }
+      h.git(['add', 'src']);
+      h.git(['commit', '-qm', 'base callers']);
+      h.git(['checkout', '-qb', 'fixture-callers']);
+      fs.writeFileSync(path.join(h.repo, 'src', 'a.ts'), '// changed callee\n');
+      h.git(['add', 'src/a.ts']);
+      h.git(['commit', '-qm', 'change callee']);
+      h.ok(['claim', 'T1', '--agent', 'worker-T1-1']);
+    });
     set(h, [process.execPath, '-e', `console.log(${JSON.stringify(output)}); process.exit(1)`]);
-    assert.match(submit(h).stderr, /Escalated to orchestrator/);
-    const item = h.json(['inbox']).items.find((i) => i.kind === 'presubmit_failed');
-    assert.equal(item.attempts, 1);
-    assert.equal(item.output.trim(), output);
+    for (const attempts of [1, 2]) {
+      const failed = submit(h);
+      assert.equal(failed.code, 1, output);
+      const event = events(h).at(-1);
+      assert.equal(event.cmd, 'presubmit refused', output);
+      assert.equal(event.detail.attempts, attempts, output);
+      assert.equal(event.detail.escalated, false, output);
+      assert.equal(h.json(['task', 'show', 'T1']).sha, null);
+    }
   }
 });
 
-test('stack and test-location metadata stay local; primary external diagnostics escalate', (t) => {
+test('repeated node:test failures escalate despite changing reporter durations', (t) => {
+  for (const reporter of ['spec', 'tap']) {
+    const h = fixture(t);
+    fs.writeFileSync(path.join(h.repo, 'fail.test.js'),
+      "require('node:test')('same failure', () => { throw new Error('same'); });\n");
+    h.git(['add', 'fail.test.js']);
+    h.git(['commit', '-qm', 'add failing test']);
+    set(h, [process.execPath, '--test', `--test-reporter=${reporter}`, 'fail.test.js']);
+    for (const attempts of [1, 2, 3]) {
+      const result = submit(h);
+      assert.equal(result.code, 1, result.stderr);
+      const event = events(h).at(-1);
+      assert.equal(event.detail.attempts, attempts, reporter);
+      assert.equal(event.detail.escalated, attempts === 3, reporter);
+      assert.match(event.detail.output, /duration_ms[: ]+\d+/);
+    }
+    const item = h.json(['inbox']).items.find((i) => i.kind === 'presubmit_failed');
+    assert.equal(item.attempts, 3);
+    assert.match(item.output, /same failure/);
+    assert.match(submit(h).stderr, /stop retrying/);
+  }
+});
+
+test('file and dependency diagnostics alone do not prove an external failure', (t) => {
+  for (const output of ['README.md:1: invalid link', 'ModuleNotFoundError: missing dependency']) {
+    const h = fixture(t);
+    set(h, [process.execPath, '-e', `console.log(${JSON.stringify(output)}); process.exit(1)`]);
+    assert.match(submit(h).stderr, /Attempt 1\/3/);
+    const refusal = events(h).at(-1).detail;
+    assert.equal(refusal.escalated, false);
+    assert.equal(refusal.output.trim(), output);
+    assert.equal(h.json(['inbox']).items.some((i) => i.kind === 'presubmit_failed'), false);
+  }
+});
+
+test('stack, test-location and primary file diagnostics remain locally retryable', (t) => {
   for (const [label, diagnostic, escalated] of [
     ['Node frame', (h) => `Error: regression\n    at TestContext.<anonymous> (${h.repo}/README.md:30:5)`, false],
     ['TAP frame', (h) => `# Error: regression\n#     at TestContext.<anonymous> (${h.repo}/README.md:30:5)`, false],
     ['Python frame', (h) => `Traceback (most recent call last):\n  File "${h.repo}/README.md", line 10, in test\nValueError: regression`, false],
     ['node:test location', (h) => `location: '${h.repo}/README.md:30:1'\nerror: regression`, false],
     ['test-at location', () => 'test at README.md:30:1\nerror: regression', false],
-    ['primary location', () => 'README.md:1: invalid link', true],
+    ['primary location', () => 'README.md:1: invalid link', false],
   ]) {
     const h = fixture(t);
     set(h, [process.execPath, '-e', `console.log(${JSON.stringify(diagnostic(h))}); process.exit(1)`]);
