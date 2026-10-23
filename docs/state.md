@@ -344,7 +344,7 @@ The hot paths query the indexes instead of reading the log. A hook's poll reads 
 
 `status`, `inbox` and the orchestrator's observer read the log by index too. Each reads the task heads and:
 
-- each task's own events of the commands a check folds (its claim and dispatch lifecycle, its merge and gate receipts, its reviews, its PR-body repair, a submitted task's deferred review dispatch, an accepted task's merge refusals), only for the tasks that check applies to, and in one query for many tasks where a view asks every task the same thing;
+- each task's own events of the commands a check folds (its claim and dispatch lifecycle, its merge and gate receipts, its reviews, its PR-body repair, a submitted task's deferred review dispatch and archive refusal, an accepted task's merge refusals), only for the tasks that check applies to, and in one query for many tasks where a view asks every task the same thing;
 - the few commands they list or settle across tasks: `msg`, the owner's `task note` and `decision note`, `review exit missing`, `inbox ack`, `main ci`, `gates pin`, `project set`, `check tests` of the last seven days for native crashes, read by time (`at`) so no older run's body is read, `worktree orphan cleanup`, and `stall` for claimed tasks;
 - the newest `inbox snapshot`, `ladder set` or `merge queue` entry that answers a question (the last snapshot, the queue's holder, an accepted task's last blocked pass), read newest first in growing pages, so a recent one costs a few rows;
 - the events naming the agents whose homes remain, for kept homes;
