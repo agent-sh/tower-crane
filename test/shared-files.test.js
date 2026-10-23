@@ -51,8 +51,8 @@ test('the shared check rejects CLI-running fake fixtures without the env helper'
   assert.equal(accepted.status, 0, accepted.stderr);
 });
 
-function fixture(t, { crlfProtected = false, windowsCheckout = false } = {}) {
-  const h = makeDocsRepo(t);
+function fixture(t, { crlfProtected = false, windowsCheckout = false, crlfCommandSource = false } = {}) {
+  const h = makeDocsRepo(t, { crlfCommandSource });
   if (windowsCheckout) h.git(['config', 'core.autocrlf', 'true']);
   if (windowsCheckout) {
     for (const name of ['bin/tower-crane.js', 'docs/cli.md']) {
@@ -207,7 +207,7 @@ test('a new module registers its command without editing the CLI entry point', (
 
 for (const windowsCheckout of [false, true]) {
   test(`independent task list and task note flag additions merge without generated-doc conflicts (${windowsCheckout ? 'Windows checkout' : 'LF checkout'})`, (t) => {
-    const f = fixture(t, { windowsCheckout });
+    const f = fixture(t, { windowsCheckout, crlfCommandSource: true });
     for (const name of ['bin/tower-crane.js', 'docs/cli.md']) {
       assert.ok(!fs.readFileSync(path.join(f.h.repo, name), 'utf8').includes('\r'), `${name} checks out as LF`);
     }

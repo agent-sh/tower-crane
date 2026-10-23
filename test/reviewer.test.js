@@ -169,23 +169,26 @@ test('review contract extraction covers split and legacy state layouts', (t) => 
     { split: 'no heading', legacy: true, expected: 'LEGACY_CONTRACT' },
   ];
   fs.mkdirSync(path.join(h.repo, 'docs', 'state'), { recursive: true });
-  fs.writeFileSync(path.join(h.repo, 'docs', 'cli.md'), '## Gates\nCLI_CONTRACT\n\n## Next\nOUTSIDE_CLI\n');
-  for (const variant of variants) {
-    const gates = path.join(h.repo, 'docs', 'state', 'gates.md');
-    if (!variant.split) fs.rmSync(gates, { force: true });
-    else fs.writeFileSync(gates, variant.split === true
-      ? '# Gates\n\n### Acceptance gates\nSPLIT_CONTRACT\n```md\n## FENCED_HEADING\n```\n\n### Next\nOUTSIDE_STATE\n'
-      : '# Gates\n');
-    fs.writeFileSync(path.join(h.repo, 'docs', 'state.md'), variant.legacy
-      ? '# State\n\n### Acceptance gates\nLEGACY_CONTRACT\n\n## Next\nOUTSIDE_STATE\n'
-      : '# State\n\n[Acceptance gates](state/gates.md#acceptance-gates)\n');
-    const context = staticContext(h.repo, [], 'default', 'ROLE', {});
-    assert.ok(context.includes(variant.expected), JSON.stringify(variant));
-    assert.ok(context.includes('CLI_CONTRACT'));
-    assert.ok(!context.includes('OUTSIDE_STATE') && !context.includes('OUTSIDE_CLI'));
-    if (variant.split === true) {
-      assert.ok(context.includes('FENCED_HEADING'));
-      assert.ok(!context.includes('LEGACY_CONTRACT'));
+  for (const eol of ['\n', '\r\n']) {
+    const write = (file, text) => fs.writeFileSync(file, text.replace(/\n/g, eol));
+    write(path.join(h.repo, 'docs', 'cli.md'), '## Gates\nCLI_CONTRACT\n\n## Next\nOUTSIDE_CLI\n');
+    for (const variant of variants) {
+      const gates = path.join(h.repo, 'docs', 'state', 'gates.md');
+      if (!variant.split) fs.rmSync(gates, { force: true });
+      else write(gates, variant.split === true
+        ? '# Gates\n\n### Acceptance gates\nSPLIT_CONTRACT\n```md\n## FENCED_HEADING\n```\n\n### Next\nOUTSIDE_STATE\n'
+        : '# Gates\n');
+      write(path.join(h.repo, 'docs', 'state.md'), variant.legacy
+        ? '# State\n\n### Acceptance gates\nLEGACY_CONTRACT\n\n## Next\nOUTSIDE_STATE\n'
+        : '# State\n\n[Acceptance gates](state/gates.md#acceptance-gates)\n');
+      const context = staticContext(h.repo, [], 'default', 'ROLE', {});
+      assert.ok(context.includes(variant.expected), JSON.stringify({ ...variant, eol }));
+      assert.ok(context.includes('CLI_CONTRACT'));
+      assert.ok(!context.includes('OUTSIDE_STATE') && !context.includes('OUTSIDE_CLI'));
+      if (variant.split === true) {
+        assert.ok(context.includes('FENCED_HEADING'));
+        assert.ok(!context.includes('LEGACY_CONTRACT'));
+      }
     }
   }
   const root = path.join(__dirname, '..');
