@@ -408,6 +408,8 @@ function start() {
     finish();
     return;
   }
+  const swept = require('./tmp-root').sweepTempRoot();
+  console.error(`Test tmp sweep: removed ${swept.count} directories, ${swept.bytes} bytes`);
   // The clean git seed every test repository copies, built once per run and
   // passed to every file through the environment (test/global-setup.js).
   const setup = require('./global-setup');
