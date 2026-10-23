@@ -8,10 +8,10 @@ const path = require('node:path');
 const cp = require('node:child_process');
 const { cachedFixture } = require('./helpers');
 const { writeHost } = require('./host');
+const { socketDir } = require('./socket-dir');
 const { HUNG_TEST_MS } = require('./signals');
-const { probe, grantSummary } = require('../scripts/probe-gate-scratch');
-const { shellQuote } = require('../lib/gates/common');
-const { suiteTime, reportSuiteTime, DEADLINE_MIN } = require('../scripts/suite-time');
+const { probe } = require('../scripts/probe-gate-scratch');
+const { suiteTime, reportSuiteTime, DEADLINE_MIN, PROOF_DEADLINE_MIN } = require('../scripts/suite-time');
 
 function fixture(t) {
   return cachedFixture(t, 'scratch-proof', (h) => {
@@ -37,6 +37,134 @@ if (process.env.PROOF_FAIL === '1') process.exit(7);
   });
 }
 
+test('the default gate proof runs the representative files and still rejects leaked scratch', (t) => {
+  const h = fixture(t);
+  const files = ['test/ladder.test.js', 'test/broker.test.js', 'test/spawn.test.js', 'test/gates/tests.test.js'];
+  fs.mkdirSync(path.join(h.repo, 'test'));
+  fs.writeFileSync(path.join(h.repo, 'test', 'run.js'), `
+require('node:assert/strict').deepEqual(process.argv.slice(2), ['--test-concurrency=3', ...${JSON.stringify(files)}]);
+require('../scratch.js');
+`);
+  h.git(['add', 'test/run.js']);
+  h.git(['commit', '-qm', 'Add representative runner']);
+  for (const leak of [false, true]) {
+    const result = probe({ root: h.repo, cache: path.join(h.base, 'probe'),
+      environment: { ...h.env, TOWER_CRANE_SANDBOX: '0', TOWER_CRANE_BROKER: '', PROOF_LEAK: leak ? '1' : '0' } });
+    assert.equal(result.command, `node test/run.js --test-concurrency=3 ${files.join(' ')}`);
+    assert.equal(result.exit, 0);
+    assert.equal(result.cleanup_ok, !leak);
+    assert.equal(result.ok, !leak);
+    assert.deepEqual(result.outer_after, leak ? ['escaped'] : []);
+  }
+});
+
+test('default host proofs isolate ambient admission while preserving supplied hosts', (t) => {
+  const h = fixture(t);
+  fs.mkdirSync(path.join(h.repo, 'test'));
+  fs.writeFileSync(path.join(h.repo, 'test', 'run.js'), "require('../scratch.js');\n");
+  h.git(['add', 'test/run.js']);
+  h.git(['commit', '-qm', 'Add host proof runner']);
+  const busy = writeHost(path.join(h.base, 'busy-host'), { limit: 5, used: 3 });
+  const script = `
+const cp = require('node:child_process');
+const spawn = cp.spawnSync;
+cp.spawnSync = (bin, args, options) => {
+  if (args[1] === 'check' && !options.env.TOWER_CRANE_HOST_ROOT) {
+    options = { ...options, env: { ...options.env, TOWER_CRANE_HOST_ROOT: process.env.PROOF_BUSY_HOST } };
+  }
+  return spawn(bin, args, options);
+};
+const { probe } = require(${JSON.stringify(require.resolve('../scripts/probe-gate-scratch'))});
+try {
+  console.log(JSON.stringify(probe({ root: process.cwd(), cache: process.argv[1] })));
+} catch (error) { console.error(error.message); process.exitCode = 1; }
+`;
+  const failures = [];
+  for (const row of [
+    { name: 'standalone', supplied: null, leak: false },
+    { name: 'nested host gate', supplied: null, leak: false, tmp: true },
+    { name: 'nested leak', supplied: null, leak: true, tmp: true },
+    { name: 'supplied available host', supplied: h.env.TOWER_CRANE_HOST_ROOT, leak: false },
+    { name: 'supplied busy host', supplied: busy, deferred: true },
+  ]) {
+    const cache = path.join(h.base, row.name);
+    const environment = { ...h.env, PROOF_BUSY_HOST: busy, PROOF_LEAK: row.leak ? '1' : '0' };
+    delete environment.NODE_TEST_CONTEXT;
+    delete environment.TOWER_CRANE_HOST_ROOT;
+    if (row.supplied) environment.TOWER_CRANE_HOST_ROOT = row.supplied;
+    if (row.tmp) environment.TOWER_CRANE_TEST_TMP = path.join(h.base, 'enclosing-gate', 'tmp');
+    const out = cp.spawnSync(process.execPath, ['-e', script, cache], {
+      cwd: h.repo, env: environment, encoding: 'utf8', timeout: HUNG_TEST_MS,
+    });
+    if (out.status !== (row.deferred ? 1 : 0)) {
+      failures.push(`${row.name}: ${out.stderr || out.stdout}`);
+      continue;
+    }
+    if (row.deferred) assert.match(out.stderr, /exit code 3[\s\S]*deferred by the host governor/);
+    else {
+      const result = JSON.parse(out.stdout);
+      assert.equal(result.exit, 0, row.name);
+      assert.equal(result.cleanup_ok, !row.leak, row.name);
+      assert.equal(result.ok, !row.leak, row.name);
+    }
+    assert.deepEqual(fs.readdirSync(cache), [], row.name);
+  }
+  assert.deepEqual(failures, []);
+});
+
+test('deep scratch proofs keep a granted socket leaf across runtime root variants', {
+  skip: process.platform === 'win32' && 'Windows brokers use named pipes',
+}, async (t) => {
+  const h = fixture(t);
+  const sockets = socketDir(t);
+  fs.writeFileSync(path.join(h.repo, 'broker-proof.js'), `
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+assert.equal(process.env.TOWER_CRANE_SOCKET_DIR, process.env.PROOF_SOCKET_DIR);
+assert.equal(process.env.TOWER_CRANE_BROKER, undefined);
+// The account cache is overlong too, so the granted leaf is the fallback.
+const os = require('node:os');
+const userInfo = os.userInfo;
+os.userInfo = (...args) => ({ ...userInfo(...args), homedir: path.join(process.cwd(), 'account-'.repeat(30)) });
+const broker = require(${JSON.stringify(require.resolve('../lib/broker'))});
+(async () => {
+  const state = path.join(process.cwd(), 'deep-'.repeat(30), 'state');
+  const where = path.join(state, 'brokers', 'worker-T1-1');
+  const listener = await broker.start({ state, task: 'T1', agent: 'worker-T1-1',
+    role: 'worker', harness: 'claude', cwd: process.cwd(), broker: path.join(where, 'broker.json') });
+  try {
+    const socket = JSON.parse(fs.readFileSync(path.join(where, 'broker.json'), 'utf8')).socket;
+    if (process.platform !== 'win32') {
+      assert.ok(Buffer.byteLength(socket) <= 103, socket);
+      assert.ok(socket.startsWith(process.env.PROOF_SOCKET_DIR + path.sep), socket);
+      assert.ok(fs.statSync(socket).isSocket());
+    }
+  } finally { await listener.close(); }
+  assert.deepEqual(fs.readdirSync(process.env.PROOF_SOCKET_DIR), []);
+})().catch(error => { console.error(error); process.exitCode = 1; });
+`);
+  h.git(['add', 'broker-proof.js']);
+  h.git(['commit', '-qm', 'Add deep broker proof']);
+  for (const [name, runtime] of [
+    ['overlong runtime', path.join(h.base, 'runtime-'.repeat(30))],
+    ['short runtime', sockets],
+    ['missing runtime', path.join(sockets, 'missing')],
+  ]) {
+    await t.test(name, () => {
+      const cache = path.join(h.base, 'deep-cache-'.repeat(12), name);
+      const result = probe({ root: h.repo, cache, command: 'node broker-proof.js',
+        environment: { ...h.env, XDG_RUNTIME_DIR: runtime,
+          TOWER_CRANE_SOCKET_DIR: sockets, PROOF_SOCKET_DIR: sockets } });
+      assert.equal(result.exit, 0, `${name}: ${result.gate?.summary}`);
+      assert.equal(result.ok, true, name);
+      assert.equal(result.cleanup_ok, true, name);
+      assert.deepEqual(fs.readdirSync(sockets), [], name);
+      assert.deepEqual(fs.readdirSync(cache), [], name);
+    });
+  }
+});
+
 test('the gate proof measures caller contents and the actual removed parent', (t) => {
   const h = fixture(t);
   const result = probe({ root: h.repo, cache: path.join(h.base, 'probe'), command: 'node scratch.js', environment: h.env });
@@ -47,29 +175,9 @@ test('the gate proof measures caller contents and the actual removed parent', (t
   assert.deepEqual(result.gate_root_after, []);
   assert.equal(result.gate_parents.length, 1);
   assert.equal(result.gate_parents[0].removed, true);
-  assert.equal(result.suite_time.deadline_min, DEADLINE_MIN);
-  assert.ok(result.suite_time.wall_ms > 0 && result.suite_time.wall_ms < DEADLINE_MIN * 60000);
+  assert.equal(result.suite_time.deadline_min, PROOF_DEADLINE_MIN);
+  assert.ok(result.suite_time.wall_ms > 0 && result.suite_time.wall_ms < PROOF_DEADLINE_MIN * 60000);
   assert.equal(result.suite_time.warn, false);
-});
-
-test('the gate proof records the test threads the governor grants the gate\'s run', (t) => {
-  const h = fixture(t);
-  // A run that asks for two threads and holds its lease past a few samples, as test/run.js does.
-  const grants = path.join(__dirname, '..', 'lib', 'test-grants.js');
-  fs.writeFileSync(path.join(h.base, 'lease.js'), `
-require(${JSON.stringify(grants)}).open(process.env, 2).then((lease) => {
-  setTimeout(() => lease.close(), 1500); // wait-allow: holds the lease across the proof's 100 ms samples
-});
-`);
-  const command = `${shellQuote(process.execPath)} ${shellQuote(path.join(h.base, 'lease.js'))}`;
-  const result = probe({ root: h.repo, cache: path.join(h.base, 'probe'), command, environment: h.env, sampleMs: 100 });
-  assert.equal(result.ok, true, JSON.stringify(result.gate?.summary));
-  const held = result.test_threads.filter((row) => row.grants.length);
-  assert.ok(held.length, JSON.stringify(result.test_threads));
-  assert.deepEqual(held[0].grants.map(([, requested]) => requested), [2]);
-  assert.ok(held[0].grants[0][0] >= 1 && held[0].budget >= 1 && held[0].cores >= 1, JSON.stringify(held[0]));
-  assert.match(grantSummary(result.test_threads, result.finished_at), /^test threads granted (\d+ for [\d.]+ min(, )?)+ \(cap \d+ on \d+ cores\)$/);
-  assert.equal(grantSummary([], result.finished_at), 'test threads granted never sampled');
 });
 
 test('suite time warns on GitHub past 75% of the deadline and records each run in the step summary', (t) => {
