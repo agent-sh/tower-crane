@@ -1,0 +1,1 @@
+- The CPU contention probe retains raw timings and signed changes on failure. Three paired baseline and weighted trials alternate order, warm the gate before timing and record actual weights, CPU use and host pressure while keeping the strict 10% absolute limit.

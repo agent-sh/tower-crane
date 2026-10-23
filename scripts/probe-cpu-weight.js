@@ -15,6 +15,21 @@ const ROOT = path.resolve(__dirname, '..');
 const RUNNER = path.join(ROOT, 'lib', 'containment-runner.js');
 const TIMEOUT = 8 * 60000;
 
+function runOutput(result) {
+  return [result.stdout, result.stderr].filter(Boolean).join('\n');
+}
+
+function checkRun(result, label) {
+  assert.ok(result.status === 0 && !result.error && !result.signal,
+    `${label}: status ${result.status}, signal ${result.signal || 'none'}${result.error ? `, ${result.error.message}` : ''}\n${runOutput(result)}`);
+}
+
+function parseRun(result, label) {
+  checkRun(result, label);
+  try { return JSON.parse(result.stdout.trim()); }
+  catch (error) { throw new Error(`${label}: invalid JSON\n${runOutput(result)}`, { cause: error }); }
+}
+
 function readback() {
   const group = path.dirname(C.currentGroup());
   const unit = path.basename(group);
@@ -46,8 +61,7 @@ async function scope(mode, weight, action) {
   const result = await gates.treeExec(argv[0], argv.slice(1), {
     cwd: ROOT, env: { ...process.env, NODE_OPTIONS: '' }, timeout: TIMEOUT,
   });
-  assert.equal(result.status, 0, result.stderr || String(result.error || result.signal));
-  return JSON.parse(result.stdout.trim());
+  return parseRun(result, `${mode} scope ${action}`);
 }
 
 async function nestedWeights() {
@@ -77,9 +91,12 @@ console.log(JSON.stringify({ group: C.currentGroup(), weight: Number(fs.readFile
 function cpuGate() {
   const workers = Array.from({ length: os.availableParallelism() }, () => new Worker(`
 const { parentPort } = require('node:worker_threads');
-parentPort.postMessage('ready');
 let x = 1;
-for (;;) { for (let i = 0; i < 1000000; i++) x = Math.imul(x ^ i, 1664525) + 1013904223; }
+const spin = () => { for (let i = 0; i < 1000000; i++) x = Math.imul(x ^ i, 1664525) + 1013904223; };
+// Warm a full batch before readiness so JIT work is outside timed builds.
+spin();
+parentPort.postMessage('ready');
+for (;;) spin();
 `, { eval: true }));
   Promise.all(workers.map((worker) => new Promise((resolve) => worker.once('message', resolve))))
     .then(() => console.log('ready'));
@@ -89,10 +106,57 @@ for (;;) { for (let i = 0; i < 1000000; i++) x = Math.imul(x ^ i, 1664525) + 101
 
 const summary = (runs) => ({ median_ms: [...runs].sort((a, b) => a - b)[1], min_ms: Math.min(...runs), max_ms: Math.max(...runs), runs_ms: runs });
 
+function comparison(before, withGate) {
+  for (const samples of [before, withGate]) {
+    assert.ok(Array.isArray(samples) && samples.length === 3 && samples.every((n) => Number.isFinite(n) && n > 0),
+      'a comparison needs three positive finite timings per condition');
+  }
+  const baseline = summary(before);
+  const contended = summary(withGate);
+  const signed = (contended.median_ms - baseline.median_ms) / baseline.median_ms;
+  return { before: baseline, with_gate: contended, signed_change: signed, absolute_change: Math.abs(signed) };
+}
+
+async function measureTrials({ build, startGate, waitGate, stopGate }) {
+  const before = [];
+  const withGate = [];
+  const contended = async (trial) => {
+    const gate = startGate();
+    try {
+      await waitGate(gate);
+      withGate.push(await build('with_gate', trial, gate));
+    } finally { await stopGate(gate); }
+  };
+  // Nearby controls and alternating order reduce drift from other host work.
+  for (let trial = 0; trial < 3; trial++) {
+    if (trial % 2 === 0) {
+      before.push(await build('before', trial));
+      await contended(trial);
+    } else {
+      await contended(trial);
+      before.push(await build('before', trial));
+    }
+  }
+  return comparison(before, withGate);
+}
+
+function cpuReading(group) {
+  const usage = /^usage_usec (\d+)$/m.exec(fs.readFileSync(path.join(group, 'cpu.stat'), 'utf8'));
+  assert.ok(usage && Number.isSafeInteger(Number(usage[1])), `missing CPU usage counter in ${group}`);
+  return { group, weight: Number(fs.readFileSync(path.join(group, 'cpu.weight'), 'utf8')),
+    cpu_max: fs.readFileSync(path.join(group, 'cpu.max'), 'utf8').trim(), usage_usec: Number(usage?.[1]) };
+}
+
+function hostReading() {
+  const reading = G.probe();
+  return { load: reading.load, cpu_some_avg10: reading.pressure.cpu?.some.avg10, cpu_some_avg60: reading.pressure.cpu?.some.avg60 };
+}
+
 async function benchmark() {
   const cache = process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache');
   const project = fs.mkdtempSync(path.join(cache, 'tc-other-build-'));
-  let gate;
+  const traces = [];
+  let reported = false;
   try {
     const cores = os.availableParallelism();
     const objects = Array.from({ length: 2 * cores }, (_, i) => `unit-${i}.o`);
@@ -101,48 +165,79 @@ async function benchmark() {
       `unsigned f${f}(unsigned x) {\n${Array.from({ length: 80 }, (_, i) => `x = (x ^ ${i + f + 1}u) * 1664525u + 1013904223u;`).join('\n')}\nreturn x;\n}`).join('\n');
     for (let i = 0; i < objects.length; i++) fs.writeFileSync(path.join(project, `unit-${i}.c`), source);
     fs.writeFileSync(path.join(project, 'Makefile'), `all: ${objects.join(' ')}\n%.o: %.c\n\tcc -O2 -c $< -o $@\n`);
-    const build = async () => {
+    const build = async (condition, trial, gate) => {
       for (const object of objects) fs.rmSync(path.join(project, object), { force: true });
+      const trace = { condition, trial, host_before: hostReading() };
+      traces.push(trace);
+      const gateBefore = gate ? cpuReading(gate.cpu.group) : null;
       const start = performance.now();
       const result = await gates.treeExec('make', ['-s', '-j', String(cores)], {
         cwd: project, resources: caps(), cpuWeight: G.cpuWeight({}, 'worker'), timeout: 60000,
         env: { ...process.env, TOWER_CRANE_TEST_CONTAINMENT: '1' },
+        onSpawn(_pid, containment) {
+          if (!containment?.group) return;
+          try { trace.build_cpu = cpuReading(containment.group); }
+          catch (error) { trace.build_cpu = { error: error.message }; }
+        },
       });
-      assert.equal(result.status, 0, result.stderr || String(result.error || result.signal));
-      return performance.now() - start;
+      trace.elapsed_ms = performance.now() - start;
+      trace.host_after = hostReading();
+      checkRun(result, `build ${condition} ${trial}`);
+      assert.equal(trace.build_cpu?.weight, G.cpuWeight({}, 'worker'), JSON.stringify(trace));
+      if (gate) {
+        assert.equal(gate.child.exitCode, null, 'CPU gate must run throughout each build');
+        assert.equal(gate.child.signalCode, null, 'CPU gate must run throughout each build');
+        const after = cpuReading(gate.cpu.group);
+        assert.equal(after.weight, G.cpuWeight({}, 'tests'));
+        assert.ok(after.usage_usec > gateBefore.usage_usec, 'CPU gate must consume CPU during the build');
+        trace.gate_cpu = { ...after, usage_usec: after.usage_usec - gateBefore.usage_usec,
+          core_share: (after.usage_usec - gateBefore.usage_usec) / (trace.elapsed_ms * 1000 * cores) };
+      }
+      return trace.elapsed_ms;
     };
-    await build();
-    const before = [];
-    for (let i = 0; i < 3; i++) before.push(await build());
-    gate = C.spawn(process.execPath, [__filename, '--cpu-gate'], {
-      cpuWeight: G.cpuWeight({}, 'tests'), resources: caps(),
-      env: { ...process.env, TOWER_CRANE_TEST_CONTAINMENT: '1' }, stdio: ['ignore', 'pipe', 'pipe'],
+    await build('warmup', null);
+    const measured = await measureTrials({
+      build,
+      startGate() {
+        const child = C.spawn(process.execPath, [__filename, '--cpu-gate'], {
+          cpuWeight: G.cpuWeight({}, 'tests'), resources: caps(),
+          env: { ...process.env, TOWER_CRANE_TEST_CONTAINMENT: '1' }, stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        const gate = { child, closed: false };
+        gate.close = new Promise((resolve) => child.once('close', () => { gate.closed = true; resolve(); }));
+        gate.ready = new Promise((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error('gate startup timed out')), 30000); // wait-allow: bounded startup
+          let output = '';
+          let errors = '';
+          child.stderr.on('data', (chunk) => { errors += chunk; });
+          child.stdout.on('data', (chunk) => { output += chunk; if (output.includes('ready')) { clearTimeout(timer); resolve(); } });
+          child.once('error', (error) => { clearTimeout(timer); reject(error); });
+          child.once('close', () => { clearTimeout(timer); reject(new Error(`gate exited before startup\n${errors}`)); });
+        });
+        return gate;
+      },
+      async waitGate(gate) {
+        await gate.ready;
+        gate.cpu = cpuReading(path.dirname(C.currentGroup(gate.child.pid)));
+        assert.equal(gate.cpu.weight, G.cpuWeight({}, 'tests'));
+      },
+      async stopGate(gate) {
+        if (!gate.closed && gate.child.exitCode === null && gate.child.signalCode === null) gate.child.kill('SIGKILL');
+        await gate.close;
+      },
     });
-    await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('gate startup timed out')), 30000); // wait-allow: bounded startup
-      let output = '';
-      gate.stdout.on('data', (chunk) => { output += chunk; if (output.includes('ready')) { clearTimeout(timer); resolve(); } });
-      gate.once('error', (error) => { clearTimeout(timer); reject(error); });
-      gate.once('close', () => { clearTimeout(timer); reject(new Error('gate exited before startup')); });
-    });
-    const after = [];
-    for (let i = 0; i < 3; i++) {
-      assert.equal(gate.exitCode, null, 'CPU gate must run throughout each build');
-      after.push(await build());
-    }
-    const baseline = summary(before);
-    const contended = summary(after);
-    const change = Math.abs(contended.median_ms / baseline.median_ms - 1);
-    const report = { host: os.hostname(), cores, compiler: cp.execFileSync('cc', ['--version'], { encoding: 'utf8', timeout: 5000 }).split('\n')[0],
+    const report = { trials: traces, host: os.hostname(), cores,
+      compiler: cp.execFileSync('cc', ['--version'], { encoding: 'utf8', timeout: 5000 }).split('\n')[0],
       workload: 'independent generated C project, 256 functions per translation unit, 2 units per core, cc -O2, make -j all cores',
-      build_weight: 100, gate_weight: 1, before: baseline, with_gate: contended, absolute_change: change };
+      order: 'three paired controls with alternating before/with order; gate workers warm up before ready',
+      build_weight: G.cpuWeight({}, 'worker'), gate_weight: G.cpuWeight({}, 'tests'), ...measured };
     console.log(JSON.stringify(report));
-    assert.ok(change < 0.1, `median build time changed ${(change * 100).toFixed(2)}%, must be under 10%`);
+    reported = true;
+    assert.ok(measured.absolute_change < 0.1, `median build time changed ${(measured.signed_change * 100).toFixed(2)}%, absolute change must be under 10%`);
+  } catch (error) {
+    if (!reported) console.error(JSON.stringify({ partial_trials: traces }));
+    throw error;
   } finally {
-    if (gate && gate.exitCode === null) {
-      gate.kill('SIGKILL');
-      await new Promise((resolve) => gate.once('close', resolve));
-    }
     fs.rmSync(project, { recursive: true, force: true });
   }
 }
@@ -170,4 +265,4 @@ async function main() {
 
 if (require.main === module) main().catch((error) => { console.error(error.stack); process.exitCode = 1; });
 
-module.exports = { summary };
+module.exports = { summary, checkRun, parseRun, comparison, measureTrials };

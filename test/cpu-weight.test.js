@@ -10,6 +10,97 @@ const G = require('../lib/governor');
 const C = require('../lib/containment');
 const gates = require('../lib/gates/common');
 
+test('the CPU host probe preserves both output streams on failed commands and invalid reports', () => {
+  const { checkRun, parseRun } = require('../scripts/probe-cpu-weight');
+  for (const failure of [
+    { status: 1 }, { status: 2 }, { status: null, signal: 'SIGTERM' },
+    { status: null, error: Object.assign(new Error('startup failed'), { code: 'ENOENT' }) },
+    { status: null, error: Object.assign(new Error('deadline reached'), { code: 'ETIMEDOUT' }) },
+    { status: 0, error: new Error('runner failed') },
+  ]) {
+    const result = { stdout: '{"before":{"median_ms":100},"with_gate":{"median_ms":124.03}}',
+      stderr: 'median build time changed 24.03%', ...failure };
+    assert.throws(() => checkRun(result, 'probe phase'), (error) => {
+      assert.match(error.message, /probe phase/);
+      assert.ok(error.message.includes(result.stdout));
+      assert.ok(error.message.includes(result.stderr));
+      return true;
+    });
+  }
+  assert.deepEqual(parseRun({ status: 0, stdout: '{"weight":7}', stderr: '' }, 'scope'), { weight: 7 });
+  for (const stdout of ['', 'not-json']) {
+    assert.throws(() => parseRun({ status: 0, stdout, stderr: 'diagnostic marker' }, 'scope'), /scope[\s\S]*diagnostic marker/);
+  }
+});
+
+test('the CPU host probe reports signed changes and retains the strict 10 percent boundary', () => {
+  const { comparison } = require('../scripts/probe-cpu-weight');
+  for (const [median, signed, passes] of [
+    [100, 0, true], [109, 0.09, true], [109.99, 0.0999, true],
+    [110, 0.1, false], [124.03, 0.2403, false],
+    [91, -0.09, true], [90.01, -0.0999, true],
+    [90, -0.1, false], [75.97, -0.2403, false],
+  ]) {
+    const result = comparison([101, 99, 100], [median + 1, median - 1, median]);
+    assert.ok(Math.abs(result.signed_change - signed) < 1e-12);
+    assert.equal(result.absolute_change, Math.abs(result.signed_change));
+    assert.equal(result.absolute_change < 0.1, passes, String(median));
+    assert.equal(result.before.median_ms, 100);
+    assert.equal(result.with_gate.median_ms, median);
+  }
+  for (const samples of [[], [100], [100, 100], [100, 100, 100, 100], [0, 100, 200], [-1, 100, 200], [NaN, 100, 200]]) {
+    assert.throws(() => comparison(samples, [100, 100, 100]), /three positive finite timings/);
+    assert.throws(() => comparison([100, 100, 100], samples), /three positive finite timings/);
+  }
+});
+
+test('the CPU host probe balances three trial pairs and stops gates on every failure path', async () => {
+  const { measureTrials } = require('../scripts/probe-cpu-weight');
+  for (const failure of [null, 'start', 'ready', 'with_gate', 'second_baseline']) {
+    let active = false;
+    let started = 0;
+    let stopped = 0;
+    const order = [];
+    const run = () => measureTrials({
+      startGate() {
+        if (failure === 'start') throw new Error('start failure');
+        assert.equal(active, false);
+        active = true;
+        started++;
+        return { trial: started };
+      },
+      async waitGate(gate) {
+        assert.ok(gate.trial);
+        if (failure === 'ready') throw new Error('ready failure');
+      },
+      async stopGate(gate) {
+        assert.ok(gate.trial);
+        assert.equal(active, true);
+        active = false;
+        stopped++;
+      },
+      async build(condition, trial) {
+        assert.equal(active, condition === 'with_gate');
+        order.push(condition);
+        if (condition === failure || failure === 'second_baseline' && condition === 'before' && trial === 1) {
+          throw new Error(`${failure} failure`);
+        }
+        return 100 + trial + (condition === 'with_gate' ? 1 : 0);
+      },
+    });
+    if (failure) await assert.rejects(run, new RegExp(`${failure} failure`));
+    else {
+      const result = await run();
+      assert.deepEqual(order, ['before', 'with_gate', 'with_gate', 'before', 'before', 'with_gate']);
+      assert.deepEqual(result.before.runs_ms, [100, 101, 102]);
+      assert.deepEqual(result.with_gate.runs_ms, [101, 102, 103]);
+      assert.equal(started, 3);
+    }
+    assert.equal(active, false, failure || 'success');
+    assert.equal(stopped, started, failure || 'success');
+  }
+});
+
 test('the CPU host probe summarizes three build timings without reordering samples', () => {
   const { summary } = require('../scripts/probe-cpu-weight');
   for (const [samples, median, min, max] of [
