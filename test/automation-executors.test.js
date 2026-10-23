@@ -767,6 +767,50 @@ poll();
   }
 });
 
+// The race the test above can lose: a drain checks the older reaction while
+// its holder lives, the holder dies, and the newer waiter's check then finds
+// the slot free. The holder here is a PID whose state the test sets.
+test('a reaction killed between a drain\'s checks keeps its place ahead of a newer executor waiter', async (t) => {
+  const h = setup(t);
+  const A = require('../lib/automation');
+  const P = require('../lib/processes');
+  const S = require('../lib/state');
+  h.ok(['project', 'set', '--tests-mode', 'run-only', '--executors', '1', '--agent', 'orchestrator']);
+  h.ok(['task', 'add', '--title', 'Change T2', '--acceptance', 'it works', '--kind', 'code']);
+  for (const id of ['T1', 'T2']) {
+    h.ok(['claim', id, '--agent', 'worker']);
+    h.ok(['submit', id, '--sha', h.sha, '--agent', 'worker']);
+  }
+  const [first, second] = h.logs().filter((e) => e.cmd === 'submit');
+  const holder = 2147483646;
+  const at = new Date().toISOString();
+  const event = (cmd, task, detail) => ({ at, agent: 'orchestrator', cmd, task, detail });
+  StateFiles.appendEvents(h.state, [
+    event('automation', 'T1', { source: first.id, phase: 'running', pid: holder }),
+    event('executor', 'T1', { lease: 'cpu:holder', phase: 'running', kind: 'tests', source: first.id, pid: holder }),
+    event('automation queued', 'T1', { source: first.id }),
+    event('automation queued', 'T2', { source: second.id, executors: 1 }),
+    event('automation', 'T2', { source: second.id, phase: 'executor', error: 'T2: tests waits for a gate executor (1 of 1 in use)', kind: 'tests' }),
+  ]);
+  let dead = false;
+  const processState = P.processState;
+  t.mock.method(P, 'processState', (detail) => (detail?.pid === holder ? (dead ? 'exited' : 'running') : processState(detail)));
+  // The holder dies once the drain has found T1 still held.
+  const mutate = S.mutate;
+  t.mock.method(S, 'mutate', (...args) => {
+    const result = mutate(...args);
+    if (args[1] === 'automation' && result === false) dead = true;
+    return result;
+  });
+  const ctx = { stateDir: h.state, env: h.env, agent: 'orchestrator', agentExplicit: true, flags: {}, pos: [] };
+  await A.consume(ctx, [first, second]);
+  t.mock.restoreAll();
+  assert.equal(dead, true, 'the drain checked T1 while its holder lived');
+  assert.deepEqual(executorStarts(h), ['T1'], 'T2 does not take the slot T1 is owed');
+  h.consume();
+  assert.deepEqual(executorStarts(h), ['T1', 'T1', 'T2']);
+});
+
 test('accepted merges take the next executor in acceptance order before queued submitted gates', async (t) => {
   const h = setup(t);
   const { stalled, release } = holdSuite(h);
