@@ -274,6 +274,36 @@ test('a local CI base ahead of origin is reported once instead of refreshed inde
   assert.equal(h.readState('tasks.json').tasks[0].status, 'accepted');
 });
 
+for (const [verdict, out, ran] of [
+  ['keep', { pr_steps: ['docs'], main_steps: ['readme'], shared: [], verdict: 'keep' }, []],
+  ['shared steps', { pr_steps: ['readme'], main_steps: ['readme'], shared: ['readme'], verdict: 'rerun' }, [['--only', 'readme']]],
+]) {
+  test(`the merge queue refreshes a local CI receipt across a base move through ci.overlap (${verdict})`, (t) => {
+    const h = accepted(t);
+    const runs = path.join(h.base, 'runs.jsonl');
+    const checker = path.join(h.base, 'checker.js');
+    fs.writeFileSync(checker, "require('node:fs').appendFileSync(process.argv[2], JSON.stringify(process.argv.slice(3)) + '\\n');\n");
+    const hook = path.join(h.base, 'overlap.js');
+    fs.writeFileSync(hook, `process.stdout.write(${JSON.stringify(JSON.stringify(out))});\n`);
+    h.ok(['project', 'set', '--ci-local', JSON.stringify({ command: [process.execPath, checker, runs], timeout: 5,
+      rerun_cmd: [process.execPath, checker, runs, '--only', '{steps}'] }),
+    '--ci-overlap', JSON.stringify({ command: [process.execPath, hook], timeout: 5 })]);
+    h.ok(['check', 'ci', 'T1']);
+    const base = h.git(['rev-parse', 'main']);
+    const tip = h.git(['commit-tree', `${base}^{tree}`, '-p', base, '-m', 'base advances']);
+    h.git(['update-ref', 'refs/heads/main', tip]);
+    const read = () => fs.readFileSync(runs, 'utf8').trim().split('\n').map(JSON.parse);
+    const before = read();
+    h.ok(['merge', '--accepted', '--agent', 'orchestrator']);
+    assert.equal(h.github().prs['7'].state, 'MERGED');
+    assert.deepEqual(read().slice(before.length), ran);
+    const ci = h.json(['task', 'show', 'T1']).evidence.findLast((e) => e.type === 'ci');
+    assert.equal(ci.receipt.narrows.base_sha, base);
+    assert.equal(ci.receipt.base_sha, tip);
+    assert.deepEqual(ci.receipt.steps, out.shared);
+  });
+}
+
 test('accept refreshes a stale clean policy before accepting', (t) => {
   const h = accepted(t);
   h.ok(['rework', 'T1', '--reason', 'new acceptance pass', '--agent', 'orchestrator']);
