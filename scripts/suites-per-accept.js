@@ -2,7 +2,7 @@
 'use strict';
 
 // Full suites run per accepted task in a time window, read from a state's
-// event log, to compare gate orders (docs/state.md#gate-order).
+// event log, to compare gate orders (docs/state/gates.md#gate-order).
 //
 //   node scripts/suites-per-accept.js EVENTS_JSONL FROM_ISO TO_ISO
 //
