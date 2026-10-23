@@ -132,6 +132,23 @@ test('status, inbox and an observing wait read only indexed rows, not the whole 
   assert.match(runs[1].stdout, /^native crashes: 1 in the last 7 days, last T3 at /m);
 });
 
+// The benchmark behind docs/state/storage.md's status and inbox numbers runs
+// both views on its own copy of a state directory and records their latency.
+test('the views benchmark times status and inbox on a copy of the state', (t) => {
+  const h = viewFixture(t);
+  const out = path.join(h.base, 'views.json');
+  execFileSync(process.execPath, [path.join(__dirname, '..', 'research', 'storage-eval', 'views.js'), '--state', h.state,
+    '--work', path.join(h.base, 'views'), '--tree', `head=${path.join(__dirname, '..')}`, '--runs', '2', '--warmup', '0', '--out', out], { encoding: 'utf8' });
+  const result = JSON.parse(fs.readFileSync(out, 'utf8'));
+  assert.deepEqual(result.trees, ['head']);
+  for (const view of ['status', 'inbox']) {
+    const s = result.summary.head[view];
+    assert.equal(s.n, 2);
+    assert.ok(s.p50 > 0 && s.p95 >= s.p50, `${view}: ${JSON.stringify(s)}`);
+    assert.ok(s.output_bytes > 0, `${view} printed nothing`);
+  }
+});
+
 // A merge of an already merged task, which the merge queue's entry answers
 // before it reserves a turn, checks the merge's own event by index.
 test('a repeated merge reads only the merged task\'s events, not the whole log', (t) => {
