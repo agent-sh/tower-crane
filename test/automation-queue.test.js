@@ -743,6 +743,10 @@ for (const [why, end] of Object.entries(PAUSE_ENDS)) {
     const manual = h.run(['merge', 'T1', '--agent', 'orchestrator']);
     assert.equal(manual.code, 1);
     assert.match(manual.stderr, /T1: merges are paused for T2 until .*; clear it with merge pause T2 --clear/);
+    const batch = h.run(['merge', '--accepted', '--agent', 'orchestrator']);
+    assert.equal(batch.code, 1);
+    assert.match(batch.stdout, /T1: held by the merge pause for T2 until /);
+    assert.equal(h.github().prs['7'].state, 'OPEN');
     const env = end(h);
     const start = h.logs().length;
     h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator'], { env });
@@ -755,6 +759,26 @@ for (const [why, end] of Object.entries(PAUSE_ENDS)) {
     assert.equal(h.json(['status'], { env }).merge_pause, null);
   });
 }
+
+test('an armed merge pause holds nothing until its task submits', (t) => {
+  const h = queueFixture(t);
+  h.ok(['rework', 'T2', '--reason', CONFLICT.replace('#7', '#8'), '--agent', 'orchestrator']);
+  h.ok(['merge', 'pause', 'T2', '--minutes', '30', '--reason', 'lands docs first', '--agent', 'orchestrator']);
+  const status = h.json(['status']);
+  assert.deepEqual([status.merge_pause.phase, status.merge_pause.since, status.merge_pause.until], ['armed', null, null]);
+  assert.match(h.ok(['status']), /merge pause: T2 armed: from its next submit it holds other merges for 30 min: lands docs first/);
+  h.reviewer('T1', 'reviewer');
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha, '--ok', '--agent', 'reviewer']);
+  h.ok(['accept', 'T1', '--agent', 'orchestrator']);
+  h.consume();
+  assert.equal(h.github().prs['7'].state, 'MERGED', 'an armed pause holds no merge');
+  // Refill gave the rework to a worker, which submits it.
+  const worker = h.json(['task', 'show', 'T2']).claim.agent;
+  h.ok(['submit', 'T2', '--sha', h.second, '--pr', '8', '--agent', worker]);
+  const holding = h.json(['status']).merge_pause;
+  assert.equal(holding.phase, 'holding');
+  assert.equal(holding.since, h.logs().findLast((e) => e.cmd === 'submit' && e.task === 'T2').at, 'the deadline counts from the submit');
+});
 
 test('a merge pause refuses a second task, and --clear lifts it', (t) => {
   const h = queueFixture(t);
@@ -780,14 +804,16 @@ test('a merge pause ranks its task ahead of accepted merges, armed or holding', 
   const queued = (e) => ({ cmd: 'automation queued', task: e.task, at, detail: { source: e.id } });
   const waiter = (e) => ({ cmd: 'automation', task: e.task, at, detail: { source: e.id, phase: 'executor', kind: 'tests' } });
   const pause = (holding) => ({ cmd: 'merge pause', task: 'T2', at, agent: 'orchestrator', detail: { reason: 'lands first', minutes: 30, holding } });
-  for (const [name, events, want] of [
+  for (const [name, events, want, later = []] of [
     ['no pause', [], ['T4', 'T2']],
     ['a pause on the submitted task', [pause(true)], ['T2', 'T4']],
     ['a pause on another task', [{ ...pause(true), task: 'T4' }], ['T4', 'T2']],
     ['a cleared pause', [pause(true), { ...pause(true), detail: { clear: true } }], ['T4', 'T2']],
+    ['an armed pause set after the submit', [], ['T2', 'T4'], [pause(false)]],
+    ['an ended pause', [pause(true), { cmd: 'merge pause end', task: 'T2', at, detail: { why: 'deadline' } }], ['T4', 'T2']],
   ]) {
     const st = { project: {}, tasks: { tasks: [task('T2', 'submitted'), task('T4', 'accepted')] },
-      events: [...events, submit, accept, queued(submit), queued(accept), waiter(submit), waiter(accept)] };
+      events: [...events, submit, accept, queued(submit), queued(accept), waiter(submit), waiter(accept), ...later] };
     assert.deepEqual(A.gateQueue(st).queued.map((q) => q.id), want, name);
   }
 });
