@@ -445,6 +445,22 @@ test('a lasting refusal fails a state read after one wait, wherever in the read 
         assert.ok(elapsed < 2 * Sharing.SHARING_RETRY_MS, `${where}: failed ${elapsed} ms after the first refusal`); // wait-allow: the retry's time bound is the contract under test
       }
     }
+    // A reader that cannot write the state directory cannot take the lock
+    // either; that refusal is not the files', so it still returns its last read.
+    const mkdir = fs.mkdirSync;
+    fs.mkdirSync = (target, ...rest) => {
+      if (path.dirname(path.resolve(target)) === path.resolve(h.state) && path.basename(target).startsWith('lock')) {
+        throw Object.assign(new Error(`EPERM: operation not permitted, mkdir '${target}'`), { code: 'EPERM' });
+      }
+      return mkdir.call(fs, target, ...rest);
+    };
+    try {
+      appends = 5;
+      assert.ok(S.loadState(h.state).project, 'a read with an unwritable state directory returns its last read');
+      assert.equal(appends, 0);
+    } finally {
+      fs.mkdirSync = mkdir;
+    }
     // A writer recovers a staged commit under the lock before it reads. A
     // refusal there counts as a busy lock (docs/state/storage.md): the commit
     // stays staged until recovery can read the schema, and the writer fails
