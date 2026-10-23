@@ -55,23 +55,22 @@ test('each project gets one slice directly below the caller slice, at the same n
   }
 });
 
-test('systemd-run and D-Bus scopes carry CPUWeight only for a weight other than the agents\' default', {
+test('systemd-run scopes carry CPUWeight only for a weight other than the agents\' default', {
   skip: process.platform === 'win32' && 'Linux scope runner uses execve',
 }, async (t) => {
   const base = scratch(t, 'weights');
   const slice = C.projectSlice('test-fence.slice', base);
-  for (const mode of ['cli', 'dbus']) {
+  for (const [mode, owner] of [['plain', {}], ['owner-scope', { CPUQuota: '200%' }]]) {
     for (const [role, weight] of [['gate', C.GATE_WEIGHT], ['gate at a set weight', 700], ['agent', C.AGENT_WEIGHT], ['agent at a set weight', 150]]) {
       const label = `${mode}-${role.replaceAll(' ', '-')}`;
       const group = path.join(base, label, UNIT);
       fs.mkdirSync(group, { recursive: true });
       const log = path.join(base, `${label}.jsonl`);
-      const settings = JSON.stringify({ ...LIMITS, fleet: false, ...(weight !== C.AGENT_WEIGHT ? { cpu_weight: weight } : {}) });
-      const args = [RUNNER, settings, mode === 'dbus' ? `@${UNIT}:${slice}` : '', UNIT, process.execPath, '-e', ''];
-      const command = mode === 'dbus' ? ['--require', FAKE_SYSTEMD, ...args]
-        : [FAKE_SYSTEMD, ...C.scopeArguments(UNIT, slice, LIMITS, { CPUQuota: '200%' }, weight), process.execPath, ...args];
+      const settings = JSON.stringify({ ...LIMITS, fleet: false });
+      const command = [FAKE_SYSTEMD, ...C.scopeArguments(UNIT, slice, LIMITS, owner, weight), process.execPath, RUNNER, settings, '', UNIT, process.execPath, '-e', ''];
       const result = await G.treeExec(process.execPath, command, {
-        env: { ...process.env, TC_FAKE_CGROUP: group, TC_FAKE_SYSTEMD_LOG: log, TOWER_CRANE_CONTAINMENT_REPORT: path.join(base, `${label}-report.json`) },
+        env: { ...process.env, TC_FAKE_CGROUP: group, TC_FAKE_SYSTEMD_LOG: log, XDG_RUNTIME_DIR: path.join(base, 'runtime'),
+          TOWER_CRANE_CONTAINMENT_REPORT: path.join(base, `${label}-report.json`) },
       });
       assert.equal(result.status, 0, `${label}: ${result.stderr}`);
       const properties = JSON.parse(fs.readFileSync(log, 'utf8').trim());
@@ -186,8 +185,11 @@ test('the CLI starts each project\'s gates and agents in its own slice, gates at
     const plan = h.json(['spawn', '--task', 'T2', '--dry-run'], { pre });
     const runner = plan.argv.findIndex((arg) => arg.endsWith('containment-runner.js'));
     assert.ok(runner > 0, plan.argv.join(' '));
-    assert.equal(JSON.parse(plan.argv[runner + 1]).cpu_weight, weight);
-    assert.match(plan.argv[runner + 2], new RegExp(`^@tower-crane-\\d+-[0-9a-f]{16}\\.scope:${sliceOf(h)}$`));
+    const scope = plan.argv.slice(0, plan.argv.indexOf('--'));
+    assert.equal(scope[0], 'systemd-run');
+    assert.ok(scope.includes(`--slice=${sliceOf(h)}`), scope.join(' '));
+    assert.deepEqual(scope.filter((arg) => arg.startsWith('CPUWeight=')), weight === undefined ? [] : [`CPUWeight=${weight}`]);
+    assert.equal(JSON.parse(plan.argv[runner + 1]).cpu_weight, undefined, 'an outer scope carries its weight, not the runner');
     assert.deepEqual(plan.containment.cpu, { weight: weight ?? C.AGENT_WEIGHT, slice: sliceOf(h) });
     assert.deepEqual(harnessArgv(plan.argv).slice(0, 2), [process.execPath, '-e']);
   }
@@ -205,8 +207,9 @@ test('the CLI starts each project\'s gates and agents in its own slice, gates at
   assert.equal(done.code, 0, done.stderr);
   const launches = fs.readFileSync(a.env.TC_FAKE_SCOPE_LOG, 'utf8').trim().split('\n').map(JSON.parse);
   assert.equal(launches.length, 1, JSON.stringify(launches));
-  assert.equal(launches[0].settings.cpu_weight, 700);
-  assert.equal(launches[0].target, `@${launches[0].unit}:${sliceOf(a)}`);
+  assert.equal(launches[0].cpu_weight, 700);
+  assert.equal(launches[0].slice, sliceOf(a));
+  assert.equal(launches[0].target, '');
   const evidence = () => a.readState('tasks.json').tasks.find((x) => x.id === 'T1').evidence.findLast((e) => e.type === 'clean');
   assert.deepEqual(evidence().cpu, { weight: 700, slice: sliceOf(a) });
 

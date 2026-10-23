@@ -11,6 +11,11 @@ Tower Crane keeps a project's plan and progress in plain files. The CLI is the s
 - [Storage](state/storage.md)
 - [Stacks](state/stacks.md)
 
+Containment probes and outer scopes use the systemd private peer transport with
+the same resolved runtime directory. New user scopes require the caller's own
+user-manager ancestry or confirmed linger; otherwise automatic launches use the
+watchdog with a logout warning. See [resource containment](state/containment.md#resource-containment).
+
 ## Compatibility anchors
 
 Existing links use these anchors. Follow the link to the contract in its area.
