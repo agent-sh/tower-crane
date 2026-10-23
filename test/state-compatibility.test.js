@@ -363,17 +363,34 @@ test('a lasting refusal fails a state read after one wait, wherever in the read 
   let from = Infinity;
   let opened = null;
   let closed = false;
+  // Every access to project.json while the lock is held is refused, for good.
+  let whileLocked = false;
+  // Reads of decisions.json still to be followed by a commit's append.
+  let appends = 0;
+  const append = () => {
+    const fd = realFs.openSync(path.join(h.state, 'events.jsonl'), 'a');
+    try {
+      fs.writeSync(fd, JSON.stringify({ id: `E${crypto.randomUUID()}`, at: new Date().toISOString(), cmd: 'appended', task: null, detail: {} }) + '\n');
+    } finally {
+      fs.closeSync(fd);
+    }
+  };
   for (const name of calls) {
     fs[name] = function (target, ...rest) {
       const rel = typeof target === 'string' ? path.relative(h.state, path.resolve(target)).split(path.sep).join('/') : '';
-      if (STATE_FILE.test(rel) && ++accesses >= from && !closed) {
+      if (STATE_FILE.test(rel) && (++accesses >= from && !closed || whileLocked && rel === 'project.json' && fs.existsSync(path.join(h.state, 'lock')))) {
         opened ??= performance.now();
         // The first refusal at or past the window's end still happens and closes it.
         if (performance.now() - opened >= WINDOW_MS) closed = true; // wait-allow: the virtual clock the refusals move on
         skew += 500;
         throw Object.assign(new Error(`EPERM: operation not permitted, ${name} '${target}'`), { code: 'EPERM' });
       }
-      return realFs[name].call(this, target, ...rest);
+      const result = realFs[name].call(this, target, ...rest);
+      if (name === 'readFileSync' && rel === 'decisions.json' && appends > 0) {
+        appends--;
+        append();
+      }
+      return result;
     };
   }
   Object.defineProperty(performance, 'now', { value: () => realNow.call(performance) + skew, configurable: true });
@@ -391,10 +408,13 @@ test('a lasting refusal fails a state read after one wait, wherever in the read 
       { name: 'a read that keeps its snapshot', before: () => { release = S.retainEvents(h.state); S.loadState(h.state); }, run: () => S.loadState(h.state) },
       { name: 'a write', run: () => S.mutate(ctx, 'read', () => {}) },
       { name: 'a read while a logged commit is staged', before: staged, run: () => S.loadState(h.state) },
+      // Every lock-free read loses to an append, so the read ends under the lock.
+      { name: 'a read that falls back to the lock', before: () => { appends = 5; }, run: () => S.loadState(h.state) },
     ]) {
       const attempt = (start) => {
         release?.();
         release = null;
+        appends = 0;
         row.before?.();
         accesses = 0;
         from = start;
@@ -411,6 +431,7 @@ test('a lasting refusal fails a state read after one wait, wherever in the read 
       };
       const clean = attempt(Infinity);
       assert.ifError(clean.error);
+      assert.equal(appends, 0, `${row.name}: every append landed during the read`);
       const total = accesses;
       assert.ok(total > 3, `${row.name}: ${total} state accesses`);
       for (let start = 1; start <= total; start++) {
@@ -424,6 +445,19 @@ test('a lasting refusal fails a state read after one wait, wherever in the read 
         assert.ok(elapsed < 2 * Sharing.SHARING_RETRY_MS, `${where}: failed ${elapsed} ms after the first refusal`); // wait-allow: the retry's time bound is the contract under test
       }
     }
+    // A writer recovers a staged commit under the lock before it reads. A
+    // refusal there counts as a busy lock (docs/state/storage.md): the commit
+    // stays staged until recovery can read the schema, and the writer fails
+    // at the lock wait. One that read on finished the commit unchecked.
+    staged();
+    const commits = () => fs.readdirSync(h.state).filter((name) => name.endsWith('.commit')).length;
+    assert.equal(commits(), 1);
+    whileLocked = true;
+    assert.throws(() => S.mutate(ctx, 'read', () => {}), (error) => error.code === 3 && /holds an interrupted commit's file open/.test(error.message));
+    assert.equal(commits(), 1, 'the commit stays staged');
+    whileLocked = false;
+    S.mutate(ctx, 'read', () => {});
+    assert.equal(commits(), 0, 'the next writer finishes it');
   } finally {
     release?.();
     Object.assign(fs, realFs);
