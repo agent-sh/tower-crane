@@ -2112,7 +2112,8 @@ WHAT`, with JSON `merge_waits: [{id, since, behind}]`. `since` is its current
 `accept` event's time. `behind` is the first that holds: a `suite` deferral
 of the host governor (`the host governor: REASON`), a head check waiting for
 a full cap (`a gate executor: N of N in use: ...`), either one read from the
-reaction's receipt or from the queue's deferred record, an earlier unblocked
+reaction's receipt or from the queue's deferred record written after that
+`accept`, an earlier unblocked
 entry (`T3 ahead in the merge line`), pending CI at its head (`GitHub
 checks`), else `the next merge queue pass`.
 Automatic state changes and evidence use `agent: orchestrator` and

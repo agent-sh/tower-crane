@@ -858,7 +858,7 @@ test('status names what each merge waits behind', (t) => {
     { kind: 'governor', reason: 'memory: the host is full' });
   let failing = new Set();
   t.mock.method(T, 'gateReport', (x) => ({ ok: !failing.has(x.id), gates: [], missing: failing.has(x.id) ? ['ci failed'] : [] }));
-  for (const [name, five, events, fails, want] of [
+  for (const [name, five, events, fails, want, earlier = []] of [
     ['a full executor cap', null, [lease('T1', 'tests'), lease('T2', 'clean'), queued('merge-T3', 'T3'),
       receipt('merge-T3', 'T3', { phase: 'executor', kind: 'head check', merge: 'T4' })], [],
     [['T4', 'a gate executor: 2 of 2 in use: T1 tests, T2 clean']]],
@@ -875,6 +875,7 @@ test('status names what each merge waits behind', (t) => {
     ['a governor deferral only the queue recorded', null, [governorPass], [],
       [['T4', 'the host governor: memory: the host is full']]],
     ['a head the queue refused', null, [pass('T4: PR mergeability is CONFLICTING')], [], []],
+    ['a deferral recorded before the acceptance', null, [], [], [['T4', 'the next merge queue pass']], [executorPass]],
     ['an earlier acceptance', 1, [], [], [['T5', 'the next merge queue pass'], ['T4', 'T5 ahead in the merge line']]],
     ['an earlier acceptance whose merge is blocked', 1, [], ['T5'], [['T4', 'the next merge queue pass']]],
     ['a head check that runs', null, [lease('T4', 'head check')], [], []],
@@ -882,7 +883,7 @@ test('status names what each merge waits behind', (t) => {
   ]) {
     failing = new Set(fails);
     const tasks = [task('T3', 'submitted'), task('T4', 'accepted'), ...(five ? [task('T5', 'accepted')] : [])];
-    const log = [...(five ? [accept('T5', five)] : []), accept('T4', 2), merge, ...events];
+    const log = [...earlier, ...(five ? [accept('T5', five)] : []), accept('T4', 2), merge, ...events];
     const waits = A.mergeWaits({ project: {}, tasks: { tasks }, events: log });
     assert.deepEqual(waits.map((w) => [w.id, w.behind]), want, name);
     for (const w of waits) assert.equal(w.since, log.find((e) => e.cmd === 'accept' && e.task === w.id).at, `${name}: ${w.id} waits since its acceptance`);
