@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { makeRepo, TMP_ROOT } = require('./helpers');
+const { HUNG_TEST_MS } = require('./signals');
 const { shellQuote } = require('../lib/gates/common');
 
 test('timeout validation and runner interruption formats', () => {
@@ -108,7 +109,7 @@ test('a timeout that comes due during a blocked event loop stops only a child wi
   // A loaded host can take longer than the block to start node, and a child that has not written
   // yet is rightly stopped, so the block counts from the child's start.
   const block = () => {
-    const deadline = Date.now() + 60000;
+    const deadline = Date.now() + HUNG_TEST_MS;
     while (!fs.existsSync(started)) {
       assert.ok(Date.now() < deadline, 'the child starts');
       pause(10);
