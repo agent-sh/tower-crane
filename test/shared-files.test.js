@@ -459,7 +459,7 @@ test('PR-body lifecycle instructions agree across orchestrator, reviewer and rew
     ['automatic repair', /automation dispatches a worker restricted to the body and title/i],
     ['verified carryover', /carries review, tests and CI without another reviewer or suite run/i],
     ['head and revision preserved', /same head and revision/i],
-    ['no race with repair', /metadata alone while automatic repair/i],
+    ['no race with repair', /metadata alone while automatic repair is pending or running/i],
     ['unchanged repair stops', /unchanged named field.*review_body_stuck/i],
     ['manual correction proof', /accept ID --metadata-fixed --reason R/i],
     ['manual fallback', /without a recorded PR or branch/i],
