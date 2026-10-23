@@ -32,7 +32,7 @@ test('TOWER_CRANE_INTERVALS replaces named intervals and refuses anything else',
     assert.throws(() => I.ms('lock_wait', env(value)), message, value);
   }
   assert.throws(() => I.ms('lock_wiat', {}), /unknown interval: lock_wiat/);
-  assert.deepEqual(Object.keys(I.DEFAULTS), ['lock_wait', 'startup', 'lock_refresh', 'governor_lock_wait', 'governor_bind_wait']);
+  assert.deepEqual(Object.keys(I.DEFAULTS), ['lock_wait', 'startup', 'lock_refresh', 'governor_lock_wait', 'governor_bind_wait', 'test_grant']);
 });
 
 test('an interval set in this process applies to a module loaded before it', (t) => {
