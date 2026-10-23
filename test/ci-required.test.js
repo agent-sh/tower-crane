@@ -215,7 +215,7 @@ test('a shard reaches its deadline, and leaves a log, before the test step and j
 
 test('the stack section says hosted CI runs on every stack member at its own base', () => {
   const root = path.resolve(__dirname, '..');
-  const state = fs.readFileSync(path.join(root, 'docs', 'state.md'), 'utf8');
+  const state = fs.readFileSync(path.join(root, 'docs', 'state', 'stacks.md'), 'utf8');
   assert.match(state, /Hosted CI runs on every stack member at its own base\. `ci\.yml` has no base filter on pull requests\b/);
 });
 
@@ -303,7 +303,7 @@ test('documented fork PR job lists pass CI with the full matrix check runs', (t)
   const root = path.resolve(__dirname, '..');
   const names = jobNames(workflowMatrix(readWorkflow(root)));
   const h = fixture(t);
-  for (const file of ['docs/state.md', 'docs/cli.md']) {
+  for (const file of ['docs/state/tasks.md', 'docs/cli.md']) {
     const text = fs.readFileSync(path.join(root, file), 'utf8');
     const documented = text.match(/(?:PR test jobs are|matrix jobs have these full names:)\s+`(\[[^`]+\])`/);
     assert.ok(documented, `${file} documents the PR job names`);
