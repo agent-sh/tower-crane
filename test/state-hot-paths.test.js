@@ -132,6 +132,37 @@ test('status, inbox and an observing wait read only indexed rows, not the whole 
   assert.match(runs[1].stdout, /^native crashes: 1 in the last 7 days, last T3 at /m);
 });
 
+// A merge of an already merged task, which the merge queue's entry answers
+// before it reserves a turn, checks the merge's own event by index.
+test('a repeated merge reads only the merged task\'s events, not the whole log', (t) => {
+  const h = cachedFixture(t, 'merged-repeat', (h) => {
+    h.init();
+    h.ok(['task', 'add', '--title', 'Merged task', '--acceptance', 'done']);
+    const sha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: h.repo, encoding: 'utf8' }).trim();
+    h.ok(['claim', 'T1', '--agent', 'worker']);
+    h.ok(['submit', 'T1', '--sha', sha, '--pr', '7', '--branch', 'fixture-T1', '--agent', 'worker']);
+    const events = Array.from({ length: OTHER }, () => ({ id: `E${crypto.randomUUID()}`, at: new Date().toISOString(), agent: 'worker-T2-1',
+      cmd: 'renew', task: 'T2', detail: { until: new Date().toISOString() }, type: 'renew', to: 'orchestrator' }));
+    StateFiles.withDb(h.state, () => {
+      S.mutate({ stateDir: h.state, agent: 'owner' }, 'merge', (st, emit) => {
+        const task = st.tasks.tasks.find((x) => x.id === 'T1');
+        const merge = { type: 'merge', source: 'merge', ok: true, sha: task.sha, revision: task.revision, commands: ['gh pr merge 7'] };
+        task.status = 'accepted';
+        task.evidence.push({ ...merge, agent: 'owner', at: new Date().toISOString(), summary: 'merged' });
+        emit(task.id, merge);
+      });
+      S.withLock(h.state, () => Db.commit(h.state, { events }));
+    });
+    return { sha };
+  });
+  const meter = path.join(h.base, 'rows.json');
+  const r = h.run(['merge', 'T1', '--agent', 'orchestrator'], { env: { EVENT_ROWS: meter, NODE_OPTIONS: `--require "${ROWS}"` } });
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stdout, new RegExp(`already merged at ${h.sha}`));
+  const { rows } = JSON.parse(fs.readFileSync(meter, 'utf8'));
+  assert.ok(rows < OTHER / 10, `merge read ${rows} event rows of a ${OTHER}-event log`);
+});
+
 // A select over every event (a long-lived reader's) and one by index pick the same events.
 test('an indexed select and a select over every event agree', (t) => {
   const h = viewFixture(t);

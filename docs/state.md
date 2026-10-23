@@ -2131,7 +2131,8 @@ dispatcher's `TOWER_CRANE_TMP`. Agent commands retain their restrictive Git
 and GitHub shims. This provenance does not replace gate command receipts.
 For an accepted task with an audited, successful, non-waived merge receipt
 at its current head and revision, `merge ID` prints `already merged at <ref>`
-and returns the recorded result locally. It makes no GitHub lookup, validates
+and returns the recorded result locally. It checks the receipt against the
+task's own `merge` events by index, makes no GitHub lookup, validates
 no merge text or method, takes no reservation and writes no evidence or events.
 If there is no such receipt at entry, `merge ID` takes the same reservation
 with source `merge:<uuid>`, waits while a running executor is observable
