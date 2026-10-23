@@ -24,6 +24,8 @@ test('the ci.overlap output contract accepts keep and shared steps, and names wh
     ['unknown step', steps(['unit'], ['lint'], ['unit'], 'rerun'), /shared step unit is not in both pr_steps and main_steps/],
     ['keep with shared', steps(['unit'], ['unit'], ['unit'], 'keep'), /verdict keep names shared steps/],
     ['rerun without shared', steps(['unit'], ['lint'], [], 'rerun'), /verdict rerun names no shared steps/],
+    ['keep with a step both select', steps(['unit', 'docs'], ['unit'], [], 'keep'), /step unit is in both pr_steps and main_steps but not shared/],
+    ['rerun missing a step both select', steps(['unit', 'lint'], ['unit', 'lint'], ['unit'], 'rerun'), /step lint is in both pr_steps and main_steps but not shared/],
   ]) {
     const got = Local.overlapResult(value);
     if (want instanceof RegExp) assert.match(got.error || '', want, name);
@@ -135,6 +137,7 @@ for (const [name, opts, env, reason] of [
   ['a timed out hook', {}, { OVERLAP_SLEEP: '4000' }, /ci.overlap timed out after 1 s/],
   ['bad JSON', {}, { OVERLAP_OUT: 'shared: none' }, /ci.overlap its output is not JSON: shared: none/],
   ['an unknown step', {}, { OVERLAP_OUT: JSON.stringify(steps(['unit'], ['docs'], ['unit'], 'rerun')) }, /shared step unit is not in both/],
+  ['a step both select left out of shared', {}, { OVERLAP_OUT: JSON.stringify(steps(['unit'], ['unit'], [], 'keep')) }, /step unit is in both pr_steps and main_steps but not shared/],
 ]) {
   test(`${name} reruns everything after a base move and records why`, (t) => {
     const h = overlapFixture(t, opts);
