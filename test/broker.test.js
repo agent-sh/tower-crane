@@ -1062,6 +1062,19 @@ test('a monitor closing after the agent\'s next spawn started leaves that spawn 
     // What a codex agent's sandbox wrote in its own broker directory.
     fs.writeFileSync(path.join(where, 'agent-file'), 'x');
     const inode = fs.statSync(where).ino;
+    if (i === 0) {
+      // A start that fails before its file names it leaves the earlier broker its file and directory.
+      const before = fs.readFileSync(job.broker, 'utf8');
+      const write = fs.writeFileSync;
+      t.mock.method(fs, 'writeFileSync', (p, ...rest) => {
+        if (path.dirname(String(p)) === where && String(p).endsWith('.new')) throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' });
+        return write(p, ...rest);
+      });
+      await assert.rejects(B.start(job), /ENOSPC/);
+      t.mock.restoreAll();
+      assert.equal(fs.readFileSync(job.broker, 'utf8'), before, `${label}: the failed start keeps the earlier broker's file`);
+      assert.equal(fs.statSync(where).ino, inode, `${label}: and its directory`);
+    }
     const second = await B.start(job);
     let closed = false;
     t.after(() => closed || second.close());
