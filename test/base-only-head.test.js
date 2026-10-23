@@ -31,7 +31,14 @@ function gated(t, { running = false, probes = [] } = {}) {
     h.git(['switch', '-q', 'fixture-change']);
     h.git(['merge', '-q', '--no-ff', '-m', 'take the base', 'main']);
     write(h, 'shared.txt', 'one\nTWO\nthree\n');
-    write(h, 'test/shared.test.js', "require('node:assert/strict').match(require('node:fs').readFileSync('shared.txt', 'utf8'), /TWO/);\n");
+    // SHARED_FLAKE names a marker: the first run that finds it absent writes it and fails.
+    write(h, 'test/shared.test.js', `const fs = require('node:fs');
+require('node:test')('shared holds TWO', () => {
+  const flake = process.env.SHARED_FLAKE;
+  if (flake && !fs.existsSync(flake)) { fs.writeFileSync(flake, ''); throw new Error('flaked once'); }
+  require('node:assert/strict').match(fs.readFileSync('shared.txt', 'utf8'), /TWO/);
+});
+`);
     h.git(['add', '.']);
     h.git(['commit', '-qm', 'raise two']);
     h.sha = h.git(['rev-parse', 'HEAD']);
@@ -175,6 +182,22 @@ for (const [path_, probes] of [['resubmit', []], ['conflict rework', []], ['resu
   assert.match(packet, /diff --git a\/shared.txt b\/shared.txt/);
   assert.match(packet, /^-<<<<<<< /m, 'the resolution removes the conflict markers');
   for (const file of ['value.js', 'upstream.md', 'test/shared.test.js']) assert.ok(!packet.includes(`diff --git a/${file}`), file);
+});
+
+// The resolved run is the pinned proof command over the selected tests, so a
+// failure in one of them reruns that file alone, as a crucial head's would.
+test('a resolved head reruns its failing selected test file once on its own', (t) => {
+  const h = gated(t);
+  upstream(h, true);
+  const head = mergeAndSubmit(h, { conflict: true });
+  h.env.SHARED_FLAKE = path.join(h.base, 'shared-flaked');
+  h.ok(['check', 'tests', 'T1']);
+  const tests = h.readState('tasks.json').tasks[0].evidence.findLast((e) => e.type === 'tests');
+  assert.equal(tests.ok, true, tests.summary);
+  assert.equal(tests.sha, head);
+  assert.equal(tests.receipt.mode, 'resolved');
+  assert.deepEqual(tests.receipt.reruns, [{ step: 'head', files: ['test/shared.test.js'], ok: true }], tests.summary);
+  assert.match(tests.summary, /Rerun: reran test\/shared\.test\.js once in the same checkout: exit 0; flaky: test\/shared\.test\.js > shared holds TWO\./);
 });
 
 test('a head that changes one line of the own change gets the normal gates', (t) => {
