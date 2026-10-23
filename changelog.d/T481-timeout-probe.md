@@ -1,0 +1,1 @@
+- The blocked-event-loop timeout test waits for child output before checking pipe backpressure, covering stdout, stderr and idle children with immediate or delayed startup.

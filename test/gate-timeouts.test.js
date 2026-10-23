@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { makeRepo } = require('./helpers');
 const { shellQuote } = require('../lib/gates/common');
+const { HUNG_TEST_MS } = require('./signals');
 
 test('timeout validation and runner interruption formats', () => {
   const timeouts = require('../lib/gate-timeouts');
@@ -94,30 +95,52 @@ setTimeout(() => process.exit(0), 10000); // wait-allow: the gate must time out 
 
 // inbox reads PRs with synchronous gh calls while its base CI read runs in the background, so a
 // timer can come due while the event loop is blocked, before the child's exit or output is seen.
-test('a timeout that comes due during a blocked event loop stops only a child with nothing to show', async () => {
+test('a timeout that comes due during a blocked event loop stops only a child with nothing to show', async (t) => {
   const C = require('../lib/gates/common');
-  const run = (script) => C.exec({ exec: C.treeExec }, process.execPath, ['-e', script], { timeout: 300 }); // wait-allow: the gate timeout itself is under test
+  const h = makeRepo(t);
   const block = () => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1500); // wait-allow: blocks the event loop past the gate timeout, the condition under test
   const cases = [
-    ['exited', "process.stdout.write('done')", (r) => assert.equal(r.stdout, 'done')],
+    ['exited', 1, 4],
     // More than a pipe buffer: the child cannot exit until the parent reads.
-    ['waiting on its pipe', "process.stdout.write('x'.repeat(1 << 20))", (r) => assert.equal(r.stdout.length, 1 << 20)],
+    ['waiting on its stdout pipe', 1, 1 << 20],
+    ['waiting on its stderr pipe', 2, 1 << 20],
+    ['idle', null, 0],
   ];
-  for (const [what, script, check] of cases) {
-    const pending = run(script);
-    block();
-    const r = await pending;
-    assert.equal(r.timedOut, false, what);
-    assert.equal(r.ok, true, `${what}: ${r.stderr}`);
-    check(r);
+  for (const startup of [0, 1800]) {
+    for (const [what, fd, size] of cases) {
+      const ready = path.join(h.base, `ready-${startup}-${fd}-${size}`);
+      const script = `
+const fs = require('node:fs');
+Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ${startup}); // wait-allow: models a child not scheduled before the old fixed block ended
+${fd ? `fs.writeSync(${fd}, 'x'.repeat(${Math.min(size, 4096)}));` : ''}
+// write-atomic: existence signals that output is in the pipe, or the idle child has started.
+fs.writeFileSync(${JSON.stringify(ready)}, '');
+${fd ? `process.${fd === 1 ? 'stdout' : 'stderr'}.write('x'.repeat(${Math.max(0, size - 4096)}));`
+    : 'setTimeout(() => {}, 30000);'} // wait-allow: idle child outlives the gate timeout under test
+`;
+      const pending = C.exec({ exec: C.treeExec }, process.execPath, ['-e', script], { timeout: 300 }); // wait-allow: the gate timeout itself is under test
+      // Keep the loop blocked while waiting for actual pipe output. A fixed delay alone
+      // races child startup under load and can turn a pipe case into the idle case.
+      const deadline = performance.now() + HUNG_TEST_MS;
+      while (!fs.existsSync(ready) && performance.now() < deadline) {
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10); // wait-allow: readiness while deliberately preventing the timeout and pipe callbacks from running
+      }
+      const started = fs.existsSync(ready);
+      if (started) block();
+      const r = await pending;
+      assert.equal(started, true, `${what}, startup=${startup}: child never became ready`);
+      assert.equal(r.timedOut, fd === null, `${what}, startup=${startup}`);
+      if (fd !== null) {
+        assert.equal(r.ok, true, `${what}: ${r.stderr}`);
+        assert.equal(r.stdout.length, fd === 1 ? size : 0, what);
+        assert.equal(r.stderr.length, fd === 2 ? size : 0, what);
+      } else {
+        const failure = C.ghFailure({ ...r, stdout: '{"id":1}' }, 'gh api runs');
+        assert.match(failure, /^gh api runs failed: timed out after 300 ms \(status=/);
+        assert.doesNotMatch(failure, /"id"/);
+      }
+    }
   }
-  const pending = run('setTimeout(() => {}, 30000)'); // wait-allow: a child that outlives the gate timeout under test
-  block();
-  const r = await pending;
-  assert.equal(r.timedOut, true);
-  const failure = C.ghFailure({ ...r, stdout: '{"id":1}' }, 'gh api runs');
-  assert.match(failure, /^gh api runs failed: timed out after 300 ms \(status=/);
-  assert.doesNotMatch(failure, /"id"/);
 });
 
 // A runner killed at its deadline often stops mid-line, and both streams can end that way.
