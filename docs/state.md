@@ -830,7 +830,9 @@ which they read its counters every millisecond, finding the OOM the kernel
 counts before it kills. A scope that stays at its cap opens at most one window
 every 100 ms, and the reads stop once the scope is empty. When a keeper takes over the scope's retained
 processes, the keeper reads `Result` and settles the scope when it ends, and the
-supervisor leaves the scope alone. Report directories are
+supervisor leaves the scope alone. The supervisor keeps its own watch until the
+keeper reports that its watch is in place, so an OOM while the keeper starts
+still fails the attempt. Report directories are
 `tower-crane-containment-<supervisor pid>-*` under `XDG_CACHE_HOME` (else
 `~/.cache`), removed when the attempt closes. A supervisor killed before then
 leaves both behind, so contained launches and the idle `wait` timer sweep once
@@ -2082,7 +2084,9 @@ notifications a `gates prioritize` event names run first among submitted
 work, the most recent request first. An explicit request cannot move
 submitted work ahead of accepted merges or change acceptance order.
 While a higher-ranked reaction waits for an executor, a later one that reaches
-CPU work waits behind it even if a slot is free. A notification queued after a priority request keeps
+CPU work waits behind it even if a slot is free. A queued reaction that died
+running counts as waiting, so the slot it freed goes to its retry before later
+work, even when a drain passed over it while it was alive. A notification queued after a priority request keeps
 submission order unless its task becomes accepted.
 `gates prioritize ID --reason R` is operational ([Authority](#authority)); it
 records a `gates prioritize` event with `reason`, `sources` (the sources of
