@@ -246,6 +246,16 @@ test('brokered submit runs the hook in the worker environment, carries its recei
   const missing = await B.forward(job.broker, ['submit', 'T1', '--sha', sha], h.state);
   assert.equal(missing.code, 1);
   assert.match(missing.stderr, /receipt is missing/);
+  const config = { command, timeout_sec: 10 };
+  const receipt = { sha, config, config_key: require('node:crypto').createHash('sha256').update(JSON.stringify(config)).digest('hex'),
+    duration_ms: 1, status: 0, ok: true, output: '' };
+  for (const badConfig of [null, command, {}]) {
+    const refused = await B.forward(job.broker, ['submit', 'T1', '--sha', sha], h.state, undefined,
+      { ...receipt, config: badConfig });
+    assert.equal(refused.code, 1);
+    assert.match(refused.stderr, /receipt is missing or stale/);
+    assert.equal(h.json(['task', 'show', 'T1']).sha, null);
+  }
   const result = await runAsync(['submit', 'T1', '--sha', sha, '--state', h.state, '--agent', job.agent],
     { cwd: h.repo, env });
   assert.equal(result.code, 0, result.stderr);
