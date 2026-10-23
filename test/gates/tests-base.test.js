@@ -48,20 +48,22 @@ test('base runs only the file holding both failing names, then a later gate reus
   const first = await gate.run(context());
   assert.deepEqual(first.main_failure?.names, ['first failure', 'second failure'], first.summary);
   assert.equal(first.confirmed_failure, undefined);
-  assert.deepEqual(rows().map((r) => r.files), [['test/fail.test.js', 'test/pass.test.js'], ['test/fail.test.js']]);
+  // The head, its one rerun (whole, since the head is not the file selector), then the base run of the failing file.
+  assert.deepEqual(rows().map((r) => r.files), [['test/fail.test.js', 'test/pass.test.js'], ['test/fail.test.js', 'test/pass.test.js'], ['test/fail.test.js']]);
+  assert.deepEqual(first.receipt.reruns, [{ step: 'head', files: [], ok: false }]);
   assert.deepEqual(first.receipt.base_rerun.files, ['test/fail.test.js']);
   assert.equal(first.receipt.base_rerun.results[0].cached, false);
   assert.equal(first.receipt.base_rerun.base, baseSha);
-  assert.deepEqual(first.receipt.test_logs.map((r) => r.phase), ['head', 'base']);
-  const baseLog = first.receipt.test_logs[1].log;
+  assert.deepEqual(first.receipt.test_logs.map((r) => r.phase), ['head', 'head', 'base']);
+  const baseLog = first.receipt.test_logs[2].log;
   assert.match(fs.readFileSync(path.join(tmp, 'state', baseLog), 'utf8'), /old failure/);
   const second = await gate.run(context());
   assert.deepEqual(second.main_failure, first.main_failure);
   assert.equal(second.receipt.base_rerun.results[0].cached, true);
-  assert.equal(second.receipt.test_logs[1].cached, true);
-  assert.equal(fs.readFileSync(path.join(tmp, 'state', second.receipt.test_logs[1].log), 'utf8'),
+  assert.equal(second.receipt.test_logs[2].cached, true);
+  assert.equal(fs.readFileSync(path.join(tmp, 'state', second.receipt.test_logs[2].log), 'utf8'),
     fs.readFileSync(path.join(tmp, 'state', baseLog), 'utf8'));
-  assert.equal(rows().length, 3);
+  assert.equal(rows().length, 5, 'the second gate runs its head and rerun, and reads the base from the cache');
   assert.ok(logs.some((line) => /base .*test\/fail\.test\.js: cached$/.test(line)));
 });
 
@@ -72,6 +74,8 @@ test('two concurrent gates share one base file and host settings invalidate the 
   contexts[1].task.id = 'T2';
   const results = await Promise.all(contexts.map((c) => gate.run(c)));
   const newRows = rows().slice(before);
+  // Each gate's head and whole rerun, and one base run of the failing file the two share.
+  assert.equal(newRows.filter((r) => r.files.length === 2).length, 4);
   assert.equal(newRows.filter((r) => r.files.length === 1).length, 1);
   assert.deepEqual(results.map((r) => r.receipt.base_rerun.results[0].cached).sort(), [false, true]);
   assert.ok(newRows.every((r) => r.host === undefined && r.exclude === '[]' && r.sandbox === '0'));
@@ -138,7 +142,7 @@ test('base selection preserves new and shared failure verdicts when files are mi
   assert.equal(result.main_failure, undefined);
   assert.match(result.summary, /Also fails on main.*first failure, second failure/);
   assert.deepEqual(result.receipt.base_rerun.files, ['test/fail.test.js', 'test/new.test.js']);
-  assert.equal(rows().length, before + 2, 'the old file is cached and the missing file is checked through the selector');
+  assert.equal(rows().length, before + 3, 'the head reruns its failing files once, the old file is cached and the missing file is checked through the selector');
 });
 
 test('nested spec failures keep the base run scoped for suites and subtests', async () => {
@@ -161,7 +165,7 @@ test('nested spec failures keep the base run scoped for suites and subtests', as
     assert.equal(result.receipt.base_rerun.mode, 'files', label);
     assert.deepEqual(result.receipt.base_rerun.files, ['test/fail.test.js'], label);
     assert.deepEqual(rows().slice(before).map((r) => r.files),
-      [['test/fail.test.js', 'test/pass.test.js'], ['test/fail.test.js']], label);
+      [['test/fail.test.js', 'test/pass.test.js'], ['test/fail.test.js', 'test/pass.test.js'], ['test/fail.test.js']], label);
   }
 });
 
@@ -196,9 +200,9 @@ process.exit(r.status ?? 1);
 test('the base lease budgets both joining a cache holder and a fresh run', () => {
   const cases = [
     [{ mode: 'run-only' }, 0, 3, 8],
-    [{ mode: 'run-only' }, 2, 1, 6],
-    [{ mode: 'prove' }, 0, 1, 5],
-    [{ mode: 'prove', expensive: true }, 1, 2, 11],
+    [{ mode: 'run-only' }, 2, 1, 8],
+    [{ mode: 'prove' }, 0, 1, 6],
+    [{ mode: 'prove', expensive: true }, 1, 2, 16],
     [{ mode: 'none' }, 2, 3, 0],
   ];
   for (const [tests, hosts, files, expected] of cases) {
@@ -216,9 +220,10 @@ test('base commands receive the remaining phase budget after setup or cache wait
   };
   const result = await gate.run(c);
   assert.deepEqual(result.main_failure?.names, ['first failure', 'second failure'], result.summary);
-  assert.equal(budgets.length, 2);
-  assert.equal(budgets[0], 12000);
-  assert.ok(budgets[1] > 0 && budgets[1] < budgets[0], JSON.stringify(budgets));
+  // The head and its rerun each get the full budget; the base gets what remains of its phase.
+  assert.equal(budgets.length, 3);
+  assert.deepEqual(budgets.slice(0, 2), [12000, 12000]);
+  assert.ok(budgets[2] > 0 && budgets[2] < budgets[0], JSON.stringify(budgets));
 });
 
 test('host-only base commands keep host_env and clear exclusions, including cached diagnostics', async () => {
@@ -240,7 +245,8 @@ test('host-only base commands keep host_env and clear exclusions, including cach
     assert.equal(result.infrastructure_failure, true, result.summary);
     assert.equal(result.receipt.base_rerun.results[0].cached, cached);
     const ran = rows().slice(before);
-    assert.equal(ran.length, cached ? 2 : 3);
+    // The ordinary suite, the host-only file and its rerun, then the base unless cached.
+    assert.equal(ran.length, cached ? 3 : 4);
     assert.equal(ran[0].host, undefined);
     assert.equal(ran[0].exclude, '["test/host.test.js"]');
     for (const r of ran.slice(1)) {

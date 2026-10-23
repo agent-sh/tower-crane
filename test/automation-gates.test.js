@@ -293,8 +293,9 @@ process.exit(1);
   assert.match(reason, /Error: late own error/);
   assert.match(reason, /error block truncated.*logs\/tests-T1-/);
   const logs = latest.receipt.test_logs;
-  assert.deepEqual(logs.map((r) => r.phase), ['head', 'base']);
-  const head = fs.readFileSync(path.join(h.state, logs[0].log), 'utf8');
+  assert.deepEqual(logs.map((r) => r.phase), ['head', 'head', 'base']);
+  const head = logs.filter((r) => r.phase === 'head')
+    .map((r) => fs.readFileSync(path.join(h.state, r.log), 'utf8')).join('\n');
   assert.match(head, /at frame79/);
   assert.equal(h.ok(['gate', 'log', 'T1']), head.trim());
   assert.equal(h.ok(['gate', 'log', 'T1', '--run', 'base']), 'base passed');

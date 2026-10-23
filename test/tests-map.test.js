@@ -374,9 +374,55 @@ test('incremental head native reruns preserve accepted receipts in prove and run
     fs.rmSync(marker);
     const result = check(h);
     assert.equal(result.receipt.head_mode, 'incremental', mode);
-    assert.deepEqual(result.receipt.native_rerun, { step: 'head', files: ['test/crash.test.js'], ok: true }, mode);
+    assert.deepEqual(result.receipt.reruns, [{ step: 'head', files: ['test/crash.test.js'], ok: true }], mode);
     assert.equal(result.native_crash.length, 1, mode);
+    assert.equal(result.flaky[0].native_crash, true, mode);
     assert.equal(h.json(['task', 'show', 'T1']).gates.gates.find(g => g.type === 'tests').ok, true, mode);
+  }
+});
+
+test('incremental failing suites rerun once without repeating passing suites in prove and run-only modes', (t) => {
+  for (const mode of ['prove', 'run-only']) for (const failures of [1, 2]) {
+    const name = `${mode}, ${failures} failures`;
+    const h = fixture(t, null);
+    const marker = path.join(h.base, 'attempts');
+    const counted = path.join(h.base, 'passing-runs');
+    fs.writeFileSync(marker, '2');
+    h.git(['switch', 'main']);
+    fs.writeFileSync(path.join(h.repo, 'test/flaky.test.js'), `const { test } = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+test('sometimes fails', () => {
+  if (require('../value.js') === 0) return;
+  const file = ${JSON.stringify(marker)};
+  const attempts = fs.existsSync(file) ? Number(fs.readFileSync(file, 'utf8')) : 0;
+  fs.writeFileSync(file, String(attempts + 1));
+  assert.ok(attempts >= ${failures}, 'first attempts fail');
+});
+`);
+    fs.writeFileSync(path.join(h.repo, 'test/mapped.test.js'),
+      `require('node:fs').appendFileSync(${JSON.stringify(counted)}, 'x');\n`);
+    h.git(['add', '.']);
+    h.git(['commit', '-qm', 'rerun suites']);
+    h.git(['switch', 'fixture-change']);
+    h.git(['merge', '--no-edit', 'main']);
+    repositoryMap(h, { 'docs/**': ['test/flaky.test.js', 'test/mapped.test.js'], '**/*.md': [] });
+    h.ok(['project', 'set', '--ci-required', '[]', '--tests-mode', mode]);
+    h.ok(['submit', 'T1', '--sha', h.git(['rev-parse', 'HEAD']), '--agent', 'worker']);
+    assert.equal(check(h).receipt.head_mode, 'full', name);
+    resubmit(h, 'docs/state.md');
+    fs.rmSync(marker);
+    fs.rmSync(counted);
+    const run = h.run(['check', 'tests', 'T1', '--agent', 'worker', '--json']);
+    assert.equal(run.code, failures === 1 ? 0 : 1, name + run.stdout + run.stderr);
+    const result = JSON.parse(run.stdout);
+    assert.equal(result.receipt.head_mode, 'incremental', name);
+    assert.deepEqual(result.receipt.reruns, [{ step: 'head', files: ['test/flaky.test.js'], ok: failures === 1 }], name);
+    assert.equal(fs.readFileSync(marker, 'utf8'), '2', name);
+    assert.equal(fs.readFileSync(counted, 'utf8'), 'x', `${name}: passing suite runs once`);
+    assert.equal(result.flaky?.length ?? 0, failures === 1 ? 1 : 0, name);
+    if (failures === 1) assert.match(result.summary, /exit 1, then exit 0 on its rerun/);
+    assert.equal(h.json(['task', 'show', 'T1']).gates.gates.find(g => g.type === 'tests').ok, failures === 1, name);
   }
 });
 
@@ -746,10 +792,13 @@ test('incremental CLI rejects fragment-only and test-only defects through direct
         fs.writeFileSync(path.join(h.repo, 'changelog.d/probe.md'), '- Valid fragment.\n');
         fs.writeFileSync(path.join(h.repo, 'test/probe.test.js'), "require('node:test')('probe', () => {});\n");
         fs.writeFileSync(path.join(h.repo, 'test/package.test.js'), "console.log('package suite');\n");
-        fs.writeFileSync(path.join(h.repo, 'test/shared-files.test.js'), `const { fragments } = require(${JSON.stringify(path.join(ROOT, 'scripts/changelog.js'))});
+        fs.writeFileSync(path.join(h.repo, 'test/shared-files.test.js'), `const { test } = require('node:test');
+const { fragments } = require(${JSON.stringify(path.join(ROOT, 'scripts/changelog.js'))});
 const { checkTestWaits } = require(${JSON.stringify(path.join(ROOT, 'scripts/test-waits.js'))});
-fragments(process.cwd());
-checkTestWaits(process.cwd());
+test('directory reader contracts', () => {
+  fragments(process.cwd());
+  checkTestWaits(process.cwd());
+});
 `);
         h.git(['add', '.']);
         h.git(['commit', '-qm', 'directory reader contracts']);

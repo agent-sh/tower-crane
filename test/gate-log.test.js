@@ -91,11 +91,21 @@ test('test logs redact before byte limits, report cuts and prune only old runs o
 test('command capture reports truncation before saving its retained output', async (t) => {
   const h = makeRepo(t);
   const C = require('../lib/gates/common');
-  const result = await C.shell({}, `${C.shellQuote(process.execPath)} -e "for(let i=0;i<100;i++)console.log('line '+i)"`,
-    { cwd: h.repo, keep: 128 });
-  assert.equal(result.ok, true);
-  assert.equal(result.outputTruncated, true);
-  const ref = Logs.store({ stateDir: h.state, task: { id: 'T1', sha: 'b'.repeat(40) } }, C.createRedactor([])).keep('head', result);
-  assert.equal(ref.truncated, true);
-  assert.match(fs.readFileSync(path.join(h.state, ref.log), 'utf8'), /log truncated.*\n[\s\S]*line 99/);
+  const store = Logs.store({ stateDir: h.state, task: { id: 'T1', sha: 'b'.repeat(40) } }, C.createRedactor([]));
+  for (const row of [
+    { stream: 'stdout', script: "for(let i=0;i<100;i++)console.log('line '+i)", cut: true },
+    { stream: 'stderr', script: "for(let i=0;i<100;i++)console.error('line '+i)", cut: true },
+    { stream: 'both', script: "console.log('complete stdout');console.error('complete stderr')", cut: false },
+  ]) {
+    const result = await C.shell({}, `${C.shellQuote(process.execPath)} -e ${C.shellQuote(row.script)}`,
+      { cwd: h.repo, keep: 128 });
+    assert.equal(result.ok, true, row.stream);
+    assert.equal(result.truncated, row.cut, row.stream);
+    assert.equal(!!result.outputTruncated, row.cut, row.stream);
+    const ref = store.keep('head', result);
+    assert.equal(ref.truncated, row.cut, row.stream);
+    const text = fs.readFileSync(path.join(h.state, ref.log), 'utf8');
+    if (row.cut) assert.match(text, /log truncated.*\n[\s\S]*line 99/, row.stream);
+    else assert.equal(text, result.output, row.stream);
+  }
 });
