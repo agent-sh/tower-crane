@@ -294,9 +294,13 @@ test('the queue defers real generated conflicts while GitHub still reports the a
   const confirmed = h.github();
   Object.assign(confirmed.prs['7'], { mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY' });
   h.saveGithub(confirmed);
-  h.consume();
+  const run = h.consume();
   const repaired = h.readState('tasks.json').tasks[0];
-  assert.equal(repaired.status, 'submitted');
+  // A repair that did not land is named by what the wait printed, its reactions' receipts and the
+  // PR the offline GitHub held, since a host gate keeps only the failure's output.
+  const { mergeable, mergeStateStatus } = h.github().prs['7'];
+  assert.equal(repaired.status, 'submitted', [`wait exit ${run.code}: ${run.stderr.trim()}`, `PR ${mergeable}/${mergeStateStatus}`,
+    ...h.logs().filter((e) => ['automation', 'merge queue', 'queue skipped'].includes(e.cmd)).slice(-6).map((e) => `${e.cmd} ${JSON.stringify(e.detail)}`)].join('\n'));
   assert.notEqual(repaired.sha, h.sha);
   assert.equal(h.git(['--git-dir', h.remote, 'rev-parse', 'fixture-change']), repaired.sha);
   assert.equal(h.logs().some((e) => e.cmd === 'rework'), false);
