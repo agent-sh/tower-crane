@@ -4,7 +4,11 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { makeRepo } = require('./helpers');
+const cp = require('node:child_process');
+const vm = require('node:vm');
+const { createRequire } = require('node:module');
+const { EventEmitter } = require('node:events');
+const { makeRepo, ROOT } = require('./helpers');
 const { shellQuote } = require('../lib/gates/common');
 const { HUNG_TEST_MS } = require('./signals');
 
@@ -93,6 +97,67 @@ setTimeout(() => process.exit(0), 10000); // wait-allow: the gate must time out 
   }
 });
 
+// Drive the timer and poll ordering directly so host load cannot choose which wins.
+test('late gate deadlines preserve newly delivered output in either callback order', async (t) => {
+  const filename = path.join(ROOT, 'lib', 'gates', 'common.js');
+  const source = fs.readFileSync(filename, 'utf8');
+  const realRequire = createRequire(filename);
+  for (const row of [
+    { name: 'stdout before overdue timer', stream: 'stdout', order: 'before', late: true, timedOut: false },
+    { name: 'stderr before overdue timer', stream: 'stderr', order: 'before', late: true, timedOut: false },
+    { name: 'stdout after overdue timer', stream: 'stdout', order: 'after', late: true, timedOut: false },
+    { name: 'stderr after overdue timer', stream: 'stderr', order: 'after', late: true, timedOut: false },
+    { name: 'quiet child at overdue timer', late: true, timedOut: true },
+    { name: 'stale output at overdue timer', stream: 'stdout', order: 'stale', late: true, timedOut: true },
+    { name: 'output at on-time deadline', stream: 'stdout', order: 'before', timedOut: true },
+    { name: 'exited child at overdue timer', stream: 'stdout', order: 'before', late: true, exited: true, timedOut: false },
+    { name: 'progress followed by a quiet fresh window', stream: 'stdout', order: 'before', late: true, retry: true, timedOut: true },
+  ]) await t.test(row.name, async () => {
+    const child = new EventEmitter();
+    for (const stream of ['stdout', 'stderr']) {
+      child[stream] = new EventEmitter();
+      child[stream].setEncoding = child[stream].destroy = () => {};
+    }
+    let now = 0;
+    const timers = [];
+    const immediates = [];
+    const mod = { exports: {} };
+    vm.runInNewContext(source, {
+      module: mod, exports: mod.exports, Buffer,
+      process: { platform: 'linux', pid: process.pid, env: {}, kill: () => {} },
+      Date: { now: () => now },
+      setTimeout: (fn, ms) => { const timer = { fn, ms }; timers.push(timer); return timer; },
+      clearTimeout: () => {},
+      setImmediate: (fn) => immediates.push(fn),
+      require: (name) => name === '../commands' ? { spawn: () => child, assertUnlocked: () => {} }
+        : name === '../processes' ? { strays: () => [], withoutRunMarks: (env) => env, windowsKillTree: () => {} }
+          : realRequire(name),
+    }, { filename });
+    const C = mod.exports;
+    const pending = C.exec({ exec: C.treeExec }, process.execPath, ['-e', 'fixture'], { timeout: 300 }); // wait-allow: deterministic gate deadline under a virtual clock
+    const deliver = () => child[row.stream].emit('data', 'progress\n');
+    if (row.order === 'stale') { now = 100; deliver(); }
+    now = row.late ? 1500 : 300;
+    if (row.order === 'before') deliver();
+    if (row.exited) child.emit('exit', 0, null);
+    timers.find((timer) => timer.ms === 300).fn();
+    if (row.order === 'after') deliver();
+    immediates.shift()();
+    if (row.retry) {
+      const deadlines = timers.filter((timer) => timer.ms === 300);
+      assert.equal(deadlines.length, 2, row.name);
+      now += 300;
+      deadlines[1].fn();
+      immediates.shift()();
+    }
+    child.emit('close', 0, null);
+    const result = await pending;
+    assert.equal(result.timedOut, row.timedOut, row.name);
+    assert.equal(result.ok, !row.timedOut, row.name);
+    if (row.stream) assert.equal(result[row.stream], 'progress\n', row.name);
+  });
+});
+
 // inbox reads PRs with synchronous gh calls while its base CI read runs in the background, so a
 // timer can come due while the event loop is blocked, before the child's exit or output is seen.
 test('a timeout that comes due during a blocked event loop stops only a child with nothing to show', async (t) => {
@@ -119,16 +184,14 @@ ${fd ? `process.${fd === 1 ? 'stdout' : 'stderr'}.write('x'.repeat(${Math.max(0,
     : 'setTimeout(() => {}, 30000);'} // wait-allow: idle child outlives the gate timeout under test
 `;
       const pending = C.exec({ exec: C.treeExec }, process.execPath, ['-e', script], { timeout: 300 }); // wait-allow: the gate timeout itself is under test
-      // Keep the loop blocked while waiting for actual pipe output. A fixed delay alone
-      // races child startup under load and can turn a pipe case into the idle case.
-      const deadline = performance.now() + HUNG_TEST_MS;
-      while (!fs.existsSync(ready) && performance.now() < deadline) {
-        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10); // wait-allow: readiness while deliberately preventing the timeout and pipe callbacks from running
-      }
-      const started = fs.existsSync(ready);
-      if (started) block();
+      // A synchronous observer leaves the parent blocked until actual pipe output or
+      // idle startup is ready; the readiness wait uses the suite's hung-test backstop.
+      const observed = cp.spawnSync(process.execPath, ['-e',
+        "require('./test/signals').fileWritten(process.argv[1]).catch(e => { console.error(e); process.exitCode = 1; });", ready],
+      { cwd: ROOT, env: h.env, encoding: 'utf8', timeout: HUNG_TEST_MS });
+      if (observed.status === 0) block();
       const r = await pending;
-      assert.equal(started, true, `${what}, startup=${startup}: child never became ready`);
+      assert.equal(observed.status, 0, `${what}, startup=${startup}: ${observed.stderr}`);
       assert.equal(r.timedOut, fd === null, `${what}, startup=${startup}`);
       if (fd !== null) {
         assert.equal(r.ok, true, `${what}: ${r.stderr}`);
