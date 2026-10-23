@@ -142,6 +142,10 @@ test('a Windows root that exited before its first snapshot keeps the children it
     for (const [name, os, snapshot, launch, expected] of [
       ['exited root', 'win32', rows, 1000, [11, 12, 14]],
       ['live root', 'win32', [root, ...rows.filter(r => r.pid !== 13)], 1000, [10, 11, 12, 14]],
+      // 13 and the process it started belong to the earlier holder of pid 10,
+      // as a detached supervisor does once its dispatch exits.
+      ['live root and an earlier orphan', 'win32', [root, ...rows, { pid: 16, parent: 13, group: null, start: 600 }], 1000, [10, 11, 12, 14]],
+      ['a live child and an earlier orphan', 'win32', [root, ...rows, { pid: 17, parent: 11, group: null, start: 700 }], 1000, [10, 11, 12, 14]],
       ['no launch time', 'win32', rows, undefined, []],
       ['Linux reparents', 'linux', rows, 1000, []],
     ]) {
@@ -150,6 +154,53 @@ test('a Windows root that exited before its first snapshot keeps the children it
       assert.deepEqual(C.descendants(snapshot, 10, known).map(r => r.pid), expected, name);
     }
   } finally { Object.defineProperty(process, 'platform', platform); }
+});
+
+// The same tree from a real Windows snapshot: the orphan still names its
+// exited parent, whose pid a process that started after the orphan now holds.
+test('a Windows contained tree leaves out the orphan of an earlier holder of its pid', {
+  skip: process.platform !== 'win32' && 'Windows pid reuse',
+}, async () => {
+  const { windowsProcesses, windowsCreated } = require('../lib/processes');
+  const parent = cp.spawnSync(process.execPath, ['-e', `const c = require('node:child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore', windowsHide: true }); c.unref(); console.log(process.pid + ' ' + c.pid)`], { encoding: 'utf8', windowsHide: true }); // wait-allow: an orphan that runs until it is stopped
+  const [pid, orphan] = parent.stdout.trim().split(' ').map(Number);
+  const born = windowsCreated([orphan], 300000).get(orphan);
+  assert.equal(Number.isSafeInteger(born), true, `no creation time for the orphan ${orphan}`);
+  const running = (target, start) => windowsCreated([target], 300000).get(target) === start;
+  try {
+    const took = require('./windows-pid-reuse').takePid(pid);
+    assert.equal(took.taken, true, `no process got pid ${pid} back: ${took.detail}`);
+    const holder = windowsCreated([pid], 300000).get(pid);
+    try {
+      const rows = (await windowsProcesses(cp.execFile, 300000)).map((r) => ({ ...r, group: null }));
+      assert.equal(rows.find((r) => r.pid === orphan)?.parent, pid, 'the orphan names its exited parent');
+      assert.ok(rows.find((r) => r.pid === pid)?.start > born, 'the holder of the pid started after the orphan');
+      const tree = C.descendants(rows, pid, new Map()).map((r) => r.pid);
+      assert.equal(tree.includes(pid), true, 'the holder heads its own tree');
+      assert.equal(tree.includes(orphan), false, 'the orphan of the earlier holder of the pid joined the tree');
+    } finally { if (running(pid, holder)) killPid(pid, 'SIGKILL'); }
+  } finally { if (running(orphan, born)) killPid(orphan, 'SIGKILL'); }
+});
+
+// The snapshot test above runs only on Windows, so its pid taker's request and
+// reading of the PowerShell result run here on every system.
+test('the pid taker asks PowerShell for one pid and reads only its last line', (t) => {
+  const { takePid } = require('./windows-pid-reuse');
+  for (const [name, reply, expected] of [
+    ['taken after type noise', { status: 0, stdout: 'warning: compiled\r\ntaken 7\r\n' }, { taken: true, tries: 7, detail: 'taken 7' }],
+    ['missed', { status: 0, stdout: 'missed 40\n' }, { taken: false, tries: 40, detail: 'missed 40' }],
+    ['creation refused', { status: 0, stdout: 'error 5 3\n' }, { taken: false, tries: 3, detail: 'error 5 3' }],
+    ['PowerShell missing', { status: null, stdout: null, stderr: '', error: { code: 'ENOENT' } }, { taken: false, tries: 0, detail: 'null ENOENT ' }],
+  ]) {
+    const calls = [];
+    t.mock.method(cp, 'spawnSync', (file, args, opts) => { calls.push({ file, args, opts }); return reply; });
+    assert.deepEqual(takePid(1234, { ms: 500 }), expected, name);
+    assert.equal(calls.length, 1, name);
+    assert.equal(calls[0].file, 'powershell.exe', name);
+    assert.match(Buffer.from(calls[0].args.at(-1), 'base64').toString('utf16le'), /\[PidReuse\]::Take\(1234, 500, /, name);
+    assert.equal(calls[0].opts.timeout, 500 + 120000, name);
+    cp.spawnSync.mock.restore();
+  }
 });
 
 const cases = [
