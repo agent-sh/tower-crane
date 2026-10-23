@@ -699,6 +699,17 @@ test('an untracked empty read-only file with a placeholder name is a stale place
   assert.equal(u.env.GIT_CONFIG_GLOBAL, global, 'Git uses the test-only global config');
 });
 
+test('a sandboxed claude\'s commands, whose GIT_CONFIG_PARAMETERS its sandbox replaces, still exclude the placeholders and keep background gc and maintenance off', { skip: NO_STUBS }, (t) => {
+  const { h, u, wt } = setup(t);
+  isolateGitEnvironment(h, u);
+  isolated(h, 'small', 'claude');
+  fs.rmSync(path.join(wt, '.claude', 'settings.local.json'));
+  spawn(h, u, 'small', { STUB_CLAUDE_SANDBOX_PLACEHOLDERS: JSON.stringify(CLAUDE_SANDBOX_PLACEHOLDERS) });
+  const seen = u.report();
+  assert.equal(seen.placeholderGitStatus.stdout, '', 'the harness\'s own git excludes them');
+  assert.deepEqual(seen.commandGit, { status: '', code: 0, gc: '0', maintenance: 'false' });
+});
+
 test('sandbox cleanup refuses placeholder paths under a symlinked parent', { skip: NO_STUBS }, (t) => {
   const { h, u, wt } = setup(t);
   isolateGitEnvironment(h, u);
