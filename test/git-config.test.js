@@ -435,6 +435,63 @@ test('the command-scope credential reset keeps the trusted URL-specific helper, 
   assert.match(r.stdout, /^password=probe-token$/m);
 });
 
+// A sandboxed codex agent's commands get no name holding KEY, and git stops
+// when GIT_CONFIG_COUNT names a key the environment lacks, so every
+// command-scope entry Tower Crane sets for git goes in GIT_CONFIG_PARAMETERS:
+// the harness's (harness-git.js), the CLI's own (commands.js gitEnv) and the
+// dispatcher's GIT_CONFIG_COUNT entries, moved there. Inside the sandbox the
+// git shim keeps the caller's entries and gc and maintenance, and drops the
+// rest of the harness's.
+test('git config reaches git through GIT_CONFIG_PARAMETERS with no GIT_CONFIG_KEY_<n>, harness, sandbox and CLI alike', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.git(['config', 'core.fsmonitor', 'repo-fsmonitor']);
+  const HarnessGit = require('../lib/harness-git');
+  const { gitEnv } = require('../lib/commands');
+  const base = { ...h.env };
+  for (const k of Object.keys(base)) if (/^GIT_CONFIG_(COUNT|KEY_|VALUE_|PARAMETERS)/i.test(k)) delete base[k];
+  const get = (env, key) => {
+    const r = cp.spawnSync('git', ['-C', h.repo, 'config', '--get', key], { env, encoding: 'utf8' });
+    return r.status === 0 ? r.stdout.replace(/\n$/, '') : `exit ${r.status}: ${r.stderr.trim()}`;
+  };
+  const keyNames = (env) => Object.keys(env).filter((k) => /^GIT_CONFIG_(COUNT|KEY_|VALUE_)/i.test(k));
+  const odd = "it's a value with 'quotes', spaces = and \\ \"too\"";
+  const rows = [
+    ['no caller entries', {}, {}],
+    ['a dispatcher count entry', { GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'caller.count', GIT_CONFIG_VALUE_0: odd }, { 'caller.count': odd }],
+    ['a dispatcher count past its keys', { GIT_CONFIG_COUNT: '3', GIT_CONFIG_KEY_0: 'caller.count', GIT_CONFIG_VALUE_0: 'one' }, { 'caller.count': 'one' }],
+    ['dispatcher parameters', { GIT_CONFIG_PARAMETERS: "'caller.params'='two' 'url.https://h/?a=b.insteadof'='x'" }, { 'caller.params': 'two', 'url.https://h/?a=b.insteadof': 'x' }],
+    ['both', { GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'caller.count', GIT_CONFIG_VALUE_0: 'one', GIT_CONFIG_PARAMETERS: "'caller.params'='two'" }, { 'caller.count': 'one', 'caller.params': 'two' }],
+  ];
+  for (const [label, caller, kept] of rows) {
+    const harness = HarnessGit.harnessEnv({ ...base, ...caller }, h.repo);
+    assert.deepEqual(keyNames(harness), [], `${label}: the harness env holds no count entry`);
+    assert.equal(get(harness, 'core.fsmonitor'), 'false', `${label}: the harness's own git takes the command-scope value over the repository's`);
+    assert.equal(get(harness, 'gc.auto'), '0', label);
+    for (const [key, value] of Object.entries(kept)) assert.equal(get(harness, key), value, `${label}: ${key} reaches the harness's git`);
+    for (const mark of [{ SANDBOX_RUNTIME: '1' }, { CODEX_SANDBOX: 'seccomp' }]) {
+      const inside = HarnessGit.sandboxedEnv({ ...harness, ...mark });
+      const what = `${label}, ${Object.keys(mark)[0]}`;
+      assert.deepEqual(keyNames(inside), [], what);
+      assert.equal(inside[HarnessGit.MARK], undefined, what);
+      assert.equal(get(inside, 'core.fsmonitor'), 'repo-fsmonitor', `${what}: the shim drops the harness's entries in the sandbox`);
+      assert.equal(get(inside, 'gc.auto'), '0', `${what}: but keeps gc and maintenance off`);
+      for (const [key, value] of Object.entries(kept)) assert.equal(get(inside, key), value, `${what}: ${key} still reaches git`);
+      const cli = gitEnv(h.repo, inside);
+      assert.deepEqual(keyNames(cli), [], `${what}: the CLI's own git env holds no count entry`);
+      assert.equal(get(cli, 'core.fsmonitor'), 'false', `${what}: the CLI's git takes its own value`);
+      for (const [key, value] of Object.entries(kept)) assert.equal(get(cli, key), value, `${what}: ${key} reaches the CLI's git`);
+    }
+    assert.equal(HarnessGit.sandboxedEnv(harness), harness, `${label}: outside a sandbox the env is kept whole`);
+  }
+  // A span that no longer holds what harnessEnv wrote keeps every entry.
+  const harness = HarnessGit.harnessEnv(base, h.repo);
+  for (const mark of ['5:3', `0:${harness.GIT_CONFIG_PARAMETERS.length + 1}`, '1:4', 'x']) {
+    const env = { ...harness, [HarnessGit.MARK]: mark, CODEX_SANDBOX: 'seccomp' };
+    assert.equal(HarnessGit.sandboxedEnv(env), env, mark);
+  }
+});
+
 test('a config scan is reused until a file it read changes', (t) => {
   const h = makeRepo(t);
   h.init();

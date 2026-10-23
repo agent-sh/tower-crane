@@ -62,7 +62,10 @@ test('a spawned codex agent is pointed at the user\'s global rules, loads none o
   fs.appendFileSync(path.join(u.home, '.codex', '.env'), 'export BEDROCK_PLAIN_SETTING=plain\n');
   const dry = h.json(['spawn', '--role', 'small', '--task', 'T1', '--dry-run'], { env: u.env });
   assert.ok(!JSON.stringify(dry).includes(SECRET), 'no credential in the command or its env');
-  const started = spawn(h, u, 'small', { PROBE_FAKE_API_KEY: 'fake', PROBE_FAKE_SECRET: 'fake', AWS_SECRET_ACCESS_KEY: 'fake' });
+  // A KEY with an underscore and a digit after it is credential-shaped too;
+  // the dispatcher's own GIT_CONFIG_COUNT entry moves to GIT_CONFIG_PARAMETERS.
+  const started = spawn(h, u, 'small', { PROBE_FAKE_API_KEY: 'fake', PROBE_FAKE_SECRET: 'fake', AWS_SECRET_ACCESS_KEY: 'fake',
+    FOO_KEY_1X: 'fake', API_KEY_1: 'fake', OPENAI_KEY_2: 'fake', GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'towercrane.probe', GIT_CONFIG_VALUE_0: 'kept' });
   const seen = u.report();
   assert.ok(!seen.memory.join('\n').includes('PLANTED'), 'user instruction files and memories stay out of its home');
   assert.ok(seen.prompt.includes(`- ${path.join(u.home, '.codex', 'AGENTS.md')} (global, read it)`), 'the prompt names the user\'s global rules for the agent to read');
@@ -78,16 +81,18 @@ test('a spawned codex agent is pointed at the user\'s global rules, loads none o
   const policy = seen.config.shell_environment_policy;
   assert.ok(policy, 'the agent home renders a shell_environment_policy');
   assert.equal(policy.inherit, 'all');
-  assert.equal(policy.ignore_default_excludes, true, 'codex\'s own default excludes would drop GIT_CONFIG_KEY_<n>');
+  assert.equal(policy.ignore_default_excludes, true, 'codex\'s own default excludes are off, and the policy names its own');
   const excluded = (name) => policy.exclude.some((glob) => new RegExp(`^${glob.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.')}$`, 'i').test(name));
   for (const name of ['AWS_BEARER_TOKEN_BEDROCK', 'BEDROCK_PLAIN_SETTING', 'PROBE_FAKE_API_KEY', 'PROBE_FAKE_SECRET', 'AWS_SECRET_ACCESS_KEY', 'AWS_PROFILE',
-    'OPENAI_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'DB_PASSWORD', 'GOOGLE_APPLICATION_CREDENTIALS', 'P_KEY', 'API_KEY2', 'KEY', 'npm_token', 'SIGNING_KEY_FILE']) {
+    'OPENAI_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'DB_PASSWORD', 'GOOGLE_APPLICATION_CREDENTIALS', 'P_KEY', 'API_KEY2', 'KEY', 'npm_token', 'SIGNING_KEY_FILE',
+    'FOO_KEY_1X', 'API_KEY_1', 'OPENAI_KEY_2', 'api_key_9', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_COUNT', 'GIT_CONFIG_VALUE_0']) {
     assert.ok(excluded(name), `${name} stays out of commands`);
   }
-  for (const name of ['PROBE_FAKE_API_KEY', 'AWS_SECRET_ACCESS_KEY']) assert.ok(seen.envNames.includes(name), `${name} reached codex itself`);
+  for (const name of ['PROBE_FAKE_API_KEY', 'AWS_SECRET_ACCESS_KEY', 'FOO_KEY_1X', 'API_KEY_1', 'OPENAI_KEY_2']) assert.ok(seen.envNames.includes(name), `${name} reached codex itself`);
+  assert.deepEqual(seen.envNames.filter((n) => /^GIT_CONFIG_(COUNT|KEY_|VALUE_)/i.test(n)), [], 'codex starts with no GIT_CONFIG_COUNT entry for git to need');
   const kept = seen.envNames.filter((n) => /^(TOWER_CRANE_|GIT_|XDG_|PATH$|HOME$|TMPDIR$|GH_CONFIG_DIR$)/.test(n));
-  assert.ok(kept.includes('TOWER_CRANE_BROKER') && kept.includes('PATH') && kept.includes('GH_CONFIG_DIR'), kept.join(' '));
-  for (const name of [...kept, 'GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0', 'GIT_CONFIG_KEY_12']) assert.ok(!excluded(name), `${name} reaches commands`);
+  assert.ok(kept.includes('TOWER_CRANE_BROKER') && kept.includes('PATH') && kept.includes('GH_CONFIG_DIR') && kept.includes('GIT_CONFIG_PARAMETERS'), kept.join(' '));
+  for (const name of kept) assert.ok(!excluded(name), `${name} reaches commands`);
   assert.equal(seen.config.model_provider, 'p', 'the provider is kept');
   assert.deepEqual(seen.config.model_providers, { p: { name: 'P', env_key: 'P_KEY' }, q: { name: 'Q', env_key: 'Q_KEY', wire_api: 'responses' } }, 'providers in any layout, without credentials');
   for (const k of ['approval_policy', 'model_instructions_file']) assert.equal(seen.config[k], undefined, `${k} is the user's, not the role's`);
@@ -138,19 +143,29 @@ test('in the real codex sandbox an agent\'s command gets no credential-shaped va
 const cp = require('node:child_process'), fs = require('node:fs'), path = require('node:path');
 const PATH = process.env.PATH.split(path.delimiter).filter((d) => path.resolve(d) !== ${JSON.stringify(bin)}).join(path.delimiter);
 process.stdout.write(JSON.stringify({ type: 'thread.started', thread_id: 'probe' }) + '\\n');
-const r = cp.spawnSync('codex', ['sandbox', '-c', 'default_permissions="tower-crane"', '--', process.execPath, '-e', 'console.log(JSON.stringify(Object.keys(process.env)))'], { env: { ...process.env, PATH }, encoding: 'utf8' });
+const inside = 'const cp = require("child_process"); const git = (a) => cp.spawnSync("git", a, { encoding: "utf8" });'
+  + 'const probe = git(["config", "--get", "towercrane.probe"]), status = git(["status", "--porcelain"]), log = git(["log", "-1", "--format=%H"]);'
+  + 'console.log(JSON.stringify({ names: Object.keys(process.env), probe: probe.stdout.trim(), probeErr: probe.stderr, status: status.status, statusErr: status.stderr, log: log.status }))';
+const r = cp.spawnSync('codex', ['sandbox', '-c', 'default_permissions="tower-crane"', '--', process.execPath, '-e', inside], { env: { ...process.env, PATH }, encoding: 'utf8' });
 fs.writeFileSync(${JSON.stringify(out)}, JSON.stringify({ status: r.status, stderr: r.stderr, inside: r.status === 0 ? JSON.parse(r.stdout) : null, outside: Object.keys(process.env) }));
 process.exit(r.status ?? 1);
 `, { mode: 0o755 });
-  spawn(h, u, 'small', { PROBE_FAKE_API_KEY: 'fake', AWS_SECRET_ACCESS_KEY: 'fake', AWS_REGION: 'fake-region' });
+  // The dispatcher's GIT_CONFIG_COUNT entry reaches git in the sandbox
+  // through GIT_CONFIG_PARAMETERS.
+  spawn(h, u, 'small', { PROBE_FAKE_API_KEY: 'fake', AWS_SECRET_ACCESS_KEY: 'fake', AWS_REGION: 'fake-region',
+    FOO_KEY_1X: 'fake', API_KEY_1: 'fake', OPENAI_KEY_2: 'fake', GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'towercrane.probe', GIT_CONFIG_VALUE_0: 'kept' });
   const seen = JSON.parse(fs.readFileSync(out, 'utf8'));
   assert.equal(seen.status, 0, seen.stderr);
-  const gone = ['PROBE_FAKE_API_KEY', 'AWS_SECRET_ACCESS_KEY', 'AWS_REGION', 'TC_FILE_TOKEN'];
+  const gone = ['PROBE_FAKE_API_KEY', 'AWS_SECRET_ACCESS_KEY', 'AWS_REGION', 'TC_FILE_TOKEN', 'FOO_KEY_1X', 'API_KEY_1', 'OPENAI_KEY_2'];
   for (const name of gone) assert.ok(seen.outside.includes(name), `${name} reached codex itself`);
-  for (const name of [...gone, 'AWS_BEARER_TOKEN_BEDROCK', 'BEDROCK_PLAIN_SETTING']) assert.ok(!seen.inside.includes(name), `${name} stays out of the command`);
+  for (const name of [...gone, 'AWS_BEARER_TOKEN_BEDROCK', 'BEDROCK_PLAIN_SETTING']) assert.ok(!seen.inside.names.includes(name), `${name} stays out of the command`);
+  assert.deepEqual(seen.inside.names.filter((n) => /KEY/i.test(n)), [], 'no name holding KEY reaches the command');
+  assert.equal(seen.inside.probe, 'kept', `git in the sandbox reads the config Tower Crane passes on: ${seen.inside.probeErr}`);
+  assert.equal(seen.inside.status, 0, `git status through the shim works: ${seen.inside.statusErr}`);
+  assert.equal(seen.inside.log, 0, 'git log works');
   const given = seen.outside.filter((n) => /^(TOWER_CRANE_|GIT_|XDG_)/.test(n) || ['HOME', 'TMPDIR', 'GH_CONFIG_DIR', 'TC_FILE_PLAIN'].includes(n));
   assert.ok(given.includes('TOWER_CRANE_BROKER') && given.includes('TC_FILE_PLAIN'), given.join(' '));
-  for (const name of given) assert.ok(seen.inside.includes(name), `${name} reaches the command`);
+  for (const name of given) assert.ok(seen.inside.names.includes(name), `${name} reaches the command`);
 });
 
 // Why the real claude cannot run here, or false. The agent below calls no
