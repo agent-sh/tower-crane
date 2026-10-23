@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { cachedFixture } = require('./helpers');
+const { cachedFixture, ROOT } = require('./helpers');
 const Scope = require('../lib/scope');
 const S = require('../lib/state');
 const StackFixture = require('./stack-fixture');
@@ -22,6 +22,18 @@ function fixture(t) {
       h.ok(['brief', 'set', id, '-'], { input: `## Why\n\nlib/cold.js is nearby.\n\n## Scope\n\n- ${file}\n\n## Notes\n\nlib/hot.js is an example.\n` });
     }
   });
+}
+
+for (const [file, patterns] of [
+  ['docs/state/tasks.md', [/`hot_paths`/, /waits on hot path <glob> held by T<n>/]],
+  ['docs/state/decisions.md', [/\| `hot_paths` \| operational \|/]],
+  ['docs/state/storage.md', [/`hot-path-cache\/<task>\.json`/]],
+  ['scripts/cli-reference.md', [/init --hot-paths JSON/, /project set --hot-paths JSON/]],
+]) {
+test(`hot-path contract survives the split in ${file}`, () => {
+  const text = fs.readFileSync(path.join(ROOT, file), 'utf8');
+  for (const pattern of patterns) assert.match(text, pattern);
+});
 }
 
 test('hot glob intersection includes new paths, directories and glob alternatives', () => {
