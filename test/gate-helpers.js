@@ -122,6 +122,7 @@ if (args[0] === 'pr' && args[1] === 'merge') {
     isCrossRepository: false,
     state: process.env['FIXTURE_PR_STATE_' + pr] || process.env.FIXTURE_PR_STATE || (fs.existsSync(merged) ? 'MERGED' : 'OPEN'),
     mergeCommit: {oid: process.env.FIXTURE_SHA},
+    ...(process.env.FIXTURE_PR_BODY ? {body: process.env.FIXTURE_PR_BODY} : {}),
   }));
 } else {
   const ok = process.env.FIXTURE_GATE_OK !== '0';

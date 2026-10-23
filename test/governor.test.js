@@ -238,11 +238,17 @@ test('governor settings are validated and set as an operational setting', (t) =>
 test('the governor key lists in the contract and the --governor help name every setting', () => {
   const keys = Object.keys(G.DEFAULTS).sort();
   const root = path.join(__dirname, '..');
-  const contract = fs.readFileSync(path.join(root, 'docs', 'state.md'), 'utf8').split('\n').find((l) => l.startsWith('`governor`, set through'));
+  const contract = fs.readFileSync(path.join(root, 'docs', 'state', 'storage.md'), 'utf8').split('\n').find((l) => l.startsWith('`governor`, set through'));
   const listed = contract.slice(contract.indexOf('holds the lines'), contract.indexOf('Unknown keys'));
-  assert.deepEqual([...listed.matchAll(/`([a-z_]+)`/g)].map((m) => m[1]).sort(), keys, 'docs/state.md');
-  const help = /host governor lines for this project\S* admissions \{([^}]*)\}/.exec(fs.readFileSync(path.join(root, 'bin', 'tower-crane.js'), 'utf8'));
-  assert.deepEqual(help[1].split(', ').sort(), keys, 'bin/tower-crane.js --governor');
+  const { SETTINGS } = require('../lib/commands-specs');
+  const { COMMANDS } = require('../bin/tower-crane');
+  const variants = [
+    ['docs/state/storage.md', [...listed.matchAll(/`([a-z_]+)`/g)].map((m) => m[1])],
+    ...[['SETTINGS', SETTINGS.governor.help], ...['init', 'project set'].map((name) =>
+      [name, COMMANDS.find((command) => command.name === name).flags.governor.help])].map(([name, help]) =>
+      [name, /admissions \{([^}]*)\}/.exec(help)[1].split(', ')]),
+  ];
+  for (const [name, listedKeys] of variants) assert.deepEqual(listedKeys.sort(), keys, name);
 });
 
 // A task an easy command-harness rung runs: it claims, then idles until stopped.
