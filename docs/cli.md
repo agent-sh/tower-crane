@@ -492,7 +492,7 @@ Before constructing an agent home, spawn also sweeps orphan `brokers/<agent>/` d
 <!-- commands:Run:start -->
 | Command | Does |
 |---|---|
-| `accept ID [--cmd CMD] [--proof-cmd CMD] [--waive TYPE --reason R] [--drop-citation PATH --reason R] [--attest-fix SHA --reason R] [--metadata-fixed --reason R] [--disputes JSON]` | carry independent review, tests and CI across docs-only changes, named nit fixes and unchanged disputed findings. Tests on a whole docs-only diff run no suite; configured cheap docs checks still run. PR title and body corrections at an unchanged head retain gates. Orchestrator or owner `--attest-fix SHA --reason R` carries a review when every code hunk fits its named file and line ranges; `--metadata-fixed --reason R` records a verified title or body correction; other changes must satisfy every named fix. `--disputes JSON` records reasons for findings left unchanged and informs the orchestrator inbox. Other failed reviews require rework. Run missing or stale software gates, then dispatch review when needed and accept when all gates pass. Waivers and dropped citations keep their existing authority |
+| `accept ID [--cmd CMD] [--proof-cmd CMD] [--waive TYPE --reason R] [--drop-citation PATH --reason R] [--attest-fix SHA --reason R] [--metadata-fixed --reason R] [--disputes JSON] [--retry-review]` | carry independent review, tests and CI across docs-only changes, named nit fixes and unchanged disputed findings. Tests on a whole docs-only diff run no suite; configured cheap docs checks still run. PR title and body corrections at an unchanged head retain gates. Orchestrator or owner `--attest-fix SHA --reason R` carries a review when every code hunk fits its named file and line ranges; `--metadata-fixed --reason R` records a verified title or body correction; other changes must satisfy every named fix. `--disputes JSON` records reasons for findings left unchanged and informs the orchestrator inbox. A failed full review at this unchanged head is retained without a new round; the orchestrator or owner uses `--retry-review` to request one, or rework for code changes. PR-title findings are follow-ups, never blockers. Run missing or stale software gates, then dispatch review when needed and accept when all gates pass. Waivers and dropped citations keep their existing authority |
 | | |
 | `ci completed ID --sha SHA` | orchestrator or owner: deliver a CI completion hint for an active submitted head, rerun the CI gate and advance passing tasks |
 | | |
@@ -534,7 +534,7 @@ Before constructing an agent home, spawn also sweeps orphan `brokers/<agent>/` d
 | | |
 | `renew ID [--lease MIN]` | extend the lease from now; only the claimant. An expired lease must pass the claim checks again (unmet dependency, owner blocker, open decision, resource lock, workers limit), so a refused renewal leaves it expired |
 | | |
-| `rework ID --reason R \| --from-review ID` | `--from-review ID` refuses failed reviews whose findings are all PR-body false claims, with correction and carryover instructions, leaving the revision unchanged. For other failures it fetches all issue-comment pages for the linked PR and selects the last `Review (Tower Crane` body at the submitted SHA, preserving every finding and its comment link in the reason. Unposted reviews use their evidence summary. A linked review that cannot be fetched or matched refuses without changing state; the head, revision and latest failed evidence are rechecked under the lock after fetching. Otherwise send a submitted or accepted task back and bump `revision`, invalidating earlier evidence even at the same sha, and a todo task whose latest release came while a decision blocked it, answered or not, goes back the same way; the reason is appended under `## Rework notes` in its brief and as a task note |
+| `rework ID --reason R \| --from-review ID` | `--from-review ID` refuses failed reviews whose findings are PR-body false claims or title findings, with correction and carryover instructions, leaving the revision unchanged. For other failures it fetches all issue-comment pages for the linked PR and selects the last `Review (Tower Crane` body at the submitted SHA, preserving every finding and its comment link in the reason. Unposted reviews use their evidence summary. A linked review that cannot be fetched or matched refuses without changing state; the head, revision and latest failed evidence are rechecked under the lock after fetching. Otherwise send a submitted or accepted task back and bump `revision`, invalidating earlier evidence even at the same sha, and a todo task whose latest release came while a decision blocked it, answered or not, goes back the same way; the reason is appended under `## Rework notes` in its brief and as a task note |
 | | |
 | `spend ID [--minutes N] [--tokens N] [--input N] [--cached N] [--cache-write N] [--output N] [--rung R] [--harness H] [--model M] [--from-spawn AGENT]` | add spend, with optional native-agent usage breakdown and metadata; rung defaults the harness, model and profile from the current ladder. Model IDs are trimmed and case-folded; provider prefixes remain distinct. Collect an exited spawn's captured usage once per route and fresh retry invocation; resumed retries share their session's cumulative usage. Retry a failed monitor or enrich an unknown/partial entry when telemetry arrives. Refuses a live process or an unknown spawn; cannot be mixed with manual spend |
 | | |
@@ -555,9 +555,11 @@ an automatic repair path: the worker corrects the body, the engine verifies the
 edit and unchanged checkout, then carries the reviewed code without another
 reviewer or test run. `rework --from-review` refuses body-only findings so the
 repair can stay at the same head. An ordinary `rework --reason` is still available
-when the correction requires code changes.
+when the correction requires wider code changes. Title findings are follow-ups,
+never blockers. A failed full review at the unchanged head stays failed; only
+the orchestrator or owner can request another full round with `--retry-review`.
 
-When every finding is in the PR body, automation dispatches a body-only repair on the task's worker rung, resuming its session when supported and available. The task stays submitted and `status` shows `fixing PR body`. The worker edits with `gh pr edit --body-file`, then exits without claiming, submitting, editing repository files, committing or pushing. The broker refuses pushes and non-body PR changes. Once the worker exits, the engine verifies that the body changed, tracked checkout files are clean, both local and remote heads still match the submitted head, and the PR title is unchanged and its base matches the dispatch snapshot or the engine's current expected target, then requests the same light check as `accept ID`. Untracked files such as the body file do not block the repair. The expected target permits stack retirement to retarget the PR after a parent merge, including one during the GitHub request. Changed heads, tracked files, titles or unexpected bases go to normal rework without a light check, including for unsandboxed harnesses. A pass accepts at the same head and revision.
+When every finding is a PR-body false claim or a title finding, automation dispatches a body-only repair on the task's worker rung, resuming its session when supported and available. The task stays submitted and `status` shows `fixing PR body`. The worker edits with `gh pr edit --body-file` or `--title`, then exits without claiming, submitting, editing repository files, committing or pushing. The broker refuses pushes and PR changes beyond the body and title. Once the worker exits, the engine verifies that the body or title changed, tracked checkout files are clean, both local and remote heads still match the submitted head, and the actual base branch matches the dispatch snapshot or the engine's current expected target, then requests the same light check as `accept ID`, covering only the named claims or title. Untracked files such as the body file do not block the repair. The expected target permits stack retirement to retarget the PR after a parent merge, including one during the GitHub request. Changed heads, tracked files or unexpected actual base branches go to normal rework without a light check, including for unsandboxed harnesses. A pass accepts at the same head and revision.
 
 A light reviewer that leaves no verdict uses the ordinary reviewer recovery policy: retryable crashes or outages and expired missing receipts get a replacement check at the same head without another body edit. A clean no-verdict exit or three crashed review sessions hold dispatch and surface `review_held`; `accept ID` retries the corrected body's check after the cause is handled. An exited, held reviewer is no longer shown as `fixing PR body`. No-verdict exits do not count as failed body checks.
 
@@ -619,9 +621,17 @@ and reports a recovery refusal without stopping the wait host, other tasks'
 gate reactions or worker refill.
 `wait --observe` retains ranged quality recovery, including full-findings
 rework, while skipping submission automation and capacity refill.
-`accept` and a real `spawn --role review` also send a current independent FAIL
-to full-findings rework and exit 1, rather than repeating review at that head.
-PR-body-only failures are excepted.
+`accept` refuses a repeated full review at the same failed head and revision,
+exits 1, and returns `review_failed: true`, the failed `review` and the open
+`inbox` item in JSON, leaving the task submitted. A new head, a new revision
+or `accept ID --retry-review` (orchestrator or owner) allows another review.
+A review waiver cannot clear a failed verdict containing a blocker, including
+a PR-body false claim. Title-only findings remain nonblocking follow-ups. Combining `--retry-review` with `--waive review` does not bypass that
+refusal. This is checked again after software gates and under the acceptance
+lock before any waiver is recorded.
+A real `spawn --role review` still sends a current code FAIL to full-findings
+rework. PR-body false claims and title findings take only the light repair
+path; title findings are follow-ups, never blockers.
 If findings cannot be retrieved, the task stays submitted. Dry-run review
 previews do not change state.
 The trusted `wait` host refills worker slots on its own path, beside its
@@ -1139,7 +1149,7 @@ The server tails the event log for reloads and owner messages, and retains histo
 | `POST /api/controls` | owner only: invoke a control's existing CLI handler with `{command, flags, pos}` |
 | `POST /api/controls/answer` | owner only: `{decision: "D1", choice: "approve"}` or `decline`; approve also applies a recorded supported request |
 
-The Controls page links every row of `tower-crane authority` to its form. Project controls cover limits, pause, budgets, test and cleanup commands, CI and review policies, merge options, decision delegation and spawn grants. Rung controls cover every ladder field; Settings keeps its ladder table and default harness selector. Personal controls edit fallback routes (`ladder set RUNG --fallbacks`), save the ladder defaults, and set the browser kit. Task controls edit kind, tier, owner blockers, CI overrides, budgets and cancellation, release claims, interrupt running work, prioritize gate work, accept with gate waivers, attest a named review fix, confirm corrected PR title/body findings, delegate a decision and delegate orchestration. The publication form records approval; publication itself remains the orchestrator's work.
+The Controls page links every row of `tower-crane authority` to its form. Project controls cover limits, pause, budgets, test and cleanup commands, CI and review policies, merge options, decision delegation and spawn grants. Rung controls cover every ladder field; Settings keeps its ladder table and default harness selector. Personal controls edit fallback routes (`ladder set RUNG --fallbacks`), save the ladder defaults, and set the browser kit. Task controls edit kind, tier, owner blockers, CI overrides, budgets and cancellation, release claims, interrupt running work, prioritize gate work, accept with gate waivers, explicitly retry a failed review, attest a named review fix, confirm corrected PR title/body findings, delegate a decision and delegate orchestration. The publication form records approval; publication itself remains the orchestrator's work.
 
 `POST /api/controls` accepts `project set`, `ladder set`, `ladder harness`, `ladder save-user`, `browser-kit set`, `task update`, `gates prioritize`, `decision delegate`, `owner-done`, `release`, `interrupt`, `accept`, `spawn` (`task` and role `orchestrator`, without `ready`, `wait` or `dry-run`), and `ask` (setting `publish`, without a question). Flag values are strings, repeatable flags are arrays of strings, and positional arguments are strings. Flags are the CLI's names, so a rung's `web_mcp` field is sent as `web-mcp`. Global options and unknown commands or flags are refused. For example:
 
@@ -1506,7 +1516,7 @@ Plan:
   validate         report plan and ladder errors (exit 1 if any); warn when an open task has no runnable reviewer, no harness on PATH can run a worker or reviewer, or gh auth status fails
 
 Run:
-  accept           rework a current failed review unless its findings are all in the PR body; otherwise run missing or stale software gates, dispatch review when green and accept when all gates pass
+  accept           carry verified small corrections, retain a failed full review at an unchanged head unless explicitly retried, and accept when gates pass
   ci completed     handle a CI completion notification; query CI again and advance green tasks
   ci dispatch      run the repository's CI workflow (workflow_dispatch) on the task's branch at its head and record the run; ci checks shows its jobs and failing tests
   ci resolve       mark a revuto finding on the task's PR resolved with a [resolved] reply; find COMMENT_ID beside path:line in ci checks, rework prompts or submit reports
@@ -1797,11 +1807,12 @@ usage: tower-crane worktree <subcommand> ...
 <summary>tower-crane accept --help</summary>
 
 ```text
-usage: tower-crane accept ID [--cmd CMD] [--proof-cmd CMD] [--waive TYPE --reason R] [--drop-citation PATH --reason R] [--attest-fix SHA --reason R] [--metadata-fixed --reason R] [--disputes JSON]
+usage: tower-crane accept ID [--cmd CMD] [--proof-cmd CMD] [--waive TYPE --reason R] [--drop-citation PATH --reason R] [--attest-fix SHA --reason R] [--metadata-fixed --reason R] [--disputes JSON] [--retry-review]
 
-rework a current failed review unless its findings are all in the PR body; otherwise run missing or stale software gates, dispatch review when green and accept when all gates pass
+carry verified small corrections, retain a failed full review at an unchanged head unless explicitly retried, and accept when gates pass
 
 options:
+  --retry-review           orchestrator or owner: explicitly retry the failed full review at this unchanged head
   --attest-fix SHA         orchestrator or owner: attest the exact named fix from this reviewed head
   --metadata-fixed         orchestrator or owner: title or body findings corrected at the unchanged head
   --disputes JSON          disputed findings left unchanged as [{finding, reason}], using one-based finding numbers
