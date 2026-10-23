@@ -463,7 +463,7 @@ archive.onAccept = async (...args) => {
       fs.writeFileSync(script, `
 const fs = require('node:fs');
 fs.writeFileSync(process.argv[2], '');
-const end = Date.now() + 60000;
+const end = Date.now() + 60000; // wait-allow: bounded fixture wait for the explicit gate release signal
 while (!fs.existsSync(process.argv[3])) {
   if (Date.now() >= end) process.exit(1);
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20); // wait-allow: release signal with a 60-second deadline
