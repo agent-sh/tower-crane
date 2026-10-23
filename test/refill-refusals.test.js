@@ -340,6 +340,82 @@ test('refusal receipts stay out of default waits and harness pushes but remain a
   }
 });
 
+test('refusal bookkeeping preserves stack scopes while member changes invalidate them', () => {
+  const Stack = require('../lib/stack');
+  const state = { project: {}, tasks: { tasks: [
+    { id: 'T1', status: 'submitted' },
+    { id: 'T2', status: 'todo', stack: { parent: 'T1' } },
+  ] }, events: [] };
+  const cases = [
+    ['ordinary refusal', 'spawn refused', { inputs: null, state_inputs: 'state', reason: 'route unavailable', until: Date.now() + 60000 }, true],
+    ['expired refusal', 'spawn refused', { inputs: null, state_inputs: 'state', reason: 'route unavailable', until: 0 }, true],
+    ['lasting refusal', 'spawn refused', { inputs: 'git', state_inputs: 'state', reason: 'holds its own changes' }, true],
+    ['hook progress', 'hook progress', {}, true],
+    ['startup', 'startup', {}, true],
+    ['spawn session', 'spawn session', {}, true],
+    ['reservation', 'automation queued', {}, true],
+    ['ordinary message', 'msg', { to: 'orchestrator', text: 'member changed' }, false],
+    ['task update', 'task update', {}, false],
+    ['spawn', 'spawn', { role: 'worker' }, false],
+  ];
+  for (const captured of ['T1', 'T2']) {
+    const snapshot = Stack.capture(state, [captured]);
+    for (const member of ['T1', 'T2']) {
+      for (const [name, cmd, detail, unchanged] of cases) {
+        const current = structuredClone(state);
+        current.events.push({ task: member, cmd, detail, agent: 'orchestrator' });
+        assert.equal(Stack.unchanged(snapshot, current), unchanged, `${captured}: ${member}: ${name}`);
+        for (const operation of ['merge', 'sync', 'refresh']) {
+          if (unchanged) assert.doesNotThrow(() => Stack.compare(snapshot, current, operation));
+          else assert.throws(() => Stack.compare(snapshot, current, operation), /state changed during stack/);
+        }
+      }
+      const changed = structuredClone(state);
+      changed.events.push({ task: member, cmd: 'spawn refused', detail: cases[0][2] });
+      changed.tasks.tasks.find((task) => task.id === member).status = 'rework';
+      assert.equal(Stack.unchanged(snapshot, changed), false, 'bookkeeping does not hide changed task data');
+    }
+  }
+});
+
+for (const dispatch of ['refill', 'spawn --ready']) {
+  test(`${dispatch} refusal leaves a prepared child's parent stack snapshot current`, (t) => {
+    const f = fixture(t);
+    f.h.ok(['worktree', 'T2']);
+    probe(f, `
+const Stack = require(${JSON.stringify(path.resolve(__dirname, '../lib/stack'))});
+const before = S.loadState(ctx.stateDir);
+const snapshots = ['T1', 'T2'].map(id => Stack.capture(before, [id]));
+Spawn.spawn = async () => { throw new Error('route unavailable'); };
+${dispatch === 'refill' ? 'await A.refillWorkers(ctx, {});' : 'await Actions.spawn({ ...ctx, flags: { ready: true } });'}
+const current = S.loadState(ctx.stateDir);
+const receipts = current.events.filter(e => e.cmd === 'spawn refused');
+assert.deepEqual(receipts.map(e => e.task), ['T2']);
+assert.equal(receipts[0].detail.reason, 'route unavailable');
+for (const snapshot of snapshots) {
+  assert.equal(Stack.unchanged(snapshot, current), true, 'a real refusal receipt must not stale the stack');
+  for (const operation of ['merge', 'sync']) Stack.compare(snapshot, current, operation);
+}
+`);
+  });
+}
+
+test('wait and stack contracts name refusal bookkeeping in both documents', () => {
+  const { QUIET } = require('../lib/events');
+  for (const [file, waitAnchor, stackAnchor] of [
+    ['state.md', 'a default `wait` skips only', 'member events against the snapshot'],
+    ['cli.md', '`all` adds the bookkeeping the default skips:', 'The gate refuses further merges if project settings'],
+  ]) {
+    const lines = fs.readFileSync(path.join(__dirname, '../docs', file), 'utf8').split('\n');
+    const wait = lines.find((line) => line.includes(waitAnchor));
+    assert.ok(wait, `${file}: wait contract paragraph`);
+    for (const type of QUIET) assert.ok(wait.includes(`\`${type}\``), `${file}: quiet ${type}`);
+    const stack = lines.find((line) => line.includes(stackAnchor));
+    assert.ok(stack, `${file}: stack contract paragraph`);
+    assert.ok(stack.includes('spawn refused'), `${file}: stack refusal bookkeeping`);
+  }
+});
+
 test('a non-follow wait does not wake on its own automatic refusal receipt', (t) => {
   const f = fixture(t);
   f.h.ok(['task', 'update', 'T2', '--status', 'cancelled']);
