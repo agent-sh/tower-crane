@@ -324,21 +324,33 @@ for (const row of [
   { name: 'parent ignore rules for a nested repository', parentRules: true, modules: false },
   { name: 'nested repository inside nested submodules', parentRules: false, modules: true },
   { name: 'nested repository owning an initialized submodule', parentRules: false, modules: false, nestedModule: true },
+  { name: 'parent-ignored vendor repository', ignoredRepository: true },
+  { name: 'parent-ignored vendor repository inside nested submodules', ignoredRepository: true, modules: true },
+  { name: 'parent-ignored vendor repository owning an initialized submodule', ignoredRepository: true, nestedModule: true },
+  { name: 'parent-ignored repository beneath a generated directory', ignoredRepository: true, ancestor: 'generated' },
+  { name: 'parent-ignored repository beneath a cache-tagged directory', ignoredRepository: true, ancestor: 'cache-tag' },
 ]) {
   test(`save filtering honors ${row.name}`, (t) => {
     const h = row.modules || row.nestedModule ? moduleFixture(t) : fixture(t);
     const wt = h.json(['worktree', 'T1']);
     if (row.modules) h.git(['-c', 'protocol.file.allow=always', 'submodule', 'update', '--init', '--recursive', '-q'], wt.path);
     const checkout = row.modules ? path.join(wt.path, 'module', 'inner') : wt.path;
-    const nested = path.join(checkout, 'nested');
-    fs.mkdirSync(nested);
+    const nestedPath = row.ancestor === 'generated' ? 'build/lib' : row.ancestor === 'cache-tag' ? 'cache/lib'
+      : row.ignoredRepository ? 'vendor/lib' : 'nested';
+    const nested = path.join(checkout, nestedPath);
+    fs.mkdirSync(nested, { recursive: true });
     h.git(['init', '-q', '-b', 'main'], nested);
-    const rules = 'node_modules/\ntarget/*\n!target/source.js\ncache/\n';
+    const generated = ['node_modules', 'target', 'dist', 'build', '.venv', '__pycache__', '.next'];
+    const trackedFiles = generated.map((dir) => `${dir}/${dir === 'build' ? 'main.c' : 'tracked.js'}`);
+    trackedFiles.push('cache/tracked.js');
+    const rules = generated.filter((dir) => dir !== 'target').map((dir) => `${dir}/\n`).join('')
+      + 'target/*\n!target/source.js\ncache/\n';
     write(nested, '.gitignore', (row.parentRules ? '' : rules) + 'notes.txt\n');
     write(nested, 'source.js', 'tracked\n');
-    write(nested, 'node_modules/tracked.js', 'tracked source\n');
+    for (const file of trackedFiles) write(nested, file, 'tracked source\n');
+    if (row.ignoredRepository) write(nested, 'target/source.js', 'tracked exception\n');
     h.git(['add', '.'], nested);
-    h.git(['add', '-f', 'node_modules/tracked.js'], nested);
+    h.git(['add', '-f', ...trackedFiles], nested);
     h.git(['commit', '-qm', 'nested source and rules'], nested);
     if (row.nestedModule) {
       h.git(['-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', path.join(h.base, 'leaf'), 'child'], nested);
@@ -354,14 +366,20 @@ for (const row of [
       write(child, 'target/output', 'compiled\n');
       write(child, 'target/source.js', 'edited child source\n');
     }
+    h.git(['checkout', '-qb', 'build/local'], nested);
+    write(nested, 'source.js', 'local commit\n');
+    h.git(['commit', '-qam', 'local work'], nested);
     const head = h.git(['rev-parse', 'HEAD'], nested);
-    h.git(['branch', 'build/local'], nested);
-    write(checkout, '.gitignore', 'build/\n' + (row.parentRules
-      ? 'nested/node_modules/\nnested/target/*\n!nested/target/source.js\nnested/cache/\n' : ''));
+    write(checkout, '.gitignore', 'build/\n' + (row.ignoredRepository ? `${nestedPath.split('/')[0]}/\n` : '')
+      + (row.parentRules ? rules.split('\n').filter(Boolean)
+        .map((rule) => rule.startsWith('!') ? `!${nestedPath}/${rule.slice(1)}` : `${nestedPath}/${rule}`).join('\n') + '\n' : ''));
     h.git(['add', '.gitignore'], checkout);
     h.git(['commit', '-qm', 'parent ignore rules'], checkout);
     write(nested, 'notes.txt', 'handwritten\n');
-    write(nested, 'node_modules/tracked.js', 'edited tracked source\n');
+    for (const file of trackedFiles) write(nested, file, 'edited tracked source\n');
+    for (const dir of generated.filter((dir) => !['target', 'node_modules'].includes(dir))) {
+      write(nested, `${dir}/output`, 'compiled\n');
+    }
     write(nested, 'untracked.js', 'new source\n');
     write(nested, 'target/source.js', 'ignore exception\n');
     write(nested, 'target/output', '');
@@ -369,6 +387,7 @@ for (const row of [
     write(nested, 'node_modules/package/index.js', 'installed\n');
     write(nested, 'cache/CACHEDIR.TAG', 'tag');
     write(nested, 'cache/data', 'cached');
+    if (row.ancestor === 'cache-tag') write(checkout, 'cache/CACHEDIR.TAG', 'tag');
     h.ok(['task', 'update', 'T1', '--status', 'cancelled']);
     assert.equal(outcome(h).cmd, 'worktree removed', 'ignored build output must not trigger the guard');
     let saved = outcome(h).detail.saved;
@@ -378,22 +397,32 @@ for (const row of [
       manifest = JSON.parse(fs.readFileSync(path.join(saved, 'manifest.json')));
     }
     for (const [file, text] of [
-      ['source.js', 'tracked\n'], ['notes.txt', 'handwritten\n'],
-      ['untracked.js', 'new source\n'], ['target/source.js', 'ignore exception\n'],
-      ['node_modules/tracked.js', 'edited tracked source\n'],
-    ]) assert.equal(fs.readFileSync(path.join(saved, 'files', 'nested', file), 'utf8'), text);
-    for (const file of ['target/output', 'node_modules/package', 'cache']) {
-      assert.equal(fs.existsSync(path.join(saved, 'files', 'nested', file)), false, file);
+      ['source.js', 'local commit\n'], ['target/source.js', 'ignore exception\n'],
+      ...(!row.ancestor ? [['notes.txt', 'handwritten\n'], ['untracked.js', 'new source\n']] : []),
+      ...trackedFiles.map((file) => [file, 'edited tracked source\n']),
+    ]) assert.equal(fs.readFileSync(path.join(saved, 'files', nestedPath, file), 'utf8'), text);
+    for (const file of ['target/output', 'node_modules/package', 'cache/data', 'cache/CACHEDIR.TAG',
+      ...generated.filter((dir) => !['target', 'node_modules'].includes(dir)).map((dir) => `${dir}/output`),
+      ...(row.ancestor ? ['notes.txt', 'untracked.js'] : [])]) {
+      assert.equal(fs.existsSync(path.join(saved, 'files', nestedPath, file)), false, file);
     }
-    assert.deepEqual(manifest.skipped_ignored.map(({ path: dir, bytes }) => ({ path: dir, bytes })), [
-      { path: 'nested/cache', bytes: 9 },
-      ...(row.nestedModule ? [{ path: 'nested/child/target', bytes: 9 }] : []),
-      { path: 'nested/node_modules', bytes: 10 },
-      { path: 'nested/target', bytes: SAVE_FILES_LIMIT + 1 },
-    ]);
-    const restored = path.join(saved, 'files', 'nested');
+    const skipped = [
+      { path: `${nestedPath}/cache`, bytes: 9 },
+      ...(row.nestedModule ? [{ path: `${nestedPath}/child/target`, bytes: 9 }] : []),
+      ...generated.map((dir) => ({ path: `${nestedPath}/${dir}`,
+        bytes: dir === 'target' ? SAVE_FILES_LIMIT + 1 : dir === 'node_modules' ? 10 : 9 })),
+    ];
+    const expectedSkipped = row.ancestor
+      ? [{ path: nestedPath.split('/')[0], bytes: skipped.reduce((sum, entry) => sum + entry.bytes, 0)
+        + Buffer.byteLength('handwritten\nnew source\n') + (row.ancestor === 'cache-tag' ? 3 : 0) }]
+      : skipped.sort((a, b) => a.path.localeCompare(b.path));
+    assert.deepEqual(manifest.skipped_ignored.map(({ path: dir, bytes }) => ({ path: dir, bytes })), expectedSkipped);
+    const restored = path.join(saved, 'files', nestedPath);
+    assert.equal(h.git(['symbolic-ref', 'HEAD'], restored), 'refs/heads/build/local', 'the active branch remains recoverable');
     assert.equal(h.git(['rev-parse', 'HEAD'], restored), head, 'nested Git commits and refs remain recoverable');
     assert.equal(h.git(['rev-parse', 'build/local'], restored), head, 'ignore patterns must not drop Git refs');
+    assert.equal(h.git(['reflog', 'show', '--format=%H', 'build/local'], restored).split('\n')[0], head,
+      'ignore patterns must not drop Git reflogs');
     if (row.nestedModule) {
       assert.equal(fs.readFileSync(path.join(restored, 'child', 'notes.txt'), 'utf8'), 'child notes\n');
       assert.equal(fs.readFileSync(path.join(restored, 'child', 'target/source.js'), 'utf8'), 'edited child source\n');
