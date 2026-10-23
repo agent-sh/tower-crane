@@ -133,8 +133,8 @@ test('observation-only waits retain ranged full-findings recovery', (t) => {
   assert.equal(h.logs().filter((e) => e.cmd === 'spawn').length, spawns);
 });
 
-for (const command of ['accept', 'spawn review']) {
-  test(`${command} sends a current failed review to full-findings rework instead of repeating review`, (t) => {
+for (const [command, status, revision] of [['accept', 'submitted', 1], ['spawn review', 'rework', 2]]) {
+  test(`${command} returns a current failed review without repeating review (${status})`, (t) => {
     const h = setup(t, { ci: 'pending' });
     h.submit();
     h.reviewer('T1', 'reviewer');
@@ -147,13 +147,25 @@ for (const command of ['accept', 'spawn review']) {
       '--fail', '--summary', 'one blocking finding', '--ref', ref, '--agent', 'reviewer']);
     const before = h.logs().filter((e) => e.cmd === 'spawn').length;
     const args = command === 'accept' ? ['accept', 'T1'] : ['spawn', '--task', 'T1', '--role', 'review'];
-    const result = h.run([...args, '--agent', 'orchestrator']);
+    const result = h.run([...args, '--agent', 'orchestrator', '--json']);
     assert.equal(result.code, 1, result.stderr || result.stdout);
     const task = h.readState('tasks.json').tasks[0];
-    assert.equal(task.status, 'rework');
-    assert.equal(task.revision, 2);
-    assert.ok(h.ok(['brief', 'get', 'T1']).includes(body));
-    assert.ok(h.ok(['brief', 'get', 'T1']).includes(ref));
+    assert.equal(task.status, status);
+    assert.equal(task.revision, revision);
+    if (command === 'accept') {
+      const refusal = JSON.parse(result.stdout);
+      assert.equal(refusal.review_failed, true);
+      assert.equal(refusal.review.ref, ref);
+      assert.equal(refusal.inbox.id, 'review_failed:T1');
+      assert.deepEqual(refusal.inbox.action.argv, ['rework', '--from-review', 'T1']);
+      const repeated = h.run([...args, '--agent', 'orchestrator', '--json']);
+      assert.equal(repeated.code, 1);
+      assert.deepEqual(JSON.parse(repeated.stdout).review, refusal.review);
+      assert.ok(!h.logs().some((e) => e.cmd === 'rework'));
+    } else {
+      assert.ok(h.ok(['brief', 'get', 'T1']).includes(body));
+      assert.ok(h.ok(['brief', 'get', 'T1']).includes(ref));
+    }
     assert.equal(h.logs().filter((e) => e.cmd === 'spawn').length, before);
     assert.equal(h.logs().filter((e) => e.cmd.startsWith('check ')).length, 0);
   });
