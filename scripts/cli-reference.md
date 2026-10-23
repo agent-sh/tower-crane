@@ -610,6 +610,12 @@ and CI reads run at once and take no executor. A running gate finishes before
 the next waiting reaction takes its executor.
 `gates prioritize` moves submitted work within the submitted queue; it
 cannot move it ahead of accepted merges or change acceptance order.
+Priority survives later notifications, rework and resubmission until the
+task is accepted, cancelled or cleared with `gates prioritize ID --clear`.
+Priorities run in first-request order. Repeating a request keeps its place;
+`--rank N` overrides its rank (nonnegative safe integer, lower first, ties in
+first-request order). New priorities without a rank append after existing
+ranks. Clearing works during rework without queued work or a reason.
 `status` and `inbox` show the order the next free executor takes.
 
 Accepted PRs merge through a merge queue in the order of their `accept`
