@@ -157,6 +157,53 @@ test('external file and environment failures escalate on the first attempt', (t)
   }
 });
 
+test('stack and test-location metadata stay local; primary external diagnostics escalate', (t) => {
+  for (const [label, diagnostic, escalated] of [
+    ['Node frame', (h) => `Error: regression\n    at TestContext.<anonymous> (${h.repo}/README.md:30:5)`, false],
+    ['TAP frame', (h) => `# Error: regression\n#     at TestContext.<anonymous> (${h.repo}/README.md:30:5)`, false],
+    ['Python frame', (h) => `Traceback (most recent call last):\n  File "${h.repo}/README.md", line 10, in test\nValueError: regression`, false],
+    ['node:test location', (h) => `location: '${h.repo}/README.md:30:1'\nerror: regression`, false],
+    ['test-at location', () => 'test at README.md:30:1\nerror: regression', false],
+    ['primary location', () => 'README.md:1: invalid link', true],
+  ]) {
+    const h = fixture(t);
+    set(h, [process.execPath, '-e', `console.log(${JSON.stringify(diagnostic(h))}); process.exit(1)`]);
+    const result = submit(h);
+    assert.equal(result.code, 1, label);
+    const event = events(h).at(-1);
+    assert.equal(event.cmd, 'presubmit refused', label);
+    assert.equal(event.detail.escalated, escalated, label);
+    assert.equal(event.detail.attempts, 1, label);
+    assert.equal(h.json(['task', 'show', 'T1']).sha, null, label);
+  }
+});
+
+test('untracked inputs and hook outputs refuse, while ignored dependencies remain usable', (t) => {
+  for (const variant of ['input', 'output', 'ignored dependency']) {
+    const h = fixture(t);
+    if (variant === 'input') fs.writeFileSync(path.join(h.repo, 'local-only.js'), 'untracked input\n');
+    if (variant === 'ignored dependency') {
+      fs.appendFileSync(path.join(h.repo, '.gitignore'), '\nignored-deps/\n');
+      h.git(['add', '.gitignore']);
+      h.git(['commit', '-qm', 'ignore dependency cache']);
+      fs.mkdirSync(path.join(h.repo, 'ignored-deps'));
+      fs.writeFileSync(path.join(h.repo, 'ignored-deps', 'dependency.js'), 'ignored dependency\n');
+    }
+    const code = variant === 'output' ? "require('node:fs').writeFileSync('local-only.js', 'untracked output')"
+      : `if (!require('node:fs').existsSync(${JSON.stringify(variant === 'input' ? 'local-only.js' : 'ignored-deps/dependency.js')})) process.exit(1)`;
+    set(h, [process.execPath, '-e', code]);
+    const result = submit(h);
+    assert.equal(result.code, variant === 'ignored dependency' ? 0 : 1, `${variant}: ${result.stderr}`);
+    const task = h.json(['task', 'show', 'T1']);
+    if (variant === 'ignored dependency') assert.equal(task.sha, h.git(['rev-parse', 'HEAD']));
+    else {
+      assert.equal(task.sha, null, variant);
+      assert.equal(task.status, 'in_progress', variant);
+      assert.match(result.stderr, /clean worktree/, variant);
+    }
+  }
+});
+
 test('only orchestrator or owner overrides with a recorded reason, bound to one head and one submission', (t) => {
   const h = fixture(t);
   set(h, ['tower-crane-no-such-presubmit-tool']);
@@ -217,7 +264,7 @@ test('presubmit refuses a mismatching head and dirty tracked worktree', (t) => {
   assert.equal(wrong.code, 1);
   assert.match(wrong.stderr, /worktree HEAD/);
   fs.appendFileSync(path.join(h.repo, 'check.js'), '// dirty\n');
-  assert.match(submit(h).stderr, /clean tracked worktree/);
+  assert.match(submit(h).stderr, /clean worktree/);
   assert.equal(h.json(['task', 'show', 'T1']).sha, null);
 });
 
