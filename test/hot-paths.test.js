@@ -87,13 +87,14 @@ test('hot_paths is a validated operational project setting with show and clear',
   assert.deepEqual(h.json(['project', 'show']).hot_paths, []);
 });
 
-test('hot-path and PR ownership settings retain their values, summaries and usage together', (t) => {
+test('hot-path, PR ownership and broker verb settings retain their values, summaries and usage together', (t) => {
   const h = fixture(t);
-  for (const { paths, owners, idle } of [
-    { paths: ['lib/hot.js'], owners: 2, idle: 20 },
-    { paths: ['lib/*.js'], owners: 0, idle: 60 },
+  const verb = { argv: [process.execPath, 'lib/hot.js'], source: { commit: h.git(['rev-parse', 'HEAD']), paths: ['lib/hot.js'] }, timeout_sec: 60 };
+  for (const { paths, owners, idle, verbs } of [
+    { paths: ['lib/hot.js'], owners: 2, idle: 20, verbs: { hot: verb } },
+    { paths: ['lib/*.js'], owners: 0, idle: 60, verbs: null },
   ]) {
-    h.ok(['project', 'set', '--hot-paths', JSON.stringify(paths), '--owners', String(owners), '--owner-idle-minutes', String(idle)]);
+    h.ok(['project', 'set', '--hot-paths', JSON.stringify(paths), '--owners', String(owners), '--owner-idle-minutes', String(idle), '--broker-verbs', JSON.stringify(verbs)]);
     const project = h.json(['project', 'show']);
     assert.deepEqual(project.hot_paths, paths);
     assert.equal(project.limits.owners, owners);
@@ -101,9 +102,17 @@ test('hot-path and PR ownership settings retain their values, summaries and usag
     const summary = h.ok(['project', 'show']);
     assert.ok(summary.includes(`hot_paths: ${JSON.stringify(paths)}`));
     assert.ok(summary.includes(`${owners} PR owners idle up to ${idle} min`));
+    if (verbs) {
+      assert.deepEqual(project.broker.verbs.hot.argv, verb.argv);
+      assert.equal(project.broker.verbs.hot.timeout_sec, verb.timeout_sec);
+      assert.match(summary, /broker verb hot: .*pinned [0-9a-f]{12}/);
+    } else {
+      assert.equal(project.broker?.verbs, undefined);
+      assert.ok(!summary.includes('broker verb hot:'));
+    }
   }
   const help = h.ok(['project', 'set', '--help']);
-  for (const flag of ['[--hot-paths JSON]', '[--owners N]', '[--owner-idle-minutes MIN]']) assert.ok(help.includes(flag), flag);
+  for (const flag of ['[--hot-paths JSON]', '[--owners N]', '[--owner-idle-minutes MIN]', '[--broker-verbs JSON]']) assert.ok(help.includes(flag), flag);
 });
 
 function merged(h, id) {

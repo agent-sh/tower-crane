@@ -484,7 +484,18 @@ test('the suite profile records each test of a real run with its CPU', { skip: p
   fs.writeFileSync(fixture, `
 const assert = require('node:assert/strict');
 require('node:test')('waits', () => { assert.equal(Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 400), 'timed-out'); }); // wait-allow: the profile measures a timer wait
-require('node:test')('spins', () => { const end = Date.now() + 400; let n = 0; while (Date.now() < end) n++; assert.ok(n > 0); }); // wait-allow: the profile measures CPU work
+for (const [name, pause] of [['spins', 0], ['spins after pause', 250]]) {
+  require('node:test')(name, () => {
+    const start = process.cpuUsage();
+    // A pause reproduces time off CPU without depending on other host processes.
+    if (pause) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, pause); // wait-allow: the profile measures time off CPU
+    let n = 0;
+    let used;
+    // A CPU budget keeps the work stable when the scheduler gives other tasks a turn.
+    do { n++; used = process.cpuUsage(start); } while (used.user + used.system < 400000); // wait-allow: the profile measures CPU work
+    assert.ok(n > 0);
+  });
+}
 `);
   const out = path.join(h.base, 'profile.json');
   // This checkout stands in for the baseline, so the verdict is a coin toss; the exit follows it.
@@ -504,9 +515,11 @@ require('node:test')('spins', () => { const end = Date.now() + 400; let n = 0; w
   assert.equal(profile.status, 0, 'the suite itself passed');
   assert.ok(profile.host.load_peak >= 0 && profile.host.cores > 0, JSON.stringify(profile.host));
   const byName = Object.fromEntries(profile.tests.map((x) => [x.name, x]));
-  assert.deepEqual(Object.keys(byName).sort(), ['spins', 'waits']);
+  assert.deepEqual(Object.keys(byName).sort(), ['spins', 'spins after pause', 'waits']);
   assert.ok(byName.waits.wall_ms >= 400 && byName.waits.cpu_ms < 200, JSON.stringify(byName.waits));
-  assert.ok(byName.spins.cpu_ms >= 300, JSON.stringify(byName.spins));
+  for (const name of ['spins', 'spins after pause']) {
+    assert.ok(byName[name].cpu_ms >= 300, JSON.stringify(byName[name]));
+  }
   assert.equal(profile.files.length, 1);
   assert.match(r.stdout, /^serial tests: .* waiting$/m);
   assert.deepEqual(fs.readdirSync(h.base).filter((name) => name.startsWith('suite-profile-')), [], 'the record directory is removed');
@@ -528,7 +541,7 @@ test('the suite profile runs a baseline commit from a worktree it removes afterw
   h.git(['commit', '-qm', 'baseline suite']);
   const baseline = h.git(['rev-parse', 'HEAD']);
   // The head's test spins, so its file CPU is the larger whatever the load.
-  one("const end = Date.now() + 400; let n = 0; while (Date.now() < end) n++; require('node:assert/strict').ok(n > 0);"); // wait-allow: the profile measures CPU work
+  one("const start = process.cpuUsage(); let used; do { used = process.cpuUsage(start); } while (used.user + used.system < 400000);"); // wait-allow: the profile measures CPU work
   const out = path.join(h.base, 'profile.json');
   const r = cp.spawnSync(process.execPath, [path.join(h.repo, 'scripts', 'suite-profile.js'), '--test-concurrency=1', '--baseline', baseline, '--json', out, 'test/one.test.js'],
     { cwd: h.repo, env: { ...h.env, TOWER_CRANE_TEST_TMP: h.base, TOWER_CRANE_SANDBOX: '0' }, encoding: 'utf8', timeout: 300000 });
