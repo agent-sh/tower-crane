@@ -50,7 +50,7 @@ test(${JSON.stringify(name)}, async () => {
 }
 
 const log = (dir) => {
-  try { return fs.readFileSync(path.join(dir, 'log'), 'utf8').trim().split('\n').filter(Boolean); } catch (e) { if (e.code === 'ENOENT') return []; throw e; }
+  try { return fs.readFileSync(path.join(dir, 'log'), 'utf8').trim().split('\n').filter(Boolean); } catch (e) { if (e.code === 'ENOENT') return []; throw e; } // read-published: the fixtures only append to the log
 };
 const starts = (dir) => log(dir).filter((l) => l.startsWith('start ')).length;
 // The most files the log shows running at once, from line `from` on, counting those already running then.
@@ -208,7 +208,7 @@ test('outside Tower Crane, or with no governor to grant, a run keeps its request
   assert.match(r.stdout, /✖ failing tests:[\s\S]*planted failure/, 'the failures come again at the end of the run');
 
   // A sandboxed run whose spawn monitor predates test-thread leases: it answers as for a command.
-  const sock = path.join(h.base, 'old.sock');
+  const sock = process.platform === 'win32' ? `\\\\.\\pipe\\tct-old-broker-${process.pid}-${Date.now()}` : path.join(h.base, 'old.sock');
   const old = net.createServer((conn) => conn.once('data', () => conn.end(`${JSON.stringify({ code: 2, stdout: '', stderr: 'tower-crane: the broker runs commands, not help\n' })}\n`)));
   await new Promise((resolve) => old.listen(sock, resolve));
   t.after(() => old.close());
@@ -243,4 +243,96 @@ test('status shows the test-thread budget, every holder and its grant', (t) => {
   gate.release();
   worker.release();
   assert.match(h.ok(['status']), /^test threads: budget 2 of 2 on 3 cores, other work load 0; 0 runs hold 0 of 0 requested$/m);
+});
+
+test('CPU pressure or load past the defer lines stops a run from growing but does not shrink it; other work taking the cores does', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  const host = h.env.TOWER_CRANE_HOST_ROOT;
+  writeHost(host, { cores: 8, load: 0 });
+  const lease = G.testLease({ env: h.env, stateDir: h.state }, { requested: 4, task: 'T1' });
+  t.after(() => lease.release());
+  assert.equal(lease.grant, 4);
+  // A run's own files raise pressure: it keeps what it holds, and a second run gets only its one thread.
+  writeHost(host, { cores: 8, load: 0, cpuSome: 70 });
+  assert.equal(lease.refresh().grant, 4);
+  const second = G.testLease({ env: h.env, stateDir: h.state }, { requested: 4, task: 'T2' });
+  t.after(() => second.release());
+  assert.equal(lease.refresh().grant + second.refresh().grant, 4, 'no growth past what the runs held');
+  second.release();
+  // Load past the cores is other work: the run shrinks.
+  writeHost(host, { cores: 8, load: 20 });
+  assert.equal(lease.refresh().grant, 1);
+});
+
+// A broker in this process, as in the spawn monitor, on the test's fake host
+// with a short recheck interval; and a raw connection to it, as an agent
+// controls one.
+async function brokerFixture(t) {
+  const h = makeRepo(t);
+  h.init();
+  const host = h.env.TOWER_CRANE_HOST_ROOT;
+  writeHost(host, { cores: 8, load: 0 });
+  const saved = { root: process.env.TOWER_CRANE_HOST_ROOT, intervals: process.env.TOWER_CRANE_INTERVALS };
+  process.env.TOWER_CRANE_HOST_ROOT = host;
+  process.env.TOWER_CRANE_INTERVALS = JSON.stringify({ test_grant: 300 });
+  t.after(() => {
+    for (const [name, value] of [['TOWER_CRANE_HOST_ROOT', saved.root], ['TOWER_CRANE_INTERVALS', saved.intervals]]) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  });
+  const file = path.join(h.base, 'brokers', 'worker-T1-1', B.FILE);
+  const broker = await B.start({ state: h.state, task: 'T1', agent: 'worker-T1-1', role: 'worker', harness: 'codex', cwd: h.repo, broker: file });
+  t.after(() => broker.close());
+  const raw = async () => {
+    const b = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const c = { sock: net.connect(b.port, b.host), lines: [], closed: false };
+    t.after(() => c.sock.destroy());
+    let buf = '';
+    c.sock.setEncoding('utf8').on('data', (d) => {
+      buf += d;
+      for (let nl = buf.indexOf('\n'); nl >= 0; nl = buf.indexOf('\n')) { c.lines.push(JSON.parse(buf.slice(0, nl))); buf = buf.slice(nl + 1); }
+    });
+    c.sock.on('close', () => { c.closed = true; });
+    c.sock.on('error', () => {});
+    c.sock.write(`${JSON.stringify({ token: b.token, tests: { request: 2 } })}\n`);
+    await waitUntil(() => c.lines.length >= 1 || c.closed, { what: 'the grant' });
+    return c;
+  };
+  return { h, file, raw };
+}
+
+test('a sandboxed agent\'s broker leases one run at a time and tells a second one to take one thread', async (t) => {
+  const { h, file } = await brokerFixture(t);
+  const first = await B.testGrantSession(file, 2);
+  t.after(() => first.close());
+  await assert.rejects(B.testGrantSession(file, 2), (e) => e.leaseHeld === true && /already holds a test-thread lease/.test(e.message));
+  assert.equal(leases(h).length, 1);
+  first.close();
+  await waitUntil(() => leases(h).length === 0, { what: 'the first lease is released' });
+  const again = await B.testGrantSession(file, 2);
+  t.after(() => again.close());
+  assert.equal(again.state.grant, 2, 'a run after the first one ended gets a lease');
+});
+
+test('a flood of rechecks on a broker connection gets one registry refresh and one answer per interval', async (t) => {
+  const { raw } = await brokerFixture(t);
+  const c = await raw();
+  assert.equal(c.lines[0].grant, 2);
+  c.sock.write('\n'.repeat(1000));
+  await waitUntil(() => c.lines.length >= 2, { what: 'the coalesced answer' });
+  c.sock.write('\n');
+  await waitUntil(() => c.lines.length >= 3, { what: 'the next answer' });
+  assert.equal(c.lines.length, 3, `a thousand rechecks and one more got two answers, not ${c.lines.length - 1}`);
+});
+
+test('a broker connection whose line outgrows a request is ended, and its lease with it', async (t) => {
+  const { h, raw } = await brokerFixture(t);
+  const c = await raw();
+  assert.equal(leases(h).length, 1);
+  c.sock.write(`${'x'.repeat((1 << 20) + 1)}\n`);
+  await waitUntil(() => c.closed || c.lines.length > 1, { what: 'an answer or the end of the connection' });
+  assert.equal(c.closed, true, 'the broker ends a connection whose line outgrows a request');
+  await waitUntil(() => leases(h).length === 0, { what: 'the lease of the ended connection is released' });
 });

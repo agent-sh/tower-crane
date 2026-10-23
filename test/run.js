@@ -300,8 +300,8 @@ function startFile(file) {
     process.stdout.write(text);
     process.stderr.write(Buffer.concat(err));
     if (note) process.stderr.write(note);
-    count(text);
-    if (progressLines) process.stdout.write(`file ended: ${file}\n`);
+    // A file ends with its runner's summary; one stopped before it, as a shard watchdog stops a hung file, never ended.
+    if (count(text) && progressLines) process.stdout.write(`file ended: ${file}\n`);
     if (code && !process.exitCode) process.exitCode = code;
     fill();
   };
@@ -309,7 +309,7 @@ function startFile(file) {
   child.on('close', (status, signal) => end(signal ? 128 + (os.constants.signals[signal] || 0) : status ?? 1));
 }
 
-// The run's totals, from the summary each file's runner prints last.
+// The run's totals, from the summary each file's runner prints last. True when the file printed one.
 const ESCAPES = /\x1b\[[0-9;]*m/g; // eslint-disable-line no-control-regex
 function count(text) {
   const last = {};
@@ -322,6 +322,7 @@ function count(text) {
     last[m[2]] = Number(m[3]);
   }
   for (const [key, n] of Object.entries(last)) totals[key] = (totals[key] || 0) + n;
+  return 'tests' in last;
 }
 
 function finish() {
@@ -368,7 +369,9 @@ async function grant() {
   try {
     grants = await require('../lib/test-grants').open(hostEnv, request);
   } catch (e) {
-    console.error(`tower-crane: test threads: no grant from the host governor (${e.message}); running ${request} at once`);
+    // An agent's broker leases one run at a time; a second run beside it takes one thread.
+    if (e.leaseHeld) limit = 1;
+    console.error(`tower-crane: test threads: no grant from the host governor (${e.message}); running ${limit} at once`);
     return;
   }
   if (!grants) return;

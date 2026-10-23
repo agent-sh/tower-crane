@@ -497,7 +497,7 @@ test('the suite profile records each test of a real run with its CPU', { skip: p
   fs.writeFileSync(fixture, `
 const assert = require('node:assert/strict');
 require('node:test')('waits', () => { assert.equal(Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 400), 'timed-out'); }); // wait-allow: the profile measures a timer wait
-require('node:test')('spins', () => { const end = Date.now() + 400; let n = 0; while (Date.now() < end) n++; assert.ok(n > 0); }); // wait-allow: the profile measures CPU work
+require('node:test')('spins', () => { const cpu = () => { const u = process.cpuUsage(); return (u.user + u.system) / 1000; }; const end = cpu() + 400; let n = 0; while (cpu() < end) n++; assert.ok(n > 0); }); // wait-allow: the profile measures CPU work, 400 ms of this process's own whatever else runs beside it
 `);
   const out = path.join(h.base, 'profile.json');
   // This checkout stands in for the baseline, so the verdict is a coin toss; the exit follows it.
