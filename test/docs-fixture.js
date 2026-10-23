@@ -37,8 +37,13 @@ function makeDocsRepo(t, { crlfCheckout = false } = {}) {
       fs.cpSync(staged, h.repo, { recursive: true });
       fs.rmSync(staged, { recursive: true, force: true });
     };
-    if (crlfCheckout) checkout('true');
+    if (crlfCheckout) {
+      checkout('true');
+      h.git(['-c', 'core.autocrlf=input', 'add', '.']);
+    }
     checkout('false');
+    // Refresh the cached sizes recorded from the original CRLF copies.
+    h.git(['add', '.']);
     h.git(['commit', '-qm', 'documentation fixture']);
   });
 }
