@@ -400,19 +400,20 @@ for (const snapshot of snapshots) {
   });
 }
 
-test('wait and stack contracts name refusal bookkeeping in both documents', () => {
+test('wait and stack contract copies name refusal bookkeeping', () => {
   const { QUIET } = require('../lib/events');
-  for (const [file, waitAnchor, stackAnchor] of [
-    ['state.md', 'a default `wait` skips only', 'member events against the snapshot'],
-    ['cli.md', '`all` adds the bookkeeping the default skips:', 'The gate refuses further merges if project settings'],
+  const read = (file) => fs.readFileSync(path.join(__dirname, '..', file), 'utf8').split('\n');
+  for (const [waitFile, waitAnchor, stackFile, stackAnchor] of [
+    ['docs/state/tasks.md', 'a default `wait` skips only', 'docs/state/stacks.md', 'member events against the snapshot'],
+    ['docs/cli.md', '`all` adds the bookkeeping the default skips:', 'docs/cli.md', 'The gate refuses further merges if project settings'],
+    ['scripts/cli-reference.md', '`all` adds the bookkeeping the default skips:', 'scripts/cli-reference.md', 'The gate refuses further merges if project settings'],
   ]) {
-    const lines = fs.readFileSync(path.join(__dirname, '../docs', file), 'utf8').split('\n');
-    const wait = lines.find((line) => line.includes(waitAnchor));
-    assert.ok(wait, `${file}: wait contract paragraph`);
-    for (const type of QUIET) assert.ok(wait.includes(`\`${type}\``), `${file}: quiet ${type}`);
-    const stack = lines.find((line) => line.includes(stackAnchor));
-    assert.ok(stack, `${file}: stack contract paragraph`);
-    assert.ok(stack.includes('spawn refused'), `${file}: stack refusal bookkeeping`);
+    const wait = read(waitFile).find((line) => line.includes(waitAnchor));
+    assert.ok(wait, `${waitFile}: wait contract paragraph`);
+    for (const type of QUIET) assert.ok(wait.includes(`\`${type}\``), `${waitFile}: quiet ${type}`);
+    const stack = read(stackFile).find((line) => line.includes(stackAnchor));
+    assert.ok(stack, `${stackFile}: stack contract paragraph`);
+    assert.ok(stack.includes('spawn refused'), `${stackFile}: stack refusal bookkeeping`);
   }
 });
 
