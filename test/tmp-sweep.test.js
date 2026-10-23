@@ -36,10 +36,11 @@ function plant(root, name, record) {
 test('runner startup sweeps abandoned fixtures and cleans its private runtime across selection modes', async (t) => {
   const h = makeRepo(t);
   const pid = deadPid();
-  for (const [mode, vars] of [
-    ['ordinary', {}],
-    ['shard', { TC_TEST_SHARD: '1/1' }],
-    ['exclusions', { TOWER_CRANE_TEST_EXCLUDE: '["test/unused.test.js"]' }],
+  for (const [mode, vars, flags] of [
+    ['ordinary', {}, []],
+    ['shard', { TC_TEST_SHARD: '1/1' }, []],
+    ['node-shard', {}, ['--test-shard=1/1']],
+    ['exclusions', { TOWER_CRANE_TEST_EXCLUDE: '["test/unused.test.js"]' }, []],
   ]) {
     await t.test(mode, () => {
       const root = path.join(h.base, mode);
@@ -63,7 +64,7 @@ test('runner startup sweeps abandoned fixtures and cleans its private runtime ac
           fs.writeFileSync(${JSON.stringify(observed)}, JSON.stringify(runtime));
         });
       `);
-      const result = cp.spawnSync(process.execPath, [path.join(ROOT, 'test', 'run.js'), probe], {
+      const result = cp.spawnSync(process.execPath, [path.join(ROOT, 'test', 'run.js'), ...flags, probe], {
         cwd: ROOT,
         env: { ...h.env, TOWER_CRANE_TEST_TMP: root, XDG_RUNTIME_DIR: hostRuntime,
           TOWER_CRANE_HOST_RUNTIME_DIR: hostRuntime, ...vars },
@@ -283,14 +284,14 @@ test('repository seeds record ownership for direct, fallback and runner creation
         assert.equal(record.pid, process.pid);
         return;
       }
+      const observed = path.join(h.base, `${mode}-owner.json`);
       const script = mode === 'runner' ? `
         const fs = require('node:fs');
         const path = require('node:path');
-        const assert = require('node:assert/strict');
         require('node:test')('shared seed has its creator', () => {
           const base = path.dirname(process.env.TC_TEST_REPO_SEED);
           const record = JSON.parse(fs.readFileSync(path.join(base, '${OWNER_FILE}'), 'utf8'));
-          assert.equal(record.pid, process.ppid);
+          fs.writeFileSync(${JSON.stringify(observed)}, JSON.stringify(record));
         });
       ` : `
         const fs = require('node:fs');
@@ -309,6 +310,10 @@ test('repository seeds record ownership for direct, fallback and runner creation
         cwd: ROOT, env: { ...h.env, TOWER_CRANE_TEST_TMP: root }, encoding: 'utf8', timeout: HUNG_TEST_MS,
       });
       assert.equal(result.status, 0, result.stderr + result.stdout);
+      if (mode === 'runner') {
+        assert.equal(JSON.parse(fs.readFileSync(observed, 'utf8')).pid, result.pid,
+          'the shared seed belongs to the runner that created it');
+      }
     });
   }
 });
