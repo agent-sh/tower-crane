@@ -69,13 +69,21 @@ Lock attempts use private staging directories named with the process pid and a f
 | | |
 | `browser-kit show` | show the user's browser kit MCP server list, default `["playwright"]`, and its config file |
 | | |
+| `credentials check [NAME]...` | report, for each NAME, or every credential the user file or this project's ladder names, the store that holds it or why it cannot be read (not stored, a locked keyring, a missing tool) and the fix; never the value. Exits 1 when one cannot be read. Spawn runs the same check before it starts a route that names a credential |
+| | |
+| `credentials import --env-file PATH --var VAR --name NAME [--store STORE]` | read VAR from the env file and store its value as credential NAME, as `credentials set` does; the value never passes through argv or an agent. The file is left as it is: remove the line once nothing else reads it. Refused in a task process |
+| | |
+| `credentials rm NAME [--store STORE]` | remove credential NAME from the named store, or from every store a lookup tries. A credential with store env reads a file Tower Crane does not write, so it is refused. Refused in a task process |
+| | |
+| `credentials set NAME [--store STORE] < VALUE` | store the value read from stdin as credential NAME, replacing an older one; at a terminal the value is typed without echo. The value is never taken from argv and never written to project.json, events or logs; one trailing line break is dropped. The default store is the user file's for NAME (`credentials.NAME.store`), else the Secret Service, then systemd-creds (`credentials/NAME.cred` beside the user file) on Linux; a warning names an earlier store that still holds NAME. Rotating a value needs no respawn: brokers and auth commands read the store again. Refused in a task process |
+| | |
 | `init --name N --goal G [--repo O/R] [--base B] [settings]` | create the state directory and `project.json` with the default harness and ladder (from the user file, else built in), and record its canonical `owner_config_dir`; takes the `project set` settings too. Only an explicit owner's init at a terminal records the user file's folder as `owner_config_dir`; any other init records the default `~/.config/tower-crane` under the account's home, where a headless owner's key must be. Only the explicit owner's init copies the rungs' owner-required parts (`sandbox`, `env`, `env_file`, `scope`, `command`, `web_mcp`, sandbox-changing tools, unsandboxed or command harnesses); any other init leaves them out with a `notice:` line each. Refused if the user file is invalid or the project already exists |
 | | |
 | `ladder harness HARNESS` | set the default harness; every rung without its own moves to it. Operational: the orchestrator or the owner; moving a worker, reviewer or small rung off a sandboxed harness is owner-required (`ladder.reach`). Refused, naming the rungs, if one of them cannot run there (a codex profile on pi, a missing model, a Claude model on codex without a custom provider, a tool the harness does not know). A personal fallback that follows a moved rung and names a model or tool the new harness cannot run gets a `notice:` line; spawn skips it |
 | | |
 | `ladder save-user` | write the project's default harness and primary rungs to the user file (`TOWER_CRANE_CONFIG`, else `~/.config/tower-crane/config.json`), preserving personal fallbacks and other keys; only what the project defines is written. Operational: the orchestrator or the owner, and the event records the orchestrator as `authority`. Refused while a primary rung cannot run. A user file that is not valid JSON or has the wrong shape refuses every command that has to resolve the ladder, including `ladder`, `spawn` and `init`, even when the project supplies every rung; the error names the file to fix or remove |
 | | |
-| `ladder set RUNG [--harness H] [--model M] [--profile P] [--provider P] [--effort E] [--args JSON] [--command JSON] [--supervision JSON] [--tools JSON] [--mcp JSON] [--web-mcp JSON] [--fallbacks JSON] [--sandbox JSON] [--env JSON] [--env_file FILE] [--scope JSON] [--clear FIELD]...` | change the named primary fields of one rung and keep the rest. `--fallbacks JSON` replaces its ordered personal routes in the user file; `[]` empties the list and `--clear fallbacks` removes the override. Edit fallbacks separately from project primary fields. Other personal settings and project primaries are preserved. Fallback edits use the same field, reach, tool and MCP authority checks as primary edits; owner approvals bind the user file, rung and full requested list. `--tools` (claude, codex, opencode, agy and pi) and `--mcp` (claude, codex and agy) opt the rung back in to tools and MCP servers its agent file leaves out. Pi refuses MCP opt-ins. Changes are operational, except `--command`, `--web-mcp`, `--sandbox`, `--env`, `--env_file` and `--scope`, which are owner-required ([Authority](state.md#authority)); so is moving a worker, reviewer or small rung off a sandboxed harness, or `--args` on an unsandboxed harness (`ladder.reach`). The orchestrator's `--tools` and `--mcp` take only harness built-ins that keep the sandbox and MCP servers the owner's harness config defines; `--args` on a claude, codex, opencode, agy or pi rung may hold only a short list of safe flags; `--web-mcp` sets the research Claude server as `{name, command, args}` without secrets; it cannot combine with `--mcp`. `--clear web_mcp` removes it. `--clear` removes a field (a cleared harness follows the default). Moving the rung to another harness drops the fields the edit does not name that do not fit there (a Claude model or alias on codex unless its codex route uses a custom provider, another vendor's model on claude, a profile, provider, effort, args, command, mcp or web_mcp the new harness does not take, and each tool name it does not know) and prints what it dropped; a field named in the same edit stays. A personal fallback that follows the rung and names a model or tool the new harness cannot run gets a `notice:` line; spawn skips it. A rung the project left out starts from the primary it fell back to. Refused if it leaves a primary unable to run that could run before (state.md lists the checks); rungs already broken do not block it |
+| `ladder set RUNG [--harness H] [--model M] [--profile P] [--provider P] [--effort E] [--args JSON] [--command JSON] [--supervision JSON] [--tools JSON] [--mcp JSON] [--web-mcp JSON] [--credential NAME] [--fallbacks JSON] [--sandbox JSON] [--env JSON] [--env_file FILE] [--scope JSON] [--clear FIELD]...` | change the named primary fields of one rung and keep the rest. `--fallbacks JSON` replaces its ordered personal routes in the user file; `[]` empties the list and `--clear fallbacks` removes the override. Edit fallbacks separately from project primary fields. Other personal settings and project primaries are preserved. Fallback edits use the same field, reach, tool and MCP authority checks as primary edits; owner approvals bind the user file, rung and full requested list. `--tools` (claude, codex, opencode, agy and pi) and `--mcp` (claude, codex and agy) opt the rung back in to tools and MCP servers its agent file leaves out. Pi refuses MCP opt-ins. Changes are operational, except `--command`, `--web-mcp`, `--credential`, `--sandbox`, `--env`, `--env_file` and `--scope`, which are owner-required ([Authority](state.md#authority)); so is moving a worker, reviewer or small rung off a sandboxed harness, or `--args` on an unsandboxed harness (`ladder.reach`). The orchestrator's `--tools` and `--mcp` take only harness built-ins that keep the sandbox and MCP servers the owner's harness config defines; `--args` on a claude, codex, opencode, agy or pi rung may hold only a short list of safe flags; `--web-mcp` sets the research Claude server as `{name, command, args}` without secrets; it cannot combine with `--mcp`. `--clear web_mcp` removes it. `--clear` removes a field (a cleared harness follows the default). Moving the rung to another harness drops the fields the edit does not name that do not fit there (a Claude model or alias on codex unless its codex route uses a custom provider, another vendor's model on claude, a profile, provider, effort, args, command, mcp or web_mcp the new harness does not take, and each tool name it does not know) and prints what it dropped; a field named in the same edit stays. A personal fallback that follows the rung and names a model or tool the new harness cannot run gets a `notice:` line; spawn skips it. A rung the project left out starts from the primary it fell back to. Refused if it leaves a primary unable to run that could run before (state.md lists the checks); rungs already broken do not block it |
 | | |
 | `ladder show` | print each rung as it resolves: harness (and whether it is the default), model, profile, provider, effort, args, and where the primary comes from (project, user file or built-in); print personal fallbacks and their user-file source (`fallbacks_from: "user"` under `--json`); also the default harness, its source, the user file path, and every rung or fallback that cannot run (`problems` under `--json`); unavailable fallbacks are marked skipped |
 | | |
@@ -387,6 +395,17 @@ tower-crane project set --sandbox '{"write":["~/.cargo","~/.rustup"]}' --env '{"
 tower-crane ladder set hard --env_file '~/.config/claude-code/bedrock.env' --agent owner
 tower-crane ladder set review --sandbox '{"write":[]}' --scope '{}' --agent owner
 ```
+
+A provider token belongs in the OS store, not in an env file. The owner stores it once and names it on each rung; spawn reads it before launch, and the harness gets it through a broker or an auth command, never its environment ([credentials](state.md#credentials)):
+
+```sh
+tower-crane credentials import --env-file ~/.config/claude-code/bedrock.env --var AWS_BEARER_TOKEN_BEDROCK --name bedrock-bearer
+tower-crane ladder set hard --credential bedrock-bearer --clear env_file --agent owner
+tower-crane credentials check
+tower-crane credentials set bedrock-bearer < new-token-file
+```
+
+`credentials set` reads the value from stdin (without echo at a terminal), never from argv. With no `--store`, it writes the user file's store for the name, else the Secret Service, then systemd-creds, on Linux. `credentials check` exits 1 when a credential cannot be read and says why. None of the four commands needs a state directory, and a task process cannot run one that writes.
 
 `init` accepts the same `--sandbox JSON`, `--env JSON`, `--env_file FILE` and `--scope JSON` flags. `project set` replaces the named project field; `null` removes it. `ladder set --clear sandbox`, `--clear env`, `--clear env_file` or `--clear scope` restores the project default for that rung. Setting, repeating and clearing are owner-required. Rung `env` merges over project `env`; these override the env file, which overrides the spawning environment. A rung file replaces the project file. Each rung sandbox field replaces the corresponding project field. A rung `scope` replaces the entire project scope; `{}` clears its optional properties for that rung, and the containment caps remain.
 
@@ -790,12 +809,18 @@ command or tests policy, reruns in the next reaction without one.
 Automatic failures are recorded in `automation` events. Concurrent
 consumers serialize per task and reuse completed event receipts; commands
 execute outside the state lock. Deferred or errored reactions remain
-retryable at watcher startup. Accepted PRs already merged remotely are
-confirmed through the merge gate, preserving the accepted head check.
-`merge ID` holds the same task reservation as reactions. It waits while
-an observable reaction runs on the task, then merges or, when the reaction
-already merged, confirms the accepted head through the merge gate. A
-reaction that starts during a manual merge queues; the merge drains it
+retryable at watcher startup. Accepted PRs already merged remotely without
+a local merge receipt are confirmed through the merge gate, preserving the
+accepted head check.
+For an accepted task with an audited, successful, non-waived merge receipt
+at its current head and revision, `merge ID` prints `already merged at <ref>`
+and returns the recorded result locally. It makes no GitHub lookup, validates
+no merge text or method, takes no reservation and adds no evidence or events.
+Otherwise `merge ID` holds the same task reservation as reactions. It waits
+while an observable reaction runs on the task, then merges or returns the
+recorded result if the reaction recorded the merge while it waited. That
+wait still records its reservation and release. A reaction that starts
+during a manual merge queues; the merge drains it
 after releasing the task, and it finds the task merged. A reservation
 held by an unobservable executor refuses the merge.
 The merge queue takes the same reservation for the head of the line
