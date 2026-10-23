@@ -237,10 +237,13 @@ for (const [review, pass] of [[true, true], [false, true], [true, false]]) {
     h.ok(['check', 'ci', 'T1']);
     const before = h.readState('tasks.json').tasks[0].evidence;
     const old = before.at(-1);
+    // A base that moves forward keeps the receipt on its pinned tree; a force-push that
+    // drops the checked base commit makes it stale.
     h.git(['switch', '-q', 'main']);
+    h.git(['reset', '-q', '--hard', 'HEAD~1']);
     fs.writeFileSync(path.join(h.repo, 'base-advance.txt'), 'new base\n');
     h.git(['add', '.']);
-    h.git(['commit', '-qm', 'advance the CI merged tree']);
+    h.git(['commit', '-qm', 'rewrite the CI base']);
     h.git(['switch', '-q', 'fixture-change']);
     assert.match(h.json(['task', 'show', 'T1']).gates.missing.join('; '), /current merged tree/);
 
