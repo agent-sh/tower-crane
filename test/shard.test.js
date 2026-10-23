@@ -6,8 +6,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
 const { ROOT, makeRepo } = require('./helpers');
-const { HUNG_TEST_MS } = require('./signals');
-const { testFiles, shardFiles, longestFirst, startOrder, fileDurations } = require('./run');
+const { HUNG_TEST_MS, killPid } = require('./signals');
+const { testFiles, shardFiles, longestFirst, fileDurations } = require('./run');
 const { declarations, fileTimes, mergeTable } = require('../scripts/test-durations');
 
 const FIXTURES = ['a', 'b', 'c', 'd'].map((name) => path.join('test', 'fixtures', 'shard', `${name}.test.js`));
@@ -42,26 +42,6 @@ test('longestFirst starts the longest measured files first and keeps sorted orde
   assert.deepEqual(longestFirst(files, durations), ['b', 'd', 'new', 'a', 'c']);
   assert.deepEqual(files, ['d', 'c', 'b', 'a', 'new'], 'the input is not reordered');
   assert.deepEqual(longestFirst(['y', 'x'], {}), ['x', 'y'], 'an empty table keeps the sorted order');
-  assert.deepEqual(startOrder(['b', 'a'], 1, durations), ['b', 'a'], 'two files for one worker both start at once');
-});
-
-test('startOrder spells the longest files so that node --test sorts them first, one band per worker', () => {
-  const durations = { a: 1, b: 9, c: 1, d: 5, e: 3, f: 2 };
-  const files = ['f', 'e', 'd', 'c', 'b', 'a', 'new'];
-  const named = (cwd, order) => order.map((f) => path.relative(cwd, path.resolve(cwd, f)));
-  // Each `../` step up from the working directory is a band, then absolute paths, then plain ones.
-  for (const [depth, workers, sorted] of [
-    [3, 1, ['b', 'd', 'e', 'new', 'a', 'c', 'f']],
-    [2, 1, ['b', 'd', 'e', 'a', 'c', 'f', 'new']],
-    [1, 1, ['b', 'd', 'a', 'c', 'e', 'f', 'new']],
-    [2, 2, ['b', 'd', 'e', 'new', 'a', 'f', 'c']],
-    [1, 3, ['b', 'd', 'e', 'a', 'f', 'new', 'c']],
-  ]) {
-    const cwd = path.resolve('/', ...Array.from({ length: depth }, (_, i) => `dir${i}`));
-    const order = startOrder(files, workers, durations, cwd);
-    assert.deepEqual(named(cwd, order), files, `depth ${depth}, ${workers} workers: each file keeps its place`);
-    assert.deepEqual(named(cwd, [...order].sort()), sorted, `depth ${depth}, ${workers} workers`);
-  }
 });
 
 test('every shard count covers the real suite with each file in exactly one shard', () => {
@@ -172,6 +152,85 @@ test('a shard logs each file as it starts and ends, and past its deadline its wa
     assert.match(watchdog, /^\S+ {3}\d+ \d+ .*hang\.test\.js/m, `${what}: the dump names the hung file's process`);
     assert.match(watchdog, /stopped the shard$/m, what);
   }
+});
+
+// scripts/shard-guard.ps1 as CI runs it: PROGRAM and ARGS become the command it runs in its job object.
+function guard(h, args, env) {
+  const child = cp.spawn('pwsh', ['-NoProfile', '-File', path.join(ROOT, 'scripts', 'shard-guard.ps1'), ...args], {
+    cwd: ROOT, windowsHide: true,
+    env: { ...process.env, TOWER_CRANE_TEST_TMP: h.base, PATH: `${path.dirname(process.execPath)}${path.delimiter}${process.env.PATH}`, ...env },
+  });
+  let stdout = '';
+  child.stdout.on('data', (chunk) => { stdout += chunk; });
+  child.stderr.on('data', (chunk) => { stdout += chunk; });
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { child.kill(); reject(new Error(`the guard still ran after 3 minutes:\n${stdout}`)); }, 180000); // wait-allow: bounds a guard whose own deadline is 30 seconds
+    child.on('exit', (status) => { clearTimeout(timer); resolve({ status, stdout }); });
+  });
+}
+
+test('the Windows shard guard posts progress from outside node, and at its deadline dumps the job and stops it, orphans included', { skip: process.platform !== 'win32' && 'the guard runs the tests in a Windows job object' }, async (t) => {
+  const h = makeRepo(t);
+  const posts = [];
+  const server = require('node:http').createServer((req, res) => {
+    let body = '';
+    req.on('data', (chunk) => { body += chunk; });
+    req.on('end', () => {
+      posts.push({ method: req.method, url: req.url, auth: req.headers.authorization, body: JSON.parse(body || '{}') });
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ url: `http://127.0.0.1:${server.address().port}/check-runs/7`, html_url: 'https://github.invalid/checks/7' }));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => server.close());
+  const logDir = path.join(h.base, 'shard-log');
+  const orphanFile = path.join(h.base, 'orphan.json');
+  // The runner's event loop is blocked and its own watchdog waits past the guard's deadline, as when node is stuck.
+  const hung = await guard(h, ['node', path.join('test', 'run.js'), FIXTURES[0], path.join('test', 'fixtures', 'shard', 'orphan.test.js')], {
+    TC_TEST_SHARD: '1/1', TC_TEST_SHARD_HANG: '1', TC_TEST_SHARD_DEADLINE_MIN: '10', TC_TEST_SHARD_LOG_DIR: logDir,
+    TC_SHARD_GUARD_DEADLINE_MIN: '0.5', TC_ORPHAN_FILE: orphanFile,
+    TC_SHARD_PROGRESS_CHECK: 'shard progress (test)', TC_SHARD_PROGRESS_SHA: 'a'.repeat(40), TC_SHARD_PROGRESS_TOKEN: 'guard-token',
+    GITHUB_REPOSITORY: 'owner/repo', GITHUB_API_URL: `http://127.0.0.1:${server.address().port}`,
+  });
+  assert.equal(hung.status, 1, hung.stdout);
+  const log = fs.readFileSync(path.join(logDir, 'guard.log'), 'utf8');
+  assert.match(log, /deadline of 0\.5 min reached; free memory \d+ MiB/);
+  assert.match(log, /^\S+ guard: files still running: test\/fixtures\/shard\/orphan\.test\.js$/m, 'the guard names the hung file');
+  assert.match(hung.stdout, /guard: files still running: test\/fixtures\/shard\/orphan\.test\.js\r?$/m, 'the job log has it too');
+  assert.match(log, /^\S+ guard: {3}\d+ node handles \d+ threads \d+ committed \d+ MiB ws \d+ MiB started /m, 'the dump has handle and memory counts');
+  assert.match(log, /^\S+ guard: {3}\d+ \d+ .*orphan\.test\.js/m, "the dump names the hung file's process");
+  assert.match(log, /taskkill: SUCCESS/);
+  assert.match(log, /every job process stopped[\s\S]*stopped the shard$/m);
+  const orphan = JSON.parse(fs.readFileSync(orphanFile, 'utf8'));
+  assert.equal(orphan.token, null, 'the tests never see the progress token');
+  assert.throws(() => killPid(orphan.pid, 0), { code: 'ESRCH' }, 'the job stopped the process whose parent had exited');
+  // The progress left the process while it ran: a completed neutral check run, then updates to it.
+  assert.deepEqual(posts[0].body, { name: 'shard progress (test)', head_sha: 'a'.repeat(40), status: 'completed', conclusion: 'neutral', output: posts[0].body.output });
+  assert.equal(posts[0].method, 'POST');
+  assert.equal(posts[0].url, '/repos/owner/repo/check-runs');
+  assert.equal(posts[0].auth, 'Bearer guard-token');
+  assert.ok(posts.slice(1).length && posts.slice(1).every((post) => post.method === 'PATCH' && post.url === '/check-runs/7'), JSON.stringify(posts));
+  const last = posts.at(-1).body.output;
+  assert.match(last.title, /^stopped at the deadline at [\d.]+ min: 1\/2 files ended; running: test\/fixtures\/shard\/orphan\.test\.js$/);
+  assert.match(last.summary, /- job \d+ processes, .* handles, .*MiB committed; peaks \d+ processes/);
+  assert.match(last.summary, /file started: .*orphan\.test\.js/);
+
+  // A command that ends on its own keeps its exit status, and the job's limits refuse what is past them.
+  const script = (name, text) => { const file = path.join(h.base, name); fs.writeFileSync(file, text); return file; };
+  const spawns = script('spawns.js', `const cp = require('node:child_process'); let refused = 0;
+for (let i = 0; i < 10; i++) {
+  try { cp.spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { stdio: 'ignore' }).on('error', () => refused++); } catch { refused++; } // wait-allow: held until the guard stops the job
+}
+setTimeout(() => { console.log('refused ' + refused); process.exit(3); }, 2000); // wait-allow: lets every refused spawn report`);
+  const counted = await guard(h, ['node', spawns], { TC_SHARD_GUARD_MAX_PROCESSES: '4', TC_TEST_SHARD_LOG_DIR: path.join(h.base, 'spawns-log') });
+  assert.equal(counted.status, 3, counted.stdout);
+  assert.match(counted.stdout, /limits 4 processes/);
+  assert.ok(Number(/^refused (\d+)$/m.exec(counted.stdout)?.[1]) >= 6, `the process limit refuses spawns past it\n${counted.stdout}`);
+  assert.match(fs.readFileSync(path.join(h.base, 'spawns-log', 'guard.log'), 'utf8'), /exited 3 at [\d.]+ min/);
+  const allocates = script('allocates.js', `try { Buffer.alloc(400 * 2 ** 20, 1); console.log('allocated'); } catch (error) { console.log('refused ' + error.message); }`);
+  const bounded = await guard(h, ['node', allocates], { TC_SHARD_GUARD_MAX_MEMORY_MB: '200' });
+  assert.equal(bounded.status, 0, bounded.stdout);
+  assert.match(bounded.stdout, /^refused /m, 'the memory limit refuses a commit past it');
 });
 
 test('a durations refresh from a run with a failed shard keeps the old times of the files it did not measure', () => {

@@ -237,17 +237,21 @@ for (const [review, pass] of [[true, true], [false, true], [true, false]]) {
     h.ok(['check', 'ci', 'T1']);
     const before = h.readState('tasks.json').tasks[0].evidence;
     const old = before.at(-1);
+    // A base that moves forward keeps the receipt on its pinned tree; a force-push that
+    // drops the checked base commit makes it stale.
     h.git(['switch', '-q', 'main']);
+    h.git(['reset', '-q', '--hard', 'HEAD~1']);
     fs.writeFileSync(path.join(h.repo, 'base-advance.txt'), 'new base\n');
     h.git(['add', '.']);
-    h.git(['commit', '-qm', 'advance the CI merged tree']);
+    h.git(['commit', '-qm', 'rewrite the CI base']);
     h.git(['switch', '-q', 'fixture-change']);
     assert.match(h.json(['task', 'show', 'T1']).gates.missing.join('; '), /current merged tree/);
 
     const result = h.run(['accept', 'T1'], { env: { FIXTURE_GATE_OK: pass ? '1' : '0' } });
     assert.equal(result.code, pass ? 0 : 1, result.stderr);
     assert.match(result.stderr, /running stale ci software gate/);
-    assert.equal(fs.readFileSync(runs, 'utf8'), 'run\nrun\n');
+    // A failing local CI reruns once on the same merge.
+    assert.equal(fs.readFileSync(runs, 'utf8'), pass ? 'run\nrun\n' : 'run\nrun\nrun\n');
     const task = h.readState('tasks.json').tasks[0];
     const ci = task.evidence.at(-1);
     assert.equal(ci.type, 'ci');
@@ -260,7 +264,7 @@ for (const [review, pass] of [[true, true], [false, true], [true, false]]) {
       assert.equal(task.status, 'submitted');
       assert.equal(reviewerSpawns(h).length, reviewsBefore);
       h.run(['accept', 'T1']);
-      assert.equal(fs.readFileSync(runs, 'utf8'), 'run\nrun\n', 'current failures need an explicit rerun');
+      assert.equal(fs.readFileSync(runs, 'utf8'), 'run\nrun\nrun\n', 'current failures need an explicit rerun');
     } else if (review) {
       assert.equal(task.status, 'accepted');
     } else {

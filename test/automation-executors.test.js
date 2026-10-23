@@ -14,6 +14,14 @@ const { waitFor } = require('./canary');
 const { readPublished } = require('./atomic-file');
 const { setup, holdSuite, ghStub } = require('./automation-helpers');
 
+// The task of each CPU executor lease, in the order the leases started. A
+// reaction itself holds none: one that waits for a slot runs again to take it.
+function executorStarts(h) {
+  const seen = new Set();
+  return h.logs().filter((e) => e.cmd === 'executor' && e.detail.phase === 'running'
+    && !seen.has(e.detail.lease) && seen.add(e.detail.lease)).map((e) => e.task);
+}
+
 test('an accepted task with green gates merges in the event reaction without an agent turn', (t) => {
   const h = setup(t);
   h.submit();
@@ -558,7 +566,8 @@ require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'public-http'))}).fet
         assert.deepEqual(receipts, [], 'idle shutdown claims no automation work');
         return;
       }
-      assert.deepEqual(runs(), { starts: heldRun, peak: 1 }, 'no queued gate starts during shutdown');
+      // A failing suite reruns once inside the gate that drains; that is the gate's own command, not a queued gate.
+      assert.deepEqual(runs(), { starts: heldRun + (stage === 'failure' ? 1 : 0), peak: 1 }, 'no queued gate starts during shutdown');
       assert.deepEqual(receipts.filter((e) => e.detail.phase === 'running').map((e) => e.task), ['T1']);
       assert.equal(receipts.at(-1).detail.phase, 'deferred', 'the executor lease is released for a retry');
       const tasks = h.readState('tasks.json').tasks;
@@ -572,6 +581,33 @@ require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'public-http'))}).fet
         assert.equal(require('../lib/processes').processState({ pid: gatePid }), 'exited', 'the gate process was stopped');
         if (!sources) assert.ok(tasks[0].evidence[0].commands.some((c) => c.signal === 'SIGKILL'), 'the command tree was killed');
         assert.equal(tasks[0].evidence[0].confirmed_failure, undefined, 'interruption is not a confirmed test failure');
+      }
+      if (forced && !stage) {
+        // The interrupted run checked nothing: the next reaction runs it again, and its one retry
+        // is still there for a crash of that run.
+        assert.equal(tasks[0].evidence[0].voided, true);
+        for (const id of ['T2', 'T3']) h.ok(['task', 'update', id, '--status', 'cancelled']);
+        const once = path.join(h.base, 'crashed-once');
+        fs.writeFileSync(path.join(h.base, 'tools', 'slow-suite.js'), `const fs = require('node:fs');
+if (!fs.existsSync(${JSON.stringify(once)})) { fs.writeFileSync(${JSON.stringify(once)}, ''); process.kill(process.pid, 'SIGKILL'); }
+`);
+        h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
+        const after = h.readState('tasks.json').tasks[0];
+        assert.deepEqual([after.status, after.revision], ['submitted', tasks[0].revision]);
+        assert.ok(!h.logs().some((e) => e.cmd === 'rework'), 'a void never reworks');
+        assert.deepEqual(after.evidence.filter((e) => e.type === 'tests').map((e) => [e.ok, !!e.voided, !!e.runner_crash]),
+          [[false, true, true], [false, false, true], [true, false, false]]);
+      }
+      if (forced && proof) {
+        // accept reruns a void like a missing gate instead of asking for an explicit check.
+        assert.equal(tasks[0].evidence[0].voided, true);
+        fs.writeFileSync(release, '');
+        const accepted = h.run(['accept', 'T1', '--agent', 'orchestrator']);
+        assert.match(accepted.stderr, /running voided tests software gate/);
+        const tests = h.readState('tasks.json').tasks[0].evidence.filter((e) => e.type === 'tests');
+        // The slow suite passes without the change too, so the rerun records a real proof verdict.
+        assert.deepEqual(tests.map((e) => [e.ok, !!e.voided]), [[false, true], [false, false]]);
+        assert.match(tests.at(-1).summary, /do not prove it/);
       }
     });
   }
@@ -613,14 +649,16 @@ test('gate executors across several watchers stay within gates.executors and que
     h.runAsync(['wait', '--after', '0', '--types', 'evidence', '--task', 'T3',
       '--timeout', '300', '--agent', 'orchestrator']));
   let results;
+  let waiter;
   try {
     assert.notEqual(await fileWritten(path.join(h.base, 'suite-started-2')), null, 'two executors start');
-    // Keep both slots occupied until a watcher has queued the third submission.
-    const notification = await h.runAsync(['wait', '--observe', '--after', '0', '--types', 'automation queued',
-      '--task', 'T3', '--timeout', '300', '--agent', 'orchestrator']);
-    assert.equal(notification.code, 0, JSON.stringify(notification));
+    // Keep both slots occupied until a watcher has queued the third suite.
+    // Fresh reactions race for the slots, so any of the three can be the one waiting.
+    await waitUntil(() => h.logs().some((e) => e.cmd === 'automation queued' && e.detail.executors === 2),
+      { paths: [h.state], what: 'a third suite queues for an executor' });
     const queued = h.logs().filter((e) => e.cmd === 'automation queued' && e.detail.executors === 2);
-    assert.ok(queued.some((e) => e.task === 'T3'), JSON.stringify(queued));
+    assert.equal(new Set(queued.map((e) => e.task)).size, 1, JSON.stringify(queued));
+    waiter = queued[0].task;
     fs.writeFileSync(release, '');
     assert.notEqual(await fileWritten(path.join(h.base, 'suite-started-3')), null, 'the third executor starts');
   } finally {
@@ -637,12 +675,11 @@ test('gate executors across several watchers stay within gates.executors and que
   h.ok(['check', 'clean', 'T2']);
   h.consume();
   assert.deepEqual(runs(), { starts: 3, peak: 2 });
-  const started = h.logs().filter((e) => e.cmd === 'automation' && e.detail.phase === 'running').map((e) => e.task);
   assert.ok(h.logs().slice(beforeFollowUp).some((e) => e.cmd === 'automation'
     && e.detail.phase === 'running' && e.task === 'T2'), 'a later observation runs without restarting its suite');
-  const firstStarts = [...new Set(started)];
+  const firstStarts = executorStarts(h);
   assert.deepEqual(new Set(firstStarts), new Set(['T1', 'T2', 'T3']));
-  assert.equal(firstStarts.at(-1), 'T3', 'the queued submission runs after a slot frees');
+  assert.equal(firstStarts.at(-1), waiter, 'the queued suite runs after a slot frees');
 });
 
 // The orphans this guards against: a test killed with its runner's process
@@ -699,7 +736,7 @@ const until = Date.now() + 300000;
 const poll = () => {
   const log = read();
   if (log.some((e) => e.cmd === 'automation queued' && e.task === 'T2') || Date.now() > until) {
-    require(${JSON.stringify(path.join(__dirname, 'signals'))}).killPid(log.findLast((e) => e.cmd === 'automation' && e.detail.phase === 'running').detail.pid, 'SIGKILL');
+    require(${JSON.stringify(path.join(__dirname, 'signals'))}).killPid(log.findLast((e) => e.cmd === 'executor' && e.detail.phase === 'running').detail.pid, 'SIGKILL');
     process.exit(1);
   }
   setTimeout(poll, 50); // wait-allow: probe cadence only; the release signal and hung-test timeout bound this fixture
@@ -723,10 +760,37 @@ poll();
   h.ok(['claim', 'T3', '--agent', 'worker']);
   h.ok(['submit', 'T3', '--sha', h.sha, '--agent', 'worker']);
   h.run(['wait', '--after', String(offset), '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
-  const started = h.logs().filter((e) => e.cmd === 'automation' && e.detail.phase === 'running').map((e) => e.task);
-  assert.deepEqual(started, ['T1', 'T1', 'T2', 'T3'], 'queued T1 and T2 run before the newer T3');
+  assert.deepEqual(executorStarts(h), ['T1', 'T1', 'T2', 'T3'], 'queued T1 and T2 run before the newer T3');
   for (const task of h.readState('tasks.json').tasks) {
     assert.deepEqual(task.evidence.map((e) => [e.type, e.ok]), [['tests', true], ['clean', true]], task.id);
+  }
+});
+
+// A drain can pass over T1 while its reaction is alive and reach T2 after it
+// died, so the dead reaction must still rank ahead of T2 for the freed slot.
+test('an owed older reaction outranks a newer executor waiter only while it waits or died running', () => {
+  const A = require('../lib/automation');
+  const P = require('../lib/processes');
+  const sha = 'a'.repeat(40);
+  const tasks = ['T1', 'T2'].map((id) => ({ id, status: 'submitted', sha, revision: 1, evidence: [] }));
+  const submits = tasks.map((task) => ({ id: `submit-${task.id}`, task: task.id, cmd: 'submit', detail: { sha, revision: 1 } }));
+  const governor = { task: 'T1', kind: 'tests', until: Date.now() + 5000, reason: 'pressure' };
+  for (const [name, receipt, outranks] of [
+    ['waits for an executor', { phase: 'executor', kind: 'tests' }, true],
+    ['died running', { phase: 'running', pid: 2147483647 }, true],
+    ['running', { phase: 'running', pid: process.pid, ...P.identity(process.pid) }, false],
+    ['running unobservably on another host', { phase: 'running', pid: process.pid, host: 'another-host' }, false],
+    ['deferred by the governor', { phase: 'deferred', governor }, false],
+    ['done', { phase: 'done' }, false],
+    ['failed', { phase: 'error' }, false],
+  ]) {
+    const events = [...submits,
+      ...submits.map((e) => ({ cmd: 'automation queued', task: e.task, detail: { source: e.id } })),
+      { cmd: 'automation', task: 'T1', at: new Date().toISOString(), detail: { source: 'submit-T1', ...receipt } },
+      { cmd: 'automation', task: 'T2', at: new Date().toISOString(), detail: { source: 'submit-T2', phase: 'executor', kind: 'tests' } }];
+    const st = { project: {}, tasks: { tasks }, events };
+    assert.equal(A.outranked(st, submits[1])?.task ?? null, outranks ? 'T1' : null, `T2 behind T1 ${name}`);
+    assert.equal(A.outranked(st, submits[0]), null, `T1 ${name} is never behind the newer T2`);
   }
 });
 
@@ -741,7 +805,7 @@ test('accepted merges take the next executor in acceptance order before queued s
   const github = h.github();
   github.prs['8'] = { ...github.prs['7'] };
   h.saveGithub(github);
-  // Submit T4 first, but accept T5 first. Both already passed their gates.
+  // Both pass their gates and review before T1 starts.
   for (const id of ['T4', 'T5']) {
     h.ok(['claim', id, '--agent', 'worker']);
     h.ok(['submit', id, '--sha', h.sha, '--agent', 'worker']);
@@ -758,7 +822,7 @@ test('accepted merges take the next executor in acceptance order before queued s
   h.ok(['claim', 'T1', '--agent', 'worker']);
   const offset = fs.statSync(events).size;
   h.ok(['submit', 'T1', '--sha', h.sha, '--agent', 'worker']);
-  // Start only T1's reaction, leaving the prepared PRs for explicit acceptance.
+  // Start only T1's reaction, leaving the prepared PRs for after it holds the executor.
   const holder = h.runAsync(['wait', '--after', String(offset), '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
   let text, queue;
   try {
@@ -768,16 +832,14 @@ test('accepted merges take the next executor in acceptance order before queued s
       h.ok(['claim', id, '--agent', 'worker']);
       h.ok(['submit', id, '--sha', h.sha, '--agent', 'worker']);
     }
-    // Attach the PRs after T1 starts, so startup reconciliation cannot advance them first.
-    for (const [id, pr] of [['T4', '7'], ['T5', '8']]) {
+    // Attach the PRs after T1 starts, T5's first. Review and CI need no
+    // executor, so both are accepted at once, T5 first; their merged-tree
+    // tests wait for the slot.
+    for (const [id, pr] of [['T5', '8'], ['T4', '7']]) {
       h.ok(['submit', id, '--sha', h.sha, '--pr', pr, '--agent', 'worker']);
     }
     h.run(['wait', '--after', String(after), '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
-    // A request made while T4 is submitted gives way to its acceptance.
-    h.ok(['gates', 'prioritize', 'T4', '--reason', 'request before acceptance', '--agent', 'orchestrator']);
-    const accepted = fs.statSync(events).size;
-    for (const id of ['T5', 'T4']) h.ok(['accept', id, '--agent', 'orchestrator']);
-    h.run(['wait', '--after', String(accepted), '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
+    assert.deepEqual(h.logs().filter((e) => e.cmd === 'accept').map((e) => e.task), ['T5', 'T4']);
     const late = h.run(['gates', 'prioritize', 'T4', '--reason', 'later merge request', '--agent', 'orchestrator']);
     assert.notEqual(late.code, 0);
     assert.match(late.stderr, /T4 is accepted; its merge already runs ahead of submitted gate work, in acceptance order/);
@@ -785,8 +847,7 @@ test('accepted merges take the next executor in acceptance order before queued s
     text = h.ok(['status']);
     queue = h.json(['status']).gate_queue;
     assert.deepEqual(h.json(['inbox', '--agent', 'orchestrator']).gate_queue, queue);
-    assert.deepEqual(h.logs().filter((e) => e.cmd === 'automation' && e.detail.phase === 'running').map((e) => e.task),
-      ['T1'], 'acceptance does not preempt the running gate');
+    assert.deepEqual(executorStarts(h), ['T1'], 'acceptance does not preempt the running gate');
     assert.equal(h.github().calls.some((a) => a[1] === 'merge'), false);
   } finally {
     fs.writeFileSync(release, '');
@@ -796,12 +857,14 @@ test('accepted merges take the next executor in acceptance order before queued s
   assert.match(text, /^gate queue: T5, T4, T3 \(prioritized: submitted gate request\), T2$/m);
   assert.deepEqual(queue.queued.map((q) => q.id), ['T5', 'T4', 'T3', 'T2']);
   const log = h.logs();
-  assert.deepEqual(log.filter((e) => e.cmd === 'automation' && e.detail.phase === 'running').map((e) => e.task),
-    ['T1', 'T5', 'T4', 'T3', 'T2']);
+  // T5's reaction checks and merges the whole line, so T4's head check moves T5's lease to T4.
+  const holders = log.filter((e) => e.cmd === 'executor' && e.detail.phase === 'running').map((e) => e.task)
+    .filter((id, i, all) => id !== all[i - 1]);
+  assert.deepEqual(holders, ['T1', 'T5', 'T4', 'T3', 'T2']);
   assert.deepEqual(log.filter((e) => e.cmd === 'head check').map((e) => [e.task, e.detail.ok]),
     [['T5', true], ['T4', true]], 'merged-tree tests keep merge priority');
   assert.deepEqual(h.github().calls.filter((a) => a[1] === 'merge').map((a) => a[2]), ['8', '7']);
-  const gates = log.findIndex((e) => e.cmd === 'automation' && e.task === 'T3' && e.detail.phase === 'running');
+  const gates = log.findIndex((e) => e.cmd === 'executor' && e.task === 'T3' && e.detail.phase === 'running');
   assert.ok(log.findLastIndex((e) => e.cmd === 'merge' && e.detail.ok) < gates,
     'both merges finish before a queued submitted gate starts');
 });
@@ -850,8 +913,7 @@ test('gates prioritize runs the last queued task first; status and inbox show th
   fs.writeFileSync(release, '');
   // A zero-timeout wait with no matching type exits 2 once its drain is done.
   assert.equal((await holder).code, 2, 'the held executor finishes and drains the queue');
-  const started = h.logs().filter((e) => e.cmd === 'automation' && e.detail.phase === 'running').map((e) => e.task);
-  assert.deepEqual(started, ['T1', 'T4', 'T2', 'T3'], 'the prioritized T4 runs before T2 and T3, which keep their order');
+  assert.deepEqual(executorStarts(h), ['T1', 'T4', 'T2', 'T3'], 'the prioritized T4 runs before T2 and T3, which keep their order');
   const changes = h.logs().filter(e => e.cmd === 'setting' && e.detail.settings['gates.priority']);
   assert.deepEqual(changes.map(e => e.detail), [{
     command: 'gates prioritize', actor: 'orchestrator', mode: 'cli',
@@ -880,37 +942,171 @@ poll();
   return (n) => ({ stalled: path.join(h.base, `stalled-${n}`), release: path.join(h.base, `release-${n}`) });
 }
 
-test('a request moves only the reactions queued when it was made', async (t) => {
-  const h = setup(t);
+for (const notification of ['review', 'CI completion']) {
+  test(`later notifications share the prioritized task waiter: ${notification}`, async (t) => {
+    const h = priorityFixture(t);
+    const events = path.join(h.state, 'events.jsonl');
+    const { stalled, release } = holdSuite(h);
+    h.ok(['claim', 'T1', '--agent', 'worker']);
+    h.ok(['submit', 'T1', '--sha', h.sha, '--agent', 'worker']);
+    const holder = h.runAsync(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
+    try {
+      await waitFor(stalled, { what: 'the first executor starts' });
+      const offset = fs.statSync(events).size;
+      for (const id of ['T2', 'T3']) {
+        h.ok(['claim', id, '--agent', 'worker']);
+        h.ok(['submit', id, '--sha', h.sha, '--agent', 'worker']);
+      }
+      h.run(['wait', '--after', String(offset), '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
+      assert.deepEqual(h.logs().filter((e) => e.cmd === 'automation queued').map((e) => e.task), ['T2', 'T3']);
+
+      if (notification === 'review') h.reviewer('T3', 'reviewer', h.sha);
+      const before = fs.statSync(events).size;
+      if (notification === 'review') {
+        h.ok(['evidence', 'T3', '--revision', h.revision('T3'), '--type', 'review', '--sha', h.sha, '--ok', '--agent', 'reviewer']);
+      } else {
+        h.ok(['ci', 'completed', 'T3', '--sha', h.sha, '--agent', 'orchestrator']);
+      }
+      h.ok(['gates', 'prioritize', 'T3', '--reason', 'gate fix first', '--agent', 'orchestrator']);
+      const request = h.logs().findLast((e) => e.cmd === 'gates prioritize');
+      const submitted = h.logs().find((e) => e.cmd === 'submit' && e.task === 'T3');
+      assert.deepEqual(request.detail.sources, [submitted.id], 'the request moves the queued suite only');
+      h.run(['wait', '--after', String(before), '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
+      // The later notification reaches the suite T3 already waits for, so its
+      // reaction ends and that waiting reaction carries the task on.
+      const notified = h.logs().findLast((e) => e.task === 'T3'
+        && (notification === 'review' ? e.cmd === 'evidence' && e.detail.type === 'review' : e.cmd === 'ci completed'));
+      assert.equal(h.logs().findLast((e) => e.cmd === 'automation' && e.detail.source === notified.id).detail.phase, 'done');
+      assert.deepEqual(h.logs().filter((e) => e.cmd === 'automation queued').map((e) => e.task), ['T2', 'T3'],
+        'the later notification takes no second place in line');
+
+    } finally {
+      fs.writeFileSync(release, '');
+      assert.equal((await holder).code, 2, 'the held executor finishes and drains the queue');
+    }
+    assert.deepEqual(executorStarts(h), ['T1', 'T3', 'T2'], 'the prioritized task runs ahead of unprioritized work');
+    assert.equal(h.readState('tasks.json').tasks.find((task) => task.id === 'T3').status,
+      notification === 'review' ? 'accepted' : 'submitted', 'the later notification is acted on once its suite passes');
+  });
+}
+
+function priorityFixture(t) {
+  const h = cachedFixture(t, 'task-gate-priority', (repo) => {
+    const h = setup(null, { repo });
+    for (const id of ['T2', 'T3', 'T4']) h.ok(['task', 'add', '--title', id, '--acceptance', 'works']);
+    return { sha: h.sha };
+  });
+  h.logs = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  return h;
+}
+
+test('task gate priority lifecycle and legacy requests', () => {
+  const { gateQueue } = require('../lib/automation');
+  for (const row of [
+    { name: 'later submission', cmd: 'submit', detail: {}, priority: true },
+    { name: 'rework', cmd: 'rework', detail: {}, priority: true },
+    { name: 'clear', cmd: 'gates prioritize', detail: { clear: true }, priority: false },
+    { name: 'accepted then reopened', cmd: 'accept', detail: {}, priority: false },
+    { name: 'cancelled then reopened', cmd: 'task update', detail: { status: 'cancelled' }, priority: false },
+    { name: 'hotfix cancelled then re-recorded', cmd: 'hotfix rework', detail: {}, reopen: 'hotfix', priority: false },
+    ...['rework', 'ci', 'review'].map(gate => ({
+      name: `hotfix ${gate} cancellation then re-recorded`, cmd: 'hotfix rework', detail: { gate }, reopen: 'hotfix', priority: false,
+    })),
+    { name: 'hotfix follow-up superseded then reopened', cmd: 'hotfix supersede', detail: { status: 'cancelled' }, priority: false },
+    { name: 'unrelated update', cmd: 'task update', detail: { title: 'updated' }, priority: true },
+  ]) {
+    const event = (id, cmd, task, detail = {}) => ({ id, cmd, task, detail, at: '2026-10-22T00:00:00Z', agent: 'orchestrator' });
+    const st = {
+      tasks: { tasks: ['T2', 'T3'].map(id => ({ id, status: 'submitted', revision: 2, evidence: [] })) },
+      events: [
+        event('legacy', 'gates prioritize', 'T3', { reason: 'repair first', sources: ['old-head'] }),
+        event('transition', row.cmd, 'T3', row.detail),
+        event('plain', 'submit', 'T2'),
+        event('plain-queued', 'automation queued', 'T2', { source: 'plain' }),
+        event('new-head', row.reopen || 'submit', 'T3'),
+        event('new-queued', 'automation queued', 'T3', { source: 'new-head' }),
+      ],
+    };
+    const queue = gateQueue(st).queued;
+    assert.deepEqual(queue.map(q => q.id), row.priority ? ['T3', 'T2'] : ['T2', 'T3'], row.name);
+    assert.equal(queue.find(q => q.id === 'T3').prioritized !== null, row.priority, row.name);
+  }
+});
+
+for (const row of [
+  { name: 'FIFO', args: [], expected: ['T3', 'T4', 'T2'] },
+  { name: 'repeated request keeps its place', args: ['T3', '--reason', 'updated reason'], expected: ['T3', 'T4', 'T2'] },
+  { name: 'explicit rank', args: ['T4', '--reason', 'rank first', '--rank', '0'], expected: ['T4', 'T3', 'T2'] },
+  { name: 'clear', args: ['T3', '--clear'], expected: ['T4', 'T2', 'T3'] },
+]) {
+  test(`task gate priorities run in request order: ${row.name}`, async (t) => {
+    const h = priorityFixture(t);
+    const events = path.join(h.state, 'events.jsonl');
+    const { stalled, release } = holdSuite(h);
+    h.ok(['claim', 'T1', '--agent', 'worker']);
+    h.ok(['submit', 'T1', '--sha', h.sha, '--agent', 'worker']);
+    const holder = h.runAsync(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
+    try {
+      await waitFor(stalled, { what: 'the first executor holds the queue' });
+      const offset = fs.statSync(events).size;
+      for (const id of ['T2', 'T4', 'T3']) {
+        h.ok(['claim', id, '--agent', 'worker']);
+        h.ok(['submit', id, '--sha', h.sha, '--agent', 'worker']);
+      }
+      h.run(['wait', '--after', String(offset), '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
+      h.ok(['gates', 'prioritize', 'T3', '--reason', 'first request', '--agent', 'orchestrator']);
+      h.ok(['gates', 'prioritize', 'T4', '--reason', 'second request', '--agent', 'orchestrator']);
+      if (row.args.length) h.ok(['gates', 'prioritize', ...row.args, '--agent', 'orchestrator']);
+      const queue = h.json(['status']).gate_queue.queued;
+      assert.deepEqual(queue.map(q => q.id), row.expected);
+      assert.equal(queue.find(q => q.id === 'T3').prioritized === null, row.name === 'clear');
+    } finally {
+      fs.writeFileSync(release, '');
+      assert.equal((await holder).code, 2);
+    }
+    assert.deepEqual(executorStarts(h), ['T1', ...row.expected]);
+  });
+}
+
+test('a task priority survives rework and a new submitted head and can be cleared during rework', async (t) => {
+  const h = priorityFixture(t);
   const events = path.join(h.state, 'events.jsonl');
   const { stalled, release } = holdSuite(h);
-  for (const id of ['T2', 'T3']) h.ok(['task', 'add', '--title', `Change ${id}`, '--acceptance', 'it works', '--kind', 'code']);
   h.ok(['claim', 'T1', '--agent', 'worker']);
   h.ok(['submit', 'T1', '--sha', h.sha, '--agent', 'worker']);
   const holder = h.runAsync(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
-  await waitFor(stalled, { what: 'the first executor starts' });
-  const offset = fs.statSync(events).size;
-  for (const id of ['T2', 'T3']) {
-    h.ok(['claim', id, '--agent', 'worker']);
-    h.ok(['submit', id, '--sha', h.sha, '--agent', 'worker']);
+  try {
+    await waitFor(stalled, { what: 'the first executor holds the queue' });
+    const offset = fs.statSync(events).size;
+    for (const id of ['T2', 'T3']) {
+      h.ok(['claim', id, '--agent', 'worker']);
+      h.ok(['submit', id, '--sha', h.sha, '--agent', 'worker']);
+    }
+    h.run(['wait', '--after', String(offset), '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
+    h.ok(['gates', 'prioritize', 'T3', '--reason', 'keep repair first', '--agent', 'orchestrator']);
+    h.ok(['rework', 'T3', '--reason', 'repair the submitted change', '--agent', 'orchestrator']);
+    fs.appendFileSync(path.join(h.repo, 'README.md'), 'Repair.\n');
+    h.git(['add', 'README.md']);
+    h.git(['commit', '-qm', 'repair']);
+    const head = h.git(['rev-parse', 'HEAD']);
+    h.ok(['claim', 'T3', '--agent', 'worker']);
+    h.ok(['submit', 'T3', '--sha', head, '--agent', 'worker']);
+    h.run(['wait', '--after', String(offset), '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
+    const queue = h.json(['status']).gate_queue.queued;
+    assert.deepEqual(queue.map(q => q.id), ['T3', 'T2']);
+    assert.equal(queue[0].prioritized.reason, 'keep repair first');
+
+    h.ok(['rework', 'T3', '--reason', 'check clearing an idle priority', '--agent', 'orchestrator']);
+    h.ok(['gates', 'prioritize', 'T3', '--clear', '--agent', 'orchestrator']);
+    h.ok(['claim', 'T3', '--agent', 'worker']);
+    h.ok(['submit', 'T3', '--sha', head, '--agent', 'worker']);
+    h.run(['wait', '--after', String(offset), '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
+    assert.deepEqual(h.json(['status']).gate_queue.queued.map(q => [q.id, q.prioritized]), [['T2', null], ['T3', null]]);
+  } finally {
+    fs.writeFileSync(release, '');
+    assert.equal((await holder).code, 2);
   }
-  h.run(['wait', '--after', String(offset), '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
-  assert.deepEqual(h.logs().filter((e) => e.cmd === 'automation queued').map((e) => e.task), ['T2', 'T3']);
-
-  // T3's review is recorded, but no watcher has queued it when the request is made.
-  h.reviewer('T3', 'reviewer', h.sha);
-  const before = fs.statSync(events).size;
-  h.ok(['evidence', 'T3', '--type', 'review', '--sha', h.sha, '--revision', h.revision('T3'), '--ok', '--agent', 'reviewer']);
-  h.ok(['gates', 'prioritize', 'T3', '--reason', 'gate fix first', '--agent', 'orchestrator']);
-  h.run(['wait', '--after', String(before), '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
-  assert.deepEqual(h.logs().filter((e) => e.cmd === 'automation queued').map((e) => e.task), ['T2', 'T3', 'T3'],
-    'the review queues after the request');
-
-  fs.writeFileSync(release, '');
-  assert.equal((await holder).code, 2, 'the held executor finishes and drains the queue');
-  const started = h.logs().filter((e) => e.cmd === 'automation' && e.detail.phase === 'running').map((e) => e.task);
-  assert.deepEqual(started, ['T1', 'T3', 'T2', 'T3'],
-    'the submission queued at the request runs first; the review queued after it keeps its place behind T2');
+  assert.deepEqual(executorStarts(h), ['T1', 'T2', 'T3'], 'clearing restores the older unprioritized task first');
 });
 
 test('a reaction that is running is not queued: status and prioritize leave it out', async (t) => {
@@ -942,8 +1138,7 @@ test('a reaction that is running is not queued: status and prioritize leave it o
   await waitFor(run(3).stalled, { what: 'T3 runs last' });
   fs.writeFileSync(run(3).release, '');
   assert.equal((await holder).code, 2, 'the held executor finishes and drains the queue');
-  const started = h.logs().filter((e) => e.cmd === 'automation' && e.detail.phase === 'running').map((e) => e.task);
-  assert.deepEqual(started, ['T1', 'T2', 'T3'], 'each task runs once, in submission order');
+  assert.deepEqual(executorStarts(h), ['T1', 'T2', 'T3'], 'each task runs once, in submission order');
 });
 
 test('a follow-up queued behind a live reaction can be prioritized and runs first', async (t) => {
@@ -975,8 +1170,11 @@ test('a follow-up queued behind a live reaction can be prioritized and runs firs
 
   fs.writeFileSync(release, '');
   assert.equal((await holder).code, 2, 'the held executor finishes and drains the queue');
-  const started = h.logs().filter((e) => e.cmd === 'automation' && e.detail.phase === 'running').map((e) => e.task);
-  assert.deepEqual(started, ['T1', 'T1', 'T2'], 'the prioritized follow-up runs before T2');
+  assert.deepEqual(executorStarts(h), ['T1', 'T2']);
+  const log = h.logs();
+  const followUp = log.find((e) => e.cmd === 'ci completed' && e.task === 'T1');
+  const ran = log.findIndex((e) => e.cmd === 'automation' && e.detail.source === followUp.id && e.detail.phase === 'running');
+  assert.ok(ran >= 0 && ran < log.findIndex((e) => e.cmd === 'executor' && e.task === 'T2'), 'the prioritized follow-up runs before T2');
 });
 
 test('status shows a blocked follow-up apart from the queue the next free executor takes', async (t) => {
@@ -1011,15 +1209,19 @@ test('status shows a blocked follow-up apart from the queue the next free execut
 
   fs.writeFileSync(run(2).release, '');
   await waitFor(run(3).stalled, { what: 'T3 takes the freed executor before the blocked follow-up' });
-  const started = () => h.logs().filter((e) => e.cmd === 'automation' && e.detail.phase === 'running').map((e) => e.task);
-  assert.deepEqual(started(), ['T1', 'T2', 'T3'], 'the blocked follow-up has not started');
+  const followUp = h.logs().find((e) => e.cmd === 'ci completed' && e.task === 'T1');
+  const ran = (log) => log.findIndex((e) => e.cmd === 'automation' && e.detail.source === followUp.id && e.detail.phase === 'running');
+  assert.deepEqual(executorStarts(h), ['T1', 'T2', 'T3']);
+  assert.equal(ran(h.logs()), -1, 'the blocked follow-up has not started');
   assert.match(h.ok(['status']), /^gate queue: none; blocked behind their running reactions: T1 \(prioritized: CI follow-up first\)$/m);
 
   fs.writeFileSync(run(1).release, '');
   fs.writeFileSync(run(3).release, '');
   assert.equal((await first).code, 2, 'the first executor drains its follow-up');
   assert.equal((await second).code, 2, 'the second executor finishes');
-  assert.deepEqual(started(), ['T1', 'T2', 'T3', 'T1'], 'the prioritized follow-up runs after its own reaction and T3');
+  const log = h.logs();
+  assert.deepEqual(executorStarts(h), ['T1', 'T2', 'T3'], 'the follow-up takes no executor');
+  assert.ok(ran(log) > log.findIndex((e) => e.cmd === 'executor' && e.task === 'T3'), 'the prioritized follow-up runs after its own reaction and T3');
 });
 
 for (const reason of ['unknown mergeability', 'transport error']) {

@@ -1,6 +1,6 @@
 'use strict';
 
-const { waitOnRepo, killPid, killGroup } = require('./signals');
+const { waitOnRepo, childExit, killPid, killGroup } = require('./signals');
 
 const { test, describe } = require('node:test');
 const assert = require('node:assert/strict');
@@ -390,73 +390,104 @@ test('detached supervision renews a short lease during backoff and does not allo
   assert.equal(log(h).filter((e) => e.cmd === 'claim' && !e.detail.renewed).length, 1);
 });
 
-// The supervisor launches a rerun inside the mutation that records it, so the
-// harness can report ready before its retry event commits.
-for (const ahead of [false, true]) {
-  test(`later spawns preserve retrying homes through backoff, retries and queued hook writes${ahead ? ' (the harness runs ahead of its retry record)' : ''}`, async (t) => {
-    const h = makeTaskRepo(t, ['T1', 'T2', 'T3'].map((id) => ({
-      id,
-      args: ['--title', `Task ${id}`, '--tier', 'easy', '--acceptance', 'finish the supervised run'],
-      brief: 'Finish the task.\n',
-    })));
-    const retryReady = path.join(h.base, 'retry-ready');
-    const script = `
-const { fakeAgentEnv } = require(${JSON.stringify(path.join(__dirname, 'agent-env.js'))});
+for (const [launch, launchEnv] of [['platform launch', {}], ['launch handshake', NO_SH]]) {
+  for (const auditOrder of ['before readiness', 'after readiness']) {
+    const lifecycle = launch === 'platform launch' && auditOrder === 'after readiness';
+    const title = lifecycle ? 'later spawns preserve retrying homes through backoff, retries and queued hook writes'
+      : 'retry readiness waits for its monitor receipt';
+    test(`${title} (${launch}, audit ${auditOrder})`, async (t) => {
+      const h = makeTaskRepo(t, (lifecycle ? ['T1', 'T2', 'T3'] : ['T1']).map((id) => ({
+        id,
+        args: ['--title', `Task ${id}`, '--tier', 'easy', '--acceptance', 'finish the supervised run'],
+        brief: 'Finish the task.\n',
+      })));
+      const retryReady = path.join(h.base, 'retry-ready');
+      const auditHeld = path.join(h.base, 'retry-audit-held');
+      const auditGo = path.join(h.base, 'retry-audit-go');
+      const auditHook = path.join(__dirname, 'fixtures', 'supervision-hold-commit.js').replace(/\\/g, '/');
+      const script = `
+    const { fakeAgentEnv } = require(${JSON.stringify(path.join(__dirname, 'agent-env.js'))});
 
-const cp = require('node:child_process');
-const fs = require('node:fs');
-const cli = (args) => cp.execFileSync(process.execPath, [process.argv[1], ...args], { env: fakeAgentEnv(process.env), encoding: 'utf8' });
-const task = process.env.TOWER_CRANE_TASK;
-const agent = process.env.TOWER_CRANE_AGENT;
-const retry = Number(process.env.TOWER_CRANE_RETRY || 0);
-const delay = new Int32Array(new SharedArrayBuffer(4));
-const current = JSON.parse(cli(['task', 'show', task, '--json']));
-if (current.claim?.agent !== agent) cli(['claim', task, '--lease', '1']);
-if (task === 'T1' && retry === 0) {
-  console.log(JSON.stringify({ type: 'item.completed', item: { type: 'command_execution', command: 'first attempt' } }));
-  process.exitCode = 75;
-} else {
-  if (task === 'T1' && retry === 1) {
-    fs.writeFileSync(${JSON.stringify(retryReady)}, '');
-    while (!fs.existsSync(${JSON.stringify(`${retryReady}.go`)})) Atomics.wait(delay, 0, 0, 10);
+    const cp = require('node:child_process');
+    const fs = require('node:fs');
+    const cli = (args) => cp.execFileSync(process.execPath, [process.argv[1], ...args], { env: fakeAgentEnv(process.env), encoding: 'utf8' });
+    const task = process.env.TOWER_CRANE_TASK;
+    const agent = process.env.TOWER_CRANE_AGENT;
+    const retry = Number(process.env.TOWER_CRANE_RETRY || 0);
+    const delay = new Int32Array(new SharedArrayBuffer(4));
+    const current = JSON.parse(cli(['task', 'show', task, '--json']));
+    if (current.claim?.agent !== agent) cli(['claim', task, '--lease', '1']);
+    if (task === 'T1' && retry === 0) {
+      console.log(JSON.stringify({ type: 'item.completed', item: { type: 'command_execution', command: 'first attempt' } }));
+      process.exitCode = 75;
+    } else {
+      if (task === 'T1' && retry === 1) {
+        fs.writeFileSync(${JSON.stringify(retryReady)}, '');
+        while (!fs.existsSync(${JSON.stringify(`${retryReady}.go`)})) Atomics.wait(delay, 0, 0, 10);
+      }
+      console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'last report from ' + agent } }));
+    }
+    `;
+      h.ok(['ladder', 'set', 'easy', '--harness', 'command', '--command', JSON.stringify([process.execPath, '-e', script, BIN, '{prompt}']),
+        '--clear', 'profile', '--clear', 'effort', '--supervision', JSON.stringify({ retries: 1,
+          backoff_ms: lifecycle ? 3500 : 1, max_backoff_ms: lifecycle ? 3500 : 1 })]);
+
+      const backoff = controlledBackoff(h);
+      const started = h.json(['spawn', '--task', 'T1'], {
+        env: { ...backoff.env, ...launchEnv, NODE_OPTIONS: `${backoff.env.NODE_OPTIONS} --require "${auditHook}"`,
+          TOWER_CRANE_TEST_HOLD_COMMIT: JSON.stringify(['spawn retry', auditGo, auditHeld]) },
+      });
+      const home = path.join(h.state, 'homes', started.agent);
+      const retryRecorded = () => log(h).some((e) => e.cmd === 'spawn retry' && e.task === 'T1');
+      let released = false;
+      const releaseAudit = () => {
+        if (!released) { released = true; fs.writeFileSync(auditGo, ''); }
+      };
+      const retryPublished = () => {
+        // Observe before releasing publication so the delayed row first sees no receipt.
+        const recorded = retryRecorded();
+        releaseAudit();
+        return recorded;
+      };
+      try {
+        await waitOnRepo(h, () => h.json(['task', 'show', 'T1']).run?.phase === 'retrying', 'first attempt did not enter backoff');
+
+        if (lifecycle) {
+          const duringBackoff = h.json(['spawn', '--task', 'T2', '--wait'], { env: launchEnv });
+          assert.equal(duringBackoff.code, 0);
+          assert.ok(fs.existsSync(path.join(home, 'hook.json')), 'a later spawn keeps the home while the supervisor waits to retry');
+          assert.equal(h.json(['task', 'show', 'T1']).run.phase, 'retrying');
+        }
+
+        backoff.advance(lifecycle ? 3500 : 1);
+        await waitOnRepo(h, () => fs.existsSync(auditHeld), 'retry transaction did not reach publication');
+        if (auditOrder === 'before readiness') {
+          releaseAudit();
+          await waitOnRepo(h, retryRecorded, 'retry event was not published before checking readiness');
+        }
+        await waitOnRepo(h, () => fs.existsSync(retryReady), 'retry attempt did not start');
+        if (auditOrder === 'after readiness') assert.equal(retryRecorded(), false, 'readiness precedes the held retry audit');
+        await waitOnRepo(h, retryPublished, 'retry event was not recorded');
+        if (lifecycle) {
+          const duringRetry = h.json(['spawn', '--task', 'T3', '--wait'], { env: launchEnv });
+          assert.equal(duringRetry.code, 0);
+          assert.ok(fs.existsSync(path.join(home, 'bin', 'git')), 'a later spawn keeps the home while the retry is running');
+        }
+
+        fs.writeFileSync(`${retryReady}.go`, '');
+        await waitOnRepo(h, () => h.json(['task', 'show', 'T1']).run?.phase === 'waiting', 'retry attempt did not finish');
+        await waitOnRepo(h, () => !detachedAlive({ pid: started.monitor_pid }), 'supervisor did not finish queued hook writes');
+        const audit = log(h).filter((e) => e.task === 'T1' && e.agent === started.agent);
+        assert.match(fs.readFileSync(S.progressFile(h.state, started.agent), 'utf8'), /hook progress/, 'tool activity reached the progress log');
+        assert.equal(audit.findLast((e) => e.cmd === 'hook report')?.detail.report, `last report from ${started.agent}`);
+        assert.equal(audit.findLast((e) => e.cmd === 'hook stop')?.detail.report, `last report from ${started.agent}`);
+        assert.match(audit.find((e) => e.cmd === 'msg' && e.detail.to === 'orchestrator')?.detail.text || '', /without submit/);
+      } finally {
+        releaseAudit();
+        fs.writeFileSync(`${retryReady}.go`, '');
+      }
+    });
   }
-  console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'last report from ' + agent } }));
-}
-`;
-    h.ok(['ladder', 'set', 'easy', '--harness', 'command', '--command', JSON.stringify([process.execPath, '-e', script, BIN, '{prompt}']),
-      '--clear', 'profile', '--clear', 'effort', '--supervision', JSON.stringify({ retries: 1, backoff_ms: 3500, max_backoff_ms: 3500 })]);
-
-    const backoff = controlledBackoff(h);
-    const hold = path.join(__dirname, 'fixtures', 'supervision-hold-commit.js').replace(/\\/g, '/');
-    const started = h.json(['spawn', '--task', 'T1'], { env: ahead ? {
-      ...backoff.env,
-      NODE_OPTIONS: `${backoff.env.NODE_OPTIONS} --require "${hold}"`,
-      TOWER_CRANE_TEST_HOLD_COMMIT: JSON.stringify(['spawn retry', retryReady]),
-    } : backoff.env });
-    const home = path.join(h.state, 'homes', started.agent);
-    await waitOnRepo(h, () => h.json(['task', 'show', 'T1']).run?.phase === 'retrying', 'first attempt did not enter backoff');
-
-    const duringBackoff = h.json(['spawn', '--task', 'T2', '--wait']);
-    assert.equal(duringBackoff.code, 0);
-    assert.ok(fs.existsSync(path.join(home, 'hook.json')), 'a later spawn keeps the home while the supervisor waits to retry');
-    assert.equal(h.json(['task', 'show', 'T1']).run.phase, 'retrying');
-
-    backoff.advance(3500);
-    await waitOnRepo(h, () => fs.existsSync(retryReady), 'retry attempt did not start');
-    await waitOnRepo(h, () => log(h).some((e) => e.cmd === 'spawn retry' && e.task === 'T1'), 'retry event was not recorded');
-    const duringRetry = h.json(['spawn', '--task', 'T3', '--wait']);
-    assert.equal(duringRetry.code, 0);
-    assert.ok(fs.existsSync(path.join(home, 'bin', 'git')), 'a later spawn keeps the home while the retry is running');
-
-    fs.writeFileSync(`${retryReady}.go`, '');
-    await waitOnRepo(h, () => h.json(['task', 'show', 'T1']).run?.phase === 'waiting', 'retry attempt did not finish');
-    await waitOnRepo(h, () => !detachedAlive({ pid: started.monitor_pid }), 'supervisor did not finish queued hook writes');
-    const audit = log(h).filter((e) => e.task === 'T1' && e.agent === started.agent);
-    assert.match(fs.readFileSync(S.progressFile(h.state, started.agent), 'utf8'), /hook progress/, 'tool activity reached the progress log');
-    assert.equal(audit.findLast((e) => e.cmd === 'hook report')?.detail.report, `last report from ${started.agent}`);
-    assert.equal(audit.findLast((e) => e.cmd === 'hook stop')?.detail.report, `last report from ${started.agent}`);
-    assert.match(audit.find((e) => e.cmd === 'msg' && e.detail.to === 'orchestrator')?.detail.text || '', /without submit/);
-  });
 }
 
 // The renewal is due only if the worker's own one-minute claim is the last

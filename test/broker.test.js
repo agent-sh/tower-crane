@@ -487,6 +487,15 @@ test('a worker cannot have the broker run its tests, its cleanup or git', () => 
   for (const role of Object.keys(B.ROLES)) for (const cmd of B.ROLES[role]) assert.ok(!/^(check|worktree|merge|spawn)\b/.test(cmd), `${role}: ${cmd}`);
 });
 
+test('a brokered worker lists any archive but copies one only into its own task and never grants', () => {
+  const job = { state: '/s', task: 'T2', agent: 'worker-T2-1', role: 'worker' };
+  assert.deepEqual(B.authorize(job, ['task', 'archive', 'T1']), ['task', 'archive', '--agent', 'worker-T2-1', '--state', '/s', 'T1']);
+  assert.deepEqual(B.authorize(job, ['task', 'archive', 'T1', '--into', 'T2']).slice(-3), ['T1', '--into', 'T2']);
+  assert.throws(() => B.authorize(job, ['task', 'archive', 'T1', '--into', 'T3']), /works on T2 only, not T3/);
+  assert.throws(() => B.authorize(job, ['task', 'archive', 'T1', '--grant', 'T2']), /cannot grant archives/);
+  assert.throws(() => B.authorize({ ...job, role: 'reviewer' }, ['task', 'archive', 'T1']), /changes state only with/);
+});
+
 // Sets process.env for one test, as the broker's monitor reads it.
 function withEnv(t, vars) {
   const saved = Object.fromEntries(Object.keys(vars).map((key) => [key, process.env[key]]));
@@ -706,6 +715,209 @@ test('a broker start sweeps temporary socket directories of killed brokers and k
   for (const dir of [legacyYoung, live, starting, shared, foreign, ownerLive, shortOwnerLive, ownerGoneYoung, ownerElsewhere, ownerLinked]) assert.equal(fs.existsSync(dir), true, `${dir} stays`);
   assert.ok(fs.lstatSync(path.join(live, 's')).isSocket(), 'the live broker keeps its socket');
   assert.ok(fs.lstatSync(path.join(ownerLive, 's')).isSocket(), 'a live owner keeps a socket that refuses connections');
+});
+
+// A pid namespace no process here runs in, as the host's is to a sandbox.
+const OTHER_PIDNS = 'pid:[1]';
+function ownPidns() {
+  try {
+    return fs.readlinkSync('/proc/self/ns/pid');
+  } catch {
+    return null;
+  }
+}
+function exitedPid() {
+  const r = require('node:child_process').spawnSync(process.execPath, ['-e', '']);
+  assert.equal(r.status, 0);
+  return r.pid;
+}
+
+test('a pid recorded in another pid namespace is unknown and the sweep keeps its directory; the same record from this namespace is swept', { skip: (process.platform === 'win32' || typeof process.getuid !== 'function') && 'Windows uses a named pipe' }, async (t) => {
+  const P = require('../lib/processes');
+  const host = os.hostname();
+  const here = ownPidns();
+  const ns = here ? { pidns: here } : {};
+  const dead = exitedPid();
+  const self = { pid: process.pid, ...P.identity(process.pid) };
+  if (process.platform === 'linux') assert.equal(self.pidns, here, 'identity names the recorder\'s pid namespace');
+  for (const [label, record, expected] of [
+    ['this process, recorded here', self, 'running'],
+    ['this process\'s pid, recorded in another namespace', { ...self, pidns: OTHER_PIDNS }, 'unknown'],
+    ['an exited pid recorded here', { pid: dead, host, ...ns }, 'exited'],
+    ['an exited pid recorded in another namespace', { pid: dead, host, pidns: OTHER_PIDNS }, 'unknown'],
+    ['an exited pid from a record that names no namespace', { pid: dead, host }, 'exited'],
+  ]) {
+    assert.equal(P.processState(record), expected, label);
+    if (record.pidns === OTHER_PIDNS) assert.equal(P.processGroupState(record), 'unknown', `${label}: its group`);
+  }
+  if (process.platform === 'linux') {
+    // A caller that cannot read its own namespace cannot tell it shares the recorded one.
+    const id = require.resolve('../lib/processes');
+    const cached = require.cache[id];
+    const readlink = fs.readlinkSync;
+    t.mock.method(fs, 'readlinkSync', (p, ...rest) => {
+      if (p === '/proc/self/ns/pid') throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
+      return readlink(p, ...rest);
+    });
+    delete require.cache[id];
+    try {
+      const blind = require('../lib/processes');
+      assert.equal(blind.processState({ pid: dead, host, pidns: here }), 'unknown');
+      assert.equal(blind.processState({ pid: dead, host }), 'exited');
+    } finally {
+      require.cache[id] = cached;
+      t.mock.restoreAll();
+    }
+  }
+  // Each directory as a killed broker leaves it, its socket refusing connections.
+  const old = Date.now() - 10 * 60_000;
+  const planted = (owner) => {
+    const dir = fs.mkdtempSync(path.join(firstRoot(), 'tower-crane-'));
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+    const r = require('node:child_process').spawnSync(process.execPath, ['-e', "require('node:net').createServer().listen(process.argv[1], () => process.kill(process.pid, 'SIGKILL'))", path.join(dir, 's')]);
+    assert.equal(r.signal, 'SIGKILL');
+    fs.writeFileSync(path.join(dir, 'owner.json'), JSON.stringify({ started: old, ...owner }), { mode: 0o600 });
+    fs.utimesSync(dir, old / 1000, old / 1000);
+    return dir;
+  };
+  const elsewhere = planted({ pid: dead, host, pidns: OTHER_PIDNS });
+  const gone = planted({ pid: dead, host, ...ns });
+  const s = scratch(t);
+  const broker = await B.start({ ...s.job, broker_harnesses: ['claude'], broker: path.join(s.base, 'brokers', 'worker-T1-1', B.FILE) });
+  t.after(() => broker.close());
+  assert.deepEqual(fs.readdirSync(elsewhere).sort(), ['owner.json', 's'], 'a broker in another pid namespace keeps its directory');
+  assert.equal(fs.existsSync(gone), false, 'an exited broker of this namespace is swept');
+});
+
+test('a live broker keeps its socket directory and answers through another broker start in its runtime directory from a sandbox, where its pid is not visible', { skip: (process.platform === 'win32' || typeof process.getuid !== 'function') && 'Windows uses a named pipe' }, async (t) => {
+  const cp = require('node:child_process');
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'runtime', '--acceptance', 'noted']);
+  const runtime = socketDir(t, 40);
+  withEnv(t, { XDG_RUNTIME_DIR: runtime });
+  const first = { state: h.state, task: 'T1', agent: 'worker-T1-1', role: 'worker', harness: 'claude', broker_harnesses: ['claude'],
+    cwd: h.repo, broker: path.join(h.base, 'w'.repeat(90), B.FILE) };
+  const broker = await B.start(first);
+  t.after(() => broker.close());
+  const { socket } = JSON.parse(fs.readFileSync(first.broker, 'utf8'));
+  const dir = path.dirname(socket);
+  assert.equal(path.dirname(dir), fs.realpathSync(runtime));
+  const owner = path.join(dir, 'owner.json');
+  const recorded = JSON.parse(fs.readFileSync(owner, 'utf8'));
+  // Older than the sweep's grace, as an agent's broker is by the time its tests run.
+  const old = Date.now() - 10 * 60_000;
+  const age = (record) => {
+    fs.writeFileSync(owner, JSON.stringify({ ...record, started: old }));
+    fs.utimesSync(dir, old / 1000, old / 1000);
+  };
+  const legacy = { pid: recorded.pid, host: recorded.host, ...(recorded.start_ticks ? { start_ticks: recorded.start_ticks } : {}) };
+  // A second start as a sandboxed agent's test makes it: in a pid namespace of
+  // its own where it can be made, otherwise with a record whose pid it cannot see.
+  const isolated = process.platform === 'linux'
+    && cp.spawnSync('unshare', ['--user', '--map-current-user', '--pid', '--fork', '--mount-proc', 'true'], { stdio: 'ignore' }).status === 0;
+  const dead = exitedPid();
+  let n = 0;
+  const startHere = async () => (await B.start({ ...first, broker: path.join(h.base, `second-${++n}`, 'w'.repeat(90), B.FILE) })).close();
+  const startIsolated = () => {
+    const job = { ...first, broker: path.join(h.base, `second-${++n}`, 'w'.repeat(90), B.FILE) };
+    const r = cp.spawnSync('unshare', ['--user', '--map-current-user', '--pid', '--fork', '--mount-proc', process.execPath, '-e',
+      "require(process.argv[1]).start(JSON.parse(process.argv[2])).then((b) => { b.close(); process.stdout.write('started') })",
+      path.join(ROOT, 'lib', 'broker.js'), JSON.stringify(job)], { encoding: 'utf8', timeout: 30000, killSignal: 'SIGKILL' }); // wait-allow: a hung start fails this test at its bound
+    assert.equal(r.stdout, 'started', r.stderr);
+  };
+  for (const [label, record, start] of [
+    ...(isolated ? [
+      ['its record, checked from another pid namespace', recorded, startIsolated],
+      ['a record that names no namespace, checked from another pid namespace', legacy, startIsolated],
+    ] : []),
+    ['a record from another pid namespace whose pid this namespace does not show', { ...legacy, pid: dead, pidns: OTHER_PIDNS }, startHere],
+    ['a record that names no namespace and a pid this namespace does not show', { ...legacy, pid: dead }, startHere],
+  ]) {
+    age(record);
+    await start();
+    assert.ok(fs.lstatSync(socket).isSocket(), `${label}: the live broker keeps its socket`);
+    assert.ok(fs.existsSync(owner), `${label}: and its owner record`);
+    const r = await B.forward(first.broker, ['task', 'note', 'T1', label], h.state);
+    assert.equal(r.code, 0, `${label}: ${r.stderr}`);
+  }
+  assert.equal(h.readState('tasks.json').tasks[0].notes.length, isolated ? 4 : 2, 'the first broker answered after each start');
+});
+
+// What a test run from a tree older than the pid namespace check did to a live
+// agent's socket directory from the agent's sandbox (seen 2026-10-22): its
+// broker sweep saw the monitor's pid as exited, unlinked each entry, and its
+// rmdir failed, as the sandbox binds the directory. Where a mount namespace
+// can be made the removal runs in one with the directory bound; elsewhere
+// this process unlinks the entries.
+function sweptInSandbox(dir) {
+  const cp = require('node:child_process');
+  const unlink = "const fs = require('node:fs'), path = require('node:path'); const dir = process.argv[1]; for (const name of fs.readdirSync(dir).sort()) fs.unlinkSync(path.join(dir, name));";
+  const bind = ['--user', '--map-root-user', '--mount', 'sh', '-c', 'mount --bind "$1" "$1" && exec "$2" -e "$3" "$1"', 'sh', dir, process.execPath];
+  const mounted = process.platform === 'linux' && cp.spawnSync('unshare', [...bind, 'true'], { stdio: 'ignore' }).status === 0;
+  if (!mounted) {
+    for (const name of fs.readdirSync(dir)) fs.unlinkSync(path.join(dir, name));
+    return;
+  }
+  const r = cp.spawnSync('unshare', [...bind, `${unlink} try { fs.rmdirSync(dir); process.stdout.write('removed'); } catch (e) { process.stdout.write(e.code); }`], { encoding: 'utf8', timeout: 30000, killSignal: 'SIGKILL' }); // wait-allow: a hung removal fails this test at its bound
+  assert.equal(r.stdout, 'EBUSY', r.stderr);
+}
+
+test('a live broker whose socket and owner record its agent\'s sandbox removed listens there again and answers; one whose directory is gone reports it lost', { skip: process.platform === 'win32' && 'Windows uses a named pipe' }, async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'leaf', '--acceptance', 'noted']);
+  // The granted leaf a spawn makes for a sandboxed worker (agentDir).
+  const leaf = path.join(socketDir(t, 40), `tc-${require('node:crypto').randomBytes(6).toString('hex')}`);
+  const job = { state: h.state, task: 'T1', agent: 'worker-T1-1', role: 'worker', harness: 'claude', broker_harnesses: ['claude'],
+    cwd: h.repo, broker: path.join(h.base, 'brokers', 'worker-T1-1', B.FILE), agent_socket_dir: leaf };
+  const logged = [];
+  const write = process.stderr.write;
+  t.mock.method(process.stderr, 'write', function (chunk, ...rest) {
+    logged.push(String(chunk));
+    return write.call(this, chunk, ...rest);
+  });
+  const broker = await B.start(job);
+  t.after(() => broker.close());
+  const socket = path.join(leaf, 's');
+  const owner = path.join(leaf, 'owner.json');
+  assert.equal(JSON.parse(fs.readFileSync(job.broker, 'utf8')).socket, socket);
+  sweptInSandbox(leaf);
+  assert.deepEqual(fs.readdirSync(leaf), [], 'the sandbox removed the socket and the owner record');
+  const bound = AbortSignal.timeout(10000); // wait-allow: a broker that does not listen again never will; the bound turns that into a prompt failure
+  const back = await waitUntil(() => fs.existsSync(owner) && !!fs.lstatSync(socket, { throwIfNoEntry: false })?.isSocket(), { paths: [leaf], signal: bound, what: 'the broker listens again' })
+    .then(() => true, () => false);
+  assert.ok(back, `the broker listens at ${socket} again and rewrote its owner record: ${fs.readdirSync(leaf)}`);
+  assert.equal(JSON.parse(fs.readFileSync(owner, 'utf8')).pid, process.pid, 'the record names the broker\'s monitor');
+  const r = await B.forward(job.broker, ['task', 'note', 'T1', 'after the sweep'], h.state);
+  assert.equal(r.code, 0, r.stderr);
+  assert.deepEqual(h.readState('tasks.json').tasks[0].notes.map((n) => n.text), ['after the sweep']);
+  assert.ok(logged.some((line) => line.includes(`the state broker's socket ${socket} was removed; listening there again`)), logged.join(''));
+  assert.equal(broker.lost(), null);
+  // Removed outside the sandbox, which may still hold the old directory: lost.
+  fs.renameSync(leaf, `${leaf}.gone`);
+  const gone = AbortSignal.timeout(10000); // wait-allow: a broker that misses its directory never reports it; the bound turns that into a prompt failure
+  const lost = await waitUntil(() => broker.lost(), { paths: [path.dirname(leaf)], signal: gone, what: 'the broker reports its directory gone' })
+    .catch(() => null);
+  assert.equal(lost, `its socket directory ${leaf} is gone`);
+  assert.ok(logged.some((line) => line.includes(`the state broker is lost: its socket directory ${leaf} is gone`)), logged.join(''));
+});
+
+test('an agent that reaches its broker at no address hears each address\'s error, the socket\'s first', { skip: process.platform === 'win32' && 'Windows uses a named pipe' }, async (t) => {
+  const s = scratch(t);
+  const file = path.join(s.base, B.FILE);
+  const socket = path.join(socketDir(t), 'gone');
+  // A port nothing listens on, as the broker's is from inside claude's sandbox, whose loopback is its own.
+  const port = await new Promise((resolve) => {
+    const srv = require('node:net').createServer().listen(0, '127.0.0.1', () => {
+      const { port: p } = srv.address();
+      srv.close(() => resolve(p));
+    });
+  });
+  fs.writeFileSync(file, JSON.stringify({ socket, host: '127.0.0.1', port, token: 'x', state: fs.realpathSync(s.state) }));
+  const expected = new RegExp(`cannot reach the state broker at ${socket.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\(ENOENT\\) or 127\\.0\\.0\\.1:${port} \\(ECONNREFUSED\\)`);
+  await assert.rejects(B.forward(file, ['task', 'note', 'T1', 'x'], s.state), expected);
+  await assert.rejects(B.request(file, { gh: ['pr', 'view'] }, { stdout() {}, stderr() {} }), expected);
 });
 
 test('a FIFO planted as an owner record does not block a broker start', { skip: (process.platform === 'win32' || typeof process.getuid !== 'function') && 'Windows has no FIFOs' }, (t) => {
