@@ -8,7 +8,7 @@ const cp = require('node:child_process');
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const { createRepoSeed, cleanupRepoSeed, FOREGROUND_MAINTENANCE } = require('./repo-seed');
-const { tempRoot, liveRoot } = require('./tmp-root');
+const { tempRoot, liveRoot, markFixtureOwner, OWNER_FILE } = require('./tmp-root');
 const { readPublished } = require('./atomic-file');
 const UserConfigGuard = require('./fixtures/user-config-guard');
 const { fakeAgentEnv, ACCOUNT_HOME } = require('./agent-env');
@@ -92,6 +92,7 @@ function installHarnessGuard() {
   if (!guarded.length) return null;
   fs.mkdirSync(TMP_ROOT, { recursive: true });
   const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(TMP_ROOT, 'tower-crane-harness-guard-')));
+  markFixtureOwner(dir);
   const hits = path.join(dir, 'hits.jsonl');
   const argv = (name) => [process.execPath, path.join(__dirname, 'fixtures', 'harness-guard.js'), hits, name];
   for (const name of guarded) {
@@ -273,6 +274,7 @@ function pinLiveRung(h, harness, rung = 'small') {
   pinRung(h, rung, { harness, [field]: process.env[variable], ...(provider ? { provider } : {}) });
   const envFile = harness === 'claude' ? process.env.TOWER_CRANE_LIVE_CLAUDE_ENV_FILE : undefined;
   if (envFile) h.ok(['ladder', 'set', rung, '--env_file', envFile]);
+  if (harness === 'codex') liveCodexCredential(h, rung);
   // The fixture runs a real harness on purpose, so its agents get the PATH
   // without the guard: the guard's stand-ins are test plumbing, not programs
   // the agent's sandbox should open.
@@ -280,6 +282,30 @@ function pinLiveRung(h, harness, rung = 'small') {
     const key = Object.keys(h.env).find((k) => k.toUpperCase() === 'PATH') || 'PATH';
     h.env[key] = String(h.env[key] || '').split(path.delimiter).filter((dir) => dir !== HARNESS_GUARD.dir).join(path.delimiter);
   }
+}
+
+// codex on Bedrock took its bearer token from the .env in the user's codex
+// home, which spawn no longer links into the agent's home. A live Bedrock
+// rung names a credential in the env store that reads the same variable, so
+// the token reaches codex through its auth command, never its environment.
+// The live tests' codex home is the user's own, as codexLogin and their
+// spawn environments make it.
+function liveCodexCredential(h, rung) {
+  const home = process.env.CODEX_HOME || path.join(require('node:os').homedir(), '.codex');
+  if (require('../lib/ladder').codexProvider({ profile: process.env.TOWER_CRANE_LIVE_PROFILE }, h.env, { codex: home }) !== 'amazon-bedrock') return;
+  const envFile = path.join(home, '.env');
+  let vars;
+  try { vars = require('../lib/spawn-settings').parseEnv(readPublished(envFile, 'utf8'), envFile); }
+  catch (e) { if (e.code === 'ENOENT') return; throw e; }
+  if (!vars.AWS_BEARER_TOKEN_BEDROCK) return;
+  const file = h.env.TOWER_CRANE_CONFIG;
+  let user = {};
+  try { user = JSON.parse(readPublished(file, 'utf8')); }
+  catch (e) { if (e.code !== 'ENOENT') throw e; }
+  user.credentials = { ...user.credentials, 'live-codex-bedrock': { store: 'env', env_file: envFile, var: 'AWS_BEARER_TOKEN_BEDROCK' } };
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify(user));
+  h.ok(['ladder', 'set', rung, '--credential', 'live-codex-bedrock']);
 }
 
 // Init copies defaults from the user layer. Seed that layer only for the call,
@@ -333,6 +359,7 @@ function fixtureDir(setup, root = TMP_ROOT) {
   fs.mkdirSync(root, { recursive: true });
   const dir = fs.mkdtempSync(path.join(root, 'tower-crane-'));
   try {
+    markFixtureOwner(dir);
     return setup(fs.realpathSync.native(dir));
   } catch (error) {
     fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
@@ -395,7 +422,8 @@ function makeTaskRepo(t, tasks, { projectArgs = [] } = {}) {
 // Git and state paths still name the source; the caller repairs them.
 function copyRepo(t, source) {
   return fixtureDir((base) => {
-    fs.cpSync(source, base, { recursive: true });
+    // The copy belongs to this process, even when the source's creator is gone.
+    fs.cpSync(source, base, { recursive: true, filter: (file) => file !== path.join(source, OWNER_FILE) });
     return context(t, base);
   });
 }
