@@ -188,7 +188,7 @@ test('gate commands carry the project gate weight to the containment launcher', 
 
 test('scope arguments enforce CPUWeight after optional scope properties', () => {
   const args = C.scopeArguments('unit.scope', 'agents.slice', { tasks_max: 64, memory_max_bytes: 1024 },
-    { CPUWeight: '999' }, 7);
+    { CPUWeight: '999' }, undefined, 7);
   assert.equal(args.filter((arg) => arg.startsWith('CPUWeight=')).at(-1), 'CPUWeight=7');
 });
 
@@ -242,8 +242,8 @@ test('partial CPU delegation retains kernel caps and degrades scheduling to nice
   const baselineNice = require('node:os').getPriority();
   const rows = [
     ['nested without CPU', 'nested', { TC_FAKE_CPU_CONTROLLERS: 'memory pids' }, 1, 'nice'],
-    ['D-Bus without CPU', 'dbus', { TC_FAKE_CPU_CONTROLLERS: 'memory pids' }, 1, 'nice'],
-    ['CLI without CPU', 'cli', { TC_FAKE_CPU_CONTROLLERS: 'memory pids' }, 1, 'nice'],
+    ['automatic scope without CPU', 'automatic', { TC_FAKE_CPU_CONTROLLERS: 'memory pids' }, 1, 'nice'],
+    ['configured scope without CPU', 'configured', { TC_FAKE_CPU_CONTROLLERS: 'memory pids' }, 1, 'nice'],
     ['nested normal agent without CPU', 'nested', { TC_FAKE_CPU_CONTROLLERS: 'memory pids' }, 100, 'nice'],
     ['nested configured agent without CPU', 'nested', { TC_FAKE_CPU_CONTROLLERS: 'memory pids' }, 10, 'nice'],
     ['nested CPU disappears during enable', 'nested', { TC_FAKE_CPU_ENABLE_ERROR: 'ENOENT' }, 1, 'nice'],
@@ -251,8 +251,8 @@ test('partial CPU delegation retains kernel caps and degrades scheduling to nice
     ['nested CPU weight permission denied', 'nested', { TC_FAKE_CPU_WEIGHT_ERROR: 'EPERM' }, 1, 'nice'],
     ['nested CPU weight disappears', 'nested', { TC_FAKE_CPU_WEIGHT_ERROR: 'ENOENT' }, 1, 'nice'],
     ['nested CPU present', 'nested', {}, 1, 'cgroup'],
-    ['D-Bus CPU present', 'dbus', {}, 1, 'cgroup'],
-    ['CLI CPU present', 'cli', {}, 1, 'cgroup'],
+    ['automatic scope CPU present', 'automatic', {}, 1, 'cgroup'],
+    ['configured scope CPU present', 'configured', {}, 1, 'cgroup'],
   ];
   for (const [label, mode, extra, weight, backend] of rows) {
     const parent = path.join(h.base, label.replaceAll(' ', '-'));
@@ -266,10 +266,11 @@ test('partial CPU delegation retains kernel caps and degrades scheduling to nice
     const report = path.join(h.base, `${path.basename(parent)}.json`);
     const limits = { tasks_max: 64, memory_max_bytes: 536870912 };
     const args = [runner, JSON.stringify({ ...limits, cpuWeight: weight }),
-      mode === 'nested' ? parent : mode === 'dbus' ? `@${unit}:test-fence.slice` : '', unit,
+      mode === 'nested' ? parent : '', unit,
       process.execPath, '-e', 'console.log(JSON.stringify({ nice: require("node:os").getPriority(), scoped: process.env.TOWER_CRANE_SCOPED }))'];
-    const argv = mode === 'cli' ? [fake, ...C.scopeArguments(unit, 'test-fence.slice', limits, {}, weight), process.execPath, ...args]
-      : ['--require', fake, ...args];
+    const argv = mode === 'nested' ? ['--require', fake, ...args]
+      : [fake, ...C.scopeArguments(unit, 'test-fence.slice', limits,
+        mode === 'configured' ? { CPUWeight: '999' } : {}, undefined, weight), process.execPath, ...args];
     const result = await gates.treeExec(process.execPath, argv, {
       env: { ...h.env, TC_FAKE_CGROUP: mode === 'nested' ? parent : group, TC_FAKE_SYSTEMD_LOG: path.join(parent, 'manager.jsonl'),
         TOWER_CRANE_CONTAINMENT_REPORT: report, ...extra },

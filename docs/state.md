@@ -16,6 +16,11 @@ Agents default to CPU weight `100` and gates to `1`, set through
 work get CPU first under contention. See [CPU weights](state/containment.md#cpu-weights)
 for the range, fallback and ancestor behavior.
 
+Containment probes and outer scopes use the systemd private peer transport with
+the same resolved runtime directory. New user scopes require the caller's own
+user-manager ancestry or confirmed linger; otherwise automatic launches use the
+watchdog with a logout warning. See [resource containment](state/containment.md#resource-containment).
+
 ## Compatibility anchors
 
 Existing links use these anchors. Follow the link to the contract in its area.

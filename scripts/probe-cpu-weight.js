@@ -34,7 +34,7 @@ function readback() {
   const group = path.dirname(C.currentGroup());
   const unit = path.basename(group);
   const weight = Number(cp.execFileSync('systemctl', ['--user', 'show', unit, '-p', 'CPUWeight', '--value'],
-    { encoding: 'utf8', timeout: 5000 }).trim());
+    { env: C.managerEnv(process.env), encoding: 'utf8', timeout: 5000 }).trim());
   return { unit, group, systemd_weight: weight, kernel_weight: Number(fs.readFileSync(path.join(group, 'cpu.weight'), 'utf8')) };
 }
 
@@ -54,12 +54,14 @@ async function scope(mode, weight, action) {
   const unit = `tower-crane-${process.pid}-${crypto.randomBytes(8).toString('hex')}.scope`;
   const slice = C.callerSlice();
   const limits = caps();
-  const runner = [process.execPath, RUNNER, JSON.stringify({ ...limits, cpuWeight: weight }),
-    mode === 'dbus' ? `@${unit}:${slice}` : '', unit, process.execPath, __filename, action];
-  const argv = mode === 'dbus' ? runner
-    : ['systemd-run', ...C.scopeArguments(unit, slice, limits, { CPUWeight: '999' }, weight), ...runner];
+  const env = { ...process.env, NODE_OPTIONS: '' };
+  const runner = [process.execPath, RUNNER,
+    JSON.stringify({ ...limits, cpuWeight: weight, xdg_runtime_dir: env.XDG_RUNTIME_DIR ?? null }),
+    '', unit, process.execPath, __filename, action];
+  const properties = mode === 'configured' ? { CPUWeight: '999' } : {};
+  const argv = ['systemd-run', ...C.scopeArguments(unit, slice, limits, properties, C.expandArguments(env), weight), ...runner];
   const result = await gates.treeExec(argv[0], argv.slice(1), {
-    cwd: ROOT, env: { ...process.env, NODE_OPTIONS: '' }, timeout: TIMEOUT,
+    cwd: ROOT, env: C.managerEnv(env), timeout: TIMEOUT,
   });
   return parseRun(result, `${mode} scope ${action}`);
 }
@@ -251,7 +253,7 @@ async function main() {
   assert.equal(fs.statSync('/').uid, 0, 'run outside the worker sandbox with the host root mapping');
   assert.ok(C.canScope(), 'requires delegated cgroups and a user systemd manager');
   const results = [];
-  for (const mode of ['dbus', 'cli']) {
+  for (const mode of ['automatic', 'configured']) {
     for (const weight of [G.cpuWeight({}, 'worker'), G.cpuWeight({}, 'tests'), G.cpuWeight({ governor: { cpu_weight: { gates: 7 } } }, 'tests')]) {
       const result = await scope(mode, weight, '--readback');
       assert.equal(result.systemd_weight, weight);
@@ -260,7 +262,7 @@ async function main() {
     }
   }
   console.log(JSON.stringify({ scope_readback: results }));
-  console.log(JSON.stringify({ build_contention: await scope('dbus', 100, '--benchmark') }));
+  console.log(JSON.stringify({ build_contention: await scope('automatic', 100, '--benchmark') }));
 }
 
 if (require.main === module) main().catch((error) => { console.error(error.stack); process.exitCode = 1; });
