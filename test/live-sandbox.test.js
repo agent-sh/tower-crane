@@ -740,6 +740,9 @@ test('a real codex sandbox starts for a home among 5,000 entries and reads nothi
 // fails in git itself and never reaches a server.
 // With inject, the push runs with NODE_OPTIONS asking node to load a file
 // first, which the shim must not do. before runs first, extra after the push.
+// pushErr is the shim's own line: under the tests gate's coverage proof the
+// shim inherits a NODE_V8_COVERAGE the sandbox makes read-only, and node adds
+// an EROFS line after it at exit.
 // The claude probe leaves it out: a model asked to run it declined
 // (2026-10-14), and the stub test in isolation-shims.test.js covers claude's shim.
 function shimProbe(h, out, { before = '', extra = '', inject = false } = {}) {
@@ -754,7 +757,7 @@ function shimProbe(h, out, { before = '', extra = '', inject = false } = {}) {
     + `for(const t of ["git","gh"]){const p=cp.spawnSync("sh",["-c","command -v "+t],{encoding:"utf8"}).stdout.trim();o[t]=p;`
     + `try{o[t+"Shim"]=fs.readFileSync(p,"utf8").includes("shim.js")}catch(e){o[t+"Shim"]="ERR "+e.code}}`
     + `const r=cp.spawnSync("git",["push","origin","HEAD:refs/heads/tower-crane/T999-another-task"],{cwd:${JSON.stringify(repo)},encoding:"utf8",env:{...process.env,GIT_TERMINAL_PROMPT:"0"${inject ? `,NODE_OPTIONS:${JSON.stringify(`--require=${evil}`)}` : ''}}});`
-    + `o.push=r.status;o.pushErr=String(r.stderr).trim().split("\\n").pop();o.injected=fs.existsSync(${JSON.stringify(injected)});${extra}fs.writeFileSync(${JSON.stringify(out)},JSON.stringify(o))`;
+    + `o.push=r.status;const errs=String(r.stderr).trim().split("\\n");o.pushErr=errs.find((l)=>l.startsWith("tower-crane:"))||errs.pop();o.injected=fs.existsSync(${JSON.stringify(injected)});${extra}fs.writeFileSync(${JSON.stringify(out)},JSON.stringify(o))`;
 }
 
 function assertShims(h, seen, label) {
