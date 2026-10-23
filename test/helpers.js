@@ -294,12 +294,12 @@ function liveCodexCredential(h, rung) {
   if (require('../lib/ladder').codexProvider({ profile: process.env.TOWER_CRANE_LIVE_PROFILE }, h.env, { codex: home }) !== 'amazon-bedrock') return;
   const envFile = path.join(home, '.env');
   let vars;
-  try { vars = require('../lib/spawn-settings').parseEnv(fs.readFileSync(envFile, 'utf8'), envFile); }
+  try { vars = require('../lib/spawn-settings').parseEnv(readPublished(envFile, 'utf8'), envFile); }
   catch (e) { if (e.code === 'ENOENT') return; throw e; }
   if (!vars.AWS_BEARER_TOKEN_BEDROCK) return;
   const file = h.env.TOWER_CRANE_CONFIG;
   let user = {};
-  try { user = JSON.parse(fs.readFileSync(file, 'utf8')); }
+  try { user = JSON.parse(readPublished(file, 'utf8')); }
   catch (e) { if (e.code !== 'ENOENT') throw e; }
   user.credentials = { ...user.credentials, 'live-codex-bedrock': { store: 'env', env_file: envFile, var: 'AWS_BEARER_TOKEN_BEDROCK' } };
   fs.mkdirSync(path.dirname(file), { recursive: true });

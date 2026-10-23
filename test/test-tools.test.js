@@ -10,6 +10,7 @@ const { makeRepo, ROOT, detachedAlive, pinLiveRung } = require('./helpers');
 const { tempRoot, liveRoot } = require('./tmp-root');
 const { HUNG_TEST_MS, killGroup } = require('./signals');
 const { socketDir } = require('./socket-dir');
+const { readPublished } = require('./atomic-file');
 
 test('test temp roots prefer explicit overrides and otherwise use the user cache on each platform', () => {
   const home = path.join(ROOT, 'fixture-home');
@@ -435,7 +436,7 @@ test('a live codex probe on Bedrock reads the codex home .env token through an e
     pinLiveRung(h, 'codex');
     const label = `${profile} ${JSON.stringify(env)}`;
     assert.equal(h.readState('project.json').ladder.small.credential, credential, label);
-    const user = fs.existsSync(h.env.TOWER_CRANE_CONFIG) ? JSON.parse(fs.readFileSync(h.env.TOWER_CRANE_CONFIG, 'utf8')) : {};
+    const user = fs.existsSync(h.env.TOWER_CRANE_CONFIG) ? JSON.parse(readPublished(h.env.TOWER_CRANE_CONFIG, 'utf8')) : {};
     assert.deepEqual(user.credentials, credential && { [credential]: { store: 'env', env_file: path.join(home, '.env'), var: 'AWS_BEARER_TOKEN_BEDROCK' } }, label);
     if (credential) assert.match(h.ok(['credentials', 'check', credential]), /env file/, label);
   }
