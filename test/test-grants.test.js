@@ -292,7 +292,8 @@ async function brokerFixture(t) {
   t.after(() => broker.close());
   const raw = async () => {
     const b = JSON.parse(fs.readFileSync(file, 'utf8'));
-    const c = { sock: net.connect(b.port, b.host), lines: [], closed: false };
+    // Wherever the broker listens on this platform: its socket or named pipe, else its TCP port.
+    const c = { sock: b.socket ? net.connect(b.socket) : net.connect(b.port, b.host), lines: [], closed: false };
     t.after(() => c.sock.destroy());
     let buf = '';
     c.sock.setEncoding('utf8').on('data', (d) => {
@@ -340,4 +341,18 @@ test('a broker connection whose line outgrows a request is ended, and its lease 
   await waitUntil(() => c.closed || c.lines.length > 1, { what: 'an answer or the end of the connection' });
   assert.equal(c.closed, true, 'the broker ends a connection whose line outgrows a request');
   await waitUntil(() => leases(h).length === 0, { what: 'the lease of the ended connection is released' });
+});
+
+test('the core kept back covers a little other work, so a 4-core host with a gate and its runner still grants three threads', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  const host = h.env.TOWER_CRANE_HOST_ROOT;
+  // Half a core of other work: the gate's CLI, the CI agent.
+  writeHost(host, { cores: 4, load: 0.5 });
+  const lease = G.testLease({ env: h.env, stateDir: h.state }, { requested: 3, task: 'T1' });
+  t.after(() => lease.release());
+  assert.equal(lease.grant, 3);
+  // Past one core, other work comes off the budget.
+  writeHost(host, { cores: 4, load: 2 });
+  assert.equal(lease.refresh().grant, 2);
 });
