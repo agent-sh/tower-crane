@@ -99,6 +99,12 @@ module.exports = function stub(harness) {
     report.tmpdir = process.env.TMPDIR || null;
     // Names only: what claude would hand its commands, before its sandbox.
     report.envNames = Object.keys(process.env).sort();
+    report.claudeRoute = {
+      nonceUrl: /^http:\/\/127\.0\.0\.1:\d+\/[\w-]+$/.test(process.env.ANTHROPIC_BASE_URL || ''),
+      authHash: require('node:crypto').createHash('sha256').update(process.env.ANTHROPIC_AUTH_TOKEN || '').digest('hex').slice(0, 12),
+      bedrock: process.env.CLAUDE_CODE_USE_BEDROCK,
+      model: process.env.ANTHROPIC_MODEL,
+    };
     report.flagSettings = after('--settings') ? JSON.parse(after('--settings')) : null;
     if (!args.includes('--strict-mcp-config')) Object.assign(report.mcp, json(global).mcpServers || {});
     if (after('--mcp-config')) Object.assign(report.mcp, json(after('--mcp-config')).mcpServers || {});

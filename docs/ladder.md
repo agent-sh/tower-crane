@@ -49,11 +49,69 @@ A primary rung is `{ "harness", "model", "profile", "provider", "effort", "args"
 
 `tower-crane ladder set hard --supervision '{"retries":5,"backoff_ms":30000,"max_backoff_ms":600000,"stall_ms":300000,"progress_paths":["lib","test"]}'` sets retry and progress checks for that rung. `--clear supervision` restores the defaults. Reruns keep the resolved route. Codex and command adapters resume their session; Claude starts fresh with the brief and an interruption note. [State: supervision](state.md#projectjson) records the default values and their reasons.
 
-Fallbacks are personal settings. In `~/.config/tower-crane/config.json` (or `TOWER_CRANE_CONFIG`), set `ladder.easy.fallbacks` to `[{"harness":"codex","profile":"sol","effort":"high"},{"harness":"claude","model":"opus","effort":"medium"}]`. They apply to the easy rung in every project, even when the project defines its own primary. A user rung may contain only fallbacks. `ladder set RUNG --fallbacks JSON` edits this personal list through the authority and audit check; it does not write project fallbacks. Edit it separately from primary fields. Operational route fields need no owner answer; command, environment, sandbox and other owner-required changes open an approval, as do new routes that widen reach. A route that carries authority (a grant, an unsandboxed or `command` harness, `web_mcp`, `mcp` or a non-built-in tool) written into the file any other way is not approved: spawn skips that route and says so ([fallback route grants](state.md#fallback-route-grants)). The approval binds the user file, rung and full requested list. `ladder show` prints their user-file source and marks routes with unavailable harnesses, profiles or model settings; the supervisor skips these routes. The next route runs after an outage exhausts the current route's retries, or immediately after a structured harness policy refusal. Each fallback inherits the resolved harness and supervision unless it overrides them. A route that inherits the harness moves with its rung. When it names a model that harness cannot run or a tool it does not know, `ladder set` and `ladder harness` print a `notice:` for it when they move the rung, `ladder show` lists it as unable to run instead of asking for an approval, and spawn skips it; the user file is not edited. A route that names its own harness is not judged. One that sets an `env_file` or a provider endpoint in `env` (`OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL` or its Bedrock, Vertex or Foundry variant) may reach another vendor's model through a proxy, so only its tools are judged. A moved route that carries authority needs the owner's approval again, because its pin covers the harness it resolves to. Research Claude fallbacks also inherit the primary `web_mcp` unless they specify their own web server; other harnesses do not inherit it. An inherited or explicit web MCP cannot combine with `mcp`. Other fields are independent. Every switch starts a fresh session with the original brief, keeps the claim and worktree, resets the retry budget, emits `spawn-fallback` for the orchestrator, and attributes spend to the route that ran. Use `ladder set RUNG --clear fallbacks` to remove the override, or `--fallbacks '[]'` to empty it. No fallback is enabled by default.
+Fallbacks are personal settings. In `~/.config/tower-crane/config.json` (or `TOWER_CRANE_CONFIG`), set `ladder.easy.fallbacks` to `[{"harness":"codex","profile":"sol","effort":"high"},{"harness":"claude","model":"opus","effort":"medium"}]`. They apply to the easy rung in every project, even when the project defines its own primary. A user rung may contain only fallbacks. `ladder set RUNG --fallbacks JSON` edits this personal list through the authority and audit check; it does not write project fallbacks. Edit it separately from primary fields. Operational route fields need no owner answer; command, environment, sandbox and other owner-required changes open an approval, as do new routes that widen reach. A route that carries authority (a grant, `credential`, `upstream`, an unsandboxed or `command` harness, `web_mcp`, `mcp` or a non-built-in tool) written into the file any other way is not approved: spawn skips that route and says so ([fallback route grants](state.md#fallback-route-grants)). The approval binds the user file, rung and full requested list. `ladder show` prints their user-file source and marks routes with unavailable harnesses, profiles or model settings; the supervisor skips these routes. The next route runs after an outage exhausts the current route's retries, or immediately after a structured harness policy refusal. Each fallback inherits the resolved harness and supervision unless it overrides them. A route that inherits the harness moves with its rung. When it names a model that harness cannot run or a tool it does not know, `ladder set` and `ladder harness` print a `notice:` for it when they move the rung, `ladder show` lists it as unable to run instead of asking for an approval, and spawn skips it; the user file is not edited. A route that names its own harness is not judged. One that sets an `env_file` or a provider endpoint in `env` (`OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL` or its Bedrock, Vertex or Foundry variant) may reach another vendor's model through a proxy, so only its tools are judged. A moved route that carries authority needs the owner's approval again, because its pin covers the harness it resolves to. Research Claude fallbacks also inherit the primary `web_mcp` unless they specify their own web server; other harnesses do not inherit it. An inherited or explicit web MCP cannot combine with `mcp`. Other fields are independent. Every switch starts a fresh session with the original brief, keeps the claim and worktree, resets the retry budget, emits `spawn-fallback` for the orchestrator, and attributes spend to the route that ran. Use `ladder set RUNG --clear fallbacks` to remove the override, or `--fallbacks '[]'` to empty it. No fallback is enabled by default.
 
 Claude rungs and routes also take `provider: "anthropic"` or `"bedrock"`. An Anthropic Opus primary can put `{"provider":"bedrock","model":"opus"}` first in its personal fallbacks; a Bedrock primary can put Anthropic first. Bedrock uses `global.anthropic.claude-opus-5-5` and Anthropic uses `claude-opus-5-5`, with corresponding global/plain ids for Fable, Sonnet and Haiku. Routing overrides inherited provider selectors and preserves the original user's authentication through environment, login links and helper commands. Bedrock keeps paths to the user's AWS files across isolated homes. A rung or route that names a `credential` takes its token from the OS store instead: claude on Bedrock through a per-spawn loopback broker, claude on Anthropic through `apiKeyHelper`, codex through its provider's auth command ([state.md](state.md#credentials)). `ladder show` marks missing local credentials or region configuration as unable to run; fallback providers with these problems are skipped. Checks use configuration presence only, without executing helpers or calling a provider. Spend records include the provider that ran. Without an explicit provider, the user's Claude provider settings remain in effect.
 
 Presence checks include inherited, project and rung environment names. A configured `env_file` defers readiness until real launch; previews never read it. File and literal AWS routing overrides take effect in the launch environment. Reviewer candidates use the same provider model identity as spend when comparing median costs.
+
+## Anthropic-compatible upstreams
+
+A Claude rung can send Messages API requests through the per-spawn credential broker. Store the token under a credential name first. The owner then sets `provider: "anthropic"`, `credential` and `upstream` on the rung. The endpoint receives the credential; Claude receives the nonce URL and a placeholder auth token. Bedrock and `upstream` cannot be combined. Model IDs pass through as written, and background model calls use the selected model.
+
+For z.ai's coding plan:
+
+```json
+{
+  "harness": "claude",
+  "provider": "anthropic",
+  "model": "glm-5.3",
+  "credential": "glm-api-key",
+  "upstream": {
+    "base_url": "https://api.z.ai/api/anthropic",
+    "auth": "bearer"
+  }
+}
+```
+
+Apply it with `tower-crane ladder set medium --harness claude --provider anthropic --model glm-5.3 --clear profile --credential glm-api-key --upstream '{"base_url":"https://api.z.ai/api/anthropic","auth":"bearer"}' --agent owner`. `--clear upstream` removes the endpoint.
+
+A local DS4.1F server uses the same shape:
+
+```json
+{
+  "harness": "claude",
+  "provider": "anthropic",
+  "model": "ds4.1f",
+  "credential": "local-server-key",
+  "upstream": {
+    "base_url": "http://127.0.0.1:8090",
+    "auth": "x-api-key"
+  }
+}
+```
+
+The server must implement Anthropic's Messages API, including the streaming response format. Store a placeholder credential when a trusted local server accepts any key. A base path such as `/anthropic` is kept before `/v1/messages`, `/v1/messages/count_tokens` or `/v1/models`.
+
+For a non-Anthropic API, run a translation gateway such as LiteLLM and point the same rung shape at its Anthropic Messages endpoint. For example, a LiteLLM route named `muse-wonder-full-1.0` can serve Meta Muse:
+
+```json
+{
+  "harness": "claude",
+  "provider": "anthropic",
+  "model": "muse-wonder-full-1.0",
+  "credential": "litellm-proxy-key",
+  "upstream": {
+    "base_url": "http://127.0.0.1:4000",
+    "auth": "bearer",
+    "drop_cache_ttl": true
+  }
+}
+```
+
+Configure the Meta subscription key on the gateway, and store the gateway's own auth credential as `litellm-proxy-key`. A native Anthropic-compatible Meta endpoint can replace that URL and use `meta-api-key` directly. `drop_cache_ttl: true` removes every `cache_control.ttl`, which accommodates Meta's rejection of Claude Code's one-hour TTL. Use LiteLLM for xAI Grok's OpenAI-compatible API too; xAI's deprecated `/v1/messages` route is not a stable direct upstream.
+
+`auth` must be `bearer` or `x-api-key`; `drop_cache_ttl` defaults to false. URLs cannot contain credentials, queries or fragments. The broker strips client auth headers, caches the stored credential for one minute and re-reads it on the request after a 401 or 403. Only the three API paths above pass. The upstream URL and auth configuration, including those on personal fallback routes, need the owner's approval because they choose where a credential goes.
 
 ## How each harness dispatches
 
