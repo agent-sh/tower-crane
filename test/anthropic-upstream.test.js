@@ -9,7 +9,19 @@ const path = require('node:path');
 const { NO_STUBS, setup, spawn } = require('./isolation-helpers');
 const { makeRepo } = require('./helpers');
 
-const digest = (value) => crypto.createHash('sha256').update(value || '').digest('hex').slice(0, 12);
+// A run-specific fingerprint cannot be reused to identify a credential in another run.
+const fingerprintKey = crypto.randomBytes(32);
+const digest = (value, key = fingerprintKey) => crypto.createHmac('sha256', key).update(value || '').digest('hex').slice(0, 12);
+
+test('fake credential fingerprints are scoped to each run for bearer, API-key and rotated values', () => {
+  const keys = [crypto.randomBytes(32), crypto.randomBytes(32)];
+  for (const value of ['tc-test-fake-bearer', 'tc-test-fake-api-key', 'tc-test-fake-rotated', 'tower-crane-placeholder']) {
+    assert.equal(digest(value, keys[0]), digest(value, keys[0]));
+    assert.match(digest(value, keys[0]), /^[0-9a-f]{12}$/);
+    assert.notEqual(digest(value, keys[0]), digest(value, keys[1]), 'a fingerprint cannot be reused in another run');
+    assert.notEqual(digest(value, keys[0]), digest(value + '-changed', keys[0]), 'a changed credential has a different fingerprint');
+  }
+});
 
 function credential(dir) {
   const name = `tc-test-fake-upstream-${process.pid}`;
@@ -152,7 +164,7 @@ test('a spawned Claude upstream route receives the nonce URL and placeholder, wi
   spawn(h, u, 'small');
   const seen = u.report();
   assert.equal(seen.claudeRoute.nonceUrl, true);
-  assert.equal(seen.claudeRoute.authHash, digest('tower-crane-placeholder'));
+  assert.equal(seen.claudeRoute.authPlaceholder, true);
   assert.ok(!seen.envNames.includes('ANTHROPIC_API_KEY'));
   assert.ok(!seen.envNames.includes('AWS_BEARER_TOKEN_BEDROCK'));
   assert.ok(!seen.envNames.includes('CLAUDE_CODE_OAUTH_TOKEN'));

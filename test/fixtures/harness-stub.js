@@ -101,7 +101,7 @@ module.exports = function stub(harness) {
     report.envNames = Object.keys(process.env).sort();
     report.claudeRoute = {
       nonceUrl: /^http:\/\/127\.0\.0\.1:\d+\/[\w-]+$/.test(process.env.ANTHROPIC_BASE_URL || ''),
-      authHash: require('node:crypto').createHash('sha256').update(process.env.ANTHROPIC_AUTH_TOKEN || '').digest('hex').slice(0, 12),
+      authPlaceholder: process.env.ANTHROPIC_AUTH_TOKEN === 'tower-crane-placeholder',
       bedrock: process.env.CLAUDE_CODE_USE_BEDROCK,
       model: process.env.ANTHROPIC_MODEL,
     };

@@ -62,7 +62,10 @@ async function main() {
     }
     const name = `tc-test-fake-live-local-${process.pid}`;
     const value = `tc-test-fake-${crypto.randomBytes(16).toString('hex')}`;
-    const expected = crypto.createHash('sha256').update(value).digest('hex').slice(0, 12);
+    // Only a per-probe fingerprint leaves the fake server's auth check.
+    const fingerprintKey = crypto.randomBytes(32);
+    const fingerprint = (token) => crypto.createHmac('sha256', fingerprintKey).update(token || '').digest('hex').slice(0, 12);
+    const expected = fingerprint(value);
     const file = path.join(dir, 'credential.json');
     const secretFile = path.join(dir, 'credential.env');
     fs.writeFileSync(secretFile, `ANTHROPIC_API_KEY=${value}\n`, { mode: 0o600 });
@@ -70,7 +73,7 @@ async function main() {
     let messages = 0;
     local = http.createServer(async (req, res) => {
       for await (const chunk of req) { void chunk; }
-      const actual = crypto.createHash('sha256').update(req.headers['x-api-key'] || '').digest('hex').slice(0, 12);
+      const actual = fingerprint(req.headers['x-api-key']);
       if (actual !== expected || req.headers.authorization) { res.writeHead(403); return res.end('{}'); }
       const pathname = req.url.split('?')[0];
       if (pathname === '/v1/messages/count_tokens') return res.end('{"input_tokens":10}');
@@ -93,7 +96,7 @@ async function main() {
     await turn(dir, broker, { name, model: 'tc-test-fake-local', config: file,
       upstream: { base_url: `http://127.0.0.1:${local.address().port}`, auth: 'x-api-key' } });
     assert.ok(messages > 0, 'Claude must call the local Messages API');
-    console.log(JSON.stringify({ local_messages: messages, auth_sha256_prefix: expected }));
+    console.log(JSON.stringify({ local_messages: messages, auth_hmac_sha256_prefix: expected }));
   } finally {
     broker.close();
     local?.closeAllConnections();
