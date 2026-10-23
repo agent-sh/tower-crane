@@ -24,8 +24,54 @@ const BASE_CACHE = 'tests-base-cache';
 const baseCache = (entries) => entries.filter((entry) => entry.split(path.sep)[0] === BASE_CACHE);
 const scratch = (entries) => entries.filter((entry) => entry.split(path.sep)[0] !== BASE_CACHE);
 
+// The test threads the host governor grants the gate's run, read from its registry every few
+// seconds by a child process while the check blocks this one. Each line is a change: the time,
+// the budget and its reasons, and the grant of each lease the proof's state holds.
+const SAMPLE_MS = 5000;
+function sampleGrants(env, stateDir, file, every = SAMPLE_MS) {
+  const governor = require('../lib/governor');
+  const project = path.resolve(stateDir);
+  let last = null;
+  const sample = () => {
+    const reg = governor.read(env);
+    const leases = (reg?.tests || []).filter((l) => l.project === project);
+    const b = reg?.test_budget || {};
+    const row = { budget: b.budget ?? null, cap: b.cap ?? null, cores: b.cores ?? null, source: b.source ?? null,
+      others: b.others ?? null, load: b.load ?? null, cpu_some: b.cpu_some ?? null, reasons: b.reasons || [],
+      grants: leases.map((l) => [l.granted, l.requested]) };
+    const key = JSON.stringify([row.budget, row.grants, row.reasons.length > 0]);
+    if (key !== last) fs.appendFileSync(file, `${JSON.stringify({ at: new Date().toISOString(), ...row })}\n`);
+    last = key;
+  };
+  sample();
+  setInterval(sample, every);
+  // The proof closes stdin when the check returns, or by exiting.
+  process.stdin.on('end', () => process.exit(0)).resume();
+}
+
+function readGrants(file) {
+  let text = '';
+  try { text = fs.readFileSync(file, 'utf8'); } catch { return []; }
+  return text.split('\n').flatMap((line) => {
+    try { return line ? [JSON.parse(line)] : []; } catch { return []; }
+  });
+}
+
+// One line for the log: how many threads the gate's run held from each change to the next.
+function grantSummary(rows, end) {
+  const held = new Map();
+  rows.forEach((row, i) => {
+    const until = Date.parse(rows[i + 1]?.at ?? end);
+    const grant = row.grants.reduce((n, [g]) => n + g, 0);
+    held.set(grant, (held.get(grant) || 0) + Math.max(0, until - Date.parse(row.at)));
+  });
+  const minutes = [...held].sort(([a], [b]) => a - b).map(([g, ms]) => `${g} for ${(ms / 60000).toFixed(1)} min`);
+  const top = rows.find((row) => row.cores);
+  return `test threads granted ${minutes.join(', ') || 'never sampled'}${top ? ` (cap ${top.cap} on ${top.cores} cores)` : ''}`;
+}
+
 // A separate state exercises the real gate without changing the project's tasks.
-function probe({ root = ROOT, cache, command, environment = process.env } = {}) {
+function probe({ root = ROOT, cache, command, environment = process.env, sampleMs = SAMPLE_MS } = {}) {
   if (!command && (environment.TOWER_CRANE_SANDBOX === '1' || environment.TOWER_CRANE_BROKER)) {
     throw new Error('the complete gate scratch proof must run on the host, outside the worker sandbox');
   }
@@ -87,8 +133,19 @@ function probe({ root = ROOT, cache, command, environment = process.env } = {}) 
     call(['submit', id, '--sha', result.sha], 'scratch-proof-worker');
     result.outer_before = contents(outer);
     result.gate_root_before = contents(gates);
+    const grantsFile = path.join(run, 'test-threads.jsonl');
+    const sampler = cp.spawn(process.execPath, [__filename, '--sample-grants', state, grantsFile, String(sampleMs)],
+      { cwd: root, env, stdio: ['pipe', 'ignore', 'ignore'], windowsHide: true });
+    sampler.on('error', () => {});
     const started = performance.now();
-    const checked = call(['check', 'tests', id]);
+    let checked;
+    try {
+      checked = call(['check', 'tests', id]);
+    } finally {
+      sampler.stdin.end();
+      sampler.kill();
+    }
+    result.test_threads = readGrants(grantsFile);
     // A passing head runs the suite once, so this is its wall time; a failing
     // head adds the base rerun, and the proof fails anyway.
     result.suite_time = suiteTime(performance.now() - started);
@@ -117,7 +174,9 @@ function probe({ root = ROOT, cache, command, environment = process.env } = {}) 
   }
 }
 
-if (require.main === module) {
+if (require.main === module && process.argv[2] === '--sample-grants') {
+  sampleGrants(process.env, process.argv[3], process.argv[4], Number(process.argv[5]) || SAMPLE_MS);
+} else if (require.main === module) {
   const result = probe();
   const file = process.env.TOWER_CRANE_PROOF_OUTPUT
     || path.join(process.env.TOWER_CRANE_TEST_TMP || path.join(os.homedir(), '.cache', 'tower-crane-proof'), 'gate-scratch-proof.json');
@@ -126,7 +185,8 @@ if (require.main === module) {
   console.log(JSON.stringify(result, null, 2));
   console.log(`Gate scratch proof: ${file}`);
   if (result.suite_time) reportSuiteTime('Gate scratch proof', result.suite_time);
+  console.log(`Gate scratch proof: ${grantSummary(result.test_threads || [], result.finished_at)}`);
   if (!result.ok) process.exitCode = 1;
 }
 
-module.exports = { probe };
+module.exports = { probe, grantSummary };

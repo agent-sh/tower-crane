@@ -9,7 +9,8 @@ const cp = require('node:child_process');
 const { cachedFixture } = require('./helpers');
 const { writeHost } = require('./host');
 const { HUNG_TEST_MS } = require('./signals');
-const { probe } = require('../scripts/probe-gate-scratch');
+const { probe, grantSummary } = require('../scripts/probe-gate-scratch');
+const { shellQuote } = require('../lib/gates/common');
 const { suiteTime, reportSuiteTime, DEADLINE_MIN } = require('../scripts/suite-time');
 
 function fixture(t) {
@@ -19,11 +20,13 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 fs.mkdtempSync(path.join(os.tmpdir(), 'tower-crane-unremoved-'));
+// The gate runs this in <gate root>/tower-crane-XXXXXX/wt; its TOWER_CRANE_TMP is the gate's scratch.
+const gateRoot = path.resolve(process.cwd(), '..', '..');
 if (process.env.PROOF_LEAK === '1') {
-  fs.mkdirSync(path.resolve(process.env.TOWER_CRANE_TMP, '../outer/escaped'));
+  fs.mkdirSync(path.resolve(gateRoot, '../outer/escaped'));
 }
 if (process.env.PROOF_ROOT_ENTRY) {
-  const entry = path.join(process.env.TOWER_CRANE_TMP, process.env.PROOF_ROOT_ENTRY);
+  const entry = path.join(gateRoot, process.env.PROOF_ROOT_ENTRY);
   fs.mkdirSync(path.dirname(entry), { recursive: true });
   fs.writeFileSync(entry, '{}');
 }
@@ -47,6 +50,26 @@ test('the gate proof measures caller contents and the actual removed parent', (t
   assert.equal(result.suite_time.deadline_min, DEADLINE_MIN);
   assert.ok(result.suite_time.wall_ms > 0 && result.suite_time.wall_ms < DEADLINE_MIN * 60000);
   assert.equal(result.suite_time.warn, false);
+});
+
+test('the gate proof records the test threads the governor grants the gate\'s run', (t) => {
+  const h = fixture(t);
+  // A run that asks for two threads and holds its lease past a few samples, as test/run.js does.
+  const grants = path.join(__dirname, '..', 'lib', 'test-grants.js');
+  fs.writeFileSync(path.join(h.base, 'lease.js'), `
+require(${JSON.stringify(grants)}).open(process.env, 2).then((lease) => {
+  setTimeout(() => lease.close(), 1500); // wait-allow: holds the lease across the proof's 100 ms samples
+});
+`);
+  const command = `${shellQuote(process.execPath)} ${shellQuote(path.join(h.base, 'lease.js'))}`;
+  const result = probe({ root: h.repo, cache: path.join(h.base, 'probe'), command, environment: h.env, sampleMs: 100 });
+  assert.equal(result.ok, true, JSON.stringify(result.gate?.summary));
+  const held = result.test_threads.filter((row) => row.grants.length);
+  assert.ok(held.length, JSON.stringify(result.test_threads));
+  assert.deepEqual(held[0].grants.map(([, requested]) => requested), [2]);
+  assert.ok(held[0].grants[0][0] >= 1 && held[0].budget >= 1 && held[0].cores >= 1, JSON.stringify(held[0]));
+  assert.match(grantSummary(result.test_threads, result.finished_at), /^test threads granted (\d+ for [\d.]+ min(, )?)+ \(cap \d+ on \d+ cores\)$/);
+  assert.equal(grantSummary([], result.finished_at), 'test threads granted never sampled');
 });
 
 test('suite time warns on GitHub past 75% of the deadline and records each run in the step summary', (t) => {

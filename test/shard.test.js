@@ -118,6 +118,15 @@ test('the checked-in durations split Linux into three CI shards and Windows into
   }
 });
 
+// The tests of a file run in turn, so one long file sets its shard's floor: test/stack-parent.test.js,
+// 1839 s on Windows in run 39897049976, outlived its shard's deadline when it started late.
+test('no checked-in file takes more than 15 minutes of test time on any platform', () => {
+  for (const platform of ['linux', 'win32']) {
+    const long = Object.entries(fileDurations(platform)).filter(([, seconds]) => seconds > 15 * 60);
+    assert.deepEqual(long, [], `${platform}: split these files`);
+  }
+});
+
 test('the durations refresh maps each logged title to the file that declares it', () => {
   const declared = [
     ...declarations('test/a.test.js', "test('plain title', () => {});\nfor (const n of [1, 2]) test(`case ${n} of a`, () => {});\n"

@@ -38,8 +38,11 @@ test('timeout validation and runner interruption formats', () => {
 test('gate timeouts are operational settings and record infrastructure failure through the CLI', (t) => {
   const h = makeRepo(t);
   const script = path.join(h.base, 'suite.js');
-  // A scripted TAP runner starts one file and never completes it before the gate deadline.
+  // A scripted TAP runner starts one file and never completes it before the gate deadline. Its
+  // fixture goes under TOWER_CRANE_TMP, as test/tmp-root.js puts this suite's, and the stop
+  // leaves it there.
   fs.writeFileSync(script, `
+require('node:fs').mkdtempSync(require('node:path').join(process.env.TOWER_CRANE_TMP, 'tower-crane-'));
 console.log('TAP version 13\\n# Subtest: test/slow.test.js');
 process.on('SIGTERM', () => {
   console.log("not ok 1 - test/slow.test.js\\n  ---\\n  error: 'Promise resolution is still pending but the event loop has already resolved'\\n  ...");

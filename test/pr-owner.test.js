@@ -259,9 +259,13 @@ for (const row of [
     await until(() => h.task().status === 'submitted' && h.json(['status']).governor.units.some((u) => u.agent === agent && u.waiting), 'T1 owner waits');
     if (row.manual) h.ok(['rework', 'T1', '--reason', 'value.js must be 2', '--agent', 'orchestrator']);
     else {
-      h.consume();
+      const consumed = h.consume();
       const rework = h.logs().findLast((e) => e.cmd === 'rework');
-      assert.deepEqual([rework.detail.gate, rework.detail.owner_held], ['tests', agent], 'the gate rework names the owner it is held for');
+      // The engine's output and the task's events since its submit say why an owner was not held.
+      const since = h.logs().slice(h.logs().findLastIndex((e) => e.cmd === 'submit')).filter((e) => e.task === 'T1')
+        .map((e) => `${e.at} ${e.agent} ${e.cmd} ${JSON.stringify(e.detail)}`.slice(0, 400));
+      assert.deepEqual([rework.detail.gate, rework.detail.owner_held], ['tests', agent],
+        `the gate rework names the owner it is held for\n${consumed.stdout}${consumed.stderr}\n${since.join('\n')}`);
       assert.deepEqual([h.task().status, h.task().claim], ['rework', null], 'the hold keeps the task unclaimed');
       const item = h.json(['inbox', '--agent', 'orchestrator']).items.find((i) => i.kind === 'rework_ready');
       assert.deepEqual([item?.restore, item?.owner, item?.action.argv], ['gates retry T1 --from-rework', agent, ['gates', 'retry', 'T1', '--from-rework']],
