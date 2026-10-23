@@ -1,0 +1,1 @@
+- Base-failure comparisons read the merge-base date without signature output, so `log.showSignature=true` does not disable recorded exclusions for tests, hosted CI or submission.

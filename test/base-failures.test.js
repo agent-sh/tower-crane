@@ -101,6 +101,62 @@ function baseState(h) {
   h.saveGithub(state);
 }
 
+test('base exclusions ignore signature output in tests, hosted CI and submit', async (t) => {
+  for (const signed of [false, true]) for (const showSignature of [false, true]) {
+    for (const caller of ['tests', 'ci', 'submit']) await t.test(`${caller}, signed=${signed}, showSignature=${showSignature}`, (t) => {
+      const h = fixture(t);
+      h.git(['config', 'log.showSignature', String(showSignature)]);
+      if (signed) {
+        // A signature header makes git print verification output before the requested date.
+        const body = `tree ${h.git(['rev-parse', 'main^{tree}'])}\nparent ${h.git(['rev-parse', 'main'])}\n`
+          + 'author a <a@example.com> 1700000000 +0000\ncommitter a <a@example.com> 1700000000 +0000\n'
+          + 'gpgsig -----BEGIN SSH SIGNATURE-----\n U1NIU0lH\n -----END SSH SIGNATURE-----\n\nsigned base\n';
+        const base = require('node:child_process').execFileSync('git', ['hash-object', '-t', 'commit', '-w', '--stdin'],
+          { cwd: h.repo, env: h.env, input: body, encoding: 'utf8' }).trim();
+        h.git(['update-ref', 'refs/heads/main', base]);
+        const oldHead = h.sha;
+        h.sha = h.git(['commit-tree', `${oldHead}^{tree}`, '-p', base, '-m', 'change above signed base']);
+        h.git(['update-ref', 'refs/heads/fixture-change', h.sha]);
+        h.env.FIXTURE_SHA = h.sha;
+        const state = h.github();
+        state.prs[7].headRefOid = h.sha;
+        state.ci[h.sha] = state.ci[oldHead];
+        h.saveGithub(state);
+      }
+      const base = h.git(['merge-base', 'main', h.sha]);
+      const dated = h.git(['show', '-s', '--format=%cI', base]);
+      assert.equal(Number.isFinite(Date.parse(dated)), !(signed && showSignature), 'the fixture exercises signature output');
+      baseState(h);
+      if (caller === 'tests') {
+        const script = path.join(h.base, 'failure.js');
+        fs.writeFileSync(script, `console.log(${JSON.stringify(failedLog())}); process.exit(1);\n`);
+        h.ok(['project', 'set', '--tests-cmd', `node ${shellQuote(script)}`]);
+      }
+      if (caller !== 'submit') h.submit();
+      if (caller !== 'tests') {
+        const state = h.github();
+        state.checks = [{ id: 300, name: 'test', app: 'github-actions', suite: 3, status: 'completed', conclusion: 'failure',
+          url: 'https://github.com/acme/demo/actions/runs/300/job/301' }];
+        state.suites = [{ id: 3, app: 'github-actions', status: 'completed', conclusion: 'failure', runs: 1 }];
+        state.workflows = [{ ...run(300, 'pull_request', '12'), head_sha: h.sha, check_suite_id: 3 }];
+        state.jobLogs[301] = failedLog();
+        h.saveGithub(state);
+      }
+      if (caller === 'submit') {
+        h.ok(['claim', 'T1', '--agent', 'worker']);
+        const output = h.ok(['submit', 'T1', '--sha', h.sha, '--pr', '7', '--agent', 'worker']);
+        assert.match(output, /base_failure in run 200/);
+      } else {
+        const entry = h.json(['check', caller, 'T1', '--agent', 'orchestrator']);
+        assert.equal(entry.ok, true, entry.summary);
+        assert.equal(entry.base_failure[0].base_run.id, 200);
+        assert.equal(entry.base_failure[0].base_run.sha, base);
+      }
+      assert.equal(h.json(['task', 'show', 'T1']).status, 'submitted');
+    });
+  }
+});
+
 test('real tests gate records base failure, stays submitted, and updates one fix task on a second occurrence', (t) => {
   const h = fixture(t);
   const script = path.join(h.base, 'failure.js');
