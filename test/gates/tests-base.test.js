@@ -240,10 +240,12 @@ test('host-only base commands keep host_env and clear exclusions, including cach
     assert.equal(result.receipt.base_rerun.results[0].cached, cached);
     const ran = rows().slice(before);
     // The ordinary suite, the host-only file and its rerun, then the base unless cached.
+    // The host-only file runs beside the suite, so either can write its row first.
     assert.equal(ran.length, cached ? 3 : 4);
-    assert.equal(ran[0].host, undefined);
-    assert.equal(ran[0].exclude, '["test/host.test.js"]');
-    for (const r of ran.slice(1)) {
+    const ordinary = ran.filter((r) => r.host === undefined);
+    assert.equal(ordinary.length, 1, JSON.stringify(ran));
+    assert.equal(ordinary[0].exclude, '["test/host.test.js"]');
+    for (const r of ran.filter((x) => x !== ordinary[0])) {
       assert.deepEqual(r.files, ['test/host.test.js']);
       assert.equal(r.host, 'opted-in');
       assert.equal(r.exclude, undefined);
