@@ -323,6 +323,109 @@ test('failed, missing and timed out local commands record failure and clean thei
   }
 });
 
+// Fails its `lab` step on the first `fail` runs and moves the base under the check on the first
+// `move` runs, both read from LOG.config; `--only STEPS` runs just those steps.
+const RERUN_SCRIPT = `
+const fs = require('node:fs');
+const path = require('node:path');
+const cp = require('node:child_process');
+const [log, ...rest] = process.argv.slice(2);
+// read-published: the test wrote the config before the gate started.
+const config = JSON.parse(fs.readFileSync(log + '.config', 'utf8'));
+// read-published: appended only, by one gate run at a time.
+const runs = fs.existsSync(log + '.runs') ? fs.readFileSync(log + '.runs', 'utf8').length : 0;
+fs.appendFileSync(log + '.runs', 'x');
+fs.appendFileSync(log + '.argv', JSON.stringify(rest) + '\\n');
+fs.appendFileSync(log + '.trees', cp.execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { encoding: 'utf8' }));
+if (runs < config.move) {
+  fs.writeFileSync(path.join(config.repo, 'moved-' + runs + '.txt'), 'moved\\n');
+  cp.execFileSync('git', ['-C', config.repo, 'add', '-A']);
+  cp.execFileSync('git', ['-C', config.repo, '-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-qm', 'base moves']);
+}
+const only = rest.indexOf('--only');
+const failing = runs < config.fail;
+const steps = only === -1 ? ['unit', 'lab'] : rest.slice(only + 1);
+fs.mkdirSync('.local/checks', { recursive: true });
+fs.writeFileSync('.local/checks/receipt.json', JSON.stringify({
+  steps: steps.map((name) => ({ name, outcome: name === 'lab' && failing ? 'failed' : 'passed' })),
+}));
+console.log(failing ? 'lab: timing bound exceeded under load' : 'all steps OK');
+process.exit(failing ? 1 : 0);
+`;
+
+test('local CI reruns a failure once on the same merge, and a base that moves meanwhile leaves the pass on the pinned tree', (t) => {
+  for (const [name, { fail = 0, move = 0, settings = {} }, want] of [
+    ['fails once', { fail: 1 }, { ok: true, runs: 2, rerun: 'command', flaky: 'local CI lab', gate: true, note: /Rerun: reran the whole command once on the same merge: exit 0; flaky: local CI lab\./ }],
+    ['fails twice', { fail: 2 }, { ok: false, runs: 2, rerun: 'command', gate: false, note: /Rerun: reran the whole command once on the same merge: exit 1; the failure stands\./ }],
+    ['fails once with rerun_cmd', { fail: 1, settings: { rerun_cmd: 'only' } }, { ok: true, runs: 2, rerun: 'steps', flaky: 'local CI lab', gate: true, note: /Rerun: reran failed steps lab once on the same merge: exit 0/ }],
+    ['fails once with rerun off', { fail: 1, settings: { rerun: false } }, { ok: false, runs: 1, gate: false, note: /^local CI exit 1/ }],
+    ['base moves', { move: 99 }, { ok: true, runs: 1, trees: 1, gate: true, note: /^local CI \(default\) passed at [0-9a-f]+ on merged tree [0-9a-f]+ of base [0-9a-f]+ \(\d+ ms\)$/ }],
+    ['fails once while the base moves', { fail: 1, move: 99 }, { ok: true, runs: 2, trees: 1, rerun: 'command', flaky: 'local CI lab', gate: true, note: /Rerun: reran the whole command once on the same merge: exit 0/ }],
+  ]) {
+    const h = fixture(t, RERUN_SCRIPT);
+    fs.writeFileSync(`${h.log}.config`, JSON.stringify({ repo: h.repo, fail, move }));
+    const local = { command: h.command, timeout: 5, receipts: ['.local/checks/*.json'],
+      ...(settings.rerun_cmd ? { rerun_cmd: [...h.command, '--only', '{steps}'] } : {}),
+      ...(settings.rerun === false ? { rerun: false } : {}) };
+    h.ok(['project', 'set', '--ci-local', JSON.stringify(local)]);
+    const r = h.run(['check', 'ci', 'T1']);
+    assert.equal(r.code, want.ok ? 0 : 1, `${name}: ${r.stdout}${r.stderr}`);
+    const e = h.readState('tasks.json').tasks[0].evidence.at(-1);
+    assert.equal(e.ok, want.ok, name);
+    assert.match(e.summary, want.note, name);
+    assert.equal(fs.readFileSync(`${h.log}.runs`, 'utf8').length, want.runs, `${name}: runs`);
+    const argv = fs.readFileSync(`${h.log}.argv`, 'utf8').trim().split('\n').map(JSON.parse);
+    if (want.rerun === 'steps') assert.deepEqual(argv[1], [h.command[3], '--only', 'lab'], name);
+    else assert.ok(argv.every((args) => args.length === 1), `${name}: whole command runs ${JSON.stringify(argv)}`);
+    if (want.rerun) {
+      assert.deepEqual(e.receipt.rerun, { command: want.rerun === 'steps' ? [...h.command, '--only', 'lab'] : h.command,
+        steps: want.rerun === 'steps' ? ['lab'] : null, exit: want.ok ? 0 : 1, signal: null, duration_ms: e.receipt.rerun.duration_ms }, name);
+      assert.equal(e.receipt.exit, 1, `${name}: the receipt keeps the first run`);
+    } else assert.equal(e.receipt.rerun, undefined, name);
+    assert.equal(!!e.confirmed_failure, !want.ok, name);
+    if (want.flaky) {
+      assert.deepEqual(e.flaky.map((f) => [f.test, f.first_failure.status, f.rerun.status]), [[want.flaky, 1, 0]], name);
+      assert.match(e.flaky[0].first_failure.excerpt, /timing bound exceeded/, name);
+      assert.equal(e.flaky[0].first_failure.log, e.local_ci.first_failure.log, name);
+      assert.equal(e.flaky[0].rerun.log, e.local_ci.log, name);
+      assert.notEqual(e.local_ci.log, e.local_ci.first_failure.log, name);
+    } else assert.equal(e.flaky, undefined, name);
+    if (want.trees) {
+      const trees = fs.readFileSync(`${h.log}.trees`, 'utf8').trim().split('\n');
+      assert.equal(new Set(trees).size, want.trees, `${name}: every run is on the pinned merged tree`);
+      assert.equal(e.receipt.tree_hash, trees.at(-1), name);
+      assert.notEqual(h.git(['rev-parse', 'main']), e.receipt.base_sha, `${name}: the base moved during the check`);
+    }
+    const ci = h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'ci');
+    assert.equal(ci.ok, want.gate, `${name}: ${ci.reason}`);
+    assert.equal(h.git(['worktree', 'list', '--porcelain']).match(/^worktree /gm).length, 1, name);
+  }
+});
+
+test('a local CI rerun resolves per variant: args overrides append, a replacement command reruns whole unless it names its own', () => {
+  const Local = require('../lib/ci-local');
+  const base = { command: ['ci'], timeout: 5, rerun_cmd: ['ci', '--only', '{steps}'] };
+  for (const [name, local, task, want] of [
+    ['default', base, { kind: 'code' }, { rerun: true, rerun_cmd: ['ci', '--only', '{steps}'] }],
+    ['no rerun_cmd', { command: ['ci'], timeout: 5 }, { kind: 'code' }, { rerun: true, rerun_cmd: null }],
+    ['off', { ...base, rerun: false }, { kind: 'code' }, { rerun: false, rerun_cmd: ['ci', '--only', '{steps}'] }],
+    ['args override', { ...base, by_kind: { ops: { args: ['--lab'] } } }, { kind: 'ops' }, { rerun: true, rerun_cmd: ['ci', '--only', '{steps}', '--lab'] }],
+    ['replacement command', { ...base, by_kind: { ops: { command: ['lab'] } } }, { kind: 'ops' }, { rerun: true, rerun_cmd: null }],
+    ['replacement with its own', { ...base, by_kind: { ops: { command: ['lab'], rerun_cmd: ['lab', '{steps}'] } } }, { kind: 'ops' }, { rerun: true, rerun_cmd: ['lab', '{steps}'] }],
+    ['task override', base, { id: 'T1', kind: 'code', ci_local: { args: ['--x'] } }, { rerun: true, rerun_cmd: ['ci', '--only', '{steps}', '--x'] }],
+  ]) {
+    const r = Local.resolve(local, task);
+    assert.deepEqual({ rerun: r.rerun, rerun_cmd: r.rerun_cmd }, want, name);
+  }
+  for (const [name, local] of [
+    ['rerun_cmd without {steps}', { ...base, rerun_cmd: ['ci', '--only'] }],
+    ['blank rerun_cmd', { ...base, rerun_cmd: [] }],
+    ['rerun not a boolean', { ...base, rerun: 'no' }],
+    ['override rerun_cmd without {steps}', { ...base, by_kind: { ops: { args: [], rerun_cmd: ['ci'] } } }],
+  ]) assert.equal(Local.valid(local), false, name);
+  assert.deepEqual(Local.expandSteps(['ci', '--only', '{steps}', 'x{steps}'], ['a b', 'c']), ['ci', '--only', 'a b', 'c', 'x{steps}']);
+});
+
 test('a failed local CI keeps a redacted output tail, its full log and the artifacts it names', (t) => {
   // Shaped like ginza's tools/check.py: the failing step prints early, later steps print after
   // it, and the receipt it writes inside the gate worktree is named on the last line.
