@@ -201,6 +201,7 @@ Workers, reviewers and every other identity are refused both. For an operational
 | `gates.final_review` | operational | `project set --final-review`: the external reviewer command `accept` runs on the host |
 | `archive.retention_days` | operational | `project set --archive-retention-days` |
 | `gates.priority` | operational | `gates prioritize ID --reason R`: a task's queued submitted gate reactions run before older submitted work; accepted merges stay first |
+| `merge.pause` | operational | `merge pause ID --minutes N --reason R`: from the task's submit the merge line merges only it until it merges, goes back to rework or reaches the deadline ([Merge pause](#merge-pause)) |
 | `ci.required`, `ci.ignore_apps`, `ci.capped_review` | operational | `project set --ci-required`, `--ci-ignore-apps`, `--ci-capped-review` |
 | `ci.local` | operational | `project set --ci-local`, `task update --ci-local` |
 | `ci.dispatch` | operational | `project set --ci-dispatch` |
@@ -1501,7 +1502,7 @@ The format is additive within schema 1. A pinned older tool reads and preserves 
 
 Missing input, cached or output counts leave the corresponding task category total `null`, and category medians use only measured totals. Known token totals remain eligible for token medians even when their breakdown is incomplete.
 
-Runaway spend flags are computed on reads and never stored. A `spend` flag belongs to the task (`agent: null`); its text separates the task total, distinct worker count and current claimant's own spend. `worker-spend` flags name the current claimant and sum its entries across routes and retries. Both compare total tokens against the accepted-task median for the same tier and size when at least three samples exist, else the tier median with three samples, else the project median, naming any fallback. Both show cache reads as a share of total tokens and uncached tokens (`input - cached + output`), or unknown for incomplete breakdowns. `status --json` exposes tier norms in `runaway_norms.tiers` and size norms in `runaway_norms.sizes.<tier>.<size>`; size norms add `size`, `size_samples` and `from: tier-size|tier|project`, keeping `samples` as the tier count. Worker count includes distinct claimants and worker spawns, plus worker spend entries; review-rung and known non-worker spawn entries do not add workers. Old workers' spend stays in the task total; only the current claim can raise a worker alarm.
+Runaway spend flags are computed on reads and never stored. A `spend` flag belongs to the task (`agent: null`); its text separates the task total, distinct worker count and current claimant's own spend. `worker-spend` flags name the current claimant and sum its entries across routes and retries. Both compare total tokens against the accepted-task median for the same tier and size when at least three samples exist, else the tier median with three samples, else the project median, naming any fallback. Both show cache reads as a share of total tokens and uncached tokens (`input - cached + output`), or unknown for incomplete breakdowns. `status --json` exposes tier norms in `runaway_norms.tiers` and size norms in `runaway_norms.sizes.<tier>.<size>`; size norms add `size`, `size_samples` and `from: tier-size|tier|project`, keeping `samples` as the tier count. Worker count includes distinct claimants and worker spawns, plus worker spend entries; review-rung and known non-worker spawn entries do not add workers. Old workers' spend stays in the task total; only the current claim can raise a worker alarm. A `spend` flag also opens one orchestrator decision for its task ([Runaway cost](#runaway-cost)).
 
 The CLI never writes a dependency on a task that does not exist, a dependency cycle, or a task without acceptance. `validate` still checks files edited by hand.
 
@@ -1829,6 +1830,8 @@ The threat model: a verb runs outside the worker's sandbox, as the user. If its 
 
 A decision the engine opened for an orchestrator's owner-required change also has `approval_request: true`, `escalation: { "settings": [...], "change": {...} }`, options `["approve", "decline"]`, and, once the orchestrator used an approval or the owner made the matching change, `applied: { "at", "by" }` ([Authority](#authority)). One opened by a command also has `request: { "command", "flags", "pos" }`, the command as it was run; the Controls page applies an approved one the owner asked for there. When the orchestrator asks for the same change while the owner's Controls request is open, it waits on that decision, which records `repeat_by: "<agent>"`; the page then leaves the approval for that agent's repeat. The generated request and its `ask` event carry `approval_request: true`; only marked requests can be reused or applied. Older unmarked decisions cannot authorize a command. A tagged question (`ask --question Q --kind K --setting KEY`) records `escalation` with `change: null` for owner-required tags and is not technical. It is never a one-use approval.
 
+Automation opens two technical decisions of its own, asked by `orchestrator` and blocking their task, and copies their record onto the `ask` event. A conflict hotspot decision has `hotspot: { "task", "files": [{ "file", "count" }], "threshold", "samples", "from": "project"|"default" }` and options `["merge pause", "split", "keep reworking"]` ([Conflict hotspots](#conflict-hotspots)). A cost decision has `runaway: { "task", "rule": "spend", "spend", "limit", "revision", "cause": "conflict"|"review"|"gate"|null, "reworks": { "conflict", "review", "gate", "other" } }` and options `["keep working", "split", "cancel"]`, with `merge pause` first when conflicts are the main cause ([Runaway cost](#runaway-cost)).
+
 A decision blocks only the tasks it lists. Everything else keeps running. `status` is `open`, `answered` or `withdrawn`. When options are listed, the answer must be one of them. An explicit owner identity can answer every decision. `answerers` lists agents the owner named with `decision delegate DID --answerers JSON`; the owner can replace the list or clear it with `[]`. `decision delegate` is owner-required: an orchestrator request opens an approval for the target decision and supplied fields, then its identical rerun applies it once. The shared audit names `decision.delegate`; closed decisions refuse before opening or consuming an approval. `kind` is what the asker says the question is, and every `ask --question` gives one: `technical`, `spend`, `credential`, `setting` or `crisis` (other values are refused, and a missing kind is a usage error). The question text is never read, so routing depends on the kind and the state alone. `credential` is only for a request that grants a credential or loosens a sandbox: the ask must also name one of `env`, `env_file`, `sandbox`, `sandbox.session_bus`, `scope`, `ladder.reach` or `ladder.web_mcp` with `--setting`, or it exits 2; a host or harness that fails is technical. An approval request is owner-only. An escalated technical question is answerable by the orchestrator under project delegation when no other owner restriction remains; tagging does not lift a kind or `owner_required` reason. Other decisions are owner-only when their `ask` carries `--owner-required REASON` (another call only the owner makes; stored as `owner_required`), or when their kind is `spend`, `credential`, `setting` or `crisis`.
 
 A worker's or reviewer's question (an identity that is neither the owner nor the orchestrator) that blocks a task whose latest tests evidence, at any revision, failed with `main_failure` (every failing name also fails on the base) goes to the orchestrator: it is stored with `kind: "technical"`, `technical: true`, no escalation and no `owner_required`, plus `routed: { to: "orchestrator", task, base, names, asked_kind, dropped?, owner_required? }` keeping what the asker gave. No owner grant fixes such a failure: the gate keeps the task submitted and reruns when main moves. A `spend` or `crisis` question, or one that names an owner-required setting other than a `waive.*` gate waiver, keeps its route. The `ask` event carries `routed`, and the command prints the id with the route.
@@ -2052,7 +2055,9 @@ Stopped steps record no deferral; the next refresh retries them.
 another reaction of the same task. Queued notifications for accepted, unmerged PR
 tasks run first, in the order of their current `accept` events. This includes
 older notifications that now run a merge and any merged-tree test the merge
-needs. Running reactions are never preempted.
+needs. Running reactions are never preempted. The task of a merge pause,
+armed or holding, goes ahead of them too: its notifications run before every
+other queued one, merges included ([Merge pause](#merge-pause)).
 The merge line runs under whichever reaction drains it, often one for a task
 that already merged, so a head check ranks by the accepted task it checks,
 not by that reaction's own task: it takes a free executor ahead of every
@@ -2125,7 +2130,8 @@ or `deferred: {kind: "governor", reason}`. That is a wait, not a refusal.
 Every other accepted, unmerged PR task whose head check is not running is a
 merge wait, listed in merge-line order as `merge waits: TASK since AT, behind
 WHAT`, with JSON `merge_waits: [{id, since, behind}]`. `since` is its current
-`accept` event's time. `behind` is the first that holds: a `suite` deferral
+`accept` event's time. `behind` is the first that holds: a holding merge
+pause (`the merge pause for T5 until T`), a `suite` deferral
 of the host governor (`the host governor: REASON`), a head check waiting for
 a full cap (`a gate executor: N of N in use: ...`), either one read from the
 reaction's receipt or from the queue's deferred record written after that
@@ -2156,8 +2162,8 @@ or `merged` event; this call still records its reservation and release.
 The merge queue takes the head of the line's reservation
 with source `queue:<uuid>` around its merge, unless its own process
 already holds it. Stack head checks ignore `automation`,
-`automation queued`, `automation reconcile` and `gates prioritize` events,
-which change no task state.
+`automation queued`, `automation reconcile`, `gates prioritize`, `merge pause`
+and `merge pause end` events, which change no task state.
 An accepted PR already merged remotely without a local merge receipt goes
 through the merge gate's confirmation path. It records the matching
 accepted head and the PR's merge
@@ -2460,3 +2466,29 @@ Two independent failed reviews with blocking findings in the same file area bloc
 The inbox shows `review_redesign` with `areas`, `reason` and a scope-ruling command, and holds the task out of `rework_ready`. The orchestrator or owner clears the hold by either narrowing acceptance to a closed list with `task update ID --acceptance A ... --closed-acceptance`, or recording a design change with `task note ID TEXT --kind scope-ruling`. Closed acceptance requires an actual acceptance change. Ordinary notes, acceptance changes without that declaration, brief edits and title changes do not clear the hold.
 
 These actions audit the operational `task.scope_ruling` setting. Their task events carry `review_after`, the evidence-array length when the ruling is written; a closed-list update also carries `closed_acceptance: true`, and a design note carries `kind: "scope-ruling"`. Ruling events also record the task revision. Only failures recorded after that cutoff at that revision or later can trigger the next hold; late verdicts from older revisions cannot re-block the new design. The original evidence and rework notes stay in the audit history.
+
+## Runaway cost
+
+A `spend` flag also opens one orchestrator decision for its task, the first time the wait host's refill pass sees it ([decisions.json](#decisionsjson)). The question carries the flag's text (task total, worker count and the median it compares with), the task's revision and the main cause of its reworks: conflict reworks (a rework that names conflicting files, [Conflict hotspots](#conflict-hotspots)), review rounds (`from_review`) or gate failures (a `gate` rework, or the merge line's failed head check), with every count. A rework of none of these kinds counts as other and is never the main cause. The decision blocks the task: the running worker keeps its claim and can submit, but no new round is claimed or handed back until someone answers it. A task gets one cost decision; answering it does not reopen one when spend keeps growing, and the status line keeps showing the flag.
+
+## Conflict hotspots
+
+A conflict rework records the files automation found conflicting as `conflicts` on its `rework` event: the merge line's head check, the conflict sweep after a merge and a mixed generated-file repair (the hand-written files left). Older conflict reworks name their files only in the reason text (`PR #N conflicts with BASE: FILES. Merge the base...` or `... The merge is prepared ...`); the count reads both.
+
+For each task, every conflict rework since its last hotspot decision adds one to each file it names. When the rework being written takes a file past the threshold and the task has no open hotspot decision, the same write opens one ([decisions.json](#decisionsjson)). The task still goes to `rework`, since its PR cannot merge, but the decision blocks it: refill does not dispatch a worker and a waiting owner is not handed it back ([PR owners](#pr-owners)). The orchestrator answers:
+
+- `merge pause`: set `merge pause ID --minutes N --reason R` and answer; the next round's submit holds other merges ([Merge pause](#merge-pause)).
+- `split`: split the work so the hot files land in a smaller task, and cancel or narrow this one.
+- `keep reworking`: the count starts again from the decision, so another threshold's worth of conflicts opens the next one.
+
+The threshold is the nearest-rank 90th percentile, over every task with a conflict rework in the event log, of the count of the file that task conflicted on most. With fewer than 10 such tasks it is 3. On 2026-10-23 this project's log held 380 conflict reworks over 136 tasks: the worst file came back once for 82 tasks, twice for 26, three times for 19, and four times or more for 9, T499 among them with docs/state.md 18 times. The 90th percentile was 3, so a task trips on its fourth conflict on the same file, where 93% of tasks had stopped.
+
+`status` lists `hot files: FILE (TASK N conflict reworks, DID open); ...` for tasks not yet accepted or cancelled, from each one's latest hotspot decision; JSON `conflict_hotspots: [{file, tasks: [{id, count, decision, status}]}]`.
+
+## Merge pause
+
+`merge pause ID --minutes N --reason R` (operational, [Authority](#authority)) records a `merge pause` event with `reason`, `minutes`, `holding` (whether the task was submitted or accepted then) and `authority`. The pause is armed until the task's next `submit`, or holds at once when `holding` is true. While it holds, the merge line takes only the entry that carries the task or sits below it in its stack; other accepted tasks wait, listed `behind the merge pause for ID until T`, and a manual `merge` of one of them refuses. Armed or holding, the task's queued notifications run before every other notification, merges included ([events.jsonl](#eventsjsonl)).
+
+The pause ends when the task merges, is cancelled or has a `rework` after the pause started holding (a failed gate or review, a conflict or a person's send-back), or `minutes` after it started holding. The end is computed on each read; the wait host's refill pass records it as `merge pause end` with `why` (`merged`, `cancelled`, `reworked` or `deadline`), `set_at`, `since`, `until` and `reason`, and appends an `automation reconcile` for each accepted, unmerged PR task so the held merges run. The refill timer wakes at the deadline. One pause holds at a time: a second task refuses until the first is cleared or ended, and setting it again for the same task restarts it. `merge pause ID --clear` records `clear: true` and `authority`. `--minutes` has no default; the orchestrator sizes it to the task's gates and review.
+
+`status` shows `merge pause: ID holds other merges until T: REASON`, or `ID armed: from its next submit it holds other merges for N min: REASON`; JSON `merge_pause` is `{task, reason, minutes, set_at, by, phase, since, until}` or null once it ended.

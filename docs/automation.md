@@ -146,8 +146,12 @@ only the next PR to merge needed one. Evidence now belongs to the PR's own
 diff at its submitted sha, and a base move alone keeps it. Accepted PRs
 merge in acceptance order. Only the head of the line runs the full suite,
 once, on its merge with the current base, and only when its head does not
-already contain that base. A conflicting head goes to rework with its files.
-The rest of the line waits without running anything.
+already contain that base. A conflicting head goes to rework with its files;
+past the conflict hotspot threshold on one file the rework also opens an
+orchestrator decision that holds the task (docs/state.md, Conflict hotspots).
+The rest of the line waits without running anything. A merge pause
+(docs/state.md, Merge pause) holds the line for one task from its submit
+until it merges, goes back to rework or reaches its deadline.
 A stack is one entry ordered by its lowest task, and its check runs on the
 whole chain merged with current main. The executor fetches main again after
 the check; only the seconds between that fetch and the merge call remain

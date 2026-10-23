@@ -137,3 +137,64 @@ test('CLI status and board identify a multi-worker task and its current worker w
   assert.match(h.ok(['status']), /runaway: T7 current-worker: current-worker has spent 60M tokens/);
   assert.match(page(), /data-key="runaway-T7-worker-spend">[\s\S]*?Worker spend on[\s\S]*?current-worker has spent 60M tokens/);
 });
+
+test('rework causes count conflicts, review rounds and gate failures from the rework events', () => {
+  const { cause } = require('../lib/runaway');
+  const rework = (detail) => ({ cmd: 'rework', task: 'T7', detail });
+  const conflict = rework({ reason: 'PR #7 conflicts with main: docs/state.md. Merge the base, resolve these files and submit a new head.' });
+  const structured = rework({ reason: 'anything', conflicts: ['bin/tower-crane.js'] });
+  const review = rework({ reason: 'findings', from_review: true });
+  const gate = rework({ reason: 'tests failed', gate: 'tests' });
+  const suite = rework({ reason: 'full suite fails on PR #7 merged with main. exit 1' });
+  const other = rework({ reason: 'owner asked for a rename' });
+  for (const [events, main, counts] of [
+    [[conflict, structured, review], 'conflict', { conflict: 2, review: 1, gate: 0, other: 0 }],
+    [[review, review, gate], 'review', { conflict: 0, review: 2, gate: 1, other: 0 }],
+    [[gate, suite, other], 'gate', { conflict: 0, review: 0, gate: 2, other: 1 }],
+    [[other], null, { conflict: 0, review: 0, gate: 0, other: 1 }],
+    [[{ ...conflict, task: 'T8' }], null, { conflict: 0, review: 0, gate: 0, other: 0 }],
+  ]) {
+    const result = cause({ events }, { id: 'T7' });
+    assert.equal(result.main, main, JSON.stringify(events));
+    assert.deepEqual(result.counts, counts);
+  }
+});
+
+test('a runaway spend trip opens one orchestrator decision with spend, revisions and main cause', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  const sha = h.git(['rev-parse', 'HEAD']);
+  for (let i = 0; i < 3; i++) {
+    const id = h.ok(['task', 'add', '--title', `Done ${i}`, '--size', 'L', '--tier', 'hard', '--acceptance', 'done', '--kind', 'docs']).match(/T\d+/)[0];
+    h.ok(['claim', id, '--agent', `w-${i}`]);
+    h.ok(['spend', id, '--tokens', '10000000', '--agent', `w-${i}`]);
+    h.ok(['submit', id, '--sha', sha, '--agent', `w-${i}`]);
+    h.reviewer(id, `r-${i}`, sha);
+    h.ok(['evidence', id, '--revision', h.revision(id), '--type', 'review', '--ok', '--sha', sha, '--agent', `r-${i}`]);
+    h.ok(['accept', id]);
+  }
+  h.ok(['task', 'add', '--title', 'Magnet', '--size', 'L', '--tier', 'hard', '--acceptance', 'done', '--kind', 'docs']);
+  for (const reason of ['PR #7 conflicts with main: docs/state.md. Merge the base, resolve these files and submit a new head.',
+    'PR #7 conflicts with main: docs/state.md. Merge the base, resolve these files and submit a new head.', 'tests failed']) {
+    h.ok(['claim', 'T4', '--agent', 'worker']);
+    h.ok(['submit', 'T4', '--sha', sha, '--agent', 'worker']);
+    h.ok(['rework', 'T4', '--reason', reason, '--agent', 'orchestrator']);
+  }
+  h.ok(['claim', 'T4', '--agent', 'worker']);
+  const wait = () => h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
+  wait();
+  assert.deepEqual(h.readState('decisions.json').decisions, [], 'no decision below the rule');
+  h.ok(['spend', 'T4', '--tokens', '60000000', '--agent', 'worker']);
+  wait();
+  wait();
+  const decisions = h.readState('decisions.json').decisions;
+  assert.equal(decisions.length, 1, 'one decision however many passes see the trip');
+  const [d] = decisions;
+  assert.deepEqual([d.status, d.kind, d.blocks, d.asked_by], ['open', 'technical', ['T4'], 'orchestrator']);
+  assert.deepEqual(d.options, ['merge pause', 'keep working', 'split', 'cancel']);
+  assert.deepEqual(d.runaway, { task: 'T4', rule: 'spend', spend: 60e6, limit: 55e6, revision: 4, cause: 'conflict',
+    reworks: { conflict: 2, review: 0, gate: 0, other: 1 } });
+  assert.match(d.question, /T4 has spent 60M tokens .*the hard L median of 10M; the rule is 5\.5 times\. Revision 4; main cause: conflict reworks \(2 of 3 reworks/);
+  assert.match(h.ok(['status']), new RegExp(`open decisions: ${d.id} T4 has spent 60M tokens`));
+  assert.equal(h.json(['task', 'show', 'T4']).claim.agent, 'worker', 'the running worker keeps its claim');
+});
