@@ -153,7 +153,7 @@ ${nativeCrashTest({ marker })}}
     const result = check(h);
     assert.equal(result.ok, true, result.summary);
     assert.deepEqual(result.receipt.coverage_gaps, ['value.js']);
-    assert.deepEqual(result.receipt.native_rerun, { step: 'proof', files: ['test/value.test.js'], ok: true });
+    assert.deepEqual(result.receipt.reruns, [{ step: 'proof', files: ['test/value.test.js'], ok: true }]);
     assert.equal(fs.readFileSync(marker, 'utf8'), 'xx', 'only the coverage run and its rerun reach the crash');
     assert.equal(counts(h), true);
   });
