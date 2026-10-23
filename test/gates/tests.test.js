@@ -172,44 +172,47 @@ process.exit(files.length ? cp.spawnSync(process.execPath, ['--test', ...files],
   assertCleanedUp();
 });
 
-// The ordinary command and the host-only commands beside it end together: a side that throws stops
-// the other, and a failing ordinary command stops the host-only side, before the step returns. A
-// command still running when the gate returned would run on in its removed worktree.
-test('a step returns only after both sides end, and one side throwing or the suite failing stops the other', async () => {
-  const SLOW_MS = 20000;
-  const slow = (dir, name) => `const fs = require('node:fs');
+// Fixtures for the test below: a test file that waits SLOW_MS unless its command is stopped, one
+// that passes or fails at once, and a runner that honors the host-only exclusion.
+const SLOW_MS = 20000;
+const slowFile = (dir, name) => `const fs = require('node:fs');
 require('node:test')('${name} waits', async () => {
   fs.writeFileSync(${JSON.stringify(path.join(dir, `${name}-started`))}, '');
   await new Promise((r) => setTimeout(r, ${SLOW_MS})); // wait-allow: a command that only a stop ends early
   fs.writeFileSync(${JSON.stringify(path.join(dir, `${name}-finished`))}, '');
 });
 `;
-  const quick = (dir, name, error) => `require('node:fs').writeFileSync(${JSON.stringify(path.join(dir, `${name}-started`))}, '');
+const quickFile = (dir, name, error) => `require('node:fs').writeFileSync(${JSON.stringify(path.join(dir, `${name}-started`))}, '');
 require('node:test')('${name} ${error ? 'fails' : 'passes'}', () => {${error ? ` throw new Error('${name} broke');` : ''} });
 `;
-  const runner = path.join(tmp, 'lanes-runner.cjs');
-  fs.writeFileSync(runner, `const cp = require('node:child_process');
+const LANES_RUNNER = path.join(tmp, 'lanes-runner.cjs');
+fs.writeFileSync(LANES_RUNNER, `const cp = require('node:child_process');
 const excluded = JSON.parse(process.env.TOWER_CRANE_TEST_EXCLUDE || '[]');
 const files = process.argv.slice(2).filter(f => !excluded.includes(f));
 process.exit(files.length ? cp.spawnSync(process.execPath, ['--test', ...files], { stdio: 'inherit' }).status : 0);
 `);
-  const suite = `${NODE} ${quote(runner)} test/plain.test.js`;
+
+// The ordinary command and the host-only commands beside it end together: a side that throws stops
+// the other, and a failing ordinary command stops the host-only side, before the step returns. A
+// command still running when the gate returned would run on in its removed worktree.
+test('a step returns only after both sides end, and one side throwing or the suite failing stops the other', async () => {
+  const suite = `${NODE} ${quote(LANES_RUNNER)} test/plain.test.js`;
   const project = {
     tests: { mode: 'run-only', host_only: ['test/*-host.test.js'] },
     gates: { tests_cmd: suite, tests_proof_cmd: `${NODE} --test {tests}` },
   };
   for (const [name, files, throwOn, outcome] of [
-    ['the suite throws while a host-only command runs', (d) => ({ 'test/plain.test.js': quick(d, 'plain'), 'test/a-host.test.js': slow(d, 'a') }),
+    ['the suite throws while a host-only command runs', (d) => ({ 'test/plain.test.js': quickFile(d, 'plain'), 'test/a-host.test.js': slowFile(d, 'a') }),
       (cmd) => cmd === suite, 'throws'],
-    ['a host-only command throws while the suite runs', (d) => ({ 'test/plain.test.js': slow(d, 'plain'), 'test/a-host.test.js': quick(d, 'a') }),
+    ['a host-only command throws while the suite runs', (d) => ({ 'test/plain.test.js': slowFile(d, 'plain'), 'test/a-host.test.js': quickFile(d, 'a') }),
       (cmd) => cmd.includes('a-host'), 'throws'],
-    ['the suite fails while a host-only command runs', (d) => ({ 'test/plain.test.js': quick(d, 'plain', true), 'test/a-host.test.js': slow(d, 'a') }),
+    ['the suite fails while a host-only command runs', (d) => ({ 'test/plain.test.js': quickFile(d, 'plain', true), 'test/a-host.test.js': slowFile(d, 'a') }),
       () => false, 'fails'],
   ]) {
     const dir = path.join(tmp, `lanes-${name.replace(/\W+/g, '-')}`);
     fs.mkdirSync(dir);
     // A second host-only file the stopped side must never start.
-    const sha = task({ ...files(dir), 'test/b-host.test.js': quick(dir, 'b') });
+    const sha = task({ ...files(dir), 'test/b-host.test.js': quickFile(dir, 'b') });
     let running = 0;
     const exec = async (cmd, args, opts) => {
       if (!opts.shell && !opts.processTree) return require('node:child_process').spawnSync(cmd, args, opts);
