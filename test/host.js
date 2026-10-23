@@ -12,7 +12,10 @@ const SLICE = 'tests.slice';
 
 // limit and used are the shared slice's, in GiB; cache is page cache inside
 // used that the governor does not count.
-function writeHost(dir, { limit = 64, used = 1, cache = 0, high = null, memorySome = 0, memoryFull = 0, cpuSome = 0, load = 0, oomKill = 0 } = {}) {
+// cores, when given, writes a /proc/stat listing that many CPUs whose times
+// never move, so the test-thread budget reads its cores there and its other
+// work from the load.
+function writeHost(dir, { limit = 64, used = 1, cache = 0, high = null, memorySome = 0, memoryFull = 0, cpuSome = 0, load = 0, oomKill = 0, cores = null } = {}) {
   const write = (rel, text) => {
     const file = path.join(dir, rel);
     fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -27,6 +30,7 @@ function writeHost(dir, { limit = 64, used = 1, cache = 0, high = null, memorySo
   write('proc/pressure/memory', `some avg10=${memorySome.toFixed(2)} avg60=0.00 avg300=0.00 total=0\nfull avg10=${memoryFull.toFixed(2)} avg60=0.00 avg300=0.00 total=0\n`);
   write('proc/pressure/cpu', `some avg10=${cpuSome.toFixed(2)} avg60=0.00 avg300=0.00 total=0\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n`);
   write('proc/loadavg', `${load.toFixed(2)} 0.00 0.00 1/100 1\n`);
+  if (cores) write('proc/stat', `cpu  100 0 100 1000 0 0 0 0 0 0\n${Array.from({ length: cores }, (_, i) => `cpu${i} 10 0 10 100 0 0 0 0 0 0\n`).join('')}`);
   write('proc/self/cgroup', `0::/${SLICE}/run.scope\n`);
   const slice = `sys/fs/cgroup/${SLICE}`;
   write(`${slice}/memory.current`, `${bytes(used)}\n`);
