@@ -214,7 +214,9 @@ used as the cheap docs command.
 
 On `submit`, passing and `--followups-only` independent reviews carry across
 docs-only changes. Their passing tests and CI evidence also carry, so acceptance
-queues no new review, tests or CI suite. Cleanup still checks the new head.
+queues no new review, tests or CI suite. If submit could not read repository
+metadata, automation prepares carryover before its software gates. Cleanup still
+checks the new head.
 Requirements edits, unreadable commits, rewritten history, instruction changes
 and code changes beyond named small fixes keep the normal gates.
 

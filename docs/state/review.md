@@ -73,7 +73,9 @@ These actions audit the operational `task.scope_ruling` setting. Their task even
 ### Docs and small fix rounds
 
 Submission compares the latest eligible independent review's head with the new
-head. A passing or `followups_only: true` verdict carries across docs-only
+head. Automation repeats this preparation before software gates when a brokered
+submit could not read repository metadata; carryover therefore precedes any suite
+or local CI rerun. A passing or `followups_only: true` verdict carries across docs-only
 changes. A failed verdict also carries when every blocker is explicitly a
 `nit`, `doc-fix`, `title-body-fix`, or a disputed finding whose path is unchanged.
 False claims confined to the PR title or body are clerical findings. Each code

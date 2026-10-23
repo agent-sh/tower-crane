@@ -384,3 +384,34 @@ test('a mixed code and metadata fix waits for verified metadata correction', (t)
   assert.equal(task.status, 'accepted');
   assert.equal(task.evidence.findLast((e) => e.type === 'tests').source, 'gate carry');
 });
+
+test('automation carries docs fixes before software when submit cannot read repository metadata', (t) => {
+  const h = makeRepo(t);
+  const reviewed = gateFixture(h);
+  h.state = path.join(h.base, 'external-state');
+  h.env.TOWER_CRANE_STATE = h.state;
+  h.init(['--base', 'main']);
+  const runs = path.join(h.base, 'suite-runs');
+  const command = `${shellQuote(process.execPath)} -e ${shellQuote(`require('node:fs').appendFileSync(${JSON.stringify(runs)}, 'run\\n')`)}`;
+  h.ok(['project', 'set', '--tests-mode', 'run-only', '--tests-cmd', command]);
+  for (const tier of ['easy', 'medium', 'hard', 'research', 'review']) {
+    h.ok(['ladder', 'set', tier, '--harness', 'command', '--clear', 'model', '--clear', 'profile',
+      '--clear', 'provider', '--clear', 'effort',
+      '--command', JSON.stringify([process.execPath, '-e', 'process.exit(0)', tier, '{prompt}'])]);
+  }
+  h.ok(['task', 'add', '--title', 'Value change', '--acceptance', 'Value becomes one']);
+  h.ok(['claim', 'T1', '--agent', 'builder']);
+  h.ok(['submit', 'T1', '--sha', reviewed, '--agent', 'builder']);
+  h.ok(['check', 'tests', 'T1']);
+  gateEvidence(h, 'clean', 'gates');
+  h.reviewer('T1', 'reviewer', reviewed);
+  h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', reviewed, '--revision', '1', '--agent', 'reviewer']);
+  const sha = change(h, ['docs/state.md']);
+  const submitted = h.json(['submit', 'T1', '--sha', sha, '--agent', 'builder'], { cwd: h.base });
+  assert.match(submitted.scope.error, /no repository/);
+  h.run(['wait', '--after', '0', '--types', 'never', '--task', 'T1', '--timeout', '0', '--agent', 'orchestrator']);
+  assert.equal(fs.readFileSync(runs, 'utf8').trim().split('\n').length, 1, 'the reviewed suite must not rerun');
+  const task = h.json(['task', 'show', 'T1']);
+  assert.equal(task.evidence.findLast((e) => e.type === 'review').reviewed_head, reviewed);
+  assert.equal(task.status, 'accepted');
+});
