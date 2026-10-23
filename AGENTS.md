@@ -14,9 +14,9 @@ Tower Crane is a CLI and an agent plugin. The CLI (`bin/`, `lib/`) keeps a proje
 - A fixture several tests share is built once per file with `cachedFixture` in `test/helpers.js` and copied, not rebuilt per test. `node scripts/mutants.js` must still catch every planted bug after a change to tests.
 - Changes reach `main` through a PR with a clean-context review comment and green CI.
 - No em dashes or assistant phrasing in code, comments, docs or commit messages. Comments say why, never record review history.
-- `docs/state.md` and `docs/cli.md` are the contract. Change them in the same PR as the behavior.
+- `docs/state/` (indexed by `docs/state.md`) and `docs/cli.md` are the contract. Change them in the same PR as the behavior: state prose in its `docs/state/` area file, CLI prose in `scripts/cli-reference.md`. `docs/cli.md` is generated whole; never edit it by hand.
 - Add `changelog.d/<task-or-pr>.md` for each change; leave `CHANGELOG.md` unchanged and keep existing fragments, editing one only where your change made it untrue. A release PR writes the `## <version>` section of `CHANGELOG.md` from the unreleased fragments that `node scripts/changelog.js` lists; `changelog.d/README.md` has the steps.
-- Keep command usage, help summaries and long descriptions in `COMMANDS`, sorted by name, one entry per line with a blank line between entries. `description` supplies the full command-table text; commands without it use `summary`. Generate `docs/cli.md` command rows with `npm run docs:generate`; its empty table rows separate independent edits. Keep further contract details and examples outside the generated blocks.
+- Keep command usage, help summaries and long descriptions in the `COMMANDS` table of the module the command belongs to (`lib/commands-*.js`), sorted by name, one entry per line with a blank line between entries. `description` supplies the full command-table text; commands without it use `summary`. Regenerate `docs/cli.md` with `npm run docs:cli`; its empty table rows separate independent edits. Put further contract details and examples in `scripts/cli-reference.md`.
 - Before submitting, run `npm run check:shared -- --base origin/BASE` after fetching the configured base branch. CI runs the same checks for changelog fragments, command layout and documentation drift.
 
 ## Layout
