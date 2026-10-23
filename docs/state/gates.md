@@ -2,6 +2,8 @@
 
 ### Acceptance gates
 
+Command timeouts allow pending child events a turn before stopping the command. When the timer is more than one second late because its caller stalled, stdout or stderr observed at or after that deadline starts a fresh timeout window, whether the output arrived before the overdue callback or during its deferred check. Earlier output alone does not extend the deadline. On-time deadlines and quiet children still time out; a child that exited completes without a timeout.
+
 Failed GitHub commands retain the child exit status, signal and startup error code and message in the gate evidence `summary`, including when stderr and stdout are empty.
 
 `tower-crane accept` refuses unless the task's current revision has, at the submitted `sha`:
