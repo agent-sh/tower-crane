@@ -42,26 +42,55 @@ test('longestFirst starts the longest measured files first and keeps sorted orde
   assert.deepEqual(longestFirst(files, durations), ['b', 'd', 'new', 'a', 'c']);
   assert.deepEqual(files, ['d', 'c', 'b', 'a', 'new'], 'the input is not reordered');
   assert.deepEqual(longestFirst(['y', 'x'], {}), ['x', 'y'], 'an empty table keeps the sorted order');
-  assert.deepEqual(startOrder(['b', 'a'], 1, durations), ['b', 'a'], 'two files for one worker both start at once');
 });
 
-test('startOrder spells the longest files so that node --test sorts them first, one band per worker', () => {
-  const durations = { a: 1, b: 9, c: 1, d: 5, e: 3, f: 2 };
-  const files = ['f', 'e', 'd', 'c', 'b', 'a', 'new'];
-  const named = (cwd, order) => order.map((f) => path.relative(cwd, path.resolve(cwd, f)));
-  // Each `../` step up from the working directory is a band, then absolute paths, then plain ones.
-  // The file the table does not list takes the first band, whatever its median cost.
-  for (const [depth, workers, sorted] of [
-    [3, 1, ['new', 'b', 'd', 'e', 'a', 'c', 'f']],
-    [2, 1, ['new', 'b', 'd', 'a', 'c', 'e', 'f']],
-    [1, 1, ['new', 'b', 'a', 'c', 'd', 'e', 'f']],
-    [2, 2, ['b', 'new', 'd', 'e', 'a', 'f', 'c']],
-    [1, 3, ['b', 'd', 'new', 'a', 'e', 'f', 'c']],
+test('startOrder puts unmeasured files before measured files without changing shard costs', () => {
+  for (const [name, files, durations, expected] of [
+    ['one unlisted file', ['b', 'new', 'a', 'c'], { a: 9, b: 1, c: 2 }, ['new', 'a', 'c', 'b']],
+    ['several unlisted files', ['z', 'b', 'a', 'new'], { a: 9, b: 1 }, ['new', 'z', 'a', 'b']],
+    ['one worker and two files', ['a', 'new'], { a: 9 }, ['new', 'a']],
+    ['zero is measured', ['a', 'z', 'b'], { a: 0, b: 9 }, ['z', 'b', 'a']],
+    ['invalid costs are unmeasured', ['e', 'a', 'd', 'c', 'b'],
+      { a: 9, b: NaN, c: -1, d: Infinity, e: '1' }, ['b', 'c', 'd', 'e', 'a']],
+    ['measured ties', ['c', 'a', 'b'], { a: 2, b: 9, c: 2 }, ['b', 'a', 'c']],
+    ['no table', ['z', 'a', 'b'], {}, ['a', 'b', 'z']],
+    ['no files', [], { a: 9 }, []],
   ]) {
-    const cwd = path.resolve('/', ...Array.from({ length: depth }, (_, i) => `dir${i}`));
-    const order = startOrder(files, workers, durations, cwd);
-    assert.deepEqual(named(cwd, order), files, `depth ${depth}, ${workers} workers: each file keeps its place`);
-    assert.deepEqual(named(cwd, [...order].sort()), sorted, `depth ${depth}, ${workers} workers`);
+    const original = [...files];
+    assert.deepEqual(startOrder(files, durations), expected, name);
+    assert.deepEqual(files, original, `${name}: input order is preserved`);
+    const shards = [1, 2].map((i) => shardFiles(files, i, 2, durations));
+    assert.deepEqual([1, 2].map((i) => shardFiles(startOrder(files, durations), i, 2, durations)),
+      shards, `${name}: launch order does not change shard allocation`);
+  }
+});
+
+test('the runner starts an unmeasured file first with one worker, sharded or unsharded', (t) => {
+  const h = makeRepo(t);
+  const durations = { [FIXTURES[0]]: 100, [FIXTURES[1]]: 1, [FIXTURES[2]]: 10 };
+  const hook = path.join(h.base, 'file-durations.cjs');
+  fs.writeFileSync(hook, `
+const fs = require('node:fs');
+const read = fs.readFileSync;
+fs.readFileSync = function (file, ...args) {
+  if (String(file) === ${JSON.stringify(path.join(ROOT, 'test', 'durations.json'))}) {
+    return JSON.stringify({ [process.platform]: ${JSON.stringify(durations)} });
+  }
+  return read.call(this, file, ...args);
+};
+`);
+  for (const shard of ['', '1/1']) {
+    const result = cp.spawnSync(process.execPath, [path.join(ROOT, 'test', 'run.js'),
+      '--test-concurrency=1', '--test-reporter=tap', ...FIXTURES], {
+      cwd: ROOT, env: { ...h.env, NODE_OPTIONS: `${h.env.NODE_OPTIONS || ''} --require "${hook}"`,
+        TOWER_CRANE_TEST_GRANT: '', TC_TEST_SHARD: shard },
+      encoding: 'utf8', timeout: HUNG_TEST_MS,
+    });
+    assert.equal(result.status, 0, result.stderr + result.stdout);
+    const expected = [FIXTURES[3], FIXTURES[0], FIXTURES[2], FIXTURES[1]];
+    const titles = [...result.stdout.matchAll(/^# Subtest: (.+)$/gm)].map(([, name]) => name);
+    assert.deepEqual(titles, ['shard d', 'shard a', 'shard c', 'shard b'], shard || 'unsharded');
+    if (shard) assert.deepEqual([...result.stdout.matchAll(/^file started: (.+)$/gm)].map(([, file]) => file), expected);
   }
 });
 
