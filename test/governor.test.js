@@ -61,6 +61,27 @@ test('the budget admits work only under every defer line, counting growth, other
     others: 3 * GiB, others_room: 2 * GiB * (1 - 1 / 30), need: 0, units: 1, projects: 1 }));
 });
 
+test('one merge-queue suite passes the CPU lines while gate runs hold places; new gate runs and memory still wait', () => {
+  const now = Date.now();
+  const gates = [unit('tests', 1), unit('clean', 2)];
+  const cases = [
+    ['a suite past the load line while gate runs hold places', 'suite', reading({ load: 40, cores: 8 }), registry(gates), true],
+    ['a suite past the cpu stall line while gate runs hold places', 'suite', reading({ cpu: 90 }), registry(gates), true],
+    ['a new tests gate past the load line', 'tests', reading({ load: 40, cores: 8 }), registry(gates), false, /load: 40 on 8 cores/],
+    ['a new clean gate past the cpu stall line', 'clean', reading({ cpu: 90 }), registry(gates), false, /cpu pressure/],
+    ['a worker past the load line', 'worker', reading({ load: 40, cores: 8 }), registry(gates), false, /load: 40/],
+    ['a suite past the load line with no gate run holding a place', 'suite', reading({ load: 40, cores: 8 }), registry([unit('worker', 1)]), false, /load: 40/],
+    ['a second suite past the load line', 'suite', reading({ load: 40, cores: 8 }), registry([...gates, unit('suite', 3)]), false, /load: 40/],
+    ['a suite past the memory line while gate runs hold places', 'suite', reading({ used: 7.1, load: 40, cores: 8 }), registry(gates), false, /memory: tests\.slice/],
+    ['a suite under memory stall while gate runs hold places', 'suite', reading({ some: 20 }), registry(gates), false, /memory pressure/],
+  ];
+  for (const [name, kind, r, reg, ok, reason] of cases) {
+    const verdict = G.assess(r, reg, s, need, kind, now);
+    assert.equal(verdict.ok, ok, `${name}: ${verdict.reasons.join('; ')}`);
+    if (reason) assert.match(verdict.reasons.join('; '), reason, name);
+  }
+});
+
 test('running units reserve their summed room until enough windows exist, then the share of it sets grew into together', () => {
   const now = Date.UTC(2026, 9, 20, 2, 0);
   const at = new Date(now - 3600000).toISOString();

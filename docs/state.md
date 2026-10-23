@@ -997,6 +997,8 @@ Each closed window is appended to `HOST.windows.jsonl` beside the registry, whic
 
 Pressure defers as well: memory `some` avg10 at or over `psi_memory_defer`, CPU `some` avg10 at or over `psi_cpu_defer`, or load at or over `load_defer` times the cores. Admission and the registry write that records the unit are one locked step, so two projects cannot both take the last room.
 
+Merge work has a reserved share of the CPU lines. While a `tests`, `clean` or `ci` unit holds a place on the host, a `suite` unit is admitted past the CPU pressure and load lines, provided no other `suite` holds a place. New gate runs and agents still meet those lines and wait. Memory lines and memory pressure apply to the suite as to any unit. The share is reserved rather than won by holding back new gate runs while a merge waits, for two reasons. Load and CPU pressure are averages that fall minutes after work stops. And the gate runs already admitted, whose load holds the suite back, run for as long as the suite does. A hold would leave the merge waiting until all of them ended, though the merge is what frees dependents, stacked branches and the release. One suite at a time keeps the share bounded, and the merge line is serial anyway. On 2026-10-23 every merge-queue suite was deferred at load 25 to 36 on 24 cores while admitted gate runs kept their places.
+
 #### Live-window replay, 2026-10-21 (T451)
 
 The first day's log does not call for tightening the p99 rule or its largest-unit floor. Of 1338 closed windows, 25 grew past their reservation (1.87%). The highest `actual` among those crossings was 20.712 GiB, 57.53% of the limit; their highest `slice_peak`, including later admissions and other sessions, was 21.702 GiB, 60.28%. These leave 13.488 and 12.498 GiB to the 95% stop line. No crossing reached 90% of the limit, the threshold five percentage points below that line. None reached 95% of the stop line either (90.25% of the limit).
@@ -2028,6 +2030,13 @@ another reaction of the same task. Queued notifications for accepted, unmerged P
 tasks run first, in the order of their current `accept` events. This includes
 older notifications that now run a merge and any merged-tree test the merge
 needs. Running reactions are never preempted.
+The merge line runs under whichever reaction drains it, often one for a task
+that already merged, so a head check ranks by the accepted task it checks,
+not by that reaction's own task: it takes a free executor ahead of every
+waiting gate run, and a reaction that stopped for a full cap at a head check
+records `merge` (the task it checks) on its `phase: "executor"` receipt and
+keeps that task's merge turn in the queue. When that task is no longer
+accepted, the receipt keeps its own event's turn.
 Submitted tasks follow in submission order, except that the queued
 notifications a `gates prioritize` event names run first among submitted
 work, the most recent request first. An explicit request cannot move
@@ -2075,6 +2084,14 @@ global mode masked by the task's kind override queues nothing. Already merged ta
 `status` also lists `merge blocked: TASK REASON` for accepted, unmerged PRs.
 JSON carries `merge_blocked: [{id, reason}]`. It uses current gate evidence
 first, then the recorded merge queue refusal; it makes no GitHub request.
+Every other accepted, unmerged PR task whose head check is not running is a
+merge wait, listed in merge-line order as `merge waits: TASK since AT, behind
+WHAT`, with JSON `merge_waits: [{id, since, behind}]`. `since` is its current
+`accept` event's time. `behind` is the first that holds: a `suite` deferral
+of the host governor (`the host governor: REASON`), a head check waiting for
+a full cap (`a gate executor: N of N in use: ...`), an earlier unblocked
+entry (`T3 ahead in the merge line`), pending CI at its head (`GitHub
+checks`), else `the next merge queue pass`.
 Automatic state changes and evidence use `agent: orchestrator` and
 `via: automation`. Reactions establish an explicit authorization context
 only after verifying the caller's authority or entering from the trusted
