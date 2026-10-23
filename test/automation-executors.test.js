@@ -892,6 +892,44 @@ test('status names what each merge waits behind', (t) => {
     `T4 since ${at(2)}, behind T5 ahead in the merge line`);
 });
 
+test('status lists each stacked merge wait with its own acceptance and its stack blocker', (t) => {
+  const A = require('../lib/automation');
+  const T = require('../lib/tasks');
+  const P = require('../lib/processes');
+  const sha = 'a'.repeat(40);
+  const at = (minute) => new Date(Date.UTC(2026, 9, 23, 8, minute)).toISOString();
+  const self = { pid: process.pid, ...P.identity(process.pid) };
+  const task = (id, pr, stack, status = 'accepted') => ({ id, status, sha, revision: 1, pr, evidence: [], ...(stack ? { stack } : {}) });
+  const accept = (id, minute) => ({ id: `accept-${id}`, task: id, cmd: 'accept', at: at(minute), detail: { sha, revision: 1 } });
+  const lease = (id, kind) => ({ cmd: 'executor', task: id, at: at(40), detail: { lease: `cpu:${id}`, phase: 'running', kind, ...self } });
+  const linked = { parent: 'T1', linked: true };
+  let failing = new Set();
+  t.mock.method(T, 'gateReport', (x) => ({ ok: !failing.has(x.id), gates: [], missing: failing.has(x.id) ? ['ci failed'] : [] }));
+  for (const [name, tasks, events, fails, want] of [
+    ['a linked stack whose bottom is blocked', [task('T1', 7), task('T2', 8, linked)], [], ['T1'],
+      [['T2', 'T1 merge blocked: ci failed']]],
+    ['a linked stack whose top is blocked', [task('T1', 7), task('T2', 8, linked)], [], ['T2'],
+      [['T1', 'T2 merge blocked: ci failed']]],
+    ['a linked stack that waits', [task('T1', 7), task('T2', 8, linked)], [], [],
+      [['T1', 'the next merge queue pass'], ['T2', 'the next merge queue pass']]],
+    ['a later entry behind a blocked stack', [task('T1', 7), task('T2', 8, linked), task('T5', 9)], [accept('T5', 35)], ['T1'],
+      [['T2', 'T1 merge blocked: ci failed'], ['T5', 'the next merge queue pass']]],
+    ['a later entry behind a waiting stack', [task('T1', 7), task('T2', 8, linked), task('T5', 9)], [accept('T5', 35)], [],
+      [['T1', 'the next merge queue pass'], ['T2', 'the next merge queue pass'], ['T5', 'T2 ahead in the merge line']]],
+    ['an unlinked task on an accepted task', [task('T1', 7), task('T2', 8, { parent: 'T1' })], [], [],
+      [['T1', 'the next merge queue pass'], ['T2', 'T1 under it in its stack']]],
+    ['a linked task on a task in review', [task('T1', 7, null, 'submitted'), task('T2', 8, linked)], [], [],
+      [['T2', 'T1 under it in its stack']]],
+    ['a stack whose head check runs', [task('T1', 7), task('T2', 8, linked)], [lease('T2', 'head check')], [], []],
+  ]) {
+    failing = new Set(fails);
+    const log = [...(tasks[0].status === 'accepted' ? [accept('T1', 1)] : []), accept('T2', 30), ...events];
+    const waits = A.mergeWaits({ project: {}, tasks: { tasks }, events: log });
+    assert.deepEqual(waits.map((w) => [w.id, w.behind]), want, name);
+    for (const w of waits) assert.equal(w.since, log.find((e) => e.cmd === 'accept' && e.task === w.id).at, `${name}: ${w.id} waits since its acceptance`);
+  }
+});
+
 test('accepted merges take the next executor in acceptance order before queued submitted gates', async (t) => {
   const h = setup(t);
   const events = path.join(h.state, 'events.jsonl');

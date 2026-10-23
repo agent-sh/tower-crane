@@ -291,16 +291,21 @@ first, then the recorded merge queue refusal; it makes no GitHub request.
 A pass that ends at a head check deferred for a full executor cap or by the
 governor records that head as `blocked` with `deferred: {kind: "executor"}`
 or `deferred: {kind: "governor", reason}`. That is a wait, not a refusal.
-Every other accepted, unmerged PR task whose head check is not running is a
-merge wait, listed in merge-line order as `merge waits: TASK since AT, behind
-WHAT`, with JSON `merge_waits: [{id, since, behind}]`. `since` is its current
-`accept` event's time. `behind` is the first that holds: a `suite` deferral
+Every other accepted, unmerged PR task is a merge wait unless its entry's
+head check is running, listed in merge-line order as `merge waits: TASK since
+AT, behind WHAT`, with JSON `merge_waits: [{id, since, behind}]`. `since` is
+the task's own current `accept` event's time. A linked stack is one entry of
+the line, and each of its unblocked members is listed with what holds the
+entry. `behind` is the first that holds: a blocked member of the same entry
+(`T1 merge blocked: REASON`), a `suite` deferral
 of the host governor (`the host governor: REASON`), a head check waiting for
-a full cap (`a gate executor: N of N in use: ...`), either one read from the
-reaction's receipt or from the queue's deferred record written after that
-`accept`, an earlier unblocked
-entry (`T3 ahead in the merge line`), pending CI at its head (`GitHub
-checks`), else `the next merge queue pass`.
+an executor (`a gate executor: N of M in use: ...`, the leases held now),
+either one read from the reaction's receipt or from the queue's deferred
+record written after that `accept`, an earlier entry with no blocked member
+(`T3 ahead in the merge line`), pending CI at its head (`GitHub
+checks`), else `the next merge queue pass`. A stacked task outside the line,
+whose lower task is not accepted or not linked to it, is listed after the
+line as behind its nearest unmerged lower task (`T1 under it in its stack`).
 Automatic state changes and evidence use `agent: orchestrator` and
 `via: automation`. Reactions establish an explicit authorization context
 only after verifying the caller's authority or entering from the trusted
