@@ -522,24 +522,22 @@ test('the suite profile compares the medians of interleaved baseline and head ru
   assert.match(files.text, /^median of 1: CPU seconds \(file processes\) head 3999\.0 vs baseline 4999\.0/m, 'without a cgroup the file processes are summed');
 });
 
-test('the suite profile records each test of a real run with its CPU', { skip: process.platform !== 'linux' && 'CPU comes from /proc' }, (t) => {
+// Wall deadlines cannot guarantee CPU work when the scheduler pauses a process.
+function profileCpuWork(pauseMs) {
+  return `const start = process.cpuUsage();
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ${pauseMs}); // wait-allow: the profile measures CPU work and pauses
+    let used;
+    do { used = process.cpuUsage(start); } while (used.user + used.system < 400000);`;
+}
+
+for (const pauseMs of [0, 350]) {
+test(`the suite profile records each test of a real run with its CPU (pause ${pauseMs} ms)`, { skip: process.platform !== 'linux' && 'CPU comes from /proc' }, (t) => {
   const h = makeRepo(t);
   const fixture = path.join(h.base, 'profiled.test.js');
   fs.writeFileSync(fixture, `
 const assert = require('node:assert/strict');
 require('node:test')('waits', () => { assert.equal(Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 400), 'timed-out'); }); // wait-allow: the profile measures a timer wait
-for (const [name, pause] of [['spins', 0], ['spins after pause', 250]]) {
-  require('node:test')(name, () => {
-    const start = process.cpuUsage();
-    // A pause reproduces time off CPU without depending on other host processes.
-    if (pause) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, pause); // wait-allow: the profile measures time off CPU
-    let n = 0;
-    let used;
-    // A CPU budget keeps the work stable when the scheduler gives other tasks a turn.
-    do { n++; used = process.cpuUsage(start); } while (used.user + used.system < 400000); // wait-allow: the profile measures CPU work
-    assert.ok(n > 0);
-  });
-}
+require('node:test')('spins', () => { ${profileCpuWork(pauseMs)} });
 `);
   const out = path.join(h.base, 'profile.json');
   // This checkout stands in for the baseline, so the verdict is a coin toss; the exit follows it.
@@ -559,17 +557,17 @@ for (const [name, pause] of [['spins', 0], ['spins after pause', 250]]) {
   assert.equal(profile.status, 0, 'the suite itself passed');
   assert.ok(profile.host.load_peak >= 0 && profile.host.cores > 0, JSON.stringify(profile.host));
   const byName = Object.fromEntries(profile.tests.map((x) => [x.name, x]));
-  assert.deepEqual(Object.keys(byName).sort(), ['spins', 'spins after pause', 'waits']);
+  assert.deepEqual(Object.keys(byName).sort(), ['spins', 'waits']);
   assert.ok(byName.waits.wall_ms >= 400 && byName.waits.cpu_ms < 200, JSON.stringify(byName.waits));
-  for (const name of ['spins', 'spins after pause']) {
-    assert.ok(byName[name].cpu_ms >= 300, JSON.stringify(byName[name]));
-  }
+  assert.ok(byName.spins.cpu_ms >= 300, JSON.stringify(byName.spins));
   assert.equal(profile.files.length, 1);
   assert.match(r.stdout, /^serial tests: .* waiting$/m);
   assert.deepEqual(fs.readdirSync(h.base).filter((name) => name.startsWith('suite-profile-')), [], 'the record directory is removed');
 });
+}
 
-test('the suite profile runs a baseline commit from a worktree it removes afterwards', { skip: process.platform !== 'linux' && 'CPU comes from /proc' }, (t) => {
+for (const pauseMs of [0, 350]) {
+test(`the suite profile runs a baseline commit from a worktree it removes afterwards (pause ${pauseMs} ms)`, { skip: process.platform !== 'linux' && 'CPU comes from /proc' }, (t) => {
   const h = makeRepo(t);
   // The runner and what it loads, so the repository's own suite runs at both commits.
   for (const file of ['scripts/suite-profile.js', 'test/run.js', 'test/signals.js', 'test/atomic-file.js', 'test/global-setup.js', 'test/host.js', 'test/repo-seed.js', 'test/tmp-root.js',
@@ -584,8 +582,8 @@ test('the suite profile runs a baseline commit from a worktree it removes afterw
   h.git(['add', '.']);
   h.git(['commit', '-qm', 'baseline suite']);
   const baseline = h.git(['rev-parse', 'HEAD']);
-  // The head's test spins, so its file CPU is the larger whatever the load.
-  one("const start = process.cpuUsage(); let used; do { used = process.cpuUsage(start); } while (used.user + used.system < 400000);"); // wait-allow: the profile measures CPU work
+  // The head spends 400 ms of CPU, so its file CPU is larger under contention too.
+  one(profileCpuWork(pauseMs));
   const out = path.join(h.base, 'profile.json');
   const r = cp.spawnSync(process.execPath, [path.join(h.repo, 'scripts', 'suite-profile.js'), '--test-concurrency=1', '--baseline', baseline, '--json', out, 'test/one.test.js'],
     { cwd: h.repo, env: { ...h.env, TOWER_CRANE_TEST_TMP: h.base, TOWER_CRANE_SANDBOX: '0' }, encoding: 'utf8', timeout: 300000 });
@@ -599,3 +597,4 @@ test('the suite profile runs a baseline commit from a worktree it removes afterw
   assert.deepEqual(h.git(['worktree', 'list', '--porcelain']).split('\n').filter((line) => line.startsWith('worktree ')).length, 1, 'the baseline worktree is removed');
   assert.deepEqual(fs.readdirSync(h.base).filter((name) => name.startsWith('suite-baseline-')), [], 'its directory is removed');
 });
+}
