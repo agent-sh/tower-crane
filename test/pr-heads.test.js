@@ -4,7 +4,8 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { countHeads } = require('../lib/pr-heads');
+const { countHeads, read, warning } = require('../lib/pr-heads');
+const C = require('../lib/gates/common');
 
 const old = 'a'.repeat(40);
 const intermediate = 'b'.repeat(40);
@@ -70,3 +71,45 @@ for (const file of ['docs/state.md', 'docs/cli.md', 'changelog.d/T497.md']) {
     assert.ok(/late run.*head replaced before the previous submit can be counted/i.test(text), 'late runs can overcount pushes');
   });
 }
+
+test('history queries use whole seconds while counts retain the exact submit boundary', async (t) => {
+  const gh = C.gh;
+  t.after(() => { C.gh = gh; });
+  const boundary = { at: '2026-10-01T10:00:05.500Z', detail: { sha: old, pr: 7, branch }, task: 'T1', cmd: 'submit' };
+  C.gh = async (_ctx, args) => {
+    if (args[0] === 'pr') return { ok: true, stdout: JSON.stringify({ headRefName: branch, headRefOid: sha }) };
+    const query = new URL(args[1], 'https://api.github.com');
+    assert.equal(query.searchParams.get('created'), '>=2026-10-01T10:00:05Z');
+    return { ok: true, stdout: [
+      run(intermediate, { created_at: '2026-10-01T10:00:05.499Z' }),
+      run(sha, { created_at: '2026-10-01T10:00:05.500Z' }),
+    ].map(JSON.stringify).join('\n') };
+  };
+  assert.deepEqual(await read({}, { repo: 'acme/app' }, { task: { id: 'T1' }, sha, pr: 7, events: [boundary] }), { count: 1 });
+});
+
+test('policy refusals at either history read are informational and ordinary failures warn', async (t) => {
+  const gh = C.gh;
+  t.after(() => { C.gh = gh; });
+  for (const command of ['pr', 'api']) {
+    for (const denied of [true, false]) {
+      C.gh = async (_ctx, args) => args[0] === command
+        ? { ok: false, stderr: denied ? "gh is not allowed by this agent's agent file" : 'HTTP 503' }
+        : { ok: true, stdout: JSON.stringify({ headRefName: branch, headRefOid: sha }) };
+      const result = await read({}, { repo: 'acme/app' }, { task: { id: 'T1' }, sha, pr: 7, events: [] });
+      assert.equal(result.count, null);
+      if (denied) {
+        assert.match(result.note, /gh policy refuses.*history/);
+        assert.equal(result.error, undefined);
+        assert.equal(warning(result), null);
+      } else {
+        assert.match(result.error, /HTTP 503/);
+        assert.match(warning(result), /unavailable/);
+      }
+    }
+  }
+});
+
+test('multiple observed heads call for inspection without attributing every push to the worker', () => {
+  assert.match(warning({ count: 2 }), /inspect.*delayed runs.*engine or orchestrator pushes/);
+});

@@ -922,8 +922,10 @@ cp.spawnSync = function (command, args, opts) {
     const receipt = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim()
       .split('\n').map(JSON.parse).findLast((e) => e.cmd === 'submit');
     if (row.denied) {
-      assert.match(receipt.detail.push_history_error, /is not allowed/, row.name);
-      assert.match(result.stdout, /pushes_since_last_submit unavailable/, row.name);
+      assert.equal(receipt.detail.push_history_error, undefined, row.name);
+      assert.match(receipt.detail.push_history_note, /gh policy refuses PR head history/, row.name);
+      assert.match(result.stdout, /pushes_since_last_submit is unavailable/, row.name);
+      assert.doesNotMatch(result.stdout, /warning: pushes_since_last_submit/, row.name);
     } else {
       assert.equal(receipt.detail.push_history_error, undefined, row.name);
     }

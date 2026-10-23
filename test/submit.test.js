@@ -169,7 +169,7 @@ test('the claimant resubmits a newer head and its gates need evidence at that he
     ['submitted', newSha, 'fixture-change', 7, 'w-1', null, before.revision],
   );
   assert.deepEqual(submitted.evidence, before.evidence);
-  assert.ok(submitted.notes.some((n) => n.text === 'submitted: fixed review feedback'));
+  assert.equal(submitted.notes.at(-1).text, 'submitted: fixed review feedback');
   const resubmit = events(h).filter((event) => event.cmd === 'submit').at(-1);
   assert.deepEqual(
     [resubmit.task, resubmit.agent, resubmit.detail.previous_sha, resubmit.detail.sha],

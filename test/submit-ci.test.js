@@ -242,6 +242,23 @@ test('submit records unavailable PR head history without refusing or reporting a
   }
 });
 
+test('status lists multiple observed heads only for open tasks', (t) => {
+  const h = fixture(t);
+  for (const row of [
+    { status: 'submitted', visible: true },
+    { status: 'rework', visible: true },
+    { status: 'accepted', visible: false },
+    { status: 'cancelled', visible: false },
+  ]) {
+    const tasks = h.readState('tasks.json');
+    Object.assign(tasks.tasks[0], { status: row.status, pushes_since_last_submit: 2 });
+    h.writeState('tasks.json', tasks);
+    assert.deepEqual(h.json(['status']).pushes_since_last_submit,
+      row.visible ? [{ id: 'T1', pushes_since_last_submit: 2 }] : [], row.status);
+    assert.equal(/pushes since last submit:/.test(h.ok(['status'])), row.visible, row.status);
+  }
+});
+
 test('a PR that conflicts with its base refuses the submit, even with a failing required check', (t) => {
   const h = fixture(t);
   const r = submitPr(h, {
@@ -261,6 +278,14 @@ test('a shimmed agent whose gh policy refuses gh api submits with a notice that 
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /CI at \w+ in acme\/app was not checked: this agent's gh policy refuses gh api/);
   assert.equal(status(h), 'submitted');
+  assert.match(r.stdout, /gh policy refuses PR head history/);
+  assert.doesNotMatch(r.stdout, /warning: pushes_since_last_submit/);
+  const receipt = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim()
+    .split('\n').map(JSON.parse).findLast((e) => e.cmd === 'submit');
+  assert.equal(receipt.detail.pushes_since_last_submit, null);
+  assert.equal(receipt.detail.push_history_error, undefined);
+  assert.match(receipt.detail.push_history_note, /gh policy refuses PR head history/);
+  assert.ok(!h.readState('tasks.json').tasks[0].notes.some((n) => /warning: pushes_since_last_submit/.test(n.text)));
 });
 
 test('a [P1]/[P2] revuto finding with no change at its path and no [resolved] reply refuses the submit, as review ok would', (t) => {

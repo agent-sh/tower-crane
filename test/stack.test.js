@@ -419,7 +419,8 @@ test('a spawned worker claims a task whose dependency merged while gh api is den
   assert.ok(submit, 'denied API access does not refuse the worker submission');
   assert.equal(submit.agent, claim.agent);
   assert.equal(submit.detail.pushes_since_last_submit, null, 'denied history has no clean count');
-  assert.match(submit.detail.push_history_error, /is not allowed by this agent's agent file/);
+  assert.equal(submit.detail.push_history_error, undefined);
+  assert.match(submit.detail.push_history_note, /gh policy refuses PR head history/);
   // Both CI observations fail under this fixture's denied API, so rework follows the one retry.
   const rework = events.find((e) => e.task === 'T2' && e.cmd === 'rework');
   assert.ok(rework, 'the submitted task was sent back before refill could claim it');
