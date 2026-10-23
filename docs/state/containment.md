@@ -144,9 +144,10 @@ On Windows, cleanup with retained identities stops each identified non-kept
 process individually. It does not tree-kill an ancestor of retained work.
 Full containment cleanup without retained identities still uses `taskkill /T /F`.
 Retention requires recorded dispatch or controller pid/start identities.
-Verified orchestrator CLI commands register `{pid, start, host, role, command}`
+Verified orchestrator CLI commands register `{pid, start, host, pidns, role, command}`
 under `controllers/<pid>-<nonce>.json` in their state directory and remove the
-record when they return. A command started before its spawn is recorded registers
+record when they return. `pidns` is the command's pid namespace on Linux; a
+reader in another one keeps the record, since it cannot see that process. A command started before its spawn is recorded registers
 once the record appears ([agent identity](decisions.md#agent-identity)), before the command
 runs. Linux uses process start ticks; macOS and Windows use
 the process snapshot's start time. A background orchestrator `wait --inbox`
