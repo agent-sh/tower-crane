@@ -142,6 +142,10 @@ test('a Windows root that exited before its first snapshot keeps the children it
     for (const [name, os, snapshot, launch, expected] of [
       ['exited root', 'win32', rows, 1000, [11, 12, 14]],
       ['live root', 'win32', [root, ...rows.filter(r => r.pid !== 13)], 1000, [10, 11, 12, 14]],
+      // 13 and the process it started belong to the earlier holder of pid 10,
+      // as a detached supervisor does once its dispatch exits.
+      ['live root and an earlier orphan', 'win32', [root, ...rows, { pid: 16, parent: 13, group: null, start: 600 }], 1000, [10, 11, 12, 14]],
+      ['a live child and an earlier orphan', 'win32', [root, ...rows, { pid: 17, parent: 11, group: null, start: 700 }], 1000, [10, 11, 12, 14]],
       ['no launch time', 'win32', rows, undefined, []],
       ['Linux reparents', 'linux', rows, 1000, []],
     ]) {
@@ -150,6 +154,53 @@ test('a Windows root that exited before its first snapshot keeps the children it
       assert.deepEqual(C.descendants(snapshot, 10, known).map(r => r.pid), expected, name);
     }
   } finally { Object.defineProperty(process, 'platform', platform); }
+});
+
+// The same tree from a real Windows snapshot: the orphan still names its
+// exited parent, whose pid a process that started after the orphan now holds.
+test('a Windows contained tree leaves out the orphan of an earlier holder of its pid', {
+  skip: process.platform !== 'win32' && 'Windows pid reuse',
+}, async () => {
+  const { windowsProcesses, windowsCreated } = require('../lib/processes');
+  const parent = cp.spawnSync(process.execPath, ['-e', `const c = require('node:child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore', windowsHide: true }); c.unref(); console.log(process.pid + ' ' + c.pid)`], { encoding: 'utf8', windowsHide: true }); // wait-allow: an orphan that runs until it is stopped
+  const [pid, orphan] = parent.stdout.trim().split(' ').map(Number);
+  const born = windowsCreated([orphan], 300000).get(orphan);
+  assert.equal(Number.isSafeInteger(born), true, `no creation time for the orphan ${orphan}`);
+  const running = (target, start) => windowsCreated([target], 300000).get(target) === start;
+  try {
+    const took = require('./windows-pid-reuse').takePid(pid);
+    assert.equal(took.taken, true, `no process got pid ${pid} back: ${took.detail}`);
+    const holder = windowsCreated([pid], 300000).get(pid);
+    try {
+      const rows = (await windowsProcesses(cp.execFile, 300000)).map((r) => ({ ...r, group: null }));
+      assert.equal(rows.find((r) => r.pid === orphan)?.parent, pid, 'the orphan names its exited parent');
+      assert.ok(rows.find((r) => r.pid === pid)?.start > born, 'the holder of the pid started after the orphan');
+      const tree = C.descendants(rows, pid, new Map()).map((r) => r.pid);
+      assert.equal(tree.includes(pid), true, 'the holder heads its own tree');
+      assert.equal(tree.includes(orphan), false, 'the orphan of the earlier holder of the pid joined the tree');
+    } finally { if (running(pid, holder)) killPid(pid, 'SIGKILL'); }
+  } finally { if (running(orphan, born)) killPid(orphan, 'SIGKILL'); }
+});
+
+// The snapshot test above runs only on Windows, so its pid taker's request and
+// reading of the PowerShell result run here on every system.
+test('the pid taker asks PowerShell for one pid and reads only its last line', (t) => {
+  const { takePid } = require('./windows-pid-reuse');
+  for (const [name, reply, expected] of [
+    ['taken after type noise', { status: 0, stdout: 'warning: compiled\r\ntaken 7\r\n' }, { taken: true, tries: 7, detail: 'taken 7' }],
+    ['missed', { status: 0, stdout: 'missed 40\n' }, { taken: false, tries: 40, detail: 'missed 40' }],
+    ['creation refused', { status: 0, stdout: 'error 5 3\n' }, { taken: false, tries: 3, detail: 'error 5 3' }],
+    ['PowerShell missing', { status: null, stdout: null, stderr: '', error: { code: 'ENOENT' } }, { taken: false, tries: 0, detail: 'null ENOENT ' }],
+  ]) {
+    const calls = [];
+    t.mock.method(cp, 'spawnSync', (file, args, opts) => { calls.push({ file, args, opts }); return reply; });
+    assert.deepEqual(takePid(1234, { ms: 500 }), expected, name);
+    assert.equal(calls.length, 1, name);
+    assert.equal(calls[0].file, 'powershell.exe', name);
+    assert.match(Buffer.from(calls[0].args.at(-1), 'base64').toString('utf16le'), /\[PidReuse\]::Take\(1234, 500, /, name);
+    assert.equal(calls[0].opts.timeout, 500 + 120000, name);
+    cp.spawnSync.mock.restore();
+  }
 });
 
 const cases = [
@@ -192,6 +243,29 @@ for (const [kind, ending, owner, late, survives] of cases) {
         if (file === 'systemctl' && args.includes('ActiveState')) settled.push(args[2]);
         return execFile.call(this, file, args, ...rest);
       });
+      if (late !== 'none') {
+        // The keeper releases the late probe as it starts. A memory probe's OOM empties a
+        // systemd scope, whose manager then removes it with its counters, so that keeper
+        // starts only once the kernel ended the probe: the launcher's watch must see it.
+        const preload = path.join(h.base, 'keeper-preload.js');
+        fs.writeFileSync(preload, `
+const path=require('node:path');
+const {writeAtomic,readPublished}=require(${JSON.stringify(require.resolve('./atomic-file'))});
+const dir=${JSON.stringify(dir)};
+writeAtomic(path.join(dir,'probe.go'),'go');
+if(process.env.TC_KEEPER_HOLD){
+ const [id]=JSON.parse(readPublished(path.join(dir,'identities.json'),'utf8'));
+ const P=require(${JSON.stringify(require.resolve('../lib/processes'))});
+ while(P.processState({pid:id.pid,start_ticks:id.start})!=='exited')Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,25); // wait-allow: hold the keeper until the kernel ended the probe
+}
+`);
+        const spawn = cp.spawn;
+        t.mock.method(cp, 'spawn', function (file, args, options) {
+          if (!String(args?.[0]).endsWith('containment-keeper.js')) return spawn.apply(this, arguments);
+          const hold = late === 'memory' && child.containment.unit ? '1' : '';
+          return spawn.call(this, file, ['--require', preload, ...args], { ...options, env: { ...options.env, TC_KEEPER_HOLD: hold } });
+        });
+      }
       // The caller row deliberately terminates its own launcher to prove the
       // detached keeper retains the bound after that launcher is gone.
       const child = C.spawn(process.execPath, args, {
@@ -216,13 +290,21 @@ for (const [kind, ending, owner, late, survives] of cases) {
         }
       }
     }
+    if (late !== 'none') {
+      const [id] = JSON.parse(readPublished(path.join(dir, 'identities.json'), 'utf8'));
+      const work = { pid: id.pid, ...process.platform === 'linux' ? { startTicks: id.start } : {},
+        ...process.platform === 'win32' ? { startTime: require('./windows-process').startTime(id.pid) } : {} };
+      t.after(() => { if (detachedAlive(work)) killPid(work.pid, 'SIGKILL'); });
+      await waitOnRepo(h, () => reason, 'late limit reported');
+      await waitOnRepo(h, () => !detachedAlive(work), 'late limit stopped the dispatched work');
+    }
     await new Promise(resolve => setTimeout(resolve, 2200 * scale)); // wait-allow: all finite fixture children and the keeper end
     if (survives) {
       assert.equal(fs.existsSync(path.join(dir, 'managed.done')), true);
       assert.equal(fs.existsSync(path.join(dir, 'grandchild.done')), true);
       assert.ok(metadata.retained?.length, JSON.stringify(metadata));
     } else if (late !== 'none') {
-      assert.equal(reason, late === 'tasks' ? 'resource-tasks-max' : 'resource-memory-max');
+      assert.equal(reason, late === 'tasks' ? 'resource-tasks-max' : 'resource-memory-max', JSON.stringify(metadata));
       assert.equal(fs.existsSync(path.join(dir, 'managed.done')), false);
     } else {
       assert.equal(metadata.retained, undefined);
@@ -231,6 +313,62 @@ for (const [kind, ending, owner, late, survives] of cases) {
     if (!survives) assert.equal(fs.existsSync(path.join(dir, 'managed.done')), false);
   });
 }
+
+// Only a systemd scope reaches the handover in the row above; nested groups keep their counters.
+test('a launcher keeps its OOM watch on a scope until the keeper reports its own watch', async (t) => {
+  const { EventEmitter } = require('node:events');
+  const { TMP_ROOT } = require('./helpers');
+  const base = fs.mkdtempSync(path.join(TMP_ROOT, 'handover-'));
+  t.after(() => fs.rmSync(base, { recursive: true, force: true }));
+  for (const [name, before, end, after, expected] of [
+    // The OOM empties the scope and the manager removes it before the keeper is ready.
+    ['OOM announced while the keeper starts, scope then removed', 'oom', 'ready', null, 'resource-memory-max'],
+    ['OOM counted but not yet announced when the keeper is ready', 'counted', 'ready', null, 'resource-memory-max'],
+    ['fork refused while the keeper starts', 'tasks', 'ready', null, 'resource-tasks-max'],
+    ['keeper exits before it is ready', null, 'exit', null, null],
+    ['keeper fails to start', null, 'error', null, null],
+    ['OOM after the keeper reported its watch', null, 'ready', 'oom', null],
+  ]) {
+    const group = path.join(base, name.replace(/\W+/g, '-'));
+    fs.mkdirSync(group);
+    fs.writeFileSync(path.join(group, 'cgroup.events'), 'populated 1\nfrozen 0\n');
+    const events = (oom) => fs.writeFileSync(path.join(group, 'memory.events.local'),
+      `low 0\nhigh 0\nmax ${oom}\noom ${oom}\noom_kill ${oom}\noom_group_kill 0\n`);
+    events(0);
+    fs.writeFileSync(path.join(group, 'pids.events.local'), 'max 0\n');
+    let notify;
+    t.mock.method(fs, 'watch', (file, listener) => {
+      notify = listener;
+      return { on() {}, unref() {}, close() {} };
+    });
+    const found = [];
+    const stop = C.watchOom(group, { tasks: 0, memory: 0 }, reason => found.push(reason));
+    fs.watch.mock.restore();
+    const keeper = new EventEmitter();
+    let settled = false;
+    const done = C.handOver(keeper, group, { tasks: 0, memory: 0 }, false, stop, reason => found.push(reason))
+      .then(() => { settled = true; });
+    if (before === 'oom') {
+      events(1);
+      notify();
+      fs.rmSync(group, { recursive: true });
+    } else if (before === 'counted') events(1);
+    else if (before === 'tasks') fs.writeFileSync(path.join(group, 'pids.events.local'), 'max 1\n');
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(settled, false, `${name}: the handover waits for the keeper`);
+    if (end === 'ready') keeper.emit('message', { ready: true });
+    else if (end === 'error') keeper.emit('error', new Error('spawn failed'));
+    // Every keeper exits in the end; the handover reads the counters once.
+    keeper.emit('exit', 0, null);
+    await done;
+    if (after === 'oom') {
+      events(1);
+      notify();
+    }
+    assert.equal(found[0] ?? null, expected, name);
+    assert.ok(found.length <= 1, `${name}: ${found}`);
+  }
+});
 
 test('a CLI worker fixture named like a supervisor ends with its worker', async (t) => {
   const h = cachedFixture(t, 'lifecycle-cli', h => {
