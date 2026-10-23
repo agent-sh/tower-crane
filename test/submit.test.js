@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { makeRepo } = require('./helpers');
+const { makeRepo, cachedFixture } = require('./helpers');
 const { gateFixture, gateEvidence } = require('./gate-helpers');
 
 function events(h) {
@@ -70,47 +70,57 @@ test('submit preserves full SHA-1 and SHA-256 IDs without requiring their object
   }
 });
 
-test('a legacy short submitted sha reuses its full-sha reviewer and recognizes its failed review', (t) => {
-  const h = makeRepo(t);
-  h.init();
-  h.ok(['ladder', 'set', 'medium', '--harness', 'command', '--clear', 'profile', '--clear', 'effort',
-    '--command', '["tower-crane-no-such-reviewer","{prompt}"]']);
-  h.ok(['task', 'add', '--title', 'Docs', '--acceptance', 'reads well', '--kind', 'docs']);
-  h.ok(['claim', 'T1', '--agent', 'w-1']);
-  const sha = h.git(['rev-parse', 'HEAD']);
-  h.ok(['submit', 'T1', '--sha', sha, '--agent', 'w-1']);
-  const legacy = h.readState('tasks.json');
-  legacy.tasks[0].sha = sha.slice(0, 8);
-  h.writeState('tasks.json', legacy);
-  const revision = Number(h.revision('T1'));
-  const spawn = { at: new Date().toISOString(), agent: 'orchestrator', cmd: 'spawn', task: 'T1',
-    detail: { agent: 'r-1', role: 'reviewer', rung: 'review', sha, revision, pid: process.pid, attempt: 1,
-      ...require('../lib/processes').identity(process.pid) } };
-  const log = path.join(h.state, 'events.jsonl');
-  fs.appendFileSync(log, `${JSON.stringify(spawn)}\n`);
-  const pending = h.json(['accept', 'T1']);
-  assert.equal(pending.review_pending, true);
-  assert.equal(pending.reviewer, 'r-1');
-  const duplicate = h.run(['spawn', '--task', 'T1', '--role', 'review']);
-  assert.equal(duplicate.code, 1);
-  assert.match(duplicate.stderr, /reviewer is still running/);
-  fs.appendFileSync(log, `${JSON.stringify({ at: spawn.at, agent: 'orchestrator', cmd: 'spawn exit', task: 'T1',
-    detail: { agent: 'r-1', pid: process.pid, attempt: 1, code: 0 } })}\n`);
-  h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', sha, '--agent', 'r-1',
-    '--summary', 'lib/value.js:1 - Check null before dereferencing']);
-  const failed = h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'review');
-  assert.equal(failed.ok, false);
-  assert.match(failed.reason, /Check null/);
-  const denied = h.run(['accept', 'T1']);
-  assert.equal(denied.code, 1);
-  assert.match(denied.stdout, /current review FAIL.*sent back for rework/);
-  assert.equal(events(h).filter((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer').length, 1);
-  assert.equal(h.readState('tasks.json').tasks[0].sha, sha.slice(0, 8));
-  const reworked = h.json(['task', 'show', 'T1']);
-  assert.equal(reworked.status, 'rework');
-  assert.match(reworked.notes.at(-1).text, /Check null/);
-  assert.match(h.ok(['brief', 'get', 'T1']), /Check null before dereferencing/);
-});
+for (const length of [7, 8, 12, 40]) {
+  test(`a ${length}-character submitted sha reuses its full-sha reviewer and returns its failed review`, (t) => {
+    const h = cachedFixture(t, 'submitted reviewer sha variants', (h) => {
+      h.init();
+      h.ok(['ladder', 'set', 'medium', '--harness', 'command', '--clear', 'profile', '--clear', 'effort',
+        '--command', '["tower-crane-no-such-reviewer","{prompt}"]']);
+      h.ok(['task', 'add', '--title', 'Docs', '--acceptance', 'reads well', '--kind', 'docs']);
+      h.ok(['claim', 'T1', '--agent', 'w-1']);
+      const sha = h.git(['rev-parse', 'HEAD']);
+      h.ok(['submit', 'T1', '--sha', sha, '--agent', 'w-1']);
+      return { sha };
+    });
+    const sha = h.sha;
+    const legacy = h.readState('tasks.json');
+    legacy.tasks[0].sha = sha.slice(0, length);
+    h.writeState('tasks.json', legacy);
+    const revision = Number(h.revision('T1'));
+    const spawn = { at: new Date().toISOString(), agent: 'orchestrator', cmd: 'spawn', task: 'T1',
+      detail: { agent: 'r-1', role: 'reviewer', rung: 'review', sha, revision, pid: process.pid, attempt: 1,
+        ...require('../lib/processes').identity(process.pid) } };
+    const log = path.join(h.state, 'events.jsonl');
+    fs.appendFileSync(log, `${JSON.stringify(spawn)}\n`);
+    const pending = h.json(['accept', 'T1']);
+    assert.equal(pending.review_pending, true);
+    assert.equal(pending.reviewer, 'r-1');
+    const duplicate = h.run(['spawn', '--task', 'T1', '--role', 'review']);
+    assert.equal(duplicate.code, 1);
+    assert.match(duplicate.stderr, /reviewer is still running/);
+    fs.appendFileSync(log, `${JSON.stringify({ at: spawn.at, agent: 'orchestrator', cmd: 'spawn exit', task: 'T1',
+      detail: { agent: 'r-1', pid: process.pid, attempt: 1, code: 0 } })}\n`);
+    h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', sha, '--agent', 'r-1',
+      '--summary', 'lib/value.js:1 - Check null before dereferencing']);
+    const failed = h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'review');
+    assert.equal(failed.ok, false);
+    assert.match(failed.reason, /Check null/);
+    const denied = h.run(['accept', 'T1', '--json']);
+    assert.equal(denied.code, 1);
+    const refusal = JSON.parse(denied.stdout);
+    assert.equal(refusal.review_failed, true);
+    assert.equal(refusal.review.agent, 'r-1');
+    assert.equal(refusal.review.sha, sha);
+    assert.equal(refusal.inbox.id, 'review_failed:T1');
+    assert.deepEqual(refusal.inbox.action.argv, ['rework', '--from-review', 'T1']);
+    assert.equal(events(h).filter((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer').length, 1);
+    assert.equal(h.readState('tasks.json').tasks[0].sha, sha.slice(0, length));
+    const task = h.json(['task', 'show', 'T1']);
+    assert.equal(task.status, 'submitted');
+    assert.equal(task.revision, revision);
+    assert.ok(!events(h).some((e) => e.cmd === 'rework'));
+  });
+}
 
 test('submit refuses an ambiguous prefix and a non-commit object', (t) => {
   const h = makeRepo(t);
