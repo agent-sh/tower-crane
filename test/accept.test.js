@@ -1,12 +1,12 @@
 'use strict';
 
-const { waitOnRepo } = require('./signals');
+const { waitOnRepo, waitUntil } = require('./signals');
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { makeRepo, cachedFixture, BIN, ROOT } = require('./helpers');
+const { makeRepo, cachedFixture, detachedAlive, BIN, ROOT } = require('./helpers');
 const { gateFixture, gateEvidence } = require('./gate-helpers');
 const Actions = require('../lib/actions');
 const Reviewer = require('../lib/reviewer');
@@ -46,9 +46,12 @@ const events = (h) => {
 const reviewerSpawns = (h) => events(h).filter((e) => e.cmd === 'spawn' && e.task === 'T1' && e.detail.role === 'reviewer');
 
 // The dispatched reviewer runs detached; the test must outlive it and its monitor.
+// The monitor reacts to the exit after recording it, so evidence written
+// before the monitor ends is for those reactions to act on.
 async function reviewerExited(h) {
-  const agents = reviewerSpawns(h).map((e) => e.detail.agent);
-  await waitOnRepo(h, () => agents.every((a) => events(h).some((e) => e.cmd === 'spawn exit' && e.detail.agent === a)));
+  const spawns = reviewerSpawns(h);
+  await waitOnRepo(h, () => spawns.every((s) => events(h).some((e) => e.cmd === 'spawn exit' && e.detail.agent === s.detail.agent)));
+  await waitUntil(() => spawns.every((s) => !detachedAlive({ pid: s.detail.monitor_pid })), { what: 'the reviewer monitors exit' });
 }
 
 // After a reviewer exits its monitor advances the task too, so either accept may win.
