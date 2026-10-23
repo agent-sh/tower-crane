@@ -201,7 +201,8 @@ for (const mode of ['pass-first', 'local-commit', 'remote-commit', 'unchanged',
       assert.deepEqual(item.blockers, [finding]);
       if (mode === 'fail-twice') assert.match(item.findings, /The body still claims/);
       assert.match(item.reason, ['unchanged', 'availability-twice'].includes(mode) ? /without changing/ : /two consecutive/);
-      assert.match(item.correction, /Edit the false PR-body claims or the PR title before accept/);
+      assert.match(item.correction, /Correct every named PR-body claim or title finding/);
+      assert.match(item.correction, /accept T1 --metadata-fixed --reason R/);
       assert.deepEqual(item.action.argv, ['accept', 'T1']);
       h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
       assert.equal(logs().filter((e) => e.cmd === 'spawn' && e.detail.body_fix).length, fixes.length);

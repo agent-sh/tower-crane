@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { cachedFixture, makeRepo } = require('./helpers');
+const { cachedFixture, makeRepo, ROOT } = require('./helpers');
 const { gateFixture, gateEvidence } = require('./gate-helpers');
 const { shellQuote } = require('../lib/gates/common');
 
@@ -41,6 +41,7 @@ test('docs-only resubmissions keep review while code and agent instructions queu
     [['docs/state.md', 'lib/value.js'], false],
     [['skills/example/SKILL.md'], false],
     [['agents/example.md'], false],
+    [['AGENTS.md', 'standards/default.md', 'commands/tower-crane-inbox.md', '.claude/agents/x.md'], false],
   ]) {
     const h = setup(t);
     const sha = change(h, files);
@@ -124,6 +125,44 @@ test('docs path matching covers nested markdown and refuses mixed and instructio
   assert.equal(R.docsOnly(['docs/contracts/pinned.md'], R.docsPaths({}), ['docs/contracts/**']), false);
 });
 
+test('instruction paths cannot use docs rules or a named fix to bypass gates', () => {
+  const R = require('../lib/review-carry');
+  for (const file of [
+    'AGENTS.md', 'CLAUDE.md', 'CLAUDE.local.md', 'AGENTS.override.md', 'src/AGENTS.md',
+    'src/agents.md', 'plugin/SKILLS/x/SKILL.md',
+    '.claude/CLAUDE.md', 'standards/default.md', 'commands/tower-crane-inbox.md',
+    '.claude/agents/x.md', '.codex/skills/x/SKILL.md', 'plugin/skills/x/SKILL.md',
+    'plugin/prompts/review.md', 'plugin/commands/review.md', 'plugin/standards/default.md',
+  ]) {
+    for (const paths of [R.docsPaths({}), ['**']]) {
+      assert.equal(R.docsOnly([file], paths), false, file);
+      const rules = { docs_paths: paths, docs_exclude: [] };
+      const diff = `diff --git a/${file} b/${file}\n--- a/${file}\n+++ b/${file}\n@@ -1 +1 @@\n-old\n+new\n`;
+      for (const attested of [false, true]) {
+        assert.equal(R.namedFixes([file], diff,
+          [{ kind: 'nit', path: file, line: 1, claim: 'Correct this instruction' }],
+          rules, [], attested), false, `${file}: attested=${attested}`);
+      }
+    }
+  }
+});
+
+test('published repair contracts describe verified carryover and structured finding kinds', () => {
+  for (const file of [
+    'skills/tower-crane/SKILL.md', 'skills/tower-crane-review/SKILL.md',
+    'agents/tower-crane-reviewer.md', 'commands/tower-crane-rework-from-review.md',
+    'standards/default.md', 'scripts/cli-reference.md', 'docs/state/gates.md',
+  ]) {
+    const text = fs.readFileSync(path.join(ROOT, file), 'utf8');
+    assert.doesNotMatch(text, /requests? (?:the same |a )light reviewer? check|requests? (?:the same |a )light check|two (?:consecutive )?failed light (?:re-)?checks|fresh independent review evidence passes/, file);
+    assert.match(text, /carr(?:y|ies|ied|yover)/i, file);
+  }
+  const reviewer = fs.readFileSync(path.join(ROOT, 'skills/tower-crane-review/SKILL.md'), 'utf8');
+  for (const term of ['nit', 'doc-fix', 'title-body-fix', 'end_line', '--followups-only']) {
+    assert.ok(reviewer.includes(term), `reviewer needs ${term}`);
+  }
+});
+
 test('a fresh docs-only tests gate runs only the optional cheap docs check', (t) => {
   const h = makeRepo(t);
   h.init(['--base', 'main']);
@@ -144,6 +183,25 @@ test('a fresh docs-only tests gate runs only the optional cheap docs check', (t)
   h.ok(['project', 'set', '--review-policy', '{"docs_exclude":["docs/guide.md"]}']);
   const failed = h.run(['check', 'tests', 'T1']);
   assert.equal(failed.code, 1, failed.stdout);
+});
+
+test('fresh instruction-only heads run the suite even with broad custom docs rules', (t) => {
+  for (const file of ['AGENTS.md', 'plugin/skills/x/SKILL.md', '.claude/agents/x.md']) {
+    const h = makeRepo(t);
+    h.init(['--base', 'main']);
+    h.git(['checkout', '-qb', 'instruction-change']);
+    const sha = change(h, [file]);
+    h.ok(['task', 'add', '--title', 'Instructions', '--acceptance', 'prompt is correct']);
+    h.ok(['claim', 'T1', '--agent', 'builder']);
+    const marker = path.join(h.base, 'suite-ran');
+    const cmd = `node -e ${shellQuote(`require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ran'); process.exit(99)`)}`;
+    h.ok(['project', 'set', '--tests-mode', 'run-only', '--tests-cmd', cmd,
+      '--review-policy', '{"docs_paths":["**"]}']);
+    h.ok(['submit', 'T1', '--sha', sha, '--agent', 'builder']);
+    assert.equal(h.run(['check', 'tests', 'T1']).code, 1, file);
+    assert.equal(fs.readFileSync(marker, 'utf8'), 'ran', file);
+    assert.equal(h.json(['task', 'show', 'T1']).evidence.at(-1).ok, false, file);
+  }
 });
 
 function failedReview(h, findings) {
@@ -190,6 +248,33 @@ test('disputed findings stay unchanged and become informational inbox items', (t
   const sha = change(h, ['value.js']);
   const refused = h.run(['submit', 'T1', '--sha', sha, '--disputes', disputes, '--agent', 'builder']);
   assert.equal(refused.code, 1);
+});
+
+test('dispute acknowledgements cover single, batch and cutoff modes without deleting evidence', (t) => {
+  for (const mode of ['single', 'batch', 'cutoff', 'cutoff-kind']) {
+    const h = setup(t);
+    failedReview(h, [{ kind: 'blocking', path: 'value.js', line: 1, claim: 'Return zero' }]);
+    h.ok(['submit', 'T1', '--sha', h.reviewed, '--agent', 'builder',
+      '--disputes', '[{"finding":1,"reason":"The acceptance requires one."}]']);
+    const task = h.json(['task', 'show', 'T1']);
+    const notice = h.json(['inbox', '--agent', 'orchestrator']).items.find((i) => i.kind === 'review_dispute');
+    assert.ok(notice, mode);
+    assert.equal(h.run(['inbox', '--ack', notice.id, '--agent', 'builder']).code, 1);
+    assert.equal(h.run(['inbox', '--ack', notice.id, '--ack', 'missing', '--agent', 'orchestrator']).code, 2);
+    if (mode.startsWith('cutoff')) {
+      const prior = new Date(Date.parse(task.evidence.at(-1).at) - 1).toISOString();
+      assert.equal(h.json(['inbox', '--ack-before', prior, '--kind', 'review_dispute',
+        '--agent', 'orchestrator']).count, 0);
+    }
+    const args = mode === 'single' ? ['--ack', notice.id]
+      : mode === 'batch' ? ['--ack', notice.id, '--ack', notice.id]
+        : ['--ack-before', task.evidence.at(-1).at, ...(mode === 'cutoff-kind' ? ['--kind', 'review_dispute'] : [])];
+    const result = h.json(['inbox', ...args, '--agent', 'orchestrator']);
+    assert.ok(Array.isArray(result.acknowledged) ? result.acknowledged.includes(notice.id)
+      : result.acknowledged === notice.id, mode);
+    assert.equal(h.json(['inbox', '--agent', 'orchestrator']).items.some((i) => i.id === notice.id), false, mode);
+    assert.deepEqual(h.json(['task', 'show', 'T1']).evidence, task.evidence, mode);
+  }
 });
 
 test('only orchestrator or owner can attest an exact named code fix', (t) => {

@@ -384,9 +384,9 @@ The governor signals only processes the registry recorded when Tower Crane start
 
 `review dispatch deferred` events persist a governor-deferred reviewer dispatch
 with `sha`, `revision`, `reason`, `since` and the original `body_recheck` context
-when it is an automatic light check. Refill restores that context on the reviewer
-spawn, preserving the automatic marker in its evidence and the two-failure stop.
-If an automatic check replaces an outstanding explicit request, a
+for previously dispatched light checks. Refill restores that legacy context on
+the reviewer spawn. Verified metadata repair carries review and queues no new
+light check. If a retained check context replaces an outstanding explicit request, a
 `review dispatch context` event records its `sha`, `revision` and `body_recheck`
 without adding another debt. An unchanged context emits nothing, and a context
 event cannot revive debt a matching spawn has already settled.

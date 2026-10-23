@@ -93,8 +93,12 @@ round.
 The default `review.docs_paths` is `["docs/**", "**/*.md", "changelog.d/**"]`.
 A configured array replaces it; `[]` disables docs classification.
 `review.docs_exclude` excludes matching paths, so a project can keep pinned
-contract documents on its normal tests path. `prompts/`, `agents/` and `skills/`
-are always excluded. Renames count both old and new paths. Missing commits,
+contract documents on its normal tests path. Directories named `prompts`, `agents`, `skills`, `commands` or `standards`
+at any depth, including hidden harness directories, are always excluded.
+House-rule files `AGENTS.md`, `AGENTS.override.md`, `CLAUDE.md` and
+`CLAUDE.local.md` at any depth are also excluded, even by custom docs rules.
+These instruction path checks are case-insensitive and also forbid named-fix
+carryover or attestation for instruction edits. Renames count both old and new paths. Missing commits,
 unreadable diffs and rewritten history fail closed. An acceptance, dependency,
 needs, kind or brief edit after the review prevents carryover; rework alone does
 not. The reviewed commit must be an ancestor of the submitted head.

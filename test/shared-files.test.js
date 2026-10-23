@@ -456,19 +456,21 @@ test('PR-body lifecycle instructions agree across orchestrator, reviewer and rew
     'commands/tower-crane-rework-from-review.md',
   ];
   const contract = [
-    ['automatic repair', /automation dispatches a body-only worker/i],
-    ['automatic light check', /automatically requests a light reviewer check/i],
+    ['automatic repair', /automation dispatches a worker restricted to the body and title/i],
+    ['verified carryover', /carries review, tests and CI without another reviewer or suite run/i],
     ['head and revision preserved', /same head and revision/i],
-    ['no race with repair', /body alone while automatic repair is pending or running/i],
-    ['two failures stop', /two consecutive [^\n]*review_body_stuck/i],
-    ['correct before accept', /correct the PR body before running `(?:tower-crane )?accept ID/i],
+    ['no race with repair', /metadata alone while automatic repair/i],
+    ['unchanged repair stops', /unchanged named field.*review_body_stuck/i],
+    ['manual correction proof', /accept ID --metadata-fixed --reason R/i],
     ['manual fallback', /without a recorded PR or branch/i],
   ];
   const failures = [];
   for (const file of copies) {
     const text = readText(path.join(ROOT, file));
     for (const [rule, pattern] of contract) if (!pattern.test(text)) failures.push(`${file}: ${rule}`);
-    if (/the orchestrator corrects the body, then requests/i.test(text)) failures.push(`${file}: stale manual dispatch`);
+    if (/requests a light reviewer check|two consecutive failed light re-checks/i.test(text)) {
+      failures.push(`${file}: stale light-review dispatch`);
+    }
   }
   assert.deepEqual(failures, [], 'every plugin copy describes the implemented PR-body lifecycle');
 });

@@ -34,13 +34,13 @@ repair can stay at the same head. An ordinary `rework --reason` is still availab
 when the correction requires wider code changes. PR title findings are follow-ups,
 never blockers; older title-only failures use the verified correction path.
 
-When every finding is a PR-body false claim or a title finding, automation dispatches a worker restricted to editing the body and title. The base and other metadata stay fixed. The task stays submitted at the same revision and keeps its SHA and software evidence. False PR-body claims still block until fresh independent review evidence passes; the light reviewer treats unresolved title findings as follow-ups. `rework --from-review` refuses with correction instructions, without changing state. Submissions without a linked PR and recorded branch retain the explicit body edit and `accept` path.
+When every finding is a PR-body false claim or a title finding, automation dispatches a worker restricted to editing the body and title. The base and other metadata stay fixed. The task stays submitted at the same revision and keeps its SHA and software evidence. False PR-body claims block until verified correction carries the review; title findings remain follow-ups. Verification queues no new reviewer or test suite. `rework --from-review` refuses with correction instructions, without changing state. Submissions without a linked PR and recorded branch retain the explicit body edit and `accept` path.
 
 PR-body repair uses the task worker rung and its supported session resume.
 The worker's `spawn` event carries `body_fix` with the failed review, submitted
 head and revision, PR, branch, original body digest, title and base. The broker
 permits reading the PR and editing its body, and refuses claim, renew, release,
-submit, push, PR creation, title and base edits. Repair leaves the task submitted
+submit, push, PR creation and base edits. Repair leaves the task submitted
 at its existing revision. The engine reads the body after exit and verifies the
 head, tracked checkout, base stayed fixed, allowing an engine stack
 retarget. A verified edit calls acceptance with `bodyRecheck` as its correction

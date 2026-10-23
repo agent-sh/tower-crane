@@ -444,9 +444,9 @@ when the correction requires wider code changes. Title findings are follow-ups,
 never blockers. A failed full review at the unchanged head stays failed; only
 the orchestrator or owner can request another full round with `--retry-review`.
 
-When every finding is a PR-body false claim or a title finding, automation dispatches a body-only repair on the task's worker rung, resuming its session when supported and available. The task stays submitted and `status` shows `fixing PR body`. The worker edits with `gh pr edit --body-file` or `--title`, then exits without claiming, submitting, editing repository files, committing or pushing. The broker refuses pushes and PR changes beyond the body and title. Once the worker exits, the engine verifies that the body or title changed, tracked checkout files are clean, both local and remote heads still match the submitted head, and the actual base branch matches the dispatch snapshot or the engine's current expected target, then requests the same light check as `accept ID`, covering only the named claims or title. Untracked files such as the body file do not block the repair. The expected target permits stack retirement to retarget the PR after a parent merge, including one during the GitHub request. Changed heads, tracked files or unexpected actual base branches go to normal rework without a light check, including for unsandboxed harnesses. A pass accepts at the same head and revision.
+When every finding is a PR-body false claim or a title finding, automation dispatches a body-only repair on the task's worker rung, resuming its session when supported and available. The task stays submitted and `status` shows `fixing PR body`. The worker edits with `gh pr edit --body-file` or `--title`, then exits without claiming, submitting, editing repository files, committing or pushing. The broker refuses pushes and PR changes beyond the body and title. Once the worker exits, the engine verifies that the body or title changed, tracked checkout files are clean, both local and remote heads still match the submitted head, and the actual base branch matches the dispatch snapshot or the engine's current expected target, then carries review, tests and CI without another reviewer or suite run. Every named body/title field must change. Untracked files such as the body file do not block the repair. The expected target permits stack retirement to retarget the PR after a parent merge, including one during the GitHub request. Changed heads, tracked files or unexpected actual base branches require ordinary rework, including for unsandboxed harnesses. Verified correction accepts at the same head and revision. The orchestrator or owner confirms manual corrections with `accept ID --metadata-fixed --reason R`.
 
-A light reviewer that leaves no verdict uses the ordinary reviewer recovery policy: retryable crashes or outages and expired missing receipts get a replacement check at the same head without another body edit. A clean no-verdict exit or three crashed review sessions hold dispatch and surface `review_held`; `accept ID` retries the corrected body's check after the cause is handled. An exited, held reviewer is no longer shown as `fixing PR body`. No-verdict exits do not count as failed body checks.
+A verified automatic correction queues no reviewer, so ordinary reviewer exit recovery does not add a metadata check. Existing explicitly dispatched light checks retain their recorded recovery context; they are not part of the automatic repair route.
 
 A body fixer that leaves the body unchanged stops with `review_body_stuck`.
 An availability failure before an edit gets one repair retry; an availability
@@ -515,7 +515,7 @@ a PR-body false claim. Title-only findings remain nonblocking follow-ups. Combin
 refusal. This is checked again after software gates and under the acceptance
 lock before any waiver is recorded.
 A real `spawn --role review` still sends a current code FAIL to full-findings
-rework. PR-body false claims and title findings take only the light repair
+rework. PR-body false claims and title findings take the verified metadata repair
 path; title findings are follow-ups, never blockers.
 If findings cannot be retrieved, the task stays submitted. Dry-run review
 previews do not change state.
@@ -565,12 +565,12 @@ dispatch. Both kinds are checked again on the next pass. A dispatch lock still
 stops the whole batch. Reviewers do not take worker slots, so full worker capacity
 does not prevent their retry. A running reaction for the same task postpones the
 retry. A successful reviewer dispatch, a verdict, or a changed head, revision or
-submission status clears that dispatch debt. A failed PR-body verdict still
-allows a deferred light review to retry. `status` lists `deferred reviewers:
+submission status clears that dispatch debt. An explicitly dispatched light check can retain its
+legacy recovery context after a failed PR-body verdict. `status` lists `deferred reviewers:
 TASK since AT: REASON`; JSON `deferred_reviewers` carries `id`, `sha`, `revision`,
-`since` and `reason`, even after the governor's registry hint expires. Automatic
+`since` and `reason`, even after the governor's registry hint expires. Previously dispatched
 light reviews keep their `body_recheck` context through deferral, retry and
-evidence, so their failures still count toward the two-failure repair stop.
+evidence. Verified metadata repair carries review and creates no such dispatch.
 An outstanding debt is recorded once regardless of changing governor readings.
 Status uses the latest matching reviewer reason from the governor registry,
 falling back to the recorded reason when that hint expires.
@@ -1256,7 +1256,7 @@ Windows orchestrator commands discover their persistent caller from one CIM proc
 
 `tower-crane mcp --agent orchestrator` serves the inbox and batch actions as MCP tools over stdio. Pass `--state DIR` outside the project. The plugin registers it for Claude Code, and spawned Claude and Codex orchestrators receive it in their generated homes. The Codex plugin command surface exposes `/tower-crane-inbox`, `/tower-crane-spawn-ready`, `/tower-crane-merge-accepted`, `/tower-crane-rework-from-review ID` and `/tower-crane-release-dead`.
 
-Use `inbox --json` for typed findings with `action.command` and `action.argv`; use the returned command to resolve each item. Messages, stalls, decision answers and owner comments can be acknowledged after handling with `inbox --ack ITEM`. Owner-only decisions require the owner's answer; technical decisions are the orchestrator's to answer unless `decision_delegation.orchestrator_technical` is false. Escalated technical questions without another owner restriction are also answerable when `decision_delegation.orchestrator_escalated_questions` is not false; approval requests stay owner-only. GitHub observation failures remain visible as `github_error` items. Batch merge refusals remain in the inbox while independent mergeable entries continue through the existing current-base and stack checks.
+Use `inbox --json` for typed findings with `action.command` and `action.argv`; use the returned command to resolve each item. Messages, stalls, decision answers, owner comments and informational review disputes can be acknowledged after handling with `inbox --ack ITEM`. Owner-only decisions require the owner's answer; technical decisions are the orchestrator's to answer unless `decision_delegation.orchestrator_technical` is false. Escalated technical questions without another owner restriction are also answerable when `decision_delegation.orchestrator_escalated_questions` is not false; approval requests stay owner-only. GitHub observation failures remain visible as `github_error` items. Batch merge refusals remain in the inbox while independent mergeable entries continue through the existing current-base and stack checks.
 
 Repeat `--ack ITEM` to acknowledge several handled items atomically. All ids must be current acknowledgeable items; duplicate ids count once and an invalid id refuses the whole batch. A single item keeps its existing JSON response; a batch returns `{acknowledged: [ITEM, ...], count}`.
 
@@ -1264,7 +1264,7 @@ Each owner comment has its own `owner_comment:TASK:EVENT` id (`project` for deci
 
 Foreground inbox reads use cached GitHub observations and never wait on GitHub. The host's `wait --inbox` follower refreshes them concurrently across PRs, at most once a minute, in `inbox-github-cache.json` in the state directory. A changed repository, base or GitHub host invalidates the cache; a changed task status, PR, submitted SHA or revision invalidates that task's reads. Missing or overdue entries produce one `github_pending` summary with the task count and last refresh time. Overdue valid observations remain visible until replacement, marked `stale: true`, so a slow follower pass does not hide findings. Future timestamps and changed task versions cannot supply old findings. A pending item re-reads `inbox` when the last completed refresh is recent; a missing or overdue refresh offers `wait --inbox --observe --timeout 1`. These actions do not start a persistent host or run reactions and worker dispatch. Real background failures remain explicit `github_error` items alongside local findings. Gate and merge commands use their own fresh GitHub reads.
 
-Use `inbox --ack-before TIME` to acknowledge every current acknowledgeable item at or before a timestamp, optionally restricted by `--kind message|stall|decision_answer|owner_comment|review_exit_missing`. The command writes one audit event with the count and UTC cutoff and returns `{acknowledged: [ITEM, ...], count, cutoff}`, including when nothing matches. It uses each item's `at`, which is the source event time, a derived stall's lease expiry, or a decision's answer time. `--kind` requires `--ack-before`, and `--ack` cannot combine with `--ack-before`. Task and GitHub findings cannot be acknowledged.
+Use `inbox --ack-before TIME` to acknowledge every current acknowledgeable item at or before a timestamp, optionally restricted by `--kind message|stall|decision_answer|owner_comment|review_exit_missing|review_dispute`. The command writes one audit event with the count and UTC cutoff and returns `{acknowledged: [ITEM, ...], count, cutoff}`, including when nothing matches. It uses each item's `at`, which is the source event time, a derived stall's lease expiry, or a decision's answer time. `--kind` requires `--ack-before`, and `--ack` cannot combine with `--ack-before`. Task and GitHub findings cannot be acknowledged.
 
 ```sh
 tower-crane inbox --ack message:T12:E123 --ack decision_answer:project:D4 --agent orchestrator

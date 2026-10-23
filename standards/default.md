@@ -14,14 +14,14 @@ The way Tower Crane works unless the project names its own profile in `project.j
 - Every change reaches the base branch through a pull request. Keep branches short-lived. Read the configured `base` from `tower-crane project show` and replace `BASE` in `git fetch origin +refs/heads/BASE:refs/remotes/origin/BASE` and `git merge --no-ff origin/BASE` with that branch name. The PR's squash merge makes this commit harmless; push normally. A rebase that would require a force push is the orchestrator's job.
 - One task, one branch, one PR. A PR that depends on another open PR stays stacked; the orchestrator handles any history rewrite needed to update the stack.
 - The PR body says what changed, why, how it was verified, and the limits. Keep it current when the change moves.
-- Merge only when CI is green on the exact head, review passed, and the merge names that head (`--match-head-commit`). For GitHub stacks, check every lower accepted head first, then merge PRs bottom up through the asynchronous merge API, each pinned to its accepted head (`expected_head_sha`), and confirm each before retargeting and merging the next. Merge commits preserve accepted dependency heads as ancestors of the base. A moved head or unconfirmed merge stops the chain; record any confirmed accepted lower merges. A cancelled, timed-out or never-started check is a failure, not a pass.
+- Merge only when CI and review have eligible passing evidence for the head, including audited carryover for verified docs, metadata or named small fix rounds, and the merge names that head (`--match-head-commit`). For GitHub stacks, check every lower accepted head first, then merge PRs bottom up through the asynchronous merge API, each pinned to its accepted head (`expected_head_sha`), and confirm each before retargeting and merging the next. Merge commits preserve accepted dependency heads as ancestors of the base. A moved head or unconfirmed merge stops the chain; record any confirmed accepted lower merges. A cancelled, timed-out or never-started check is a failure, not a pass.
 - On repositories the project does not own, the PR stays clean: motivation, design, limits and measurements in the body; no self-review or status comments.
 
 ## Review
 
 - Nobody reviews their own work. Review comes from an agent with a clean context that did not write the change. Its model follows the task tier, diff risk and measured review cost, and may match the builder's model.
 - The review is posted where the repository keeps reviews (a PR comment by default) and recorded as evidence.
-- PR title findings are follow-ups, never blockers. PR-body false claims remain blockers until verified. Correct title findings through PR-body repair and a light title check; they never justify a full re-review.
+- PR title findings are follow-ups, never blockers. PR-body false claims remain blockers until verified. Verified body/title correction carries review, tests and CI without another reviewer or suite run; title findings never justify a full re-review. Instruction edits, important docs findings and wider code changes retain ordinary gates.
 - An external review bot, when the repository has one, is addressed like any reviewer. When it is capped or down, the clean-context review is enough; say so in the PR body.
 
 ## Tests
