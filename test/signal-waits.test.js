@@ -284,7 +284,6 @@ test('shared checks reject readiness budgets and require a reason on allowed tim
   assert.deepEqual(scoped.map((finding) => finding.line), [3]);
   assert.ok(waitFindings('await until(check, "// wait-allow: fake reason", 1000);').length); // wait-allow: rejected lint fixture
   const h = makeRepo(t);
-  // The shared check also follows the docs' links, into skills/ and research/.
   for (const dir of ['scripts', 'bin', 'lib', 'docs', 'changelog.d', 'skills', 'research']) {
     fs.cpSync(path.join(ROOT, dir), path.join(h.repo, dir), { recursive: true });
   }
