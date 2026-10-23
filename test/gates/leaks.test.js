@@ -13,7 +13,7 @@ const gate = require('../../lib/gates/tests');
 const Reaper = require('../../lib/reaper');
 const { scratch, isolateGit, isolateUserFile, commit, initRepo, worktrees, quote } = require('./helpers');
 const { makeRepo, detachedAlive } = require('../helpers');
-const { shellQuote } = require('../../lib/gates/common');
+const { shellQuote, treeExec } = require('../../lib/gates/common');
 const { waitUntil, killPid } = require('../signals');
 
 const skip = !['linux'].includes(process.platform)
@@ -27,7 +27,8 @@ const [pids, mode] = process.argv.slice(2);
 const spin = \`const end = Date.now() + 300000;
 while (Date.now() < end) Math.sqrt(Math.random()); // spin-allow: the leak this test plants; only the gate may end it sooner
 \`;
-const child = cp.spawn(process.execPath, ['-e', spin], { detached: true, stdio: 'ignore', env: {} });
+// Windows has no run mark to clear, and node there needs its system variables.
+const child = cp.spawn(process.execPath, ['-e', spin], { detached: true, stdio: 'ignore', env: process.platform === 'win32' ? process.env : {} });
 fs.appendFileSync(pids, child.pid + '\\n');
 child.unref();
 if (mode === 'hang') setInterval(() => {}, 1000);
@@ -96,6 +97,8 @@ while (Date.now() < end) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 
   const r = h.run(['check', 'tests', 'T1', '--agent', 'checker', '--json']);
   assert.equal(r.code, 0, r.stdout + r.stderr);
   assert.match(r.stderr, new RegExp(`killed 1 leaked process at gate start: ${orphan.pid} \\(deleted `));
+  // Without a cgroup, as here, the evidence says the process group was the boundary.
+  assert.deepEqual(JSON.parse(r.stdout).commands.find((c) => c.command !== 'git').cleanup, { backend: 'process-group', empty: true });
   assert.equal(detachedAlive({ pid: orphan.pid }), false);
   const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   const reap = events.find((e) => e.cmd === 'gate reap');
@@ -151,4 +154,26 @@ test('the reaper spares live gates and tests, and kills what names a finished or
   assert.deepEqual(killed.sort(), [102, 103, 104, 108, 110]);
   assert.equal(Reaper.named(`--dir=${root}/tower-crane-ab12CD/wt`, root), `${root}/tower-crane-ab12CD`);
   assert.equal(Reaper.named(`${root}x/tower-crane-ab12CD`, root), null);
+});
+
+test('a Windows gate command runs in a job object that stops its orphaned grandchild and reports the job empty', {
+  skip: process.platform !== 'win32' && 'Windows only; Linux gates use a cgroup, which scripts/probe-gate-containment.js checks on the host',
+}, async (t) => {
+  const tmp = scratch('gates-job');
+  const pids = path.join(tmp, 'pids');
+  t.after(() => {
+    for (const pid of fs.existsSync(pids) ? fs.readFileSync(pids, 'utf8').trim().split('\n').map(Number) : []) {
+      if (detachedAlive({ pid })) killPid(pid, 'SIGKILL');
+    }
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+  fs.writeFileSync(path.join(tmp, 'leak.js'), LEAK);
+  const r = await treeExec(`${quote(process.execPath)} leak.js ${quote(pids)} 0`, [], {
+    shell: true, cwd: tmp, timeout: 300000, resources: { tasks_max: 64, memory_max_bytes: 2 ** 30 },
+    env: { ...process.env, TOWER_CRANE_TEST_CONTAINMENT: '1' },
+  });
+  assert.equal(r.status, 0, r.output);
+  assert.deepEqual(r.cleanup, { backend: 'job', empty: true });
+  const pid = Number(fs.readFileSync(pids, 'utf8').trim());
+  assert.equal(detachedAlive({ pid }), false, 'the orphan outlived its job');
 });
