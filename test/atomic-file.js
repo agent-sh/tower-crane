@@ -61,6 +61,12 @@ function readPublished(file, options, impl = fs) {
   }
 }
 
+// An append has no atomic rename; its newline publishes the complete record.
+function readJsonLines(file, impl = fs) {
+  const text = readPublished(file, 'utf8', impl);
+  return text.slice(0, text.lastIndexOf('\n') + 1).split('\n').filter((line) => line.trim()).map(JSON.parse);
+}
+
 // A JSON file that several processes read, change and write back, such as a
 // gh stub's state, loses a change when one process writes a copy it read
 // before another process's write. updateJson runs fn on the current value
@@ -156,4 +162,4 @@ function updateJson(file, fn, missing) {
   }
 }
 
-module.exports = { writeAtomic, readPublished, updateJson };
+module.exports = { writeAtomic, readPublished, readJsonLines, updateJson };

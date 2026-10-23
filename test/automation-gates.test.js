@@ -8,7 +8,7 @@ const { HUNG_TEST_MS, waitOnRepo } = require('./signals');
 const { cachedFixture, ROOT } = require('./helpers');
 const { waitFor } = require('./canary');
 const { shellQuote } = require('../lib/gates/common');
-const { readPublished } = require('./atomic-file');
+const { readPublished, readJsonLines } = require('./atomic-file');
 const { setup, refillFixture } = require('./automation-helpers');
 
 function assertReworked(h, task) {
@@ -100,7 +100,7 @@ function reconciledFixture(t) {
     h.consume();
     return { sha: h.sha };
   });
-  h.logs = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  h.logs = () => readJsonLines(path.join(h.state, 'events.jsonl'));
   h.reconcile = () => h.run(['wait', '--types', 'never', '--timeout', '0.01', '--agent', 'orchestrator']); // wait-allow: end the idle observation after startup reconciliation; assertions read state after the CLI exits
   return h;
 }

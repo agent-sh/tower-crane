@@ -7,6 +7,7 @@ const path = require('node:path');
 const { waitUntil } = require('./signals');
 const { makeRepo, cachedFixture, stubRungs, BIN, detachedAlive } = require('./helpers');
 const { gateFixture } = require('./gate-helpers');
+const { readJsonLines } = require('./atomic-file');
 
 const ghStub = path.join(__dirname, 'fixtures', 'automation-gh.js');
 const harness = path.join(__dirname, 'fixtures', 'automation-harness.js');
@@ -89,7 +90,7 @@ function attach(h) {
     h.saveGithub(after);
   };
   h.consume = () => h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
-  h.logs = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  h.logs = () => readJsonLines(path.join(h.state, 'events.jsonl'));
   return h;
 }
 
@@ -182,7 +183,7 @@ poll();
     after.ci[h.sha] = ciAtSubmit;
     h.saveGithub(after);
   };
-  h.logs = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  h.logs = () => readJsonLines(path.join(h.state, 'events.jsonl'));
   h.consume = () => h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
   h.marker = (id) => path.join(h.env.AUTOMATION_CONTEXT_DIR, id);
   t.after(async () => {

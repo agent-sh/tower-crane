@@ -6,11 +6,11 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { waitOnRepo, waitUntil } = require('./signals');
 const { BIN, cachedFixture } = require('./helpers');
-const { readPublished } = require('./atomic-file');
+const { readPublished, readJsonLines } = require('./atomic-file');
 const { gateEvidence } = require('./gate-helpers');
 const { waitFor } = require('./canary');
 const { shellQuote } = require('../lib/gates/common');
-const { setup, holdSuite, configureHarness } = require('./automation-helpers');
+const { setup, holdSuite, configureHarness, refillFixture } = require('./automation-helpers');
 
 const OWNER = path.join(__dirname, 'fixtures', 'pr-owner.js');
 
@@ -70,7 +70,7 @@ fs.writeFileSync('generated.txt', rows + '\\n');
   });
   h.github = () => JSON.parse(fs.readFileSync(h.env.AUTOMATION_GITHUB, 'utf8'));
   h.saveGithub = (state) => fs.writeFileSync(h.env.AUTOMATION_GITHUB, JSON.stringify(state));
-  h.logs = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  h.logs = () => readJsonLines(path.join(h.state, 'events.jsonl'));
   h.consume = () => {
     h.ok(['project', 'set', '--paused', 'manual generated conflict probe']);
     return h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
@@ -92,6 +92,36 @@ fs.writeFileSync('generated.txt', rows + '\\n');
   };
   return h;
 }
+
+test('automation fixture event readers keep complete records during an append', (t) => {
+  for (const [name, build] of [['generated', generatedSetup], ['setup', setup], ['refill', refillFixture]]) {
+    const h = build(t);
+    const file = path.join(h.state, 'events.jsonl');
+    const published = readPublished(file, 'utf8');
+    const expected = h.logs();
+    const event = { cmd: 'msg', detail: { text: 'brace } שלום 🌍' } };
+    const record = JSON.stringify(event);
+    const bytes = Buffer.from(record);
+    let snapshot = published;
+    const read = fs.readFileSync;
+    t.mock.method(fs, 'readFileSync', (target, ...args) => target === file ? snapshot : read(target, ...args));
+    try {
+      for (const suffix of [
+        '', record.slice(0, 11), record.slice(0, record.indexOf('}') + 1),
+        bytes.subarray(0, bytes.indexOf(Buffer.from('🌍')) + 2).toString('utf8'), record,
+      ]) {
+        snapshot = published + suffix;
+        assert.deepEqual(h.logs(), expected, `${name}: ${JSON.stringify(suffix)}`);
+      }
+      snapshot = published + record + '\n';
+      assert.deepEqual(h.logs(), [...expected, event], `${name}: the newline publishes the record`);
+      snapshot = published + '{"cmd":\n';
+      assert.throws(() => h.logs(), SyntaxError, `${name}: malformed complete records remain failures`);
+    } finally {
+      t.mock.restoreAll();
+    }
+  }
+});
 
 test('generated mappings recognize only declared paths, including names shared with object properties', async () => {
   const G = require('../lib/generated-conflicts');
@@ -391,7 +421,7 @@ for (const mixed of [false, true]) {
     for (const rung of ['easy', 'review']) h.ok(['ladder', 'set', rung, '--command', JSON.stringify([process.execPath, OWNER, BIN, '{prompt}'])]);
     Object.assign(h.env, { OWNER_HEADS: JSON.stringify([h.sha]), OWNER_LOG: path.join(h.base, 'owner.jsonl'), OWNER_CRASH_ON_FIX: '1' });
     // The owner appends while the test reads: only complete lines count.
-    const outcomes = () => (fs.existsSync(h.env.OWNER_LOG) ? readPublished(h.env.OWNER_LOG, 'utf8') : '').split('\n').filter((l) => l.endsWith('}')).map(JSON.parse);
+    const outcomes = () => fs.existsSync(h.env.OWNER_LOG) ? readJsonLines(h.env.OWNER_LOG) : [];
     const github = h.github();
     Object.assign(github.prs['7'], { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' });
     h.saveGithub(github);
