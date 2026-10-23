@@ -110,12 +110,35 @@ for (const row of [
   { state: 'retrying', primaryHarness: 'opencode', nextHarness: 'codex', reason: 'outage', ack: true },
   { state: 'retrying', primaryHarness: 'codex', nextHarness: 'claude', reason: 'outage', ack: true },
   { state: 'retrying', primaryHarness: 'codex', nextHarness: 'claude', reason: 'no-session', ack: true },
+  { state: 'retrying', primaryHarness: 'claude', nextHarness: 'codex', reason: 'outage', ack: true, pre: true },
+  { state: 'retrying', primaryHarness: 'claude', nextHarness: 'codex', reason: 'outage', ack: false, pre: true },
+  { state: 'retrying', primaryHarness: 'agy', nextHarness: 'codex', reason: 'outage', ack: true, pre: true },
+  { state: 'retrying', primaryHarness: 'pi', nextHarness: 'codex', reason: 'outage', ack: true, pre: true },
+  { state: 'retrying', primaryHarness: 'opencode', nextHarness: 'codex', reason: 'outage', ack: true, pre: true },
+  { state: 'retrying', primaryHarness: 'codex', nextHarness: 'claude', reason: 'no-session', ack: true, pre: true },
+  { state: 'retrying', primaryHarness: 'codex', nextHarness: 'claude', reason: 'outage', chain: true, ack: true, pre: true },
+  { state: 'retrying', primaryHarness: 'codex', nextHarness: 'agy', reason: 'outage', chain: true, ack: true, pre: true },
 ]) {
-  test(`decision answers survive fallback: ${row.state} ${row.primaryHarness || 'codex'} to ${row.nextHarness}, ${row.reason}, ${row.ack ? 'acknowledged' : 'unread'}`, async (t) => {
+  test(`decision answers survive fallback: ${row.state} ${row.primaryHarness || 'codex'} to ${row.nextHarness}, ${row.reason}, ${row.ack ? 'acknowledged' : 'unread'}${row.pre ? ', pre-dispatch and late answers' : ''}`, async (t) => {
     const h = setup(t, row);
     const agent = 'worker-T1-1';
     const finish = path.join(h.base, 'finish-primary');
     const login = path.join(h.base, 'login');
+    const note = 'Use Redis.\nAlso fix the CI gate so dispatch runs do not poison it.';
+    const lateNote = 'Keep the late requirement.\nIt must survive the next route too.';
+    const answer = (id, text) => {
+      h.ok(['ask', '--kind', 'technical', '--question', 'Which store?', '--blocks', 'T1', '--agent', agent]);
+      h.ok(['answer', id, '--choice', 'redis', '--note', text, '--agent', 'orchestrator']);
+      if (row.ack) {
+        const binding = path.join(h.state, 'homes', agent, 'hook.json');
+        fs.mkdirSync(path.dirname(binding), { recursive: true });
+        fs.writeFileSync(binding, JSON.stringify({ state: h.state, agent, task: 'T1', role: 'worker', attempt: 1 }));
+        const delivered = h.json(['hook', 'inbox', '--binding', binding, '--agent', agent]);
+        assert.ok(delivered.context.includes(`Orchestrator note:\n${text}`));
+        assert.equal(h.json(['hook', 'inbox', '--binding', binding, '--agent', agent]).context, '');
+      }
+    };
+    if (row.pre) answer('D1', note);
     if (row.state === 'running') {
       Object.assign(h.spawnEnv, { TOWER_CRANE_TEST_FALLBACK_FINISH: finish, TOWER_CRANE_TEST_LATE_AUTH: 'first' });
     }
@@ -137,19 +160,9 @@ for (const row of [
         fs.writeFileSync(path.join(sessions, `rollout-${session}.jsonl`), '{}\n');
       }
     }
-    h.ok(['ask', '--kind', 'technical', '--question', 'Which store?', '--blocks', 'T1', '--agent', agent]);
-    const note = 'Use Redis.\nAlso fix the CI gate so dispatch runs do not poison it.';
-    h.ok(['answer', 'D1', '--choice', 'redis', '--note', note, '--agent', 'orchestrator']);
-    if (row.ack) {
-      const binding = path.join(h.state, 'homes', agent, 'hook.json');
-      fs.mkdirSync(path.dirname(binding), { recursive: true });
-      fs.writeFileSync(binding, JSON.stringify({ state: h.state, agent, task: 'T1', role: 'worker', attempt: 1 }));
-      const delivered = h.json(['hook', 'inbox', '--binding', binding, '--agent', agent]);
-      assert.ok(delivered.context.includes(`Orchestrator note:\n${note}`));
-      assert.equal(h.json(['hook', 'inbox', '--binding', binding, '--agent', agent]).context, '');
-    }
+    answer(row.pre ? 'D2' : 'D1', row.pre ? lateNote : note);
     h.ok(['ask', '--kind', 'technical', '--question', 'Unrelated work?', '--agent', 'other-worker']);
-    h.ok(['answer', 'D2', '--choice', 'other', '--note', 'Other task requirement.', '--agent', 'orchestrator']);
+    h.ok(['answer', row.pre ? 'D3' : 'D2', '--choice', 'other', '--note', 'Other task requirement.', '--agent', 'orchestrator']);
     if (row.state === 'resumed') {
       h.ok(['submit', 'T1', '--agent', agent, '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736']);
       h.ok(['rework', 'T1', '--reason', 'Continue after the decision.']);
@@ -183,10 +196,17 @@ for (const row of [
       }
     }
     const expected = `decision D1 answered: redis (answer has a note with 2 lines)\nOrchestrator note:\n${note}`;
+    const copies = (attempt, text) => attempt.args.reduce((n, arg) => n + arg.split(text).length - 1, 0);
+    if (row.pre) assert.equal(copies(h.attempts()[0], expected), 1, 'dispatch includes the full pre-dispatch answer once');
     for (const attempt of attempts) {
       // Warm retries keep the conversation; route starts rebuild its prompt.
       if (attempt.retry !== '0' && attempt.args.includes('resume')) continue;
       assert.ok(attempt.args.some((arg) => arg.includes(expected)), `${attempt.harness} ${attempt.model} retry ${attempt.retry} lost the answer`);
+      assert.equal(copies(attempt, expected), 1, `${attempt.harness} ${attempt.model} retry ${attempt.retry} repeats the answer`);
+      if (row.pre) {
+        const late = `decision D2 answered: redis (answer has a note with 2 lines)\nOrchestrator note:\n${lateNote}`;
+        assert.equal(copies(attempt, late), 1, `${attempt.harness} ${attempt.model} retry ${attempt.retry} must keep the late answer once`);
+      }
       assert.ok(!attempt.args.some((arg) => arg.includes('Other task requirement.')));
     }
     assert.equal(events(h).filter((e) => e.cmd === 'spawn fallback').length, row.chain ? 2 : 1);

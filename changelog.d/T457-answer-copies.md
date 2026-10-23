@@ -1,0 +1,1 @@
+- Include each task decision answer once in worker prompts and cold retries, retaining pre-dispatch answers while adding later answers after acknowledgement or fallback.
