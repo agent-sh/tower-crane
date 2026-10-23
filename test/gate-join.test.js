@@ -170,7 +170,7 @@ test('a joiner that receives evidence from a run interrupted by wait shutdown ru
 });
 
 // A tests gate whose every command counts its runs and holds until the test releases it,
-// in expensive prove mode with two test files: up to eight timeout budgets per run.
+// in expensive prove mode with two test files: up to thirteen timeout budgets per run.
 const MINUTES = 10;
 function testsFixture(t) {
   return cachedFixture(t, 'gate-join-tests', (h) => {
@@ -219,14 +219,14 @@ test('the repo head lease at 75 minutes sums sequential commands and one shared 
   const head = cp.spawnSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' });
   assert.equal(head.status, 0, head.stderr);
   const cases = [
-    [['test/live-git-sandbox.test.js', 'test/live-sandbox.test.js'], 11],
-    [[], 5],
+    [['test/live-git-sandbox.test.js', 'test/live-sandbox.test.js'], 19],
+    [[], 7],
   ];
   for (const [hosts, budgets] of cases) {
     const project = { gates: { tests_timeout_min: 75 }, tests: { expensive: true, host_only: hosts } };
     const budget = require('../lib/gate-runs').budgetMs({}, project, root, { kind: 'code', sha: head.stdout.trim() }, 'tests');
     // Head, scoped proof and revert each run ordinary and host-only commands;
-    // the native retry and the shared base step add one budget each.
+    // each can rerun once, and the shared base step adds one budget.
     assert.equal(budget, budgets * (75 + 1) * 60000, JSON.stringify(hosts));
   }
 });
@@ -253,17 +253,17 @@ test('an unobservable tests holder expires at the deadline its planner recorded'
   assert.deepEqual(testLeases(h).findLast((e) => e.detail.phase === 'running').detail.replaces, [source]);
 });
 
-test('the planned commands of a tests run cover each mode, expensive proof, host-only files and a native crash rerun', () => {
+test('the planned commands of a tests run cover each mode, expensive proof, host-only files and one rerun of each', () => {
   const Tests = require('../lib/gates/tests');
   const Runs = require('../lib/gate-runs');
   const cases = [
     [{ mode: 'none' }, 0, 0],
     [{ mode: 'run-only' }, 0, 3],
-    [{ mode: 'run-only' }, 2, 5],
-    [{}, 0, 4],
-    [{ expensive: true }, 0, 5],
-    [{ host_only: ['test/h.js'] }, 1, 6],
-    [{ expensive: true, host_only: ['test/h.js'] }, 1, 8],
+    [{ mode: 'run-only' }, 2, 7],
+    [{}, 0, 5],
+    [{ expensive: true }, 0, 7],
+    [{ host_only: ['test/h.js'] }, 1, 9],
+    [{ expensive: true, host_only: ['test/h.js'] }, 1, 13],
     [{ mode: 'prove', by_kind: { docs: 'run-only' } }, 0, 3, 'docs'],
     [{ mode: 'bogus' }, 0, 0],
   ];
@@ -272,11 +272,12 @@ test('the planned commands of a tests run cover each mode, expensive proof, host
   }
   const project = { gates: { tests_timeout_min: 2, clean_timeout_min: 3 }, tests: { expensive: true }, ci: { local: { command: ['ci'], timeout: 90 } } };
   const task = { kind: 'code', sha: 'abc' };
-  // Each planned command gets its timeout and a minute for the metadata queries around it.
-  assert.equal(Runs.budgetMs({}, project, null, task, 'tests'), 5 * (120000 + 60000));
-  assert.equal(Runs.budgetMs({ flags: { timeout: '1' } }, project, null, task, 'tests'), 5 * (60000 + 60000), 'a --timeout override sets each command budget');
+  // Each planned budget gets its timeout and a minute for the metadata queries around it.
+  assert.equal(Runs.budgetMs({}, project, null, task, 'tests'), 7 * (120000 + 60000));
+  assert.equal(Runs.budgetMs({ flags: { timeout: '1' } }, project, null, task, 'tests'), 7 * (60000 + 60000), 'a --timeout override sets each command budget');
   assert.equal(Runs.budgetMs({}, project, null, task, 'clean'), 180000 + 60000, 'clean runs one command');
-  assert.equal(Runs.budgetMs({}, project, null, task, 'ci'), 90000 + 60000, 'local CI runs one command');
+  assert.equal(Runs.budgetMs({}, project, null, task, 'ci'), 2 * (90000 + 60000), 'local CI runs its command and one rerun on the same merge');
+  assert.equal(Runs.budgetMs({}, { ...project, ci: { local: { ...project.ci.local, rerun: false } } }, null, task, 'ci'), 90000 + 60000, 'without the rerun, the command alone');
   assert.equal(Runs.budgetMs({}, { tests: { mode: 'none' } }, null, task, 'tests'), 60000, 'a run with no command keeps the metadata minute');
 });
 
@@ -309,8 +310,8 @@ test('a tests run leases until every command it may start could have used its fu
   // Head and scoped proof each with the host-only file, then the reverted run, which fails at its first command.
   assert.equal(runs(h), 5, 'one passing run starts five timed commands');
   const lease = testLeases(h).find((e) => e.detail.phase === 'running');
-  // The fixture has one ordinary test and one host-only file; both may fail, and one native crash may rerun.
-  const planned = 8 * (MINUTES * 60000 + 60000);
+  // The fixture has one ordinary test and one host-only file; each command may rerun once.
+  const planned = 13 * (MINUTES * 60000 + 60000);
   const held = Date.parse(lease.detail.deadline) - Date.parse(lease.at);
   assert.ok(Math.abs(held - planned) < 5000, `deadline ${held} ms after the start, want ${planned}`);
 });
