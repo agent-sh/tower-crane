@@ -289,19 +289,19 @@ test('the shared file check rejects bare stdin reads in lib and bin, and points 
   assert.equal(f.check().status, 0, 'lib/util.js is where readStdin reads fd 0');
 });
 
-test('the suite deadline sets the proof job timeouts and warns when the configured tests gate timeout differs', (t) => {
-  const { DEADLINE_MIN } = require('../scripts/suite-time');
+test('the proof deadline sets job timeouts independently of the configured full-suite gate', (t) => {
+  const { DEADLINE_MIN, PROOF_DEADLINE_MIN } = require('../scripts/suite-time');
   const f = fixture(t);
   f.change();
   assert.equal(f.check().status, 0);
   const workflow = f.read('.github/workflows/ci.yml');
   const timeout = (job) => Number(new RegExp(`\\n  ${job}:\\n(?:    .*\\n|\\s*\\n)*?    timeout-minutes: (\\d+)`).exec(workflow)[1]);
-  assert.equal(timeout('model-swap'), DEADLINE_MIN + 5);
-  assert.equal(timeout('gate-scratch'), 2 * DEADLINE_MIN + 10);
-  f.write('.github/workflows/ci.yml', workflow.replace(`    timeout-minutes: ${DEADLINE_MIN + 5}\n`, '    timeout-minutes: 60\n'));
+  assert.equal(timeout('model-swap'), PROOF_DEADLINE_MIN + 5);
+  assert.equal(timeout('gate-scratch'), 2 * PROOF_DEADLINE_MIN + 10);
+  f.write('.github/workflows/ci.yml', workflow.replace(/(  model-swap:[\s\S]*?timeout-minutes: )\d+/, (_, prefix) => `${prefix}60`));
   const drifted = f.check();
   assert.equal(drifted.status, 1);
-  assert.match(drifted.stderr, new RegExp(`job model-swap has timeout-minutes 60; DEADLINE_MIN ${DEADLINE_MIN} in scripts/suite-time.js sets it to ${DEADLINE_MIN + 5}`));
+  assert.match(drifted.stderr, new RegExp(`job model-swap has timeout-minutes 60; PROOF_DEADLINE_MIN ${PROOF_DEADLINE_MIN} in scripts/suite-time.js sets it to ${PROOF_DEADLINE_MIN + 5}`));
   fs.rmSync(path.join(f.h.repo, '.github'), { recursive: true });
   assert.equal(f.check().status, 0, 'a tree without its workflows has no proof jobs to check');
   fs.mkdirSync(path.join(f.h.repo, '.github', 'workflows'), { recursive: true });

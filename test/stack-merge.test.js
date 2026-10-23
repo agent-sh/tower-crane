@@ -24,7 +24,7 @@ const routes = (f) => merges(f).map((m) => m.route);
 
 const POLL_HOLD_MS = HUNG_TEST_MS * 2;
 
-function pollObserver(poll, sleeping) {
+function pollObserver(poll, sleeping, signalDelay = 0) {
   return `
 const fs = require('node:fs'), timers = require('node:timers/promises');
 const delay = timers.setTimeout;
@@ -34,17 +34,25 @@ const pause = (ms) => {
   return ${POLL_HOLD_MS};
 };
 timers.setTimeout = (ms, ...args) => delay(pause(ms), ...args);
+if (${signalDelay}) process.on('SIGINT', () => {
+  // A busy event loop can dispatch cancellation after a short exit budget.
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ${signalDelay}); // wait-allow: reproduces delayed signal dispatch.
+});
 `;
 }
 
 test('the stack poll observer isolates its held backoff from ordinary cleanup timers', () => {
-  for (const [kind, ms, ready, expected] of [
+  for (const [kind, ms, ready, expected, signalDelay = 0] of [
     ['global', 1000, true, 1000],
     ['promise', 1000, true, POLL_HOLD_MS],
     ['promise', 2000, true, 2000],
     ['promise', 1000, false, 1000],
+    ['global', 1000, true, 1000, 4000],
+    ['promise', 1000, true, POLL_HOLD_MS, 4000],
+    ['promise', 2000, true, 2000, 4000],
+    ['promise', 1000, false, 1000, 4000],
   ]) {
-    const calls = [], writes = [];
+    const calls = [], writes = [], blocks = [], listeners = {};
     const signal = new AbortController().signal;
     const global = { setTimeout: (_fn, delay) => { calls.push(delay); } };
     const timers = { setTimeout: (delay, _value, options) => {
@@ -52,21 +60,29 @@ test('the stack poll observer isolates its held backoff from ordinary cleanup ti
       assert.equal(options.signal, signal);
       return Promise.resolve();
     } };
-    const context = { global, process: { on() {} }, require: (name) => name === 'node:fs'
+    const context = { global, process: { on: (signal, listener) => { listeners[signal] = listener; } },
+      Atomics: { wait: (_array, _index, _value, ms) => { blocks.push(ms); } },
+      require: (name) => name === 'node:fs'
       ? { existsSync: () => ready, writeFileSync: (file) => writes.push(file) } : timers };
-    vm.runInNewContext(pollObserver('poll', 'sleeping'), context);
+    vm.runInNewContext(pollObserver('poll', 'sleeping', signalDelay), context);
     if (kind === 'global') global.setTimeout(() => {}, ms); // wait-allow: the scheduler stub records the delay without waiting
     else timers.setTimeout(ms, undefined, { signal }); // wait-allow: the scheduler stub records the delay and signal without waiting
     assert.deepEqual(calls, [expected], `${kind} ${ms} ready=${ready}`);
     assert.deepEqual(writes, kind === 'promise' && ms === 1000 && ready ? ['sleeping'] : []);
+    listeners.SIGTERM?.();
+    assert.deepEqual(blocks, [], 'the first signal starts draining without delay');
+    listeners.SIGINT?.();
+    assert.deepEqual(blocks, signalDelay ? [signalDelay] : [], 'only the second signal reproduces delayed dispatch');
   }
 });
 
 test('wait cancels an asynchronous stack merge query or backoff on the second signal', {
   skip: process.platform === 'win32' ? 'Windows child.kill does not deliver POSIX signals' : false,
 }, async (t) => {
-  for (const stage of ['query', 'backoff']) {
-    await t.test(stage, async (t) => {
+  for (const [stage, signalDelay] of [
+    ['query', 0], ['backoff', 0], ['query', 4000], ['backoff', 4000],
+  ]) {
+    await t.test(`${stage}${signalDelay ? ' with delayed signal dispatch' : ''}`, async (t) => {
       const f = stacked(t);
       f.accept('T1');
       f.accept('T2');
@@ -74,7 +90,7 @@ test('wait cancels an asynchronous stack merge query or backoff on the second si
       const sleeping = path.join(f.h.base, 'backoff-ready');
       const preload = path.join(f.h.base, 'poll-observer.js');
       // Held queries and backoffs cannot finish before the hung-test guard, so exit proves cancellation.
-      fs.writeFileSync(preload, pollObserver(poll, sleeping));
+      fs.writeFileSync(preload, pollObserver(poll, sleeping, signalDelay));
       const env = { ...f.h.env, TEST_STACK_POLL_READY: poll, TEST_STACK_POLL_HOLD_MS: String(POLL_HOLD_MS),
         NODE_OPTIONS: `${f.h.env.NODE_OPTIONS} --require=${JSON.stringify(preload)}`,
         ...(stage === 'query' ? { TEST_STACK_POLL_RELEASE: path.join(f.h.base, 'unused-release') } : {}) };
@@ -96,7 +112,9 @@ test('wait cancels an asynchronous stack merge query or backoff on the second si
         assert.match(exited.stdout, /stopped by SIGTERM after draining 0 gates/);
         assert.deepEqual(routes(f), ['async 11'], 'the upper merge never starts');
         const task = f.h.json(['task', 'show', 'T2']);
-        assert.equal(task.evidence.findLast((entry) => entry.type === 'merge').ok, false, 'interrupted merge is retryable');
+        const evidence = task.evidence.findLast((entry) => entry.type === 'merge');
+        assert.equal(evidence.ok, false, 'interrupted merge is retryable');
+        assert.match(evidence.summary, /asynchronous merge of PR #11 interrupted/, 'cancellation ends the held poll');
         const events = fs.readFileSync(path.join(f.h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
         assert.equal(events.findLast((event) => event.cmd === 'automation').detail.phase, 'deferred');
         assert.equal(f.read().prs[11].state, 'OPEN');

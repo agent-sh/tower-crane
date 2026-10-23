@@ -1,0 +1,1 @@
+- Stack cancellation probes retain delayed SIGINT dispatch for query and backoff cases while keeping cleanup timers separate from held poll delays.
