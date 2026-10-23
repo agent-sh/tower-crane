@@ -50,12 +50,13 @@ async function main() {
   const cache = process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache');
   fs.mkdirSync(cache, { recursive: true });
   const dir = fs.mkdtempSync(path.join(cache, 'tc-upstream-proof-'));
-  fs.writeFileSync(path.join(dir, 'settings.json'), '{}\n');
-  fs.writeFileSync(path.join(dir, '.claude.json'), '{}\n');
-  fs.writeFileSync(path.join(dir, 'mcp.json'), '{"mcpServers":{}}\n');
-  const broker = await Broker.start();
+  let broker;
   let local;
   try {
+    fs.writeFileSync(path.join(dir, 'settings.json'), '{}\n');
+    fs.writeFileSync(path.join(dir, '.claude.json'), '{}\n');
+    fs.writeFileSync(path.join(dir, 'mcp.json'), '{"mcpServers":{}}\n');
+    broker = await Broker.start();
     if (!process.argv.includes('--local-only')) {
       await turn(dir, broker, { name: 'glm-api-key', model: 'glm-5.3', config: Credentials.configFile(),
         upstream: { base_url: 'https://api.z.ai/api/anthropic', auth: 'bearer' } });
@@ -99,7 +100,7 @@ async function main() {
     assert.ok(messages > 0, 'Claude must call the local Messages API');
     console.log(JSON.stringify({ local_messages: messages, auth_scrypt_sha256_prefix: expected }));
   } finally {
-    broker.close();
+    broker?.close();
     local?.closeAllConnections();
     local?.close();
     fs.rmSync(dir, { recursive: true, force: true });

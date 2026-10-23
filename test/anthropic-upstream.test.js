@@ -6,8 +6,9 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const http = require('node:http');
 const path = require('node:path');
+const cp = require('node:child_process');
 const { NO_STUBS, setup, spawn } = require('./isolation-helpers');
-const { makeRepo } = require('./helpers');
+const { makeRepo, fakeAgentEnv, ROOT } = require('./helpers');
 
 // Scrypt prevents cheap guessing; a fresh salt keeps fingerprints local to one run.
 const fingerprintSalt = crypto.randomBytes(32);
@@ -180,4 +181,50 @@ test('a spawned Claude upstream route receives the nonce URL and placeholder, wi
   const settings = seen.settings;
   assert.ok(settings.sandbox.credentials.envVars.some((e) => e.name === 'ANTHROPIC_BASE_URL' && e.mode === 'deny'));
   assert.equal(settings.apiKeyHelper, undefined);
+});
+
+test('the live probe executes its local broker and removes scratch on success and failure', async (t) => {
+  const h = makeRepo(t);
+  const probe = path.join(ROOT, 'scripts', 'probe-anthropic-upstream.js');
+  const fixture = path.join(__dirname, 'fixtures', 'upstream-probe-harness.js');
+  const coverage = process.env.NODE_V8_COVERAGE || path.join(h.base, 'probe-coverage');
+  fs.mkdirSync(coverage, { recursive: true });
+  for (const [mode, expected] of [
+    ['success', { exit: 0, success: true, reply: true }],
+    ['wrong-reply', { exit: 0, success: true, reply: false }],
+    ['provider-error', { exit: 0, success: false, reply: false }],
+    ['malformed-json', { exit: 0, success: false, reply: false }],
+    ['process-failure', { exit: 1, success: true, reply: true }],
+    ['missing-command', { exit: 'ENOENT', success: false, reply: false }],
+    ['setup-write-failure', null],
+    ['broker-start-failure', null],
+  ]) {
+    await t.test(mode, async (sub) => {
+      const cache = path.join(h.base, mode);
+      const env = fakeAgentEnv({ ...h.env, XDG_CACHE_HOME: cache, NODE_V8_COVERAGE: coverage,
+        NODE_OPTIONS: `${h.env.NODE_OPTIONS || ''} --require "${fixture.replace(/\\/g, '/')}"`,
+        TOWER_CRANE_PROBE_CLAUDE_BIN: mode === 'missing-command' ? 'tc-test-fake-probe-missing' : 'tc-test-fake-probe-claude',
+        TOWER_CRANE_TEST_UPSTREAM_PROBE_CASE: mode });
+      const run = await new Promise((resolve) => {
+        cp.execFile(process.execPath, [probe, '--local-only'], { cwd: h.repo, env, signal: sub.signal, encoding: 'utf8' },
+          (error, stdout, stderr) => resolve({ code: error?.code || 0, stdout, stderr }));
+      });
+      assert.equal(run.code, mode === 'success' ? 0 : 1, 'the probe reports the turn outcome');
+      const records = run.stdout.trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
+      if (expected) {
+        const turn = records.find((record) => Object.hasOwn(record, 'success'));
+        assert.deepEqual({ exit: turn.exit, success: turn.success, reply: turn.reply }, expected);
+      } else assert.equal(records.length, 0, 'startup failures happen before any turn');
+      if (mode === 'success') {
+        const summary = records.find((record) => Object.hasOwn(record, 'local_messages'));
+        assert.equal(summary.local_messages, 1);
+        assert.match(summary.auth_scrypt_sha256_prefix, /^[0-9a-f]{12}$/);
+        assert.equal(run.stderr, '');
+      } else assert.equal(run.stderr.trim(), 'Anthropic upstream live proof failed; raw credential and harness output omitted');
+      assert.doesNotMatch(run.stdout + run.stderr, /tc-test-fake-[0-9a-f]{32}/, 'fake credential values stay out of output');
+      assert.deepEqual(fs.readdirSync(cache), [], 'every allocated scratch directory is removed');
+    });
+  }
+  assert.ok(require('../lib/tests-coverage').ranIn(coverage, ROOT).has('scripts/probe-anthropic-upstream.js'),
+    'the changed test execution covers the probe script');
 });
