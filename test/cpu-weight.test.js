@@ -10,6 +10,26 @@ const G = require('../lib/governor');
 const C = require('../lib/containment');
 const gates = require('../lib/gates/common');
 
+test('CPU configuration contracts survive command and state area splits', () => {
+  const root = path.resolve(__dirname, '..');
+  const read = (file) => fs.readFileSync(path.join(root, file), 'utf8');
+  const specs = require('../lib/commands-specs');
+  const containment = read('docs/state/containment.md');
+  const index = read('docs/state.md');
+  for (const [label, text, pattern] of [
+    ['scope help', specs.SPAWN_SETTINGS.scope.help, /\bCPUWeight\b/],
+    ['governor help', specs.SETTINGS.governor.help, /\bcpu_weight\b/],
+    ['project config', read('docs/state/storage.md').split('\n').find((l) => l.startsWith('`governor`, set through')), /`cpu_weight`/],
+    ['scope contract', read('docs/state/tasks.md').split('\n').find((l) => l.startsWith('| `scope`')), /`CPUWeight`/],
+    ['CPU defaults', containment.split('\n').find((l) => l.startsWith('| `cpu_weight`')),
+      new RegExp('`agents` ' + G.DEFAULTS.cpu_weight.agents + ', `gates` ' + G.DEFAULTS.cpu_weight.gates)],
+    ['CPU backstop', containment.split('\n').find((l) => l.startsWith('| `psi_cpu_defer`')),
+      new RegExp('\\| ' + G.DEFAULTS.psi_cpu_defer + ' \\|')],
+    ['compatibility link', index, /id="cpu-weights"[\s\S]*state\/containment\.md#cpu-weights/],
+    ['index defaults', index, /agents[\s\S]*\b100\b[\s\S]*gates[\s\S]*\b1\b/i],
+  ]) assert.match(text || '', pattern, label);
+});
+
 test('the CPU host probe preserves both output streams on failed commands and invalid reports', () => {
   const { checkRun, parseRun } = require('../scripts/probe-cpu-weight');
   for (const failure of [
