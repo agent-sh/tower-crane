@@ -10,6 +10,7 @@ const { cachedFixture, useFixtureUserFile } = require('./helpers');
 const { gateFixture, gateEvidence } = require('./gate-helpers');
 const Archive = require('../lib/archive');
 const S = require('../lib/state');
+const StateFiles = require('./state-files');
 
 const MIB = 1024 * 1024;
 const sha256 = (data) => crypto.createHash('sha256').update(data).digest('hex');
@@ -23,7 +24,7 @@ function setTask(h, id, fields) {
 
 const task = (h, id) => h.readState('tasks.json').tasks.find((t) => t.id === id);
 const manifest = (h, id) => JSON.parse(fs.readFileSync(path.join(h.state, 'archive', id, 'manifest.json'), 'utf8'));
-const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+const events = (h) => StateFiles.readEvents(h.state);
 const stored = (h, id, rel) => fs.readFileSync(path.join(h.state, 'archive', id, 'files', ...rel.split('/')));
 
 // T1 submitted with PR 7 and every gate passed, so accept goes straight to acceptance; T2 is open.
