@@ -520,11 +520,11 @@ test('incremental seed covers every packed markdown path without lexical readers
   const { globToRegExp } = require('../lib/gates/tests');
   const seed = require('../tools/tests-map.json');
   const isTest = (p) => p.endsWith('.test.js');
-  const available = new Set(['test/package.test.js', 'test/ci-required.test.js', 'test/shared-files.test.js']);
+  const available = new Set(['test/package.test.js', 'test/ci-required.test.js', 'test/docs.test.js', 'test/shared-files.test.js']);
   for (const file of [
     'agents/tower-crane-small.md', 'agents/tower-crane-researcher.md', 'agents/tower-crane-orchestrator.md',
     'commands/tower-crane-inbox.md', 'skills/tower-crane-work/SKILL.md', 'standards/default.md',
-    'docs/state.md', 'docs/cli.md', 'docs/ladder.md', 'docs/automation.md', 'docs/design.md',
+    'docs/state.md', 'docs/state/tasks.md', 'docs/state/ci.md', 'docs/cli.md', 'docs/ladder.md', 'docs/automation.md', 'docs/design.md',
     'README.md', 'CHANGELOG.md', 'LICENSE.md', 'bin/help.md', 'lib/help.md', 'hooks/help.md', '.claude-plugin/help.md',
   ]) {
     const result = select(seed, [{ path: file, status: 'M' }], isTest, available,
