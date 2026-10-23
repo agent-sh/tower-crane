@@ -10,6 +10,7 @@ const { makeRepo, ROOT, detachedAlive, pinLiveRung } = require('./helpers');
 const { tempRoot, liveRoot } = require('./tmp-root');
 const { HUNG_TEST_MS, killGroup } = require('./signals');
 const { socketDir } = require('./socket-dir');
+const { readPublished } = require('./atomic-file');
 
 test('test temp roots prefer explicit overrides and otherwise use the user cache on each platform', () => {
   const home = path.join(ROOT, 'fixture-home');
@@ -422,6 +423,36 @@ test('live Claude probes use the requested provider and environment file without
   assert.equal(project.ladder.review.profile, 'fixture-main');
   assert.equal(project.ladder.review.provider, undefined);
   assert.equal(project.ladder.review.env_file, undefined);
+  assert.equal(project.ladder.review.credential, undefined);
+});
+
+// spawn no longer links the codex .env, where a Bedrock profile's bearer
+// token sat, so a live Bedrock codex rung reads it through a credential.
+test('a live codex probe on Bedrock reads the codex home .env token through an env-store credential', (t) => {
+  const saved = Object.fromEntries(['CODEX_HOME', 'TOWER_CRANE_LIVE_PROFILE'].map((key) => [key, process.env[key]]));
+  t.after(() => { for (const [key, value] of Object.entries(saved)) {
+    if (value === undefined) delete process.env[key]; else process.env[key] = value;
+  } });
+  for (const [profile, provider, env, credential] of [
+    ['bedrock', 'amazon-bedrock', 'AWS_BEARER_TOKEN_BEDROCK=fake-bearer\n', 'live-codex-bedrock'],
+    ['bedrock', 'amazon-bedrock', null, undefined],
+    ['bedrock', 'amazon-bedrock', 'OTHER=1\n', undefined],
+    ['plain', 'openai', 'AWS_BEARER_TOKEN_BEDROCK=fake-bearer\n', undefined],
+  ]) {
+    const h = makeRepo(t);
+    h.init();
+    const home = path.join(h.base, 'codex-home');
+    fs.mkdirSync(home);
+    fs.writeFileSync(path.join(home, `${profile}.config.toml`), `model_provider = "${provider}"\n`);
+    if (env !== null) fs.writeFileSync(path.join(home, '.env'), env);
+    Object.assign(process.env, { CODEX_HOME: home, TOWER_CRANE_LIVE_PROFILE: profile });
+    pinLiveRung(h, 'codex');
+    const label = `${profile} ${JSON.stringify(env)}`;
+    assert.equal(h.readState('project.json').ladder.small.credential, credential, label);
+    const user = fs.existsSync(h.env.TOWER_CRANE_CONFIG) ? JSON.parse(readPublished(h.env.TOWER_CRANE_CONFIG, 'utf8')) : {};
+    assert.deepEqual(user.credentials, credential && { [credential]: { store: 'env', env_file: path.join(home, '.env'), var: 'AWS_BEARER_TOKEN_BEDROCK' } }, label);
+    if (credential) assert.match(h.ok(['credentials', 'check', credential]), /env file/, label);
+  }
 });
 
 test('the suite profile sums leaf tests per file and marks tests that ran beside each other', () => {
