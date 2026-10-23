@@ -1,6 +1,6 @@
 'use strict';
 
-const { waitOnRepo, killPid, killGroup } = require('./signals');
+const { waitOnRepo, childExit, killPid, killGroup } = require('./signals');
 
 const { test, describe } = require('node:test');
 const assert = require('node:assert/strict');
@@ -637,21 +637,34 @@ test('progress paths and CPU detect a stalled process without dropping its live 
     for (const { file, text } of blocked.views) {
       assert.match(text, /blocked: no progress paths or CPU activity/, `${file} shows the stalled phase`);
     }
-    fs.writeFileSync(path.join(spawned.cwd, 'progress.txt'), 'progress\n');
-    const cleared = await waitOnRepo(h, () => {
-      const phase = log(h).findLast((e) => e.cmd === 'spawn phase');
-      const views = sketches(h);
-      return phase?.detail.phase === 'running'
-        && views.every(({ text }) => !text.includes('blocked: no progress paths or CPU activity')) && views;
-    }, 'path progress and saved sketches did not clear stall');
+    // Running lasts one sample past stall_ms once progress stops, shorter than a
+    // check on a loaded host takes, so a separate process keeps the path moving
+    // until the sketches have rendered the cleared phase.
+    const writer = cp.spawn(process.execPath, ['-e',
+      `const fs = require('node:fs'); setInterval(() => fs.appendFileSync(${JSON.stringify(path.join(spawned.cwd, 'progress.txt'))}, 'progress\\n'), 50);`,
+    ], { stdio: 'ignore' });
+    let cleared;
+    try {
+      cleared = await waitOnRepo(h, () => {
+        const phase = log(h).findLast((e) => e.cmd === 'spawn phase');
+        const views = sketches(h);
+        return phase?.detail.phase === 'running'
+          && views.every(({ text }) => !text.includes('blocked: no progress paths or CPU activity')) && views;
+      }, 'path progress and saved sketches did not clear stall', { alive: writer });
+    } finally {
+      writer.kill();
+      await childExit(writer);
+    }
     for (const { file, text } of cleared) {
       assert.doesNotMatch(text, /blocked: no progress paths or CPU activity/, `${file} clears the stalled phase`);
     }
     // Tool hooks write outside the event log; the agent's progress file counts too.
     await waitOnRepo(h, () => h.json(['task', 'show', 'T1']).run?.phase === 'blocked', 'idle process did not stall again');
+    const stalled = log(h).length;
     fs.mkdirSync(path.dirname(S.progressFile(h.state, spawned.agent)), { recursive: true });
     fs.appendFileSync(S.progressFile(h.state, spawned.agent), '{}\n');
-    await waitOnRepo(h, () => h.json(['task', 'show', 'T1']).run?.phase === 'running', 'tool progress did not clear stall');
+    // The event stays after the phase stalls again; the phase itself may not last until a check reads it.
+    await waitOnRepo(h, () => log(h).slice(stalled).some((e) => e.cmd === 'spawn phase' && e.detail.phase === 'running'), 'tool progress did not clear stall');
     assert.equal(h.json(['task', 'show', 'T1']).claim.agent, spawned.agent);
     assert.deepEqual(h.json(['status']).exited_claims, []);
   } finally {
