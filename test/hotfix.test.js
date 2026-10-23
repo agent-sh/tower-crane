@@ -452,6 +452,32 @@ function falseFailure(h) {
   return task(h);
 }
 
+test('hotfix cancellation and re-recording retire gate priority until a new request', (t) => {
+  const h = fixture(t);
+  const queue = () => {
+    const source = events(h).findLast((e) => e.cmd === 'hotfix' && e.task === 'T1');
+    // Seed the executor queue so this lifecycle test needs no held CPU process.
+    StateFiles.appendEvents(h.state, [{
+      at: new Date().toISOString(), agent: 'orchestrator', cmd: 'automation queued', task: 'T1',
+      detail: { source: source.id },
+    }]);
+    return h.json(['status']).gate_queue.queued.find((q) => q.id === 'T1');
+  };
+  record(h);
+  queue();
+  h.ok(['gates', 'prioritize', 'T1', '--reason', 'urgent hotfix']);
+  assert.equal(h.json(['status']).gate_queue.queued[0].prioritized.reason, 'urgent hotfix');
+  const failure = h.run(['check', 'ci', 'T1'], { env: { FIXTURE_MERGE_RUN: 'failure' } });
+  assert.equal(failure.code, 1);
+  assert.equal(task(h).status, 'cancelled');
+  assert.ok(events(h).some((e) => e.cmd === 'hotfix rework' && e.task === 'T1'));
+  h.ok(['hotfix', 'T1', '--pr', '42', '--sha', h.sha, '--reason', 'main was red at the merge commit']);
+  assert.equal(task(h).status, 'submitted');
+  assert.equal(queue().prioritized, null, 're-recording cannot restore the cancelled priority');
+  h.ok(['gates', 'prioritize', 'T1', '--reason', 'new priority request']);
+  assert.equal(h.json(['status']).gate_queue.queued[0].prioritized.reason, 'new priority request');
+});
+
 test('recording the same PR again supersedes a false-failure follow-up and lets accept take the new revision', (t) => {
   const h = fixture(t);
   const before = falseFailure(h);

@@ -11,7 +11,7 @@ const path = require('node:path');
 const cp = require('node:child_process');
 const { BIN, HOOKS } = require('./helpers');
 const { CHROME, openBrowser, closeBrowser } = require('./browser');
-const { events, recordedSpend, liveEntries, until, viewClock, setup, exited } = require('./live-spend-helpers');
+const { events, recordedSpend, liveEntries, fixtureState, until, viewClock, setup, exited } = require('./live-spend-helpers');
 const StateFiles = require('./state-files');
 
 test.after(closeBrowser);
@@ -82,8 +82,16 @@ test('a periodic sample that crosses the budget after submit keeps early collect
     await until(t, h, () => liveEntries(h).some((e) => e.tokens === 1000), 'initial usage was not recorded');
     h.ok(['submit', 'T1', '--agent', spawned.agent, '--sha', h.git(['rev-parse', 'HEAD'])]);
     fs.writeFileSync(finish, '');
-    // The harness holds after its final record, so a periodic sample reads it before any exit.
-    await until(t, h, () => events(h).some((e) => e.cmd === 'budget stop'), 'the live sample did not stop the budget');
+    // The harness holds after its final record, so a periodic sample reads it
+    // before any exit. A supervisor that reaches its final read first holds
+    // there until the test releases it, so that order fails now, not at the
+    // runner's timeout. The pause is checked first: a budget stop precedes it.
+    await until(t, h, () => {
+      const final = fs.existsSync(paused);
+      if (events(h).some((e) => e.cmd === 'budget stop')) return true;
+      if (final) throw new Error(`the supervisor reached its final read before a live sample stopped the budget; ${fixtureState(h)}`);
+      return false;
+    }, 'the live sample did not stop the budget');
     await until(t, h, () => fs.existsSync(paused), 'the supervisor did not pause before its final read');
     const early = h.run(['spend', 'T1', '--from-spawn', spawned.agent]);
     assert.equal(early.code, 1);
@@ -410,4 +418,16 @@ const { fakeAgentEnv } = require(${JSON.stringify(path.join(__dirname, 'agent-en
   const run = h.json(['task', 'show', 'T1']).run;
   assert.equal(run.phase, 'blocked');
   assert.match(run.reason, /tokens budget crossed/);
+});
+
+// The stress round runs this file, so its own test stops before a round
+// starts: a copy count that is not a positive integer runs nothing.
+test('the live-spend stress round refuses a copy count that is not a positive integer', () => {
+  const round = path.join(__dirname, 'fixtures', 'live-spend-round.js');
+  for (const copies of ['0', '-2', '1.5', 'many']) {
+    const r = cp.spawnSync(process.execPath, [round, '--round', '1', '--copies', copies], { encoding: 'utf8', windowsHide: true, timeout: 60000 }); // wait-allow: the refusal comes before any run
+    assert.equal(r.status, 1, copies);
+    assert.equal(r.stderr.trim(), '--copies requires a positive integer', copies);
+    assert.equal(r.stdout, '', copies);
+  }
 });

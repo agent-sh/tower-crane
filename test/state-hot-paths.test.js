@@ -196,8 +196,8 @@ test('an indexed select and a select over every event agree', (t) => {
 
 // The gate queue folds a working set read by index. A merged task's merge
 // head can still be owed its reaction, and a request made for that task
-// moves it: the working set keeps the merged task's requests, so the queue
-// matches the fold over the whole log.
+// moves it: requests are read by command across tasks, so the queue matches
+// the fold over the whole log.
 test('the gate queue honours a request for a merged task\'s queued merge reaction', (t) => {
   const h = cachedFixture(t, 'merged-request', (h) => {
     h.init();
@@ -225,7 +225,7 @@ test('the gate queue honours a request for a merged task\'s queued merge reactio
     const st = S.loadState(h.state);
     assert.ok(st.log, 'the snapshot reads the log by index');
     const queue = A.gateQueue(st);
-    assert.deepEqual(queue.queued, [{ id: 'T1', prioritized: { reason: 'merge reaction first', agent: 'owner', at: queue.queued[0]?.prioritized?.at } }]);
+    assert.deepEqual(queue.queued, [{ id: 'T1', prioritized: { reason: 'merge reaction first', agent: 'owner', at: queue.queued[0]?.prioritized?.at, rank: 1 } }]);
     assert.ok(queue.queued[0].prioritized.at, 'the request moved the merge reaction');
     const whole = S.loadState(h.state);
     const events = whole.events;
