@@ -809,12 +809,18 @@ command or tests policy, reruns in the next reaction without one.
 Automatic failures are recorded in `automation` events. Concurrent
 consumers serialize per task and reuse completed event receipts; commands
 execute outside the state lock. Deferred or errored reactions remain
-retryable at watcher startup. Accepted PRs already merged remotely are
-confirmed through the merge gate, preserving the accepted head check.
-`merge ID` holds the same task reservation as reactions. It waits while
-an observable reaction runs on the task, then merges or, when the reaction
-already merged, confirms the accepted head through the merge gate. A
-reaction that starts during a manual merge queues; the merge drains it
+retryable at watcher startup. Accepted PRs already merged remotely without
+a local merge receipt are confirmed through the merge gate, preserving the
+accepted head check.
+For an accepted task with an audited, successful, non-waived merge receipt
+at its current head and revision, `merge ID` prints `already merged at <ref>`
+and returns the recorded result locally. It makes no GitHub lookup, validates
+no merge text or method, takes no reservation and adds no evidence or events.
+Otherwise `merge ID` holds the same task reservation as reactions. It waits
+while an observable reaction runs on the task, then merges or returns the
+recorded result if the reaction recorded the merge while it waited. That
+wait still records its reservation and release. A reaction that starts
+during a manual merge queues; the merge drains it
 after releasing the task, and it finds the task merged. A reservation
 held by an unobservable executor refuses the merge.
 The merge queue takes the same reservation for the head of the line

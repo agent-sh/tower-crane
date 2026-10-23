@@ -360,7 +360,7 @@ A write parses the event log and the three snapshot files before it waits for th
 
 `TOWER_CRANE_LOCK_TRACE=FILE` appends one JSON line per lock holding to FILE: `pid`, the first command words in `argv`, `label` (the mutation's command, `orchestrator lease`, `render`, `validate`, `state read` or `dispatch`, the [dispatch lock](#dispatch-lock)), `wait_ms`, `hold_ms` and `event_bytes`, the event log bytes read while holding. It is off by default and never fails the write it measures.
 
-`TOWER_CRANE_INTERVALS` is a JSON object of interval name to positive milliseconds that replaces production waits, so tests drive a timeout path in short real time: `lock_wait` (60000, a write's wait for this lock), `lock_refresh` (10000, how often a marked lock kept fresh while held, the [dispatch lock](#dispatch-lock) and a base rerun's result lock, touches its marker), `startup` (10000, the window a dispatch gives its supervisor to report ready and a supervisor gives its spawn and, without the lease gate, its lease to be recorded) and `governor_lock_wait` and `governor_bind_wait` (5000 and 10000, the [host governor](#host-resource-governor)'s registry lock wait and a bind's further retries). It is read on every wait, so it applies to the process that sets it and to every CLI, supervisor and hook that inherits it. An unknown name or a value that is not a positive number fails the command. Production leaves it unset.
+`TOWER_CRANE_INTERVALS` is a JSON object of interval name to positive milliseconds that replaces production waits, so tests drive a timeout path in short real time: `lock_wait` (60000, a write's wait for this lock), `lock_refresh` (10000, how often a marked lock kept fresh while held, the [dispatch lock](#dispatch-lock) and a base rerun's result lock, touches its marker), `startup` (10000, the window a dispatch gives its supervisor to report ready and a supervisor gives its spawn and, without the lease gate, its lease to be recorded) and `governor_lock_wait` and `governor_bind_wait` (5000 and 10000, the [host governor](#host-resource-governor)'s registry lock wait and a bind's further retries) and `test_grant` (3000, how often a test run rechecks its [test-thread grant](#test-threads)). It is read on every wait, so it applies to the process that sets it and to every CLI, supervisor and hook that inherits it. An unknown name or a value that is not a positive number fails the command. Production leaves it unset.
 
 A writer prepares a private `lock.<pid>.<random nonce>.new` directory for each attempt and takes the lock with one atomic rename to `lock`. That directory holds one file named after the writer's random nonce, with its pid, host, pid namespace (`pidns`, the target of `/proc/self/ns/pid`, or null where there is none), process identity and time. Linux markers record `start_ticks` from `/proc/<pid>/stat` and `boot_id` from `/proc/sys/kernel/random/boot_id`; unreadable start ticks are omitted, and an unreadable boot id is null. The rename fails while `lock` holds such a file, so one writer holds it at a time. CLI commands, harness hooks and brokered writes use the same acquisition bound of 60 s, matching the stale-marker window and allowing startup bursts to drain. While a live holder has the lock, a waiter checks every 2 ms whether `lock` is gone and retries at once when it is. The check for a stale holder runs on a backoff that starts at 10-19 ms, doubles to 100-199 ms and includes random jitter; each wait is capped by the remaining time. After a reclaim, an empty lock or a staging cleanup race, the waiter sleeps the whole backoff. The deadline uses a monotonic clock, so wall-clock changes do not shorten or extend it. A holder still alive at the deadline causes exit 3. An `ENOENT` or `EEXIST` from concurrent cleanup retries within the same deadline with a fresh private directory. A missing state directory is still refused with the initialization instructions.
 
@@ -1001,7 +1001,7 @@ A unit is one piece of work the governor admits and measures:
 | `tests`, `clean`, `ci` (local CI only) | `check tests`, `check clean`, `check ci` with `ci.local`, and the reactions and `accept` that run them | the process running the gate | its own process aborts the gate on its next probe; SIGTERM to the gate's command groups when it has not ended ten seconds after the stop and the stop line is still crossed |
 | `suite` | the merge queue's merged-head suite, once the suite will run | the process running the queue | as a gate |
 
-Hosted CI polling, the sources gate, merges and every other command stay outside the budget: they read the network and write state, but run no project command.
+Hosted CI polling, the sources gate, merges and every other command stay outside the budget: they read the network and write state, but run no project command. Test runs hold test-thread leases from a CPU budget of their own ([Test threads](#test-threads)), inside the gate or agent unit that started them.
 
 ### Readings
 
@@ -1131,6 +1131,18 @@ console.log(Object.fromEntries(['predicted', 'actual', 'slice_peak'].map(key =>
   [key, Math.max(...rows.map(w => w[key])) / 2 ** 30])));
 NODE
 ```
+
+### Test threads
+
+Memory admits a tests gate; CPU decides how many test files it runs at once. No gate, worker or reviewer chooses its own test concurrency: the governor keeps one host-wide budget of test threads (file workers), shared by every project on the host through the same registry, and every test run inside Tower Crane takes a lease from it. A run asks for N threads, the `--test-concurrency` its command passes (`npm test` passes 4, a worker or a gate command may pass more), and is granted G <= N. It holds the lease until it exits; a lease whose holder has exited is dropped, as a unit is.
+
+The budget is the cores less the cores other work uses now, and never more than `cores - 1`: the core kept back covers up to one core of other work (the runner, the gate's own CLI, processes tests detach from their trees), and other work past that comes off the budget. On Linux that is the busy cores among the CPUs the run may use (`Cpus_allowed_list`), from `/proc/stat` between samples at least a second apart, less the CPU the runs' own process trees used over the same interval: each lease holder and its descendants, with the time of children they reaped. Measuring the runs, rather than counting their grants as busy, keeps a change of grant out of the figure, since runs that grow raise the busy cores and their own use together. Each new figure is averaged with the last. Before the first interval (the first lease after a quiet minute) the 1-minute load stands in whole; a host without `/proc/stat` has only the load, less the threads the runs hold. CPU `some` avg10 at or over `psi_cpu_defer`, or load at or over `load_defer` times the cores, the lines that defer new units, stop growth and step the budget down by the overshoot: the threads the runs hold times line / reading (the larger cut of the two), at most once every 30 seconds so the averages can follow, and never below one thread per run. The runs' own load counts as much as other work's. Each run gets one thread whatever the budget, so every run makes progress; past that, the budget goes one thread at a time to each run still under its request, oldest first. Every recheck by any run recomputes every run's grant under the registry lock, and each run reads its own at its next recheck. Other work that wants every core, such as a CPU-bound load on all of them, takes CPU from the runs, so their measured share falls, other work's rises, and the runs shrink to one thread each.
+
+`test/run.js` runs each test file in a `node --test` runner of its own, through a pool it sizes itself: longest measured file first (`test/durations.json`), with the hung-test timeout, the guards, the private runtime directory and the exit codes it had. Inside Tower Crane the pool's size is the grant, rechecked every `test_grant` interval (3 s, `TOWER_CRANE_INTERVALS`). A grant that falls starts no new file until fewer run than the grant; one that rises starts more at once. The runner logs the grant to stderr when it starts and once per change: `tower-crane: test threads: granted G of N (host budget B of CAP on C cores, T granted to R runs)`, then `grew to` or `shrank to`. Each file's output is printed whole when it ends, so files that ran side by side never mix their lines; the run's totals (`ℹ tests`, `ℹ pass`, `ℹ fail` and the rest, or `#` under TAP) and every failing file's `✖ failing tests:` details come again at the end. A reporter destination other than stdout or stderr is refused, since every file's runner would rewrite the file. Outside Tower Crane (plain `npm test`, CI) the pool's size is the request, capped at one below the cores, as before.
+
+Tower Crane marks the runs it governs with `TOWER_CRANE_TEST_GRANT`, a JSON label of the state directory (`project`), `task`, `agent` and `kind`: every gate command's scratch environment carries one (`kind` `gate`, or `suite` for the merge queue's head check), and so does every spawned agent (`kind` its job). A runner removes the label from its test files' environment, so a run a test starts asks for nothing unless the test labels it. A run on the host holds its lease in the registry itself. A sandboxed agent cannot write the registry, so its run sends `{"tests": {"request": N}}` to its state broker (`TOWER_CRANE_BROKER`) and keeps the connection open: the spawn monitor holds the lease, as the agent's task and name, answers recheck lines with the grant then, and releases the lease when the connection closes, so a run that dies frees its threads at once. The agent controls that connection, so the monitor holds one lease per agent at a time (a second run beside the first is refused with `held: true` and runs one thread), refreshes the registry at most once per `test_grant` interval (rechecks that come sooner share the next answer), and ends a connection whose unfinished line outgrows a request (1 MiB). A run that cannot get a grant (a busy registry, a monitor from before test-thread leases, a copy of the runner without `lib/`) prints `no grant from the host governor (REASON); running N at once` and keeps its request.
+
+`status` shows the budget and every holder on the host: `test threads: budget B of CAP on C cores, other work X cores busy` (or `load X` when the load stood in) `; R runs hold G of N requested`, then one line per run with its task, agent or kind, project, grant and request, holder pid and start. `status --json` carries the same under `governor.tests`: `budget`, `cap`, `cores`, `source` (`cpu` or `load`), `others`, `load`, `cpu_some`, `reasons`, `runs`, `requested`, `granted` and `leases` (`id`, `project`, `name`, `task`, `agent`, `kind`, `pid`, `requested`, `granted`, `started_at`, `changed_at`). The registry keeps the leases as `tests` (each with its tree's CPU ticks at the last sample), the last budget as `test_budget` and the last CPU sample as `cpu`.
 
 ### Stopping
 
@@ -2112,16 +2124,25 @@ and git there never reads a config the agent wrote in its home. When the
 project sets `gates.tmp_root`, these gates run under it rather than the
 dispatcher's `TOWER_CRANE_TMP`. Agent commands retain their restrictive Git
 and GitHub shims. This provenance does not replace gate command receipts.
-`merge ID` takes the same reservation with source `merge:<uuid>`, waits
-while a running executor is observable and records `done`, or `error` when
+For an accepted task with an audited, successful, non-waived merge receipt
+at its current head and revision, `merge ID` prints `already merged at <ref>`
+and returns the recorded result locally. It makes no GitHub lookup, validates
+no merge text or method, takes no reservation and writes no evidence or events.
+If there is no such receipt at entry, `merge ID` takes the same reservation
+with source `merge:<uuid>`, waits while a running executor is observable
+and records `done`, or `error` when
 it refuses, as its release. It drains reactions queued behind it, as an
-executor does. The merge queue takes the head of the line's reservation
+executor does. If another executor records the merge while it waits, the
+merge gate returns that receipt without a GitHub lookup or new merge evidence
+or `merged` event; this call still records its reservation and release.
+The merge queue takes the head of the line's reservation
 with source `queue:<uuid>` around its merge, unless its own process
 already holds it. Stack head checks ignore `automation`,
 `automation queued`, `automation reconcile` and `gates prioritize` events,
 which change no task state.
-An accepted PR already merged remotely goes through the merge gate's
-confirmation path. It records the matching accepted head and the PR's merge
+An accepted PR already merged remotely without a local merge receipt goes
+through the merge gate's confirmation path. It records the matching
+accepted head and the PR's merge
 commit without merging again, including after an executor dies before
 writing its receipt. A PR GitHub reports merged at the accepted head needs
 no current gate evidence or CI receipt base, so tasks accepted before merge
@@ -2130,8 +2151,9 @@ same path: confirmation reads only the member's own PR, runs no merge, retarget
 or stack sync, writes no receipts for other tasks, and an open lower PR does
 not block it. A lower member's failing review or stale CI receipt does not
 block it either.
-The confirmation lookup validates merge text and method before calling
-GitHub. Failed current gates permit this read-only lookup; an open PR still
+For a merge without a recorded receipt, the confirmation lookup validates
+merge text and method before calling GitHub. Failed current gates permit
+this read-only lookup; an open PR still
 requires passing gates. Confirmation evidence records the lookup that
 proved the accepted head merged, without querying and merging it again.
 Waiters retain automatic events even when their actor matches the waiter.
