@@ -2212,8 +2212,9 @@ Argv paths are read with `\` as `/` and `./` and `a/../` resolved; `.`, `./` and
 above the repository are ignored. Renames count as both paths. The run then
 already saw every file it would see again only when the argv and `inputs` cover
 everything the command reads, including what its tests import: list such paths in
-`inputs`, or `**` for a suite that reads the whole repository. For a task with a tests gate the head check still runs the suite on
-the real merge. Otherwise the
+`inputs`, or `**` for a suite that reads the whole repository. In the queue, a
+task with a tests gate still gets the head check's suite run on the real merge; a
+direct `merge ID` runs no suite and relies on this rule alone. Otherwise the
 queue reruns local CI on the fetched base, so what lands was checked on the
 merged tree it lands as. A run as long as a few hours on a busy base would come
 back behind the tip on every lap if any base move voided it.
