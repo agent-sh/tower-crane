@@ -5,6 +5,7 @@ const { waitOnRepo, killPid } = require('./signals');
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const crypto = require('node:crypto');
 const path = require('node:path');
 const { makeTaskRepo, dispatch } = require('./helpers');
 const S = require('../lib/state');
@@ -337,6 +338,98 @@ test('a sharing refusal is waited out with backoff and a lasting one fails at th
     let calls = 0;
     assert.throws(() => Sharing.sharingRetry(() => { calls++; throw refusal('EPERM'); }), { code: 'EPERM' });
     assert.equal(calls, 1);
+  }
+});
+
+// Where a scanner's refusal starts within a read decides which part of the
+// read meets it first. Wherever that is, a read that meets a refusal lasting
+// past the bound fails after one wait; one that waited again from a later
+// read got through once the scanner let go, and the supervisor below never
+// failed. Each row opens the window at every state access of its operation in
+// turn, as the scanner hook does (test/fixtures/hooks.js HOOK_SHARING_WINDOW).
+// Each refusal moves a virtual clock on, so a wait is a few attempts.
+test('a lasting refusal fails a state read after one wait, wherever in the read it starts', (t) => {
+  const h = fixture(t);
+  // The scanner hook's files, and a commit's staged copies, which a scanner holds as well.
+  const STATE_FILE = /^((project|tasks|decisions)\.json(\.E[0-9a-f-]{36}\.commit)?|events(\.cuts)?\.jsonl|progress\/[^/]+\.jsonl)$/;
+  const WINDOW_MS = Sharing.SHARING_RETRY_MS + 1500;
+  const calls = ['statSync', 'lstatSync', 'openSync', 'readFileSync'];
+  const realFs = Object.fromEntries(calls.map((name) => [name, fs[name]]));
+  const realNow = performance.now;
+  const ownNow = Object.getOwnPropertyDescriptor(performance, 'now');
+  const busy = Sharing.SHARING_BUSY.splice(0, Infinity, 'EPERM');
+  let skew = 0;
+  let accesses = 0;
+  let from = Infinity;
+  let opened = null;
+  let closed = false;
+  for (const name of calls) {
+    fs[name] = function (target, ...rest) {
+      const rel = typeof target === 'string' ? path.relative(h.state, path.resolve(target)).split(path.sep).join('/') : '';
+      if (STATE_FILE.test(rel) && ++accesses >= from && !closed) {
+        opened ??= performance.now();
+        // The first refusal at or past the window's end still happens and closes it.
+        if (performance.now() - opened >= WINDOW_MS) closed = true; // wait-allow: the virtual clock the refusals move on
+        skew += 500;
+        throw Object.assign(new Error(`EPERM: operation not permitted, ${name} '${target}'`), { code: 'EPERM' });
+      }
+      return realFs[name].call(this, target, ...rest);
+    };
+  }
+  Object.defineProperty(performance, 'now', { value: () => realNow.call(performance) + skew, configurable: true });
+  const ctx = { stateDir: h.state, agent: 'reader', env: {} };
+  // A commit past its commit point: its event ends the log and its file is still staged.
+  const staged = () => {
+    const id = `E${crypto.randomUUID()}`;
+    fs.writeFileSync(path.join(h.state, `tasks.json.${id}.commit`), fs.readFileSync(path.join(h.state, 'tasks.json')));
+    fs.appendFileSync(path.join(h.state, 'events.jsonl'), JSON.stringify({ id, at: new Date().toISOString(), cmd: 'staged', task: null, detail: {} }) + '\n');
+  };
+  let release = null;
+  try {
+    for (const row of [
+      { name: 'a read', run: () => S.loadState(h.state) },
+      { name: 'a read that keeps its snapshot', before: () => { release = S.retainEvents(h.state); S.loadState(h.state); }, run: () => S.loadState(h.state) },
+      { name: 'a write', run: () => S.mutate(ctx, 'read', () => {}) },
+      { name: 'a read while a logged commit is staged', before: staged, run: () => S.loadState(h.state) },
+    ]) {
+      const attempt = (start) => {
+        release?.();
+        release = null;
+        row.before?.();
+        accesses = 0;
+        from = start;
+        opened = null;
+        closed = false;
+        try {
+          row.run();
+          return { opened };
+        } catch (error) {
+          return { opened, error, elapsed: performance.now() - opened };
+        } finally {
+          from = Infinity;
+        }
+      };
+      const clean = attempt(Infinity);
+      assert.ifError(clean.error);
+      const total = accesses;
+      assert.ok(total > 3, `${row.name}: ${total} state accesses`);
+      for (let start = 1; start <= total; start++) {
+        const { opened: met, error, elapsed } = attempt(start);
+        // A path that took fewer accesses this time met no refusal.
+        if (met === null) continue;
+        const where = `${row.name}, refused from access ${start} of ${total}`;
+        assert.ok(error, `${where}: the read got through once the refusal ended`);
+        assert.equal(error.code, 'EPERM', `${where}: ${error.stack}`);
+        assert.match(error.message, new RegExp(`still refused after ${Sharing.SHARING_RETRY_MS} ms`), where);
+        assert.ok(elapsed < 2 * Sharing.SHARING_RETRY_MS, `${where}: failed ${elapsed} ms after the first refusal`); // wait-allow: the retry's time bound is the contract under test
+      }
+    }
+  } finally {
+    release?.();
+    Object.assign(fs, realFs);
+    if (ownNow) Object.defineProperty(performance, 'now', ownNow);
+    else delete performance.now;
+    Sharing.SHARING_BUSY.splice(0, Infinity, ...busy);
   }
 });
 

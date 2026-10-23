@@ -1809,7 +1809,10 @@ test('the broker\'s unframing never waits on a body the end frame has ended', ()
 // before frames did, and socket receives the connection. Resolves with the
 // answer's code (null without one), its stderr and the {need} the broker
 // sent.
-function handPush(f, sha, send, { end = false, socket = () => {} } = {}) {
+// With end, the agent ends its side after its pack, as a shim from before
+// framed packs does. With pipe, it then hangs up after that many ms unless
+// data arrives, as libuv closes a Windows named pipe after a shutdown.
+function handPush(f, sha, send, { end = false, pipe = 0, socket = () => {} } = {}) {
   const net = require('node:net');
   const b = JSON.parse(fs.readFileSync(f.job.broker, 'utf8'));
   return new Promise((resolve) => {
@@ -1818,11 +1821,13 @@ function handPush(f, sha, send, { end = false, socket = () => {} } = {}) {
     let code = null;
     let stderr = '';
     let need = null;
+    let received = 0;
     socket(sock);
     sock.setEncoding('utf8');
     sock.on('error', () => {});
     sock.on('connect', () => sock.write(`${JSON.stringify({ token: b.token, push: { sha } })}\n`));
     sock.on('data', (d) => {
+      received++;
       buf += d;
       for (let nl = buf.indexOf('\n'); nl >= 0; nl = buf.indexOf('\n')) {
         const msg = JSON.parse(buf.slice(0, nl));
@@ -1833,6 +1838,10 @@ function handPush(f, sha, send, { end = false, socket = () => {} } = {}) {
           need = msg.need;
           for (const part of send(need.have)) sock.write(part);
           if (end) sock.end();
+          if (end && pipe) {
+            const at = received;
+            setTimeout(() => received === at && sock.destroy(), pipe); // wait-allow: the Windows pipe's close after a shutdown is a timer
+          }
         }
       }
     });
@@ -1901,10 +1910,20 @@ test('the broker refuses bad frames from the agent and frees the cache lock', as
 // copy of the tool, so only a shim from a snapshot before framed packs sends
 // a bare one. Its broker says so, not "pack signature mismatch", and the
 // shim, which ends its side after its pack, still gets that answer.
+// On Windows that shim's pipe closes 50 ms after it ends its side, sooner than
+// git can fail on the pack, so the answer must not wait for git. The broker's
+// index-pack here takes seconds to fail, and the shim waits a little longer
+// than the pipe would, so a busy host's event loop does not decide the test.
 test('a broker tells a shim from before framed packs why its push failed', async (t) => {
   const f = await pushFixture(t);
   const sha = f.commit('a.txt', 'a\n');
-  const old = await handPush(f, sha, (have) => [packOf(f, sha, have)], { end: true });
+  const cp = require('node:child_process');
+  const spawn = cp.spawn;
+  t.after(() => { cp.spawn = spawn; });
+  cp.spawn = (command, args, opts) => (args.includes('index-pack')
+    ? spawn(process.execPath, ['-e', 'process.stdin.resume(); setTimeout(() => process.exit(1), 3000)'], opts) // wait-allow: an index-pack slower to fail than the pipe stays open
+    : spawn(command, args, opts));
+  const old = await handPush(f, sha, (have) => [packOf(f, sha, have)], { end: true, pipe: 500 });
   assert.notEqual(old.code, null, 'the old shim gets the answer');
   assert.notEqual(old.code, 0);
   assert.match(old.stderr, /sent its pack unframed, as a Tower Crane snapshot from before framed packs \(T291\) does/);
