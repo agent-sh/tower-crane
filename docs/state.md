@@ -51,6 +51,8 @@ Existing links use these anchors. Follow the link to the contract in its area.
 
 <a id="growth-windows"></a>[growth-windows](state/containment.md#growth-windows)
 
+<a id="test-threads"></a>[test-threads](state/containment.md#test-threads)
+
 <a id="stopping"></a>[stopping](state/containment.md#stopping)
 
 <a id="deferral-and-resumption"></a>[deferral-and-resumption](state/containment.md#deferral-and-resumption)

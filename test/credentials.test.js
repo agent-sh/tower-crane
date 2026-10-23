@@ -189,6 +189,11 @@ test('a codex rung that names a credential gets the helper as its provider auth 
     '[model_providers.amazon-bedrock]', 'base_url = "http://127.0.0.1:9/fake"', '',
     '[model_providers.amazon-bedrock.aws]', 'region = "us-east-1"', '',
   ].join('\n'));
+  // A profile that names only the region, as the owner's sol and astra do.
+  fs.writeFileSync(path.join(u.home, '.codex', 'fixture-region.config.toml'), [
+    'model = "fixture-model"', 'model_provider = "amazon-bedrock"', '',
+    '[model_providers.amazon-bedrock.aws]', 'region = "us-west-2"', '',
+  ].join('\n'));
   const name = fakeName('codex');
   const value = fakeValue('codex');
   // The user file sits in the dispatcher's home; the stand-in user's is another.
@@ -203,7 +208,10 @@ test('a codex rung that names a credential gets the helper as its provider auth 
   const auth = { command: argv[0], args: argv.slice(1) };
   assert.deepEqual(seen.config.model_providers['amazon-bedrock'].auth, auth, 'config.toml names the helper on the route\'s provider');
   const profile = JSON.parse(JSON.stringify(TOML.parse(fs.readFileSync(path.join(home, 'fixture-bedrock.config.toml'), 'utf8'))));
-  assert.deepEqual(profile.model_providers['amazon-bedrock'], { base_url: 'http://127.0.0.1:9/fake', aws: { region: 'us-east-1' }, auth }, 'the profile keeps its provider and gains the command');
+  // codex-cli 0.163.0 refuses a provider with both an aws table and auth.
+  assert.deepEqual(profile.model_providers['amazon-bedrock'], { base_url: 'http://127.0.0.1:9/fake', auth }, 'the profile keeps its endpoint, gains the command and drops the aws table codex refuses beside auth');
+  const regional = JSON.parse(JSON.stringify(TOML.parse(fs.readFileSync(path.join(home, 'fixture-region.config.toml'), 'utf8'))));
+  assert.deepEqual(regional.model_providers['amazon-bedrock'], { base_url: 'https://bedrock-mantle.us-west-2.api.aws/openai/v1', auth }, 'a region-only profile gets that region\'s Bedrock endpoint in place of the aws table');
   assert.equal(TOML.parse(fs.readFileSync(path.join(home, 'fixture-main.config.toml'), 'utf8')).model_providers.r.auth, undefined, 'a profile of another provider is left as it was');
   assert.equal(seen.env, null, 'no .env in the home');
   assert.ok(!fs.existsSync(path.join(home, '.env')));
