@@ -132,12 +132,20 @@ test('contributor guidance points CLI prose at its template and state prose at d
     ['AGENTS.md', ['scripts/cli-reference.md', 'docs/state/']],
     ['scripts/cli-reference.md', ['scripts/cli-reference.md', 'lib/commands-*.js']],
     ['docs/cli.md', ['scripts/cli-reference.md', 'lib/commands-*.js']],
-    ['skills/tower-crane-work/SKILL.md', ['scripts/cli-reference.md', 'docs/state/']],
   ];
   for (const [file, names] of rows) {
     const text = fs.readFileSync(path.join(ROOT, file), 'utf8');
     assert.doesNotMatch(text, /details (and examples )?outside the generated blocks/, file);
     assert.doesNotMatch(text, /COMMANDS` in `bin\/tower-crane\.js`/, file);
     for (const name of names) assert.ok(text.includes(name), `${file} names ${name}`);
+  }
+});
+
+// The worker skill is role text for every project's workers (lib/spawn.js puts it in each worker
+// prompt), so it must not carry this repository's own docs layout.
+test('the worker skill names no Tower Crane repository docs paths', () => {
+  const text = fs.readFileSync(path.join(ROOT, 'skills/tower-crane-work/SKILL.md'), 'utf8');
+  for (const name of ['scripts/cli-reference.md', 'docs/state/', 'docs/cli.md']) {
+    assert.ok(!text.includes(name), `skills/tower-crane-work/SKILL.md names ${name}`);
   }
 });
