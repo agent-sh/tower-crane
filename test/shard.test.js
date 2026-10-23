@@ -68,8 +68,10 @@ test('startOrder puts unmeasured files before measured files without changing sh
 test('the runner starts an unmeasured file first with one worker, sharded or unsharded', (t) => {
   const h = makeRepo(t);
   const durations = { [FIXTURES[0]]: 100, [FIXTURES[1]]: 1, [FIXTURES[2]]: 10 };
-  const hook = path.join(h.base, 'file-durations.cjs');
-  fs.writeFileSync(hook, `
+  for (const name of ['file-durations.cjs', 'file durations.cjs', 'nested\\file-durations.cjs']) {
+    const hook = path.join(h.base, name);
+    fs.mkdirSync(path.dirname(hook), { recursive: true });
+    fs.writeFileSync(hook, `
 const fs = require('node:fs');
 const read = fs.readFileSync;
 fs.readFileSync = function (file, ...args) {
@@ -79,18 +81,20 @@ fs.readFileSync = function (file, ...args) {
   return read.call(this, file, ...args);
 };
 `);
-  for (const shard of ['', '1/1']) {
-    const result = cp.spawnSync(process.execPath, [path.join(ROOT, 'test', 'run.js'),
-      '--test-concurrency=1', '--test-reporter=tap', ...FIXTURES], {
-      cwd: ROOT, env: { ...h.env, NODE_OPTIONS: `${h.env.NODE_OPTIONS || ''} --require "${hook}"`,
-        TOWER_CRANE_TEST_GRANT: '', TC_TEST_SHARD: shard },
-      encoding: 'utf8', timeout: HUNG_TEST_MS,
-    });
-    assert.equal(result.status, 0, result.stderr + result.stdout);
-    const expected = [FIXTURES[3], FIXTURES[0], FIXTURES[2], FIXTURES[1]];
-    const titles = [...result.stdout.matchAll(/^# Subtest: (.+)$/gm)].map(([, name]) => name);
-    assert.deepEqual(titles, ['shard d', 'shard a', 'shard c', 'shard b'], shard || 'unsharded');
-    if (shard) assert.deepEqual([...result.stdout.matchAll(/^file started: (.+)$/gm)].map(([, file]) => file), expected);
+    for (const shard of ['', '1/1']) {
+      // An argv path keeps backslashes that NODE_OPTIONS treats as escapes.
+      const result = cp.spawnSync(process.execPath, ['--require', hook, path.join(ROOT, 'test', 'run.js'),
+        '--test-concurrency=1', '--test-reporter=tap', ...FIXTURES], {
+        cwd: ROOT, env: { ...h.env, TOWER_CRANE_TEST_GRANT: '', TC_TEST_SHARD: shard },
+        encoding: 'utf8', timeout: HUNG_TEST_MS,
+      });
+      const variant = `${name}: ${shard || 'unsharded'}`;
+      assert.equal(result.status, 0, `${variant}: ${result.stderr}${result.stdout}`);
+      const expected = [FIXTURES[3], FIXTURES[0], FIXTURES[2], FIXTURES[1]];
+      const titles = [...result.stdout.matchAll(/^# Subtest: (.+)$/gm)].map(([, name]) => name);
+      assert.deepEqual(titles, ['shard d', 'shard a', 'shard c', 'shard b'], variant);
+      if (shard) assert.deepEqual([...result.stdout.matchAll(/^file started: (.+)$/gm)].map(([, file]) => file), expected, variant);
+    }
   }
 });
 
@@ -101,6 +105,16 @@ test('every shard count covers the real suite with each file in exactly one shar
       const shards = Array.from({ length: total }, (_, i) => shardFiles(files, i + 1, total, fileDurations(platform)));
       assert.deepEqual(shards.flat().sort(), files, `${platform}: ${total} shards run every file once`);
       for (const shard of shards) assert.ok(shard.length > 0, `${platform}: ${total} shards leave none empty`);
+    }
+  }
+});
+
+test('the long files that hit the shard deadline have timing entries on both CI platforms', () => {
+  for (const platform of ['linux', 'win32']) {
+    const durations = fileDurations(platform);
+    for (const file of ['test/reviewer-refill.test.js', 'test/stack-parent.test.js']) {
+      assert.ok(Number.isFinite(durations[file]) && durations[file] > 0,
+        `${platform}: ${file} must have a cost instead of the unknown-file median`);
     }
   }
 });
