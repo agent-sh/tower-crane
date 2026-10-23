@@ -1941,7 +1941,8 @@ ID, or a stable digest for older records without IDs.
 deduplicates completed work. `executor` records a reaction that reached CPU
 work while every executor was busy, or while an older reaction already waited
 for one, with the gate as `kind` and the wait as `error`; its source stays
-owed. `deferred` keeps unknown or moved heads,
+owed. An older reaction whose `running` process died is owed its retry and
+waits ahead of it too. `deferred` keeps unknown or moved heads,
 unknown mergeability and failed merge attempts retryable; `error` records
 an exception. Terminal receipts include `error`, null without an exception.
 Startup can retry deferred or errored work without a new lifecycle event.
