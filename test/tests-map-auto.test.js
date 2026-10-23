@@ -117,6 +117,57 @@ test('failed polls are hourly and a newer run cannot roll back an already-used r
   assert.equal(h.github().calls.filter((a) => a[0] === 'run').length, downloads);
 });
 
+for (const [name, receipt, correction, candidate, ignored] of [
+  ['changed map after automatic refresh', 'automatic', 'changed', {}, true],
+  ['unchanged map after automatic refresh', 'automatic', 'unchanged', {}, true],
+  ['cleared and restored map', 'automatic', 'clear', {}, true],
+  ['file pin after automatic refresh', 'automatic', 'file', {}, true],
+  ['changed map after manual run refresh', 'manual', 'changed', {}, true],
+  ['older unused run after a correction', 'automatic', 'changed', { id: 41, head_sha: 'c'.repeat(40) }, true],
+  ['same-SHA new run after a correction', 'automatic', 'changed', { id: 43 }, true],
+  ['earlier used run after a newer receipt', 'history', 'changed', {}, true],
+  ['new run after a correction', 'automatic', 'changed', { id: 43, head_sha: 'c'.repeat(40) }, false],
+]) {
+  test(`coverage refresh history survives ${name}`, (t) => {
+    const h = setup(t);
+    if (receipt === 'manual') h.ok(['tests', 'map', 'refresh', '--from-run', '42']);
+    else h.pass();
+    if (receipt === 'history') {
+      h.save({ ...h.github(), artifact: { sha: 'c'.repeat(40), tests: [SUITE], map: { 'new.js': [SUITE] } } });
+      h.ok(['tests', 'map', 'refresh', '--from-run', '43']);
+    }
+    const manual = correction === 'unchanged' ? h.readState('project.json').tests.map
+      : { '**/*.md': [], 'data.json': [SUITE], 'new.js': ['test/other.test.js'] };
+    if (correction === 'file') {
+      const file = path.join(h.base, 'correction.json');
+      fs.writeFileSync(file, JSON.stringify({ sha: BASE, tests: ['test/other.test.js'], map: { 'new.js': ['test/other.test.js'] } }));
+      h.ok(['tests', 'map', 'refresh', '--file', file]);
+    } else {
+      if (correction === 'clear') {
+        h.ok(['project', 'set', '--tests-map', 'null']);
+        h.advance(HOUR);
+        const calls = h.github().calls.length;
+        h.pass();
+        assert.equal(h.github().calls.length, calls, 'clearing the map stops polling');
+      }
+      h.ok(['project', 'set', '--tests-map', JSON.stringify(manual)]);
+    }
+    const run = h.runData(candidate);
+    h.save({ ...h.github(), runs: [run], artifact: { sha: run.head_sha, tests: [SUITE], map: { 'new.js': [SUITE] } } });
+    const refreshes = h.refreshes().length;
+    const downloads = h.github().calls.filter((a) => a[0] === 'run').length;
+    h.advance(HOUR);
+    h.pass();
+    assert.deepEqual(h.readState('project.json').tests.map,
+      ignored ? manual : { '**/*.md': [], 'data.json': [SUITE], 'new.js': [SUITE] });
+    assert.equal(h.refreshes().length, refreshes + (ignored ? 0 : 1));
+    assert.equal(h.github().calls.filter((a) => a[0] === 'run').length, downloads + (ignored ? 0 : 1));
+    h.advance(HOUR);
+    h.pass();
+    assert.equal(h.refreshes().length, refreshes + (ignored ? 0 : 1), 'later polls never reuse the run');
+  });
+}
+
 test('concurrent wait hosts reserve only one coverage poll', async (t) => {
   const h = setup(t);
   const args = ['wait', '--after', '0', '--types', 'never', '--timeout', '0.01', '--agent', 'orchestrator']; // wait-allow: two bounded host passes exercise the shared reservation
