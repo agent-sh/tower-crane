@@ -41,7 +41,7 @@ Both proofs run the whole suite under the gate's suite deadline, at three file w
 
 ## Gate scratch proof profile
 
-The recent complete cleanup proofs ran at three file workers. Their `suite_time.wall_ms` measurements were:
+These historical complete cleanup proofs predate T436 and ran at three file workers. Their `suite_time.wall_ms` measurements were:
 
 | CI run | Proof job | Head | Suite wall time (min) | Result |
 | --- | --- | --- | ---: | --- |
@@ -53,16 +53,16 @@ Successful proof receipts retain no per-file output. The failed receipt keeps on
 
 The [generated profile](testing-gate-scratch-profile.json) records the per-file rows from the successful Linux Node 26 shards in the first two runs. Normalize each job log to its timestamp and message, then use `fileTimes` and `titles` from `scripts/test-durations.js` to match top-level test results to their defining files and sum their reported durations. The matching used the declarations in `0881d0fb`, including the dispatch titles ending in `slow base fetch`. These are per-file sums of test wall time from the shards, not per-file wall measurements of the nested cleanup proof; file startup and teardown are excluded. The source jobs are 118749984784, 118749984860 and 118749985059 for run 39454500694, and 118768970446, 118768970539 and 118768970467 for run 39458982921.
 
-Each run has 133 matched files. Their summed test times are 6498.95 and 6531.30 seconds. Unmatched top-level results add 74.95 and 67.56 seconds. Even the matched times alone need about 36.1 to 36.3 minutes at three workers. Reducing total suite work is needed for a 30-minute proof target; trimming one file whose tests total 82 to 85 seconds cannot supply that margin.
+Each run has 133 matched files. Their summed test times are 6498.95 and 6531.30 seconds. Unmatched top-level results add 74.95 and 67.56 seconds. At those revisions, even the matched times alone needed about 36.1 to 36.3 minutes at three workers. Trimming one file whose tests total 82 to 85 seconds could not supply the margin for a 30-minute proof target. These figures do not measure the suite after T436.
 
-The dispatch tests in `test/worktree.test.js` used a 15-second fake upload-pack wait for each of their two variants. Their assertions count exactly one fetch while preparing six tasks, check every fresh HEAD and, for the spawn variant, check that all six workers reuse those worktrees without another fetch. Removing the fake waits keeps those assertions and saves 30 seconds of intentional test waiting.
+The dispatch tests in `test/worktree.test.js` originally used a 15-second fake upload-pack wait for each of their two variants. T436 (`3e8eb58b`) cut the fake upload-pack wait from 15 seconds to 2 seconds per variant. T472 removes the remaining 2 seconds per variant, saving 4 seconds of intentional waiting against its merge base. Their assertions count exactly one fetch while preparing six tasks, check every fresh HEAD and, for the spawn variant, check that all six workers reuse those worktrees without another fetch.
 
-Three scoped Linux Node 26 runs of `npm test -- test/worktree.test.js --test-name-pattern="one dispatch prepares six"` measured the following times on a shared host. Every sample passed both tests. The additional baseline samples compiled the unmodified test file from `0881d0fb` through a preload under its original module path, keeping the same fixtures and CLI paths. These measurements cover only the two dispatch tests. The whole-suite proof target still needs the total suite reduction.
+Three scoped Linux Node 26 runs of `npm test -- test/worktree.test.js --test-name-pattern="one dispatch prepares six"` measured the following times on a shared host. Every sample passed both tests. The baseline samples compiled the unmodified test file from `0881d0fb` through a preload under its original module path, keeping the same fixtures and CLI paths. The samples compare the original 15-second waits with no waits: they show the combined removal of the original waits since `0881d0fb`, not T472's incremental saving against its merge base. These measurements cover only the two dispatch tests. The orchestrator verifies the whole-suite proof target on main after T436.
 
 | Version | Sample 1 (s) | Sample 2 (s) | Sample 3 (s) | Median (s) | Min (s) | Max (s) |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Before | 42.606 | 51.197 | 48.150 | 48.150 | 42.606 | 51.197 |
-| After | 12.634 | 35.961 | 12.271 | 12.634 | 12.271 | 35.961 |
+| Original 15 s waits (`0881d0fb`) | 42.606 | 51.197 | 48.150 | 48.150 | 42.606 | 51.197 |
+| No waits (combined change since `0881d0fb`) | 12.634 | 35.961 | 12.271 | 12.634 | 12.271 | 35.961 |
 
 ## Writing tests
 
