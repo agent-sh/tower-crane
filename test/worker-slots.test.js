@@ -181,6 +181,65 @@ test('spawn refuses a task with a live reservation and clears one whose processe
   fs.writeFileSync(path.join(h.base, 'T1.exit'), '');
 });
 
+// Every reader that rebuilds a process record from a spawn detail keeps its
+// pid namespace, so a pid recorded in another one is never judged exited.
+test('readers of a spawn detail recorded in another pid namespace never judge its processes exited', { skip: process.platform === 'win32' && 'Windows records no pid namespace' }, async (t) => {
+  const T = require('../lib/tasks');
+  const C = require('../lib/containment');
+  const exited = cp.spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
+  await once(exited, 'exit');
+  const dead = exited.pid;
+  const here = P.pidNamespace();
+  const host = require('node:os').hostname();
+  for (const [label, ns, gone] of [
+    ['another namespace', { pidns: 'pid:[1]' }, false],
+    ['this namespace', here ? { pidns: here } : {}, true],
+    ['no recorded namespace', {}, true],
+  ]) {
+    const detail = { role: 'worker', agent: 'worker-T1-1', attempt: 1, reserved: true, host, pid: dead, monitor_pid: dead, ...ns };
+    const expected = gone ? 'exited' : 'unknown';
+    assert.equal(P.processState(P.monitorProcess(detail)), expected, `${label}: supervisor`);
+    assert.equal(P.processGroupState(P.harnessProcess(detail)), expected, `${label}: harness group`);
+    assert.deepEqual(P.spawnPids(detail), gone ? [] : [dead, dead], `${label}: spawnPids`);
+    assert.equal(P.spawnGone(detail, Date.now()), gone, `${label}: spawnGone`);
+    const st = { project: { limits: { lease_minutes: 60 } }, events: [{ cmd: 'spawn', task: 'T1', at: new Date().toISOString(), detail }] };
+    const [slot] = T.reservations(st, Date.now());
+    assert.equal(P.processState(P.monitorProcess(slot.proc)), expected, `${label}: reservation supervisor`);
+    assert.equal(P.processGroupState(P.harnessProcess(slot.proc)), expected, `${label}: reservation harness`);
+    // An orchestrator controller record is kept for retention until its process exits.
+    const state = fs.mkdtempSync(path.join(process.env.TOWER_CRANE_TEST_TMP || require('node:os').tmpdir(), 'controllers-'));
+    t.after(() => fs.rmSync(state, { recursive: true, force: true }));
+    fs.mkdirSync(path.join(state, 'controllers'));
+    const file = path.join(state, 'controllers', `${dead}-0123456789abcdef.json`);
+    fs.writeFileSync(file, JSON.stringify({ pid: dead, start: '1', host, ...ns, command: 'wait', role: 'orchestrator' }));
+    C.recorded(state);
+    assert.equal(fs.existsSync(file), !gone, `${label}: controller record`);
+  }
+});
+
+test('spawn from another pid namespace keeps a live reservation whose processes it cannot see', { skip: process.platform !== 'linux' && 'pid namespaces are Linux' }, async (t) => {
+  const sandboxed = (spawned) => ({ hooks: { HOOK_PIDNS: 'pid:[4026599999]', HOOK_HIDDEN_PIDS: JSON.stringify([spawned.pid, spawned.monitor_pid]) } });
+  for (const [label, workers, task] of [
+    ['the reserved task', 2, 'T1'],
+    ['the only worker slot', 1, 'T2'],
+  ]) {
+    const h = setup(t, workers, 2);
+    controlledHarness(h);
+    const { spawned, release } = await pausedSpawn(h, 'T1');
+    try {
+      assert.ok(spawned.pidns, `${label}: the spawn records its pid namespace`);
+      const r = h.run(['spawn', '--task', task], sandboxed(spawned));
+      assert.equal(r.code, 1, `${label}: ${r.stderr}`);
+      assert.equal(events(h).some((e) => e.cmd === 'reservation clear'), false, `${label}: the live reservation is not cleared`);
+      assert.equal(events(h).filter((e) => e.cmd === 'spawn').length, 1, `${label}: no second worker starts`);
+      assert.doesNotThrow(() => killPid(spawned.monitor_pid, 0), `${label}: the supervisor still runs`);
+    } finally {
+      release();
+      fs.writeFileSync(path.join(h.base, 'T1.exit'), '');
+    }
+  }
+});
+
 // macOS has no /proc, so its group probe is the signal to an empty group. CI has no macOS
 // runner: this runs the same probe on POSIX with the platform overridden.
 test('a group probe without /proc proves exit only once the group is empty', { skip: process.platform === 'win32' && 'Windows has no process groups to probe' }, async (t) => {
