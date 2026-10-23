@@ -6,19 +6,13 @@ const { cachedFixture, ROOT } = require('./helpers');
 const { links } = require('../scripts/doc-links');
 const { readText } = require('../scripts/text');
 
-function makeDocsRepo(t, { crlfCommandSource = false } = {}) {
-  return cachedFixture(t, `docs-repo:${crlfCommandSource}`, (h) => {
+function makeDocsRepo(t, { crlfCheckout = false } = {}) {
+  return cachedFixture(t, `docs-repo:${crlfCheckout}`, (h) => {
     for (const name of ['bin', 'lib', 'scripts', 'docs', 'changelog.d', '.github', 'skills', 'agents', 'standards', 'commands']) {
       fs.cpSync(path.join(ROOT, name), path.join(h.repo, name), { recursive: true });
     }
     for (const name of ['package.json', 'CHANGELOG.md', 'README.md', 'AGENTS.md', '.gitattributes']) {
       fs.copyFileSync(path.join(ROOT, name), path.join(h.repo, name));
-    }
-    if (crlfCommandSource) {
-      for (const name of fs.readdirSync(path.join(h.repo, 'lib')).filter((file) => /^commands-.*\.js$/.test(file))) {
-        const file = path.join(h.repo, 'lib', name);
-        fs.writeFileSync(file, readText(file).replace(/\n/g, '\r\n'));
-      }
     }
     // Documentation also cites repository research artifacts outside the contract.
     for (const name of fs.readdirSync(path.join(ROOT, 'docs'), { recursive: true }).filter((file) => file.endsWith('.md'))) {
@@ -36,6 +30,15 @@ function makeDocsRepo(t, { crlfCommandSource = false } = {}) {
     }
     // Copies from a Windows checkout still need Git's normalized index form.
     h.git(['-c', 'core.autocrlf=input', 'add', '.']);
+    const checkout = (autocrlf) => {
+      // A fresh destination applies checkout filters even when index stats match.
+      const staged = path.join(h.base, 'docs-checkout');
+      h.git(['-c', `core.autocrlf=${autocrlf}`, 'checkout-index', '--all', `--prefix=${staged}${path.sep}`]);
+      fs.cpSync(staged, h.repo, { recursive: true });
+      fs.rmSync(staged, { recursive: true, force: true });
+    };
+    if (crlfCheckout) checkout('true');
+    checkout('false');
     h.git(['commit', '-qm', 'documentation fixture']);
   });
 }
