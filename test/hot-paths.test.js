@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { cachedFixture } = require('./helpers');
 const Scope = require('../lib/scope');
+const S = require('../lib/state');
 const StackFixture = require('./stack-fixture');
 
 function fixture(t) {
@@ -87,21 +88,38 @@ test('hot_paths is a validated operational project setting with show and clear',
   assert.deepEqual(h.json(['project', 'show']).hot_paths, []);
 });
 
-test('hot-path, PR ownership and broker verb settings retain their values, summaries and usage together', (t) => {
+test('project validation retains hot-path and archive checks together', (t) => {
+  const h = fixture(t), project = h.readState('project.json');
+  for (const [paths, days, hotError, archiveError] of [
+    [['lib/hot.js'], 30, false, false],
+    [['../outside'], 30, true, false],
+    [['lib/hot.js'], 0, false, true],
+    [['../outside'], 0, true, true],
+  ]) {
+    const errors = S.validateProject({ ...project, hot_paths: paths, archive: { retention_days: days } });
+    assert.equal(errors.some((e) => e.includes('hot_paths')), hotError);
+    assert.equal(errors.some((e) => e.includes('archive.retention_days')), archiveError);
+    assert.equal(errors.length, Number(hotError) + Number(archiveError));
+  }
+});
+
+test('hot-path, PR ownership, archive and broker verb settings retain their values, summaries and usage together', (t) => {
   const h = fixture(t);
   const verb = { argv: [process.execPath, 'lib/hot.js'], source: { commit: h.git(['rev-parse', 'HEAD']), paths: ['lib/hot.js'] }, timeout_sec: 60 };
-  for (const { paths, owners, idle, verbs } of [
-    { paths: ['lib/hot.js'], owners: 2, idle: 20, verbs: { hot: verb } },
-    { paths: ['lib/*.js'], owners: 0, idle: 60, verbs: null },
+  for (const { paths, owners, idle, verbs, retention } of [
+    { paths: ['lib/hot.js'], owners: 2, idle: 20, verbs: { hot: verb }, retention: 7 },
+    { paths: ['lib/*.js'], owners: 0, idle: 60, verbs: null, retention: 30 },
   ]) {
-    h.ok(['project', 'set', '--hot-paths', JSON.stringify(paths), '--owners', String(owners), '--owner-idle-minutes', String(idle), '--broker-verbs', JSON.stringify(verbs)]);
+    h.ok(['project', 'set', '--hot-paths', JSON.stringify(paths), '--owners', String(owners), '--owner-idle-minutes', String(idle), '--broker-verbs', JSON.stringify(verbs), '--archive-retention-days', String(retention)]);
     const project = h.json(['project', 'show']);
     assert.deepEqual(project.hot_paths, paths);
     assert.equal(project.limits.owners, owners);
     assert.equal(project.limits.owner_idle_minutes, idle);
+    assert.equal(project.archive.retention_days, retention);
     const summary = h.ok(['project', 'show']);
     assert.ok(summary.includes(`hot_paths: ${JSON.stringify(paths)}`));
     assert.ok(summary.includes(`${owners} PR owners idle up to ${idle} min`));
+    assert.ok(summary.includes(`archive.retention_days: ${retention}`));
     if (verbs) {
       assert.deepEqual(project.broker.verbs.hot.argv, verb.argv);
       assert.equal(project.broker.verbs.hot.timeout_sec, verb.timeout_sec);
@@ -112,7 +130,7 @@ test('hot-path, PR ownership and broker verb settings retain their values, summa
     }
   }
   const help = h.ok(['project', 'set', '--help']);
-  for (const flag of ['[--hot-paths JSON]', '[--owners N]', '[--owner-idle-minutes MIN]', '[--broker-verbs JSON]']) assert.ok(help.includes(flag), flag);
+  for (const flag of ['[--hot-paths JSON]', '[--owners N]', '[--owner-idle-minutes MIN]', '[--broker-verbs JSON]', '[--archive-retention-days DAYS]']) assert.ok(help.includes(flag), flag);
 });
 
 function merged(h, id) {

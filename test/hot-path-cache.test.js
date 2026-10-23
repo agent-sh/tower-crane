@@ -4,7 +4,9 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { cachedFixture } = require('./helpers');
+const cp = require('node:child_process');
+const { cachedFixture, ROOT } = require('./helpers');
+const { HUNG_TEST_MS } = require('./signals');
 const S = require('../lib/state');
 const T = require('../lib/tasks');
 const Scope = require('../lib/scope');
@@ -33,6 +35,45 @@ function observe(h, fn) {
   };
   try { return { result: fn(), calls }; }
   finally { Commands.execFileSync = original; process.chdir(previous); }
+}
+
+for (const variant of ['ready', 'scope holder', 'diff holder', 'cancelled']) {
+test(`host hot-path probe executes with ${variant} fixture state`, (t) => {
+  const h = fixture(t);
+  if (variant.endsWith('holder')) {
+    h.ok(['brief', 'set', 'T2', '-'], { input: '## Scope\n\ndocs/cli.md\n' });
+    if (variant === 'scope holder') h.ok(['brief', 'set', 'T1', '-'], { input: '## Scope\n\ndocs/cli.md\n' });
+    h.ok(['claim', 'T1', '--agent', 'worker-1']);
+    if (variant === 'diff holder') {
+      const wt = h.json(['worktree', 'T1']);
+      fs.mkdirSync(path.join(wt.path, 'docs'), { recursive: true });
+      fs.writeFileSync(path.join(wt.path, 'docs/cli.md'), 'pending hot path\n');
+    }
+  } else if (variant === 'cancelled') {
+    for (const id of ['T1', 'T2']) h.ok(['task', 'update', id, '--status', 'cancelled']);
+  }
+  const cache = path.join(h.base, 'probe-cache');
+  fs.mkdirSync(cache);
+  const stateFiles = fs.readdirSync(h.state).filter((name) => /\.jsonl?$/.test(name));
+  const before = stateFiles.map((name) => fs.readFileSync(path.join(h.state, name), 'utf8'));
+  const run = cp.spawnSync(process.execPath, [path.join(ROOT, 'test/fixtures/hot-paths-probe.js')], {
+    cwd: h.repo, env: { ...h.env, TOWER_CRANE_STATE: h.state, XDG_CACHE_HOME: cache },
+    encoding: 'utf8', timeout: HUNG_TEST_MS,
+  });
+  assert.equal(run.status, 0, run.stderr || run.error?.message);
+  const report = JSON.parse(run.stdout);
+  assert.equal(report.tasks, 2);
+  assert.equal(report.samples.length, 4);
+  for (const sample of report.samples) {
+    assert.equal(sample.ready, variant === 'ready' ? 2 : 0);
+    assert.equal(sample.blocked, variant.endsWith('holder') ? 1 : 0);
+    for (const key of ['prepared_ms', 'views_ms', 'git_calls']) assert.ok(Number.isInteger(sample[key]) && sample[key] >= 0, key);
+  }
+  const warm = report.samples.slice(1).map((s) => s.prepared_ms).sort((a, b) => a - b);
+  assert.deepEqual(report.warm_prepared_ms, { median: warm[1], min: warm[0], max: warm[2] });
+  assert.deepEqual(fs.readdirSync(cache), [], 'the probe removes its derived cache and scratch');
+  assert.deepEqual(stateFiles.map((name) => fs.readFileSync(path.join(h.state, name), 'utf8')), before, 'the source state stays unchanged');
+});
 }
 
 for (const variant of ['local behind', 'local ahead', 'diverged', 'remote only', 'local only']) {
