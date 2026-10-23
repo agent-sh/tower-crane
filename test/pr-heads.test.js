@@ -63,7 +63,7 @@ test('run creation time can place replaced heads in a later submit interval', ()
   }
 });
 
-for (const file of ['docs/state.md', 'docs/cli.md', 'changelog.d/T497.md']) {
+for (const file of ['docs/state/tasks.md', 'scripts/cli-reference.md', 'docs/cli.md', 'changelog.d/T497.md']) {
   test(`push history timing uncertainty in ${file}`, () => {
     const text = fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
     assert.ok(!/observed lower bound/i.test(text), 'the observed count is not a lower bound');
@@ -71,6 +71,16 @@ for (const file of ['docs/state.md', 'docs/cli.md', 'changelog.d/T497.md']) {
     assert.ok(/late run.*head replaced before the previous submit can be counted/i.test(text), 'late runs can overcount pushes');
   });
 }
+
+test('split contracts retain the submission index and status command help', () => {
+  const index = fs.readFileSync(path.join(__dirname, '..', 'docs/state.md'), 'utf8');
+  assert.match(index, /\[Submission history\]\(state\/tasks\.md#submission-history\)/);
+  const tasks = fs.readFileSync(path.join(__dirname, '..', 'docs/state/tasks.md'), 'utf8');
+  assert.match(tasks, /id="submission-history"/);
+  const status = require('../lib/commands-render').find((command) => command.name === 'status');
+  assert.match(status.description, /observed push counts above one for tasks other than accepted or cancelled/);
+  assert.match(status.description, /pushes_since_last_submit/);
+});
 
 test('history queries use whole seconds while counts retain the exact submit boundary', async (t) => {
   const gh = C.gh;
