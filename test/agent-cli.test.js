@@ -143,6 +143,19 @@ if (released.status !== 0) throw new Error(released.stderr);
   }
 });
 
+for (const [file, universal] of [
+  ['docs/ladder.md', /Every spawned agent's `bin\/` holds `tower-crane` and `tower-crane\.cmd`/],
+  ['docs/state.md', /Every spawned agent's PATH starts with its shim directory, including `tower-crane` and `tower-crane\.cmd`/],
+  ['changelog.d/T506.md', /Every spawned agent runs `tower-crane` from its pinned tool snapshot before any global install/],
+]) {
+  test(`the agent-home contract in ${file} gives every spawned agent the pinned CLI`, () => {
+    const contract = fs.readFileSync(path.join(ROOT, file), 'utf8');
+    assert.ok(universal.test(contract), `${file}: missing universal pinned CLI contract`);
+    assert.equal(/A sandboxed claude or codex agent's `bin\/` also holds `tower-crane`/.test(contract),
+      false, `${file}: stale sandbox-only CLI contract`);
+  });
+}
+
 for (const [operation, launcher] of [['writeFileSync', 'tower-crane'], ['writeFileSync', 'tower-crane.cmd'], ['accessSync', 'tower-crane.js']]) {
   test(`spawn refuses before starting the harness when ${operation} fails for ${launcher}`, t => {
     const h = setup(t);
