@@ -9,13 +9,20 @@ const path = require('node:path');
 const { NO_STUBS, setup, spawn } = require('./isolation-helpers');
 const { makeRepo } = require('./helpers');
 
-// A run-specific fingerprint cannot be reused to identify a credential in another run.
-const fingerprintKey = crypto.randomBytes(32);
-const digest = (value, key = fingerprintKey) => crypto.createHmac('sha256', key).update(value || '').digest('hex').slice(0, 12);
+// Scrypt prevents cheap guessing; a fresh salt keeps fingerprints local to one run.
+const fingerprintSalt = crypto.randomBytes(32);
+const digest = (value, key = fingerprintSalt) => crypto.createHash('sha256')
+  .update(crypto.scryptSync(value || '', key, 32)).digest('hex').slice(0, 12);
 
 test('fake credential fingerprints are scoped to each run for bearer, API-key and rotated values', () => {
   const keys = [crypto.randomBytes(32), crypto.randomBytes(32)];
-  for (const value of ['tc-test-fake-bearer', 'tc-test-fake-api-key', 'tc-test-fake-rotated', 'tower-crane-placeholder']) {
+  for (const [index, [value, expected]] of [
+    ['tc-test-fake-bearer', 'd95ef7743a46'],
+    ['tc-test-fake-api-key', '8b5bfc475f31'],
+    ['tc-test-fake-rotated', '764c822e9fd7'],
+    ['tower-crane-placeholder', 'cee589016e8e'],
+  ].entries()) {
+    assert.equal(digest(value, Buffer.alloc(32, index + 1)), expected, 'the prefix follows the scrypt/SHA256 test vector');
     assert.equal(digest(value, keys[0]), digest(value, keys[0]));
     assert.match(digest(value, keys[0]), /^[0-9a-f]{12}$/);
     assert.notEqual(digest(value, keys[0]), digest(value, keys[1]), 'a fingerprint cannot be reused in another run');

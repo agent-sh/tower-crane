@@ -62,9 +62,10 @@ async function main() {
     }
     const name = `tc-test-fake-live-local-${process.pid}`;
     const value = `tc-test-fake-${crypto.randomBytes(16).toString('hex')}`;
-    // Only a per-probe fingerprint leaves the fake server's auth check.
-    const fingerprintKey = crypto.randomBytes(32);
-    const fingerprint = (token) => crypto.createHmac('sha256', fingerprintKey).update(token || '').digest('hex').slice(0, 12);
+    // Slow, salted fingerprints keep fake credentials out of the probe's output.
+    const fingerprintSalt = crypto.randomBytes(32);
+    const fingerprint = (token) => crypto.createHash('sha256')
+      .update(crypto.scryptSync(token || '', fingerprintSalt, 32)).digest('hex').slice(0, 12);
     const expected = fingerprint(value);
     const file = path.join(dir, 'credential.json');
     const secretFile = path.join(dir, 'credential.env');
@@ -96,7 +97,7 @@ async function main() {
     await turn(dir, broker, { name, model: 'tc-test-fake-local', config: file,
       upstream: { base_url: `http://127.0.0.1:${local.address().port}`, auth: 'x-api-key' } });
     assert.ok(messages > 0, 'Claude must call the local Messages API');
-    console.log(JSON.stringify({ local_messages: messages, auth_hmac_sha256_prefix: expected }));
+    console.log(JSON.stringify({ local_messages: messages, auth_scrypt_sha256_prefix: expected }));
   } finally {
     broker.close();
     local?.closeAllConnections();
