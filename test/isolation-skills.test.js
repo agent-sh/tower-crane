@@ -251,6 +251,55 @@ process.exit(r.status ?? 1);
   assert.match(seen.cli.out, /branch: tower-crane\/T1/);
 });
 
+// The live test above leans on the stand-in's protocol, so the stand-in is
+// checked here without claude: each agent turn asks for the next step, side
+// requests and token counts get text, and results are recorded by step.
+test('the fake Messages API asks for each step in turn, records its result and then says done, streamed or not', async (t) => {
+  const steps = [
+    () => ({ name: 'Bash', input: { command: 'pwd' } }),
+    (r) => ({ name: 'Write', input: { file_path: `${r[0].text}/f`, content: 'x' } }),
+  ];
+  const api = await require('./fixtures/fake-messages-api').start(steps);
+  t.after(api.close);
+  const post = async (url, body) => {
+    const res = await fetch(api.url + url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    return { type: res.headers.get('content-type'), body: await res.text() };
+  };
+  // Rebuilds the reply's content blocks and stop reason from either form.
+  const reply = ({ type, body }) => {
+    if (type === 'application/json') return JSON.parse(body);
+    const events = body.split('\n').filter((l) => l.startsWith('data: ')).map((l) => JSON.parse(l.slice(6)));
+    const content = [];
+    let stop_reason = null;
+    for (const e of events) {
+      if (e.type === 'content_block_start') content[e.index] = { ...e.content_block };
+      if (e.delta?.type === 'input_json_delta') content[e.index].input = JSON.parse(e.delta.partial_json);
+      if (e.delta?.type === 'text_delta') content[e.index].text += e.delta.text;
+      if (e.type === 'message_delta') stop_reason = e.delta.stop_reason;
+    }
+    assert.deepEqual([events[0].type, events.at(-1).type], ['message_start', 'message_stop']);
+    return { content, stop_reason };
+  };
+  const tools = [{ name: 'Bash' }];
+  const result = (id, content, is_error) => ({ role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content, ...(is_error ? { is_error } : {}) }] });
+
+  assert.deepEqual(JSON.parse((await post('/v1/messages/count_tokens', {})).body), { input_tokens: 1 });
+  assert.deepEqual(reply(await post('/v1/messages', { stream: true, messages: [] })), { content: [{ type: 'text', text: 'done' }], stop_reason: 'end_turn' }, 'a side request without tools gets text');
+
+  const first = reply(await post('/v1/messages', { stream: true, tools, messages: [{ role: 'user', content: 'go' }] }));
+  assert.equal(first.stop_reason, 'tool_use');
+  assert.deepEqual(first.content, [{ type: 'tool_use', id: 'toolu_step0', name: 'Bash', input: { command: 'pwd' } }]);
+
+  const history = [{ role: 'user', content: 'go' }, { role: 'assistant', content: first.content }, result('toolu_step0', [{ type: 'text', text: '/w' }])];
+  const second = reply(await post('/v1/messages', { tools, messages: history }));
+  assert.equal(second.stop_reason, 'tool_use');
+  assert.deepEqual(second.content, [{ type: 'tool_use', id: 'toolu_step1', name: 'Write', input: { file_path: '/w/f', content: 'x' } }], 'a step sees the results before it');
+
+  history.push({ role: 'assistant', content: second.content }, result('toolu_step1', 'denied', true));
+  assert.deepEqual(reply(await post('/v1/messages', { stream: true, tools, messages: history })), { content: [{ type: 'text', text: 'done' }], stop_reason: 'end_turn' }, 'the steps ran out');
+  assert.deepEqual(api.results, [{ error: false, text: '/w' }, { error: true, text: 'denied' }]);
+});
+
 // Automation dispatches from inside a worker's monitor, so its package root is
 // that worker's tool snapshot, removed when the worker exits. Skill paths name
 // the state directory's skill store instead, which no exit removes and which,

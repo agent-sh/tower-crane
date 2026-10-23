@@ -8,7 +8,7 @@ const cp = require('node:child_process');
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const { createRepoSeed, cleanupRepoSeed, FOREGROUND_MAINTENANCE } = require('./repo-seed');
-const { tempRoot, liveRoot } = require('./tmp-root');
+const { tempRoot, liveRoot, markFixtureOwner, OWNER_FILE } = require('./tmp-root');
 const { readPublished } = require('./atomic-file');
 const UserConfigGuard = require('./fixtures/user-config-guard');
 const StateFiles = require('./state-files');
@@ -93,6 +93,7 @@ function installHarnessGuard() {
   if (!guarded.length) return null;
   fs.mkdirSync(TMP_ROOT, { recursive: true });
   const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(TMP_ROOT, 'tower-crane-harness-guard-')));
+  markFixtureOwner(dir);
   const hits = path.join(dir, 'hits.jsonl');
   const argv = (name) => [process.execPath, path.join(__dirname, 'fixtures', 'harness-guard.js'), hits, name];
   for (const name of guarded) {
@@ -334,6 +335,7 @@ function fixtureDir(setup, root = TMP_ROOT) {
   fs.mkdirSync(root, { recursive: true });
   const dir = fs.mkdtempSync(path.join(root, 'tower-crane-'));
   try {
+    markFixtureOwner(dir);
     return setup(fs.realpathSync.native(dir));
   } catch (error) {
     fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
@@ -396,7 +398,8 @@ function makeTaskRepo(t, tasks, { projectArgs = [] } = {}) {
 // Git and state paths still name the source; the caller repairs them.
 function copyRepo(t, source) {
   return fixtureDir((base) => {
-    fs.cpSync(source, base, { recursive: true });
+    // The copy belongs to this process, even when the source's creator is gone.
+    fs.cpSync(source, base, { recursive: true, filter: (file) => file !== path.join(source, OWNER_FILE) });
     return context(t, base);
   });
 }
