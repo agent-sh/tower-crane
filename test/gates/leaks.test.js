@@ -45,6 +45,7 @@ test('a gate whose test leaves a detached spinning grandchild leaves no live pro
   initRepo(root, { 'leak.js': LEAK, 'value.txt': '0\n' });
   const sha = commit(root, { 'value.txt': '1\n' });
   const pids = path.join(tmp, 'pids');
+  // read-published: each leak appends its line in one write, and nothing replaces the file.
   const planted = () => (fs.existsSync(pids) ? fs.readFileSync(pids, 'utf8').trim().split('\n').filter(Boolean).map(Number) : []);
   t.after(() => {
     for (const pid of planted()) if (detachedAlive({ pid })) killPid(pid, 'SIGKILL');
@@ -162,6 +163,7 @@ test('a Windows gate command runs in a job object that stops its orphaned grandc
   const tmp = scratch('gates-job');
   const pids = path.join(tmp, 'pids');
   t.after(() => {
+    // read-published: the leak appends its line in one write, and nothing replaces the file.
     for (const pid of fs.existsSync(pids) ? fs.readFileSync(pids, 'utf8').trim().split('\n').map(Number) : []) {
       if (detachedAlive({ pid })) killPid(pid, 'SIGKILL');
     }

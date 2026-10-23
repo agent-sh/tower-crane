@@ -9,7 +9,7 @@ const fs = require('node:fs');
 const [ready, finish, ms] = process.argv.slice(2);
 const parent = process.ppid;
 const deadline = Date.now() + (Number(ms) || 300000); // wait-allow: a test passes a short MS to prove the deadline holds
-fs.writeFileSync(ready, 'ready');
+fs.writeFileSync(ready, 'ready'); // write-atomic: existence is the signal; no test reads the text
 while (!fs.existsSync(finish)) {
   if (process.ppid !== parent || Date.now() > deadline) process.exit(1);
   Math.sqrt(Math.random());
