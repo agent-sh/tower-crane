@@ -17,8 +17,8 @@ const Body = require('../lib/review-body');
 
 const finding = { kind: 'false-claim', path: 'PR body', claim: 'The body claims an unmeasured result.' };
 
-function fixture(t, mode) {
-  const h = cachedFixture(t, 'automatic body repair', (repo) => {
+function fixture(t, mode, reported = finding) {
+  const h = cachedFixture(t, `automatic body repair ${reported.path}`, (repo) => {
     const h = setup(null, { kind: 'docs', repo });
     configureHarness(h);
     h.ok(['task', 'update', 'T1', '--tier', 'easy..medium']);
@@ -61,9 +61,10 @@ if (prompt.includes('## PR-body repair')) {
     const starts = fs.readFileSync(${JSON.stringify(path.join(h.base, 'body-starts'))}, 'utf8').trim().split('\\n').length;
     if (mode === 'availability-twice' || mode === 'availability-once' && starts === 1) process.exit(75);
     updateJson(${JSON.stringify(h.env.AUTOMATION_GITHUB)}, (s) => {
-      if (mode !== 'unchanged') s.prs[7].body += '\\nCorrected claim.';
+      if (!['unchanged', 'title-only'].includes(mode)) s.prs[7].body += '\\nCorrected claim.';
       if (mode === 'remote-commit') s.prs[7].headRefOid = cp.execFileSync('git', ['rev-parse', 'HEAD'], {encoding:'utf8'}).trim();
       if (mode === 'title' || mode === 'retarget-title') s.prs[7].title = 'Changed title';
+      if (mode === 'title-only') s.prs[7].title = 'Corrected title';
       if (mode === 'base') s.prs[7].baseRefName = 'other';
       if (mode.startsWith('retarget')) s.prs[7].baseRefName = 'main';
       return s;
@@ -82,11 +83,11 @@ if (prompt.includes('## PR-body repair')) {
   fs.appendFileSync(${JSON.stringify(path.join(h.base, 'body-checks'))}, prompt + '\\n');
   const s = JSON.parse(fs.readFileSync(${JSON.stringify(h.env.AUTOMATION_GITHUB)}, 'utf8'));
   const round = s.prs[7].body.split('Corrected claim.').length - 1;
-  const ok = ['pass-first', 'crash-once', 'outage-once', 'untracked', 'availability-once', 'availability-after-edit', 'title', 'base', 'staged-file', 'retarget', 'retarget-title'].includes(mode)
+  const ok = ['pass-first', 'crash-once', 'outage-once', 'untracked', 'availability-once', 'availability-after-edit', 'title', 'base', 'staged-file', 'retarget', 'retarget-title', 'title-only'].includes(mode)
     || mode === 'pass-second' && round === 2;
   const args = [${JSON.stringify(BIN)}, 'evidence', 'T1', '--type', 'review', ok ? '--ok' : '--fail',
     '--sha', ${JSON.stringify(h.sha)}, '--summary', ok ? 'Corrected claims verified.' : 'The body still claims an unmeasured result.'];
-  if (!ok) args.push('--findings', ${JSON.stringify(JSON.stringify([finding]))});
+  if (!ok) args.push('--findings', ${JSON.stringify(JSON.stringify([reported]))});
   const r = cp.spawnSync(process.execPath, args, {env:fakeAgentEnv(process.env),stdio:'inherit'});
   process.exit(r.status ?? 1);
 }
@@ -95,7 +96,7 @@ if (prompt.includes('## PR-body repair')) {
       '--supervision', '{"retries":0}']);
     h.reviewer('T1', 'first-reviewer', h.sha);
     h.ok(['evidence', 'T1', '--agent', 'first-reviewer', '--type', 'review', '--fail', '--sha', h.sha,
-      '--summary', 'The body claims an unmeasured result.', '--findings', JSON.stringify([finding])]);
+      '--summary', 'The PR claims an unmeasured result.', '--findings', JSON.stringify([reported])]);
     return { sha: h.sha };
   });
   fs.writeFileSync(path.join(h.base, 'body-mode'), mode);
@@ -106,6 +107,35 @@ if (prompt.includes('## PR-body repair')) {
     });
   }
   return h;
+}
+
+for (const mode of ['title-only', 'fail-twice', 'unchanged']) {
+  test(`title failure uses repair and light checks without full re-review: ${mode}`, async (t) => {
+    const reported = { kind: 'defect', path: 'PR title', claim: 'The title claims an unmeasured result.' };
+    const h = fixture(t, mode, reported);
+    const logs = () => S.readEvents(h.state);
+    h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
+    assert.ok(logs().some((e) => e.cmd === 'spawn' && e.detail.body_fix), 'title failure dispatches its repair');
+    fs.writeFileSync(path.join(h.base, 'body-release'), '');
+    await waitOnRepo(h, () => {
+      const st = S.loadState(h.state), task = T.getTask(st, 'T1');
+      return task.status === 'accepted' || Body.state(st, task)?.stuck;
+    }, 'title repair did not finish or escalate', { signal: t.signal });
+    const task = h.json(['task', 'show', 'T1']);
+    assert.equal(task.sha, h.sha);
+    assert.equal(task.revision, 1);
+    assert.ok(!logs().some((e) => e.cmd === 'rework'));
+    const reviewers = logs().filter((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer');
+    assert.equal(reviewers.filter((e) => !e.detail.body_recheck).length, 1, 'only the original full review');
+    if (mode === 'title-only') {
+      assert.equal(task.status, 'accepted');
+      assert.equal(reviewers.filter((e) => e.detail.body_recheck).length, 1);
+    } else {
+      const item = h.json(['inbox', '--agent', 'orchestrator']).items.find((i) => i.kind === 'review_body_stuck');
+      assert.deepEqual(item.blockers, [reported]);
+      assert.equal(reviewers.filter((e) => e.detail.body_recheck).length, mode === 'fail-twice' ? 2 : 0);
+    }
+  });
 }
 
 for (const mode of ['pass-first', 'pass-second', 'fail-twice', 'local-commit', 'remote-commit', 'unchanged',
@@ -124,8 +154,8 @@ for (const mode of ['pass-first', 'pass-second', 'fail-twice', 'local-commit', '
     assert.equal(first.sha, h.sha);
     assert.equal(first.revision, 1);
     fs.writeFileSync(path.join(h.base, 'body-release'), '');
-    const fullRework = mode.endsWith('commit') || ['staged-file', 'title', 'base', 'retarget-title'].includes(mode);
-    const passes = mode.startsWith('pass') || ['untracked', 'availability-once', 'availability-after-edit', 'retarget'].includes(mode);
+    const fullRework = mode.endsWith('commit') || ['staged-file', 'base'].includes(mode);
+    const passes = mode.startsWith('pass') || ['untracked', 'availability-once', 'availability-after-edit', 'retarget', 'title', 'retarget-title'].includes(mode);
     await waitOnRepo(h, () => {
       const st = S.loadState(h.state);
       const task = T.getTask(st, 'T1');
@@ -159,7 +189,7 @@ for (const mode of ['pass-first', 'pass-second', 'fail-twice', 'local-commit', '
       assert.deepEqual(item.blockers, [finding]);
       if (mode === 'fail-twice') assert.match(item.findings, /The body still claims/);
       assert.match(item.reason, ['unchanged', 'availability-twice'].includes(mode) ? /without changing/ : /two consecutive/);
-      assert.match(item.correction, /Edit the false PR-body claims before accept/);
+      assert.match(item.correction, /Edit the false PR-body claims or the PR title before accept/);
       assert.deepEqual(item.action.argv, ['accept', 'T1']);
       h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
       assert.equal(logs().filter((e) => e.cmd === 'spawn' && e.detail.body_fix).length, fixes.length);
@@ -193,7 +223,7 @@ test('PR-body metadata distinguishes engine retargeting from unrelated changes',
     { name: 'unstacked fallback during a light check', recheck: true, base: 'main', ok: true },
     { name: 'active stack target after engine retarget', stack: true, target: 'next-parent', base: 'next-parent', ok: true },
     { name: 'unrelated base after merge', stack: true, merged: true, base: 'other', ok: false },
-    { name: 'title edit with allowed retarget', stack: true, merged: true, base: 'main', title: 'Changed', ok: false },
+    { name: 'title edit with allowed retarget', stack: true, merged: true, base: 'main', title: 'Changed', ok: true },
   ];
   for (const row of rows) {
     current = structuredClone(baseline);
@@ -321,18 +351,20 @@ test('a light-check monitor may finish its receipt, then a missing receipt trigg
   assert.equal(task.revision, 1);
 });
 
-test('PR-body repair refuses pushes, submissions and PR changes other than its body', async (t) => {
+test('PR-body repair permits title edits but refuses pushes, submissions and other metadata changes', async (t) => {
   const h = fixture(t, 'pass-first');
   const job = { state: h.state, task: 'T1', agent: 'worker', role: 'worker', body_fix: true };
   await assert.rejects(G.push(job, {}, {}), /cannot push commits/);
   for (const command of ['claim', 'renew', 'release', 'submit']) {
     assert.throws(() => B.authorize(job, [command, 'T1']), new RegExp(`cannot ${command}`));
   }
-  for (const args of [['pr', 'create'], ['pr', 'edit', '7', '--title', 'Changed'],
-    ['pr', 'edit', '7', '--base', 'other']]) {
+  for (const args of [['pr', 'create'],
+    ['pr', 'edit', '7', '--base', 'other'], ['pr', 'edit', '7', '--add-label', 'other'],
+    ['pr', 'edit', '7', '--remove-label', 'other']]) {
     assert.throws(() => G.ghCommand(job, args, {}), /permits only/);
   }
   assert.equal(G.ghCommand(job, ['pr', 'edit', '7', '--body', 'Corrected'], {}).parsed.command, 'pr edit');
+  assert.equal(G.ghCommand(job, ['pr', 'edit', '7', '--title', 'Corrected'], {}).parsed.command, 'pr edit');
 });
 
 test('status hides closed or day-old live spend while retaining totals', (t) => {

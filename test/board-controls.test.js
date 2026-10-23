@@ -6,7 +6,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
-const { makeRepo, BIN, HOOKS } = require('./helpers');
+const { makeRepo, BIN, HOOKS, stubRungs } = require('./helpers');
 const { CHROME, openBrowser, closeBrowser } = require('./browser');
 const Authority = require('../lib/authority');
 const { waitOnRepo, waitUntil } = require('./signals');
@@ -93,6 +93,43 @@ test('board controls cover the authority table and use the CLI authority and aud
   assert.equal((await post(request('merge', {}, ['T1']))).status, 400);
   assert.equal((await post(request('project set', { workers: '9' }), 'api/controls', { 'x-tower-crane-version': 'outdated' })).status, 409);
   assert.equal(h.readState('project.json').limits.workers, 3);
+});
+
+test('board review retry retains the failed submission and dispatches only on explicit override', async (t) => {
+  const h = fixture(t);
+  stubRungs(h);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Review retry', '--kind', 'docs', '--tier', 'easy', '--acceptance', 'reads well']);
+  h.ok(['claim', 'T1', '--agent', 'worker']);
+  const sha = h.git(['rev-parse', 'HEAD']);
+  h.ok(['submit', 'T1', '--sha', sha, '--agent', 'worker']);
+  h.reviewer('T1', 'failed-reviewer', sha);
+  h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', sha, '--agent', 'failed-reviewer',
+    '--summary', 'One blocking defect', '--findings',
+    JSON.stringify([{ kind: 'defect', path: 'README.md', claim: 'Missing behavior' }])]);
+  const { url, post } = await serve(t, h);
+  const page = await (await fetch(url + 'controls')).text();
+  const form = /<form id="retry-review"[^>]*data-fixed="([^"]*)"/.exec(page);
+  assert.ok(form, 'the operational setting has a usable control');
+  const flags = JSON.parse(form[1].replace(/&quot;/g, '"'));
+  assert.deepEqual(flags, { 'retry-review': true });
+  const before = events(h).filter((e) => e.cmd === 'spawn').length;
+  for (const retry of [false, true]) {
+    const result = await post(request('accept', retry ? flags : {}, ['T1']));
+    assert.equal(result.status, 200, JSON.stringify(result));
+    assert.equal(result.data.data[retry ? 'review_pending' : 'review_failed'], true);
+    const task = h.readState('tasks.json').tasks[0];
+    assert.equal(task.status, 'submitted');
+    assert.equal(task.sha, sha);
+    assert.equal(task.revision, 1);
+    assert.equal(events(h).filter((e) => e.cmd === 'spawn').length, before + Number(retry));
+  }
+  const retry = events(h).findLast((e) => e.cmd === 'spawn' && e.detail.review_retry);
+  assert.equal(retry.detail.review_retry.sha, sha);
+  assert.equal(retry.detail.review_retry.review.agent, 'failed-reviewer');
+  assert.equal(decisions(h).length, 0, 'an operational retry needs no owner approval');
+  await waitOnRepo(h, () => events(h).some((e) => e.cmd === 'spawn exit' && e.detail.agent === retry.detail.agent),
+    'the stub reviewer did not finish', { signal: t.signal });
 });
 
 test('project, ladder, personal and task controls persist through shared handlers, including pause and budget direction', async (t) => {
