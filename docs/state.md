@@ -826,7 +826,9 @@ which they read its counters every millisecond, finding the OOM the kernel
 counts before it kills. A scope that stays at its cap opens at most one window
 every 100 ms, and the reads stop once the scope is empty. When a keeper takes over the scope's retained
 processes, the keeper reads `Result` and settles the scope when it ends, and the
-supervisor leaves the scope alone. Report directories are
+supervisor leaves the scope alone. The supervisor keeps its own watch until the
+keeper reports that its watch is in place, so an OOM while the keeper starts
+still fails the attempt. Report directories are
 `tower-crane-containment-<supervisor pid>-*` under `XDG_CACHE_HOME` (else
 `~/.cache`), removed when the attempt closes. A supervisor killed before then
 leaves both behind, so contained launches and the idle `wait` timer sweep once
@@ -875,9 +877,10 @@ On Windows, cleanup with retained identities stops each identified non-kept
 process individually. It does not tree-kill an ancestor of retained work.
 Full containment cleanup without retained identities still uses `taskkill /T /F`.
 Retention requires recorded dispatch or controller pid/start identities.
-Verified orchestrator CLI commands register `{pid, start, host, role, command}`
+Verified orchestrator CLI commands register `{pid, start, host, pidns, role, command}`
 under `controllers/<pid>-<nonce>.json` in their state directory and remove the
-record when they return. A command started before its spawn is recorded registers
+record when they return. `pidns` is the command's pid namespace on Linux; a
+reader in another one keeps the record, since it cannot see that process. A command started before its spawn is recorded registers
 once the record appears ([agent identity](#agent-identity)), before the command
 runs. Linux uses process start ticks; macOS and Windows use
 the process snapshot's start time. A background orchestrator `wait --inbox`
@@ -2243,7 +2246,7 @@ The served board applies live state changes in place. Its fragment route, visibl
 
 The initial view's animation frame resets fragment scrolling only if the route, page scroll and main scroll still match their positions at load. A delayed frame cannot overwrite the reader's subsequent scrolling or live restoration.
 
-A `spawn` detail includes `role`, `rung`, `agent`, `harness`, `model`, `profile`, `billing`, `pid`, `host`, `start_ticks`, `pidns`, `cwd` and `log`. `billing` is the route's `api` or `subscription` (see `spend.entries`), or null for a harness without billing, a local Codex provider or a Codex route that cannot be resolved. `model` and `profile` may be null; `start_ticks` and `pidns` are the Linux process identity when available. `pidns` is the recorder's pid namespace (`/proc/self/ns/pid`), where the recorded pid names the process; every record that names a process this way carries it, and a reader in another pid namespace, or one that cannot read its own, never takes such a pid for exited, since a sandbox's namespace hides live processes outside it. Codex adds `codex_home` to find its exact session under a custom `CODEX_HOME`; legacy events fall back to the current `CODEX_HOME` or `~/.codex`. Both foreground and detached output has a log. A `spend` detail is the entry above; automatic entries name the spawned agent; the audit event names the collector or waiter that recorded them. `spawn exit` records the foreground exit code and rung, and `output_held` when its output stayed open after the harness exited (see the process group shutdown below). A release of an exited spawned claim records `{ reason, holder, status, exited_spawn }`, where `exited_spawn` contains only `{ pid, log, code, size }` observed at release. Unknown exit codes and unavailable log sizes are null. No log text is copied into task notes, release events or worker-exited events. The shared observer records exit wakeups and spend without releasing the claim.
+A `spawn` detail includes `role`, `rung`, `agent`, `harness`, `model`, `profile`, `billing`, `pid`, `host`, `start_ticks`, `pidns`, `cwd` and `log`. `billing` is the route's `api` or `subscription` (see `spend.entries`), or null for a harness without billing, a local Codex provider or a Codex route that cannot be resolved. `model` and `profile` may be null; `start_ticks` and `pidns` are the Linux process identity when available. `pidns` is the recorder's pid namespace (`/proc/self/ns/pid`), where the recorded pid names the process; every record that names a process this way carries it, and a reader in another pid namespace, or one that cannot read its own, never takes such a pid for exited, since a sandbox's namespace hides live processes outside it. The supervisor records `monitor_pid` in the same namespace, so every reader that rebuilds the supervisor or harness record from a spawn detail, such as a reservation or an exit probe, keeps `pidns`. Codex adds `codex_home` to find its exact session under a custom `CODEX_HOME`; legacy events fall back to the current `CODEX_HOME` or `~/.codex`. Both foreground and detached output has a log. A `spend` detail is the entry above; automatic entries name the spawned agent; the audit event names the collector or waiter that recorded them. `spawn exit` records the foreground exit code and rung, and `output_held` when its output stayed open after the harness exited (see the process group shutdown below). A release of an exited spawned claim records `{ reason, holder, status, exited_spawn }`, where `exited_spawn` contains only `{ pid, log, code, size }` observed at release. Unknown exit codes and unavailable log sizes are null. No log text is copied into task notes, release events or worker-exited events. The shared observer records exit wakeups and spend without releasing the claim.
 
 Gate events have `{ "type", "ok", "sha", "ref", "revision", "source", "commands" }` in `detail`, plus optional `confirmed_failure` matching the evidence entry. Acceptance, merge, task views and the sketch match software evidence against these events; a missing or unreadable log supplies no gate proof, while malformed lines are skipped. Keep the log with tasks.json when copying or restoring state.
 
