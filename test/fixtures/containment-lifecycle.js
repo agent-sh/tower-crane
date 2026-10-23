@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const C = require('../../lib/containment');
 const { writeAtomic, readPublished, updateJson } = require('../atomic-file');
+const { HUNG_TEST_MS } = require('../signals');
 const [role, dir, kind = 'supervisor', ending = 'zero', late = 'none'] = process.argv.slice(2);
 const limits = { tasks_max: late === 'tasks' ? (C.canScope() ? 32 : 4) : 64,
   memory_max_bytes: (late === 'memory' ? 384 : 512) * 1024 ** 2 };
@@ -15,9 +16,9 @@ const retained = () => {
 // fixture's lifetimes stretch there. Keep in step with test/containment-lifecycle.test.js.
 const scale = process.platform === 'win32' ? 5 : 1;
 
-// The test creates go once its containment has settled, and release once the keeper
-// has stopped a late limit. Work still running then writes its marker, so a marker
-// tells surviving work from stopped work whatever the stop's latency under load.
+// The test creates go once its containment has settled. Work still running then
+// writes its marker, so a marker tells surviving work from stopped work whatever
+// the stop's latency under load.
 function on(name, then) {
   setTimeout(() => process.exit(0), 30000 * scale); // wait-allow: finite lifetime when the test never signals
   const timer = setInterval(() => {
@@ -77,16 +78,23 @@ if (role === 'caller') {
     launch('grandchild', env);
     on('go', () => finish('managed.done'));
   } else {
-    on('go', () => {
-      if (late === 'tasks') {
-        let n = 0;
-        const timer = setInterval(() => {
-          launch('leaf', env);
-          if (++n === 6) clearInterval(timer);
-        }, 40); // wait-allow: finite late fork probe, at most six children
-      } else global.blocks = Array.from({ length: 24 }, () => Buffer.alloc(16 * 1024 ** 2, 1));
-    });
-    on('release', () => finish('managed.done'));
+    // The late probe starts once the keeper holds this work, which then runs
+    // until a stop ends it, however long the watchdog takes to see the breach.
+    const ready = setInterval(() => {
+      if (!fs.existsSync(path.join(dir, 'probe.go'))) return;
+      clearInterval(ready);
+      if (late === 'memory') global.blocks = Array.from({ length: 24 }, () => Buffer.alloc(16 * 1024 ** 2, 1));
+      let n = 0;
+      const timer = late === 'tasks' && setInterval(() => {
+        launch('leaf', env);
+        if (++n === 6) clearInterval(timer);
+      }, 40); // wait-allow: finite late fork probe, at most six children
+    }, 25); // wait-allow: start the late probe once the keeper releases it
+    // Only a stop that never comes lets the work complete.
+    setTimeout(() => { // wait-allow: the hung-test backstop bounds a probe no stop ended
+      writeAtomic(path.join(dir, 'managed.done'), 'done');
+      process.exit(0);
+    }, HUNG_TEST_MS); // wait-allow: the hung-test backstop bounds a probe no stop ended
   }
 } else if (role === 'ordinary' || role === 'grandchild') {
   on('go', () => finish(role + '.done'));

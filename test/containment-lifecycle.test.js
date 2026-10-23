@@ -206,6 +206,29 @@ for (const [kind, ending, owner, late, survives] of cases) {
         if (file === 'systemctl' && args.includes('ActiveState')) settled.push(args[2]);
         return execFile.call(this, file, args, ...rest);
       });
+      if (late !== 'none') {
+        // The keeper releases the late probe as it starts. A memory probe's OOM empties a
+        // systemd scope, whose manager then removes it with its counters, so that keeper
+        // starts only once the kernel ended the probe: the launcher's watch must see it.
+        const preload = path.join(h.base, 'keeper-preload.js');
+        fs.writeFileSync(preload, `
+const path=require('node:path');
+const {writeAtomic,readPublished}=require(${JSON.stringify(require.resolve('./atomic-file'))});
+const dir=${JSON.stringify(dir)};
+writeAtomic(path.join(dir,'probe.go'),'go');
+if(process.env.TC_KEEPER_HOLD){
+ const [id]=JSON.parse(readPublished(path.join(dir,'identities.json'),'utf8'));
+ const P=require(${JSON.stringify(require.resolve('../lib/processes'))});
+ while(P.processState({pid:id.pid,start_ticks:id.start})!=='exited')Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,25); // wait-allow: hold the keeper until the kernel ended the probe
+}
+`);
+        const spawn = cp.spawn;
+        t.mock.method(cp, 'spawn', function (file, args, options) {
+          if (!String(args?.[0]).endsWith('containment-keeper.js')) return spawn.apply(this, arguments);
+          const hold = late === 'memory' && child.containment.unit ? '1' : '';
+          return spawn.call(this, file, ['--require', preload, ...args], { ...options, env: { ...options.env, TC_KEEPER_HOLD: hold } });
+        });
+      }
       // The caller row deliberately terminates its own launcher to prove the
       // detached keeper retains the bound after that launcher is gone.
       const child = C.spawn(process.execPath, args, {
@@ -230,17 +253,21 @@ for (const [kind, ending, owner, late, survives] of cases) {
         }
       }
     }
+    if (late !== 'none') {
+      const [id] = JSON.parse(readPublished(path.join(dir, 'identities.json'), 'utf8'));
+      const work = { pid: id.pid, ...process.platform === 'linux' ? { startTicks: id.start } : {},
+        ...process.platform === 'win32' ? { startTime: require('./windows-process').startTime(id.pid) } : {} };
+      t.after(() => { if (detachedAlive(work)) killPid(work.pid, 'SIGKILL'); });
+      await waitOnRepo(h, () => reason, 'late limit reported');
+      await waitOnRepo(h, () => !detachedAlive(work), 'late limit stopped the dispatched work');
+    }
     fs.writeFileSync(path.join(dir, 'go'), '');
     if (survives) {
       await waitOnRepo(h, () => ['managed.done', 'grandchild.done'].every(name => fs.existsSync(path.join(dir, name))),
         'retained work finished after its owner');
       assert.ok(metadata.retained?.length, JSON.stringify(metadata));
     } else if (late !== 'none') {
-      // The keeper reports the limit, then stops the work; release lets work it missed finish.
-      assert.ok(metadata.keeper_pid, JSON.stringify(metadata));
-      await waitOnRepo(h, () => reason && !detachedAlive({ pid: metadata.keeper_pid }), 'late limit reported and stopped');
-      assert.equal(reason, late === 'tasks' ? 'resource-tasks-max' : 'resource-memory-max');
-      fs.writeFileSync(path.join(dir, 'release'), '');
+      assert.equal(reason, late === 'tasks' ? 'resource-tasks-max' : 'resource-memory-max', JSON.stringify(metadata));
     } else {
       assert.equal(metadata.retained, undefined);
     }
@@ -249,6 +276,62 @@ for (const [kind, ending, owner, late, survives] of cases) {
     if (!survives) assert.equal(fs.existsSync(path.join(dir, 'managed.done')), false);
   });
 }
+
+// Only a systemd scope reaches the handover in the row above; nested groups keep their counters.
+test('a launcher keeps its OOM watch on a scope until the keeper reports its own watch', async (t) => {
+  const { EventEmitter } = require('node:events');
+  const { TMP_ROOT } = require('./helpers');
+  const base = fs.mkdtempSync(path.join(TMP_ROOT, 'handover-'));
+  t.after(() => fs.rmSync(base, { recursive: true, force: true }));
+  for (const [name, before, end, after, expected] of [
+    // The OOM empties the scope and the manager removes it before the keeper is ready.
+    ['OOM announced while the keeper starts, scope then removed', 'oom', 'ready', null, 'resource-memory-max'],
+    ['OOM counted but not yet announced when the keeper is ready', 'counted', 'ready', null, 'resource-memory-max'],
+    ['fork refused while the keeper starts', 'tasks', 'ready', null, 'resource-tasks-max'],
+    ['keeper exits before it is ready', null, 'exit', null, null],
+    ['keeper fails to start', null, 'error', null, null],
+    ['OOM after the keeper reported its watch', null, 'ready', 'oom', null],
+  ]) {
+    const group = path.join(base, name.replace(/\W+/g, '-'));
+    fs.mkdirSync(group);
+    fs.writeFileSync(path.join(group, 'cgroup.events'), 'populated 1\nfrozen 0\n');
+    const events = (oom) => fs.writeFileSync(path.join(group, 'memory.events.local'),
+      `low 0\nhigh 0\nmax ${oom}\noom ${oom}\noom_kill ${oom}\noom_group_kill 0\n`);
+    events(0);
+    fs.writeFileSync(path.join(group, 'pids.events.local'), 'max 0\n');
+    let notify;
+    t.mock.method(fs, 'watch', (file, listener) => {
+      notify = listener;
+      return { on() {}, unref() {}, close() {} };
+    });
+    const found = [];
+    const stop = C.watchOom(group, { tasks: 0, memory: 0 }, reason => found.push(reason));
+    fs.watch.mock.restore();
+    const keeper = new EventEmitter();
+    let settled = false;
+    const done = C.handOver(keeper, group, { tasks: 0, memory: 0 }, false, stop, reason => found.push(reason))
+      .then(() => { settled = true; });
+    if (before === 'oom') {
+      events(1);
+      notify();
+      fs.rmSync(group, { recursive: true });
+    } else if (before === 'counted') events(1);
+    else if (before === 'tasks') fs.writeFileSync(path.join(group, 'pids.events.local'), 'max 1\n');
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(settled, false, `${name}: the handover waits for the keeper`);
+    if (end === 'ready') keeper.emit('message', { ready: true });
+    else if (end === 'error') keeper.emit('error', new Error('spawn failed'));
+    // Every keeper exits in the end; the handover reads the counters once.
+    keeper.emit('exit', 0, null);
+    await done;
+    if (after === 'oom') {
+      events(1);
+      notify();
+    }
+    assert.equal(found[0] ?? null, expected, name);
+    assert.ok(found.length <= 1, `${name}: ${found}`);
+  }
+});
 
 test('a CLI worker fixture named like a supervisor ends with its worker', async (t) => {
   const h = cachedFixture(t, 'lifecycle-cli', h => {
