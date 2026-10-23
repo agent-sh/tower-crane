@@ -124,11 +124,15 @@ if (released.status !== 0) throw new Error(released.stderr);
       `${version} (commit ${sha})`, task);
   }
   for (const [file, patterns] of [
-    ['docs/state.md', [
+    ['docs/state/storage.md', [
       /dispatch pins the runtime of the CLI that starts it/,
       /A spawned orchestrator keeps its pinned tool for child dispatches until it is respawned from an upgraded CLI\./,
     ]],
     ['docs/cli.md', [
+      /dispatch pins the runtime of the CLI that starts it/,
+      /A spawned orchestrator keeps its pinned tool for child dispatches until it is respawned from an upgraded CLI\./,
+    ]],
+    ['scripts/cli-reference.md', [
       /dispatch pins the runtime of the CLI that starts it/,
       /A spawned orchestrator keeps its pinned tool for child dispatches until it is respawned from an upgraded CLI\./,
     ]],
@@ -145,7 +149,7 @@ if (released.status !== 0) throw new Error(released.stderr);
 
 for (const [file, universal] of [
   ['docs/ladder.md', /Every spawned agent's `bin\/` holds `tower-crane` and `tower-crane\.cmd`/],
-  ['docs/state.md', /Every spawned agent's PATH starts with its shim directory, including `tower-crane` and `tower-crane\.cmd`/],
+  ['docs/state/storage.md', /Every spawned agent's PATH starts with its shim directory, including `tower-crane` and `tower-crane\.cmd`/],
   ['changelog.d/T506.md', /Every spawned agent runs `tower-crane` from its pinned tool snapshot before any global install/],
 ]) {
   test(`the agent-home contract in ${file} gives every spawned agent the pinned CLI`, () => {

@@ -199,9 +199,11 @@ function barrier() {
 
 const once = {};
 let busyRenames = 0;
-// HOOK_SHARING_WINDOW: when the first refusal came, and each file's refusals
-// left before its next access goes through.
+// HOOK_SHARING_WINDOW: when the first refusal came, whether a refusal at or
+// past the window's end closed it, and each file's refusals left before its
+// next access goes through.
 let sharingFrom = null;
+let sharingClosed = false;
 const sharingLeft = new Map();
 const descriptors = new Map();
 // The loaded module that lists the sharing refusals (lib/sharing.js, or
@@ -288,19 +290,23 @@ function before(name, args, raw = args) {
   // that goes through, the next HOOK_SHARING_REFUSALS (default 2; 0: every
   // one) to that file fail, so every place that reads it meets a refusal
   // first. It lasts HOOK_SHARING_WINDOW_MS (default 1000; 0: for good) from
-  // the first refusal. The process's sharing module then treats EPERM as
-  // Windows does. Each refusal appends "CALL NAME" to FILE.
+  // the first refusal, and the first refusal at or past that end still happens
+  // and closes it: a stall that carries a bounded wait past the end must not
+  // let its next attempt through before the wait meets its bound. The
+  // process's sharing module then treats EPERM as Windows does. Each refusal
+  // appends "CALL NAME" to FILE.
   if (env.HOOK_SHARING_WINDOW && ['statSync', 'lstatSync', 'openSync', 'readFileSync'].includes(name) && typeof raw[0] === 'string'
     && inState(target) && !inLock(target) && path.basename(process.argv[1] || '') === env.HOOK_SHARING_IN) {
     const rel = path.relative(STATE, path.resolve(target)).split(path.sep).join('/');
     const windowMs = Number(env.HOOK_SHARING_WINDOW_MS ?? 1000);
     if (/^((project|tasks|decisions)\.json|events(\.cuts)?\.jsonl|progress\/[^/]+\.jsonl)$/.test(rel) && real.existsSync(env.HOOK_SHARING_WINDOW)
-      && (sharingFrom === null || !windowMs || systemNow() - sharingFrom < windowMs)) {
+      && !sharingClosed) {
       const refusals = Number(env.HOOK_SHARING_REFUSALS ?? 2);
       const left = sharingLeft.get(rel) ?? refusals;
       if (!refusals || left > 0) {
         sharingLeft.set(rel, left - 1);
         sharingFrom ??= systemNow();
+        if (windowMs && systemNow() - sharingFrom >= windowMs) sharingClosed = true;
         windowsSharing();
         real.appendFileSync(env.HOOK_SHARING_WINDOW, `${name} ${rel}\n`);
         throw Object.assign(new Error(`EPERM: operation not permitted, ${name === 'openSync' || name === 'readFileSync' ? 'open' : name.replace('Sync', '')} '${target}'`), { code: 'EPERM' });
