@@ -993,7 +993,12 @@ test('what the agent leaves at its socket breaks neither the next spawn nor the 
   broker.close();
   closed = true;
   fs.mkdirSync(path.join(sock, 'inside'), { recursive: true });
-  t.mock.method(fs, 'renameSync', () => { throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' }); });
+  // Only the socket's: the broker lock and broker.json are renamed into place too.
+  const rename = fs.renameSync;
+  t.mock.method(fs, 'renameSync', (from, to) => {
+    if (from === sock) throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
+    return rename(from, to);
+  });
   await assert.rejects(B.start(job), /cannot clear .*\/s, which is in the way of the broker socket \(EACCES\)/);
   assert.equal(fs.existsSync(path.dirname(job.broker)), false, 'the refused start leaves no broker directory');
   assert.ok(fs.existsSync(path.join(sock, 'inside')), 'and does not walk the tree');
@@ -1035,7 +1040,56 @@ test('closing never walks a broker directory the agent wrote: what else is there
   assert.match(notices[0], new RegExp(`left ${where.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} as ${moved.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
 });
 
-test('a broker for claude and codex routes listens on both, and an agent that cannot use the socket uses TCP', { skip: process.platform === 'win32' && 'Windows uses a named pipe for both' }, async (t) => {
+// Seen 2026-10-23 (worker-T499-14 attempt 18): a resume started the agent's
+// next monitor while the last one still ran its gates. The last one's close
+// then deleted the new broker.json and renamed brokers/<agent>/ aside, so
+// every brokered command of the resumed codex agent failed with EACCES.
+test('a monitor closing after the agent\'s next spawn started leaves that spawn its broker file, directory and socket', async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'resume', '--acceptance', 'noted']);
+  const brokers = path.join(h.base, 'brokers');
+  const unixRows = process.platform === 'win32' ? [] : [['claude'], ['claude', 'codex']];
+  for (const [i, harnesses] of [['codex'], ...unixRows].entries()) {
+    const agent = `worker-T1-${i + 1}`;
+    const where = path.join(brokers, agent);
+    const leaf = harnesses.includes('claude') ? agentDir(path.join(h.base, 'homes', agent), process.env) : null;
+    if (leaf) t.after(() => fs.rmSync(leaf, { recursive: true, force: true }));
+    const job = { state: h.state, task: 'T1', agent, role: 'worker', harness: harnesses[0], broker_harnesses: harnesses,
+      cwd: h.repo, broker: path.join(where, B.FILE), ...(leaf ? { agent_socket_dir: leaf } : {}) };
+    const label = harnesses.join('+');
+    const first = await B.start(job);
+    // What a codex agent's sandbox wrote in its own broker directory.
+    fs.writeFileSync(path.join(where, 'agent-file'), 'x');
+    const inode = fs.statSync(where).ino;
+    const second = await B.start(job);
+    let closed = false;
+    t.after(() => closed || second.close());
+    const token = JSON.parse(fs.readFileSync(job.broker, 'utf8')).token;
+    first.close();
+    assert.equal(fs.statSync(where).ino, inode, `${label}: the directory stays in place`);
+    assert.deepEqual(fs.readdirSync(brokers).filter((n) => n.startsWith(`.stale-${agent}-`)), [], `${label}: nothing is renamed aside`);
+    const address = JSON.parse(fs.readFileSync(job.broker, 'utf8'));
+    assert.equal(address.token, token, `${label}: broker.json is the later broker's`);
+    if (leaf) {
+      assert.equal(JSON.parse(fs.readFileSync(path.join(leaf, 'owner.json'), 'utf8')).pid, process.pid, `${label}: the socket leaf keeps its owner record`);
+      // Closing the first server unlinked the shared socket path; the later broker's guard listens there again.
+      await waitUntil(() => fs.lstatSync(address.socket, { throwIfNoEntry: false })?.isSocket(), { paths: [leaf], what: `${label}: the socket again` });
+    }
+    const r = await B.forward(job.broker, ['task', 'note', 'T1', `after resume ${label}`], h.state);
+    assert.equal(r.code, 0, `${label}: ${r.stderr}`);
+    second.close();
+    closed = true;
+    assert.equal(fs.existsSync(where), false, `${label}: the later broker removes the directory it took over`);
+    const aside = fs.readdirSync(brokers).filter((n) => n.startsWith(`.stale-${agent}-`));
+    assert.deepEqual(fs.readdirSync(path.join(brokers, aside[0])), ['agent-file'], `${label}: the agent's file moves aside with it`);
+    if (leaf) assert.equal(fs.existsSync(leaf), false, `${label}: and the socket leaf`);
+  }
+  assert.deepEqual(h.readState('tasks.json').tasks[0].notes.map((n) => n.text), [['codex'], ...unixRows].map((r) => `after resume ${r.join('+')}`));
+  assert.deepEqual(fs.readdirSync(brokers).filter((n) => n.endsWith('.lock')), [], 'every broker lock is released');
+});
+
+test('a broker for claude and codex routes listens on both, and an agent that cannot use the socket uses TCP',{ skip: process.platform === 'win32' && 'Windows uses a named pipe for both' }, async (t) => {
   const h = makeRepo(t);
   h.init();
   h.ok(['task', 'add', '--title', 'routes', '--acceptance', 'noted']);

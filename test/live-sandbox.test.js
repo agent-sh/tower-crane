@@ -295,7 +295,53 @@ test('in a real codex sandbox the agent\'s tower-crane still answers after the d
   assertAnswered(h, started.agent, engine.out);
 });
 
-test('in a real claude sandbox the agent\'s tower-crane still answers after the dispatching checkout is retired', { skip, timeout: 600000 }, async (t) => {
+// Seen 2026-10-23 (worker-T499-14 attempt 18): a resume started the agent's
+// next spawn while its last monitor still ran gates, and that monitor's close
+// deleted the new broker.json and moved brokers/<agent>/ aside. codex binds
+// that directory by path for each command, under the masked brokers/, so
+// every brokered command failed with EACCES. Here the test is the earlier
+// monitor: its broker for the same agent starts before the spawn and closes
+// once the spawn's broker has started, before the sandboxed command runs.
+test('in a real codex sandbox a resumed agent reaches its broker after the agent\'s last monitor closes', { skip: realCodexSandbox(), timeout: 300000 }, async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Resume probe', '--acceptance', 'the broker answers']);
+  h.ok(['brief', 'set', 'T1', '-'], { input: 'resume probe\n' });
+  const dir = results(h);
+  const [out, go, closed] = ['resume-probe.json', 'go', 'closed'].map((n) => path.join(dir, n));
+  const B = require('../lib/broker');
+  const agent = 'small-T1-1';
+  const job = { state: h.state, task: 'T1', agent, role: 'small', harness: 'codex', broker_harnesses: ['codex'], cwd: h.repo, broker: path.join(B.dir(h.state, agent), B.FILE) };
+  const earlier = await B.start(job);
+  let open = true;
+  t.after(() => open && earlier.close());
+  // What the earlier agent's sandbox left in its broker directory.
+  fs.writeFileSync(path.join(path.dirname(job.broker), 'agent-file'), 'x');
+  const script = 'const fs=require("fs"),cp=require("child_process"),o={};'
+    + 'try{o.broker=JSON.parse(fs.readFileSync(process.env.TOWER_CRANE_BROKER,"utf8")).token?"READABLE":"NO TOKEN"}catch(e){o.broker="ERR "+e.code}'
+    + 'const r=cp.spawnSync("tower-crane",["task","note","T1","after-resume"],{encoding:"utf8"});o.note={code:r.status,stderr:r.stderr};'
+    + `fs.writeFileSync(${JSON.stringify(out)},JSON.stringify(o))`;
+  const before = `require("fs").writeFileSync(${JSON.stringify(go)},"");const s=new Int32Array(new SharedArrayBuffer(4));`
+    + `for(let i=0;i<600&&!require("fs").existsSync(${JSON.stringify(closed)});i++)Atomics.wait(s,0,0,100);run()`; // wait-allow: the stand-in waits on the host for the test to close the earlier broker, which it does within a second of go
+  const bin = standInCodex(h, script, 'small', before);
+  let done = false;
+  const spawned = h.runAsync(['spawn', '--role', 'small', '--task', 'T1', '--wait'], { env: { ...h.env, PATH: `${bin}${path.delimiter}${h.env.PATH}` } })
+    .finally(() => { done = true; });
+  await waitUntil(() => fs.existsSync(go) || done, { paths: [dir], what: 'the spawn\'s broker started' });
+  earlier.close();
+  open = false;
+  fs.writeFileSync(closed, '');
+  const r = await spawned;
+  assert.equal(r.code, 0, `${r.stderr}\n${agentLog(h)}`);
+  assert.ok(fs.existsSync(out), `the probe ran\n${agentLog(h)}`);
+  const seen = JSON.parse(fs.readFileSync(out, 'utf8'));
+  console.log(`codex resume probe: ${JSON.stringify(seen)}`);
+  assert.equal(seen.broker, 'READABLE', 'the resumed agent reads its broker.json');
+  assert.equal(seen.note.code, 0, `the note goes through the broker: ${seen.note.stderr}`);
+  assert.equal(h.readState('tasks.json').tasks[0].notes.find((n) => n.text === 'after-resume')?.agent, agent);
+});
+
+test('in a real claude sandbox the agent\'s tower-crane still answers after the dispatching checkout is retired',{ skip, timeout: 600000 }, async (t) => {
   const h = login(makeRepo(t));
   h.init();
   h.ok(['task', 'add', '--title', 'Retired engine probe', '--acceptance', 'the CLI answers']);
