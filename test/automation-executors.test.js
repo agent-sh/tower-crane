@@ -566,7 +566,8 @@ require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'public-http'))}).fet
         assert.deepEqual(receipts, [], 'idle shutdown claims no automation work');
         return;
       }
-      assert.deepEqual(runs(), { starts: heldRun, peak: 1 }, 'no queued gate starts during shutdown');
+      // A failing suite reruns once inside the gate that drains; that is the gate's own command, not a queued gate.
+      assert.deepEqual(runs(), { starts: heldRun + (stage === 'failure' ? 1 : 0), peak: 1 }, 'no queued gate starts during shutdown');
       assert.deepEqual(receipts.filter((e) => e.detail.phase === 'running').map((e) => e.task), ['T1']);
       assert.equal(receipts.at(-1).detail.phase, 'deferred', 'the executor lease is released for a retry');
       const tasks = h.readState('tasks.json').tasks;
@@ -762,6 +763,34 @@ poll();
   assert.deepEqual(executorStarts(h), ['T1', 'T1', 'T2', 'T3'], 'queued T1 and T2 run before the newer T3');
   for (const task of h.readState('tasks.json').tasks) {
     assert.deepEqual(task.evidence.map((e) => [e.type, e.ok]), [['tests', true], ['clean', true]], task.id);
+  }
+});
+
+// A drain can pass over T1 while its reaction is alive and reach T2 after it
+// died, so the dead reaction must still rank ahead of T2 for the freed slot.
+test('an owed older reaction outranks a newer executor waiter only while it waits or died running', () => {
+  const A = require('../lib/automation');
+  const P = require('../lib/processes');
+  const sha = 'a'.repeat(40);
+  const tasks = ['T1', 'T2'].map((id) => ({ id, status: 'submitted', sha, revision: 1, evidence: [] }));
+  const submits = tasks.map((task) => ({ id: `submit-${task.id}`, task: task.id, cmd: 'submit', detail: { sha, revision: 1 } }));
+  const governor = { task: 'T1', kind: 'tests', until: Date.now() + 5000, reason: 'pressure' };
+  for (const [name, receipt, outranks] of [
+    ['waits for an executor', { phase: 'executor', kind: 'tests' }, true],
+    ['died running', { phase: 'running', pid: 2147483647 }, true],
+    ['running', { phase: 'running', pid: process.pid, ...P.identity(process.pid) }, false],
+    ['running unobservably on another host', { phase: 'running', pid: process.pid, host: 'another-host' }, false],
+    ['deferred by the governor', { phase: 'deferred', governor }, false],
+    ['done', { phase: 'done' }, false],
+    ['failed', { phase: 'error' }, false],
+  ]) {
+    const events = [...submits,
+      ...submits.map((e) => ({ cmd: 'automation queued', task: e.task, detail: { source: e.id } })),
+      { cmd: 'automation', task: 'T1', at: new Date().toISOString(), detail: { source: 'submit-T1', ...receipt } },
+      { cmd: 'automation', task: 'T2', at: new Date().toISOString(), detail: { source: 'submit-T2', phase: 'executor', kind: 'tests' } }];
+    const st = { project: {}, tasks: { tasks }, events };
+    assert.equal(A.outranked(st, submits[1])?.task ?? null, outranks ? 'T1' : null, `T2 behind T1 ${name}`);
+    assert.equal(A.outranked(st, submits[0]), null, `T1 ${name} is never behind the newer T2`);
   }
 });
 
