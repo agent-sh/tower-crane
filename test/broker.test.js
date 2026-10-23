@@ -487,6 +487,15 @@ test('a worker cannot have the broker run its tests, its cleanup or git', () => 
   for (const role of Object.keys(B.ROLES)) for (const cmd of B.ROLES[role]) assert.ok(!/^(check|worktree|merge|spawn)\b/.test(cmd), `${role}: ${cmd}`);
 });
 
+test('a brokered worker lists any archive but copies one only into its own task and never grants', () => {
+  const job = { state: '/s', task: 'T2', agent: 'worker-T2-1', role: 'worker' };
+  assert.deepEqual(B.authorize(job, ['task', 'archive', 'T1']), ['task', 'archive', '--agent', 'worker-T2-1', '--state', '/s', 'T1']);
+  assert.deepEqual(B.authorize(job, ['task', 'archive', 'T1', '--into', 'T2']).slice(-3), ['T1', '--into', 'T2']);
+  assert.throws(() => B.authorize(job, ['task', 'archive', 'T1', '--into', 'T3']), /works on T2 only, not T3/);
+  assert.throws(() => B.authorize(job, ['task', 'archive', 'T1', '--grant', 'T2']), /cannot grant archives/);
+  assert.throws(() => B.authorize({ ...job, role: 'reviewer' }, ['task', 'archive', 'T1']), /changes state only with/);
+});
+
 // Sets process.env for one test, as the broker's monitor reads it.
 function withEnv(t, vars) {
   const saved = Object.fromEntries(Object.keys(vars).map((key) => [key, process.env[key]]));

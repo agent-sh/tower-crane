@@ -116,3 +116,5 @@ Existing links use these anchors. Follow the link to the contract in its area.
 <a id="gate-reruns"></a>[gate-reruns](state/gates.md#gate-reruns)
 
 <a id="flake-ledger"></a>[flake-ledger](state/gates.md#flake-ledger)
+
+<a id="scratch-archive"></a>[scratch-archive](state/storage.md#scratch-archive)

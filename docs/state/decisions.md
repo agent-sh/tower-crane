@@ -62,6 +62,7 @@ Workers, reviewers and every other identity are refused both. For an operational
 | `gates.tmp_root` | operational | `project set --tmp-root` |
 | `gates.rework_hold_min` | operational | `project set --rework-hold-min` |
 | `gates.final_review` | operational | `project set --final-review`: the external reviewer command `accept` runs on the host |
+| `archive.retention_days` | operational | `project set --archive-retention-days` |
 | `gates.priority` | operational | `gates prioritize ID --reason R`: a task's queued submitted gate reactions run before older submitted work; accepted merges stay first |
 | `ci.required`, `ci.ignore_apps`, `ci.capped_review` | operational | `project set --ci-required`, `--ci-ignore-apps`, `--ci-capped-review` |
 | `ci.local` | operational | `project set --ci-local`, `task update --ci-local` |
@@ -95,6 +96,7 @@ Workers, reviewers and every other identity are refused both. For an operational
 | `task.cancel_hold` | operational | `task update --status cancelled` on a task whose `needs_owner` the orchestrator or the engine set (`needs_owner_by.role` is `orchestrator` or `engine`, as for the respawn cap) |
 | `task.cancel_needs_owner` | owner-required | `task update --status cancelled` on a task whose `needs_owner` the owner or a worker set, or whose setter is not recorded |
 | `task.rerecord_review` | owner-required | `hotfix ID` re-recording a cancelled hotfix whose follow-up a failed independent review opened, or one whose failure is not recorded |
+| `accept.drop_citation` | operational | `accept --drop-citation`, for a cited scratch path that is stale or wrong ([Scratch archive](storage.md#scratch-archive)) |
 | `waive.review` | operational | `accept --waive review` when the reviewer is capped or down at the submitted head: a `check ci` there recorded a capped review run (`ci.capped_review`, kept as `capped_review` on the evidence), or a review spawn there exited without a verdict |
 | `merge.admin` | owner-required | `project set --merge-admin` |
 | `decision_delegation` | owner-required | `project set --decision-delegation` |
