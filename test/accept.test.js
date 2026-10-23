@@ -265,7 +265,8 @@ for (const [review, pass] of [[true, true], [false, true], [true, false]]) {
     const result = h.run(['accept', 'T1'], { env: { FIXTURE_GATE_OK: pass ? '1' : '0' } });
     assert.equal(result.code, pass ? 0 : 1, result.stderr);
     assert.match(result.stderr, /running stale ci software gate/);
-    assert.equal(fs.readFileSync(runs, 'utf8'), 'run\nrun\n');
+    // A failing local CI reruns once on the same merge.
+    assert.equal(fs.readFileSync(runs, 'utf8'), pass ? 'run\nrun\n' : 'run\nrun\nrun\n');
     const task = h.readState('tasks.json').tasks[0];
     const ci = task.evidence.at(-1);
     assert.equal(ci.type, 'ci');
@@ -278,7 +279,7 @@ for (const [review, pass] of [[true, true], [false, true], [true, false]]) {
       assert.equal(task.status, 'submitted');
       assert.equal(reviewerSpawns(h).length, reviewsBefore);
       h.run(['accept', 'T1']);
-      assert.equal(fs.readFileSync(runs, 'utf8'), 'run\nrun\n', 'current failures need an explicit rerun');
+      assert.equal(fs.readFileSync(runs, 'utf8'), 'run\nrun\nrun\n', 'current failures need an explicit rerun');
     } else if (review) {
       assert.equal(task.status, 'accepted');
     } else {
