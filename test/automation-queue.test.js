@@ -798,6 +798,73 @@ test('a merge pause refuses a second task, and --clear lifts it', (t) => {
   assert.deepEqual(h.logs().filter((e) => e.cmd === 'merge pause').map((e) => [e.task, !!e.detail.clear]), [['T2', false], ['T2', true]]);
 });
 
+// T1's reactions finished while the pause held it, and a running wait host
+// re-queues only pending CI on its own, so the command that ends the pause
+// must wake it.
+test('clearing a holding merge pause merges the task it held on a running wait host', async (t) => {
+  const h = queueFixture(t);
+  h.ok(['merge', 'pause', 'T2', '--minutes', '30', '--reason', 'lands docs first', '--agent', 'orchestrator']);
+  h.reviewer('T1', 'reviewer');
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha, '--ok', '--agent', 'reviewer']);
+  h.ok(['accept', 'T1', '--agent', 'orchestrator']);
+  const start = h.logs().length;
+  let child;
+  const host = h.runAsync(['wait', '--types', 'never', '--timeout', '120', '--agent', 'orchestrator'], { // wait-allow: the merge after the clear ends the test first; this bounds a host that never merges, the failure the test looks for
+    onSpawn: (c) => { child = c; },
+  });
+  try {
+    // The host's startup reconciles run and leave T1 held.
+    const settled = () => {
+      const log = h.logs().slice(start);
+      const sources = log.filter((e) => e.cmd === 'automation reconcile' && e.task === 'T1').map((e) => e.id);
+      const last = (id) => log.findLast((e) => e.cmd === 'automation' && e.detail.source === id)?.detail.phase;
+      return sources.length > 0 && sources.every((id) => last(id) && last(id) !== 'running');
+    };
+    await waitUntil(settled, { paths: [h.state], alive: child, what: 'the startup reconcile of T1 finishes' });
+    assert.equal(h.github().prs['7'].state, 'OPEN', 'the pause holds T1');
+    const cleared = h.logs().length;
+    h.ok(['merge', 'pause', 'T2', '--clear', '--agent', 'orchestrator']);
+    const written = h.logs().slice(cleared);
+    assert.deepEqual(written.filter((e) => e.cmd === 'merge pause end').map((e) => [e.task, e.detail.why]), [['T2', 'cleared']]);
+    assert.deepEqual(written.filter((e) => e.cmd === 'automation reconcile').map((e) => e.task), ['T1']);
+    await waitUntil(() => h.github().prs['7'].state === 'MERGED', { paths: [h.state], alive: child, what: 'T1 merges after the clear' });
+  } finally {
+    child?.kill('SIGTERM');
+    await host;
+  }
+  assert.equal(h.json(['status']).merge_pause, null);
+});
+
+// Each command that replaces a pause whose end no wait host recorded yet
+// records that end and wakes the merges it held. An armed pause held nothing.
+for (const [name, act, why] of [
+  ['a clear of the holding pause', (h) => h.ok(['merge', 'pause', 'T2', '--clear', '--agent', 'orchestrator']), 'cleared'],
+  ['a new pause after a rework ended it', (h) => {
+    h.ok(['rework', 'T2', '--reason', 'docs first, again', '--agent', 'orchestrator']);
+    h.ok(['merge', 'pause', 'T2', '--minutes', '30', '--reason', 'next round', '--agent', 'orchestrator']);
+  }, 'reworked'],
+  ['a new pause for T1 after T2 was cancelled', (h) => {
+    h.ok(['task', 'update', 'T2', '--status', 'cancelled']);
+    h.ok(['merge', 'pause', 'T1', '--minutes', '30', '--reason', 'T1 next', '--agent', 'orchestrator']);
+  }, 'cancelled'],
+  ['a clear of an armed pause', null, null],
+]) {
+  test(`${name} ${why ? `records the end (${why}) and wakes the held merge` : 'wakes nothing'}`, (t) => {
+    const h = queueFixture(t);
+    if (!act) h.ok(['rework', 'T2', '--reason', 'docs first', '--agent', 'orchestrator']);
+    h.ok(['merge', 'pause', 'T2', '--minutes', '30', '--reason', 'lands docs first', '--agent', 'orchestrator']);
+    h.reviewer('T1', 'reviewer');
+    h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha, '--ok', '--agent', 'reviewer']);
+    h.ok(['accept', 'T1', '--agent', 'orchestrator']);
+    const start = h.logs().length;
+    if (act) act(h);
+    else h.ok(['merge', 'pause', 'T2', '--clear', '--agent', 'orchestrator']);
+    const written = h.logs().slice(start);
+    assert.deepEqual(written.filter((e) => e.cmd === 'merge pause end').map((e) => [e.task, e.detail.why]), why ? [['T2', why]] : []);
+    assert.deepEqual(written.filter((e) => e.cmd === 'automation reconcile').map((e) => e.task), why ? ['T1'] : []);
+  });
+}
+
 // The paused task's reactions run first, ahead of the accepted merges it holds.
 test('a merge pause ranks its task ahead of accepted merges, armed or holding', () => {
   const A = require('../lib/automation');
