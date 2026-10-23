@@ -214,17 +214,17 @@ console.log('# tests 1\\n# pass 1\\n# fail 0\\n# skipped 0');
 
 const testLeases = (h) => logs(h).filter((e) => e.cmd === 'gate run' && e.detail.type === 'tests');
 
-test('the planned commands of a tests run cover each mode, expensive proof, host-only files and a native crash rerun', () => {
+test('the planned commands of a tests run cover each mode, expensive proof, host-only files and one rerun of each', () => {
   const Tests = require('../lib/gates/tests');
   const Runs = require('../lib/gate-runs');
   const cases = [
     [{ mode: 'none' }, 0, 0],
     [{ mode: 'run-only' }, 0, 4],
-    [{ mode: 'run-only' }, 2, 6],
-    [{}, 0, 5],
-    [{ expensive: true }, 0, 6],
-    [{ host_only: ['test/h.js'] }, 1, 7],
-    [{ expensive: true, host_only: ['test/h.js'] }, 1, 9],
+    [{ mode: 'run-only' }, 2, 8],
+    [{}, 0, 6],
+    [{ expensive: true }, 0, 8],
+    [{ host_only: ['test/h.js'] }, 1, 10],
+    [{ expensive: true, host_only: ['test/h.js'] }, 1, 14],
     [{ mode: 'prove', by_kind: { docs: 'run-only' } }, 0, 4, 'docs'],
     [{ mode: 'bogus' }, 0, 0],
   ];
@@ -232,14 +232,15 @@ test('the planned commands of a tests run cover each mode, expensive proof, host
     assert.equal(Tests.plannedCommands({ tests }, kind, hosts), want, JSON.stringify({ tests, hosts, kind }));
   }
   assert.equal(Tests.plannedCommands({ tests: { mode: 'run-only' } }, 'code', 0, 3), 8, 'three failing files can each wait and run');
-  assert.equal(Tests.plannedCommands({ tests: { expensive: true } }, 'code', 2, 3), 16, 'base files have independent wait and run budgets');
+  assert.equal(Tests.plannedCommands({ tests: { expensive: true } }, 'code', 2, 3), 24, 'base files have independent wait and run budgets');
   const project = { gates: { tests_timeout_min: 2, clean_timeout_min: 3 }, tests: { expensive: true }, ci: { local: { command: ['ci'], timeout: 90 } } };
   const task = { kind: 'code', sha: 'abc' };
   // Each planned command gets its timeout and a minute for the metadata queries around it.
-  assert.equal(Runs.budgetMs({}, project, null, task, 'tests'), 6 * (120000 + 60000));
-  assert.equal(Runs.budgetMs({ flags: { timeout: '1' } }, project, null, task, 'tests'), 6 * (60000 + 60000), 'a --timeout override sets each command budget');
+  assert.equal(Runs.budgetMs({}, project, null, task, 'tests'), 8 * (120000 + 60000));
+  assert.equal(Runs.budgetMs({ flags: { timeout: '1' } }, project, null, task, 'tests'), 8 * (60000 + 60000), 'a --timeout override sets each command budget');
   assert.equal(Runs.budgetMs({}, project, null, task, 'clean'), 180000 + 60000, 'clean runs one command');
-  assert.equal(Runs.budgetMs({}, project, null, task, 'ci'), 90000 + 60000, 'local CI runs one command');
+  assert.equal(Runs.budgetMs({}, project, null, task, 'ci'), 2 * (90000 + 60000), 'local CI runs its command and one rerun on the same merge');
+  assert.equal(Runs.budgetMs({}, { ...project, ci: { local: { ...project.ci.local, rerun: false } } }, null, task, 'ci'), 90000 + 60000, 'without the rerun, the command alone');
   assert.equal(Runs.budgetMs({}, { tests: { mode: 'none' } }, null, task, 'tests'), 60000, 'a run with no command keeps the metadata minute');
 });
 
@@ -273,8 +274,8 @@ test('a tests run leases until every command it may start could have used its fu
   // beside it; the reverted run's ordinary command fails, which is its proof.
   assert.equal(runs(h), 6, 'one passing run starts six timed commands');
   const lease = testLeases(h).find((e) => e.detail.phase === 'running');
-  // The fixture has one ordinary test and one host-only file; both may fail, and one native crash may rerun.
-  const planned = 11 * (MINUTES * 60000 + 60000);
+  // The fixture has one ordinary test and one host-only file; both may fail, and each command may rerun once.
+  const planned = 16 * (MINUTES * 60000 + 60000);
   const held = Date.parse(lease.detail.deadline) - Date.parse(lease.at);
   assert.ok(Math.abs(held - planned) < 5000, `deadline ${held} ms after the start, want ${planned}`);
 });
