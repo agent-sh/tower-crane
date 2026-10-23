@@ -10,6 +10,25 @@ const G = require('../lib/governor');
 const C = require('../lib/containment');
 const gates = require('../lib/gates/common');
 
+test('the CPU host probe summarizes three build timings without reordering samples', () => {
+  const { summary } = require('../scripts/probe-cpu-weight');
+  for (const [samples, median, min, max] of [
+    [[10, 20, 30], 20, 10, 30],
+    [[10, 30, 20], 20, 10, 30],
+    [[20, 10, 30], 20, 10, 30],
+    [[20, 30, 10], 20, 10, 30],
+    [[30, 10, 20], 20, 10, 30],
+    [[30, 20, 10], 20, 10, 30],
+    [[2, 11, 100], 11, 2, 100],
+    [[4, 9, 4], 4, 4, 9],
+    [[0, 0, 0], 0, 0, 0],
+    [[2.5, 0.25, 1.5], 1.5, 0.25, 2.5],
+  ]) {
+    const runs = Object.freeze(samples);
+    assert.deepEqual(summary(runs), { median_ms: median, min_ms: min, max_ms: max, runs_ms: runs });
+  }
+});
+
 test('CPU weights merge project overrides and validate the systemd range', () => {
   for (const [config, agents, gates] of [
     [undefined, 100, 1],
