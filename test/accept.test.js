@@ -6,7 +6,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { makeRepo, cachedFixture } = require('./helpers');
+const { makeRepo, cachedFixture, BIN, ROOT } = require('./helpers');
 const { gateFixture, gateEvidence } = require('./gate-helpers');
 const Actions = require('../lib/actions');
 const Reviewer = require('../lib/reviewer');
@@ -414,6 +414,85 @@ for (const [state, makeOut] of [['capped', reviewerCapped], ['down', reviewerDow
     assert.deepEqual(task.evidence.filter((e) => e.waived).map((e) => [e.type, e.agent]), [['review', 'orchestrator']]);
     assert.equal(h.json(['task', 'show', 'T1']).gates.ok, true);
     assert.equal(h.readState('decisions.json').decisions.length, 1);
+  });
+}
+
+for (const row of [
+  { name: 'capped reviewer', out: reviewerCapped },
+  { name: 'earlier no-verdict exit', out: reviewerDown },
+  { name: 'owner waiver of live review', agent: 'owner' },
+  { name: 'false PR-body claim', out: reviewerDown, kind: 'false-claim', path: 'PR body' },
+  { name: 'false changelog claim', out: reviewerDown, kind: 'false-claim', path: 'changelog.d/T1.md' },
+  { name: 'mixed waivers', out: reviewerDown, agent: 'owner', extra: ['--waive', 'clean'] },
+  { name: 'retry combined with waiver', out: reviewerDown, extra: ['--retry-review'] },
+  { name: 'failed verdict during software gates', out: reviewerDown, late: true },
+  { name: 'failed verdict during archive preparation', out: reviewerDown, archive: true },
+]) {
+  test(`review waivers cannot clear a failed verdict: ${row.name}`, async (t) => {
+    const h = submitted(t);
+    if (row.out) row.out(h);
+    h.reviewer('T1', 'failing-reviewer', h.sha);
+    const recordFailure = () => h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', h.sha,
+      '--agent', 'failing-reviewer', '--summary', '1 blocking finding: incorrect behavior',
+      '--findings', JSON.stringify([{ kind: row.kind || 'defect', path: row.path || 'value.js',
+        claim: 'Incorrect behavior or false claim' }])]);
+    const args = ['accept', 'T1', '--waive', 'review', '--reason', 'reviewer unavailable',
+      '--agent', row.agent || 'orchestrator', '--json', ...(row.extra || [])];
+    let result;
+    if (row.archive) {
+      const hook = path.join(h.base, 'waiver-archive-hook.js');
+      const findings = [{ kind: 'defect', path: 'value.js', claim: 'Incorrect behavior' }];
+      fs.writeFileSync(hook, `
+const cp = require('node:child_process');
+const { fakeAgentEnv } = require(${JSON.stringify(path.join(__dirname, 'agent-env.js'))});
+const archive = require(${JSON.stringify(path.join(ROOT, 'lib/archive.js'))});
+const original = archive.onAccept;
+archive.onAccept = async (...args) => {
+  const r = cp.spawnSync(process.execPath, ${JSON.stringify([BIN, 'evidence', 'T1', '--type', 'review', '--fail',
+    '--sha', h.sha, '--agent', 'failing-reviewer', '--summary', 'Late failure',
+    '--findings', JSON.stringify(findings)])}, { env: fakeAgentEnv(process.env), encoding: 'utf8' });
+  if (r.status !== 0) throw new Error(r.stderr);
+  return original(...args);
+};
+`);
+      result = h.run(args, { env: { NODE_OPTIONS: `${h.env.NODE_OPTIONS || ''} --require=${JSON.stringify(hook)}` } });
+    } else if (row.late) {
+      const started = path.join(h.base, 'waiver-gate-started');
+      const release = path.join(h.base, 'waiver-gate-release');
+      const script = path.join(h.base, 'waiver-gate.js');
+      fs.writeFileSync(script, `
+const fs = require('node:fs');
+fs.writeFileSync(process.argv[2], '');
+const end = Date.now() + 60000;
+while (!fs.existsSync(process.argv[3])) {
+  if (Date.now() >= end) process.exit(1);
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20); // wait-allow: release signal with a 60-second deadline
+}
+`);
+      h.ok(['project', 'set', '--tests-mode', 'run-only',
+        '--tests-cmd', [process.execPath, script, started, release].map(require('../lib/gates/common').shellQuote).join(' ')]);
+      const pending = h.runAsync(args);
+      try {
+        await waitOnRepo(h, () => fs.existsSync(started), 'accept never entered the software gate', { signal: t.signal });
+        recordFailure();
+      } finally {
+        fs.writeFileSync(release, '');
+      }
+      result = await pending;
+    } else {
+      recordFailure();
+      result = h.run(args);
+    }
+    assert.equal(result.code, 1, result.stderr);
+    const refusal = JSON.parse(result.stdout);
+    assert.equal(refusal.review_failed, true);
+    assert.equal(refusal.review.agent, 'failing-reviewer');
+    const task = h.readState('tasks.json').tasks[0];
+    assert.equal(task.status, 'submitted');
+    assert.equal(task.revision, 1);
+    assert.equal(task.sha, h.sha);
+    assert.equal(task.evidence.filter((e) => e.waived).length, 0);
+    assert.ok(!events(h).some((e) => e.cmd === 'accept'));
   });
 }
 
