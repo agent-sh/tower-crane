@@ -113,13 +113,16 @@ test('merge without origin records its base read in its command receipts', (t) =
 });
 
 // The command advances main from inside its run: HEAD^1 of the gate checkout is the base it merged.
+// A base that already has later.txt gets it replaced: a second entry of the same
+// name is a corrupt tree that newer git refuses to merge.
 const ADVANCE_BASE = `
 const cp = require('node:child_process');
 const env = { ...process.env, GIT_AUTHOR_NAME: 'T', GIT_AUTHOR_EMAIL: 't@localhost', GIT_COMMITTER_NAME: 'T', GIT_COMMITTER_EMAIL: 't@localhost' };
 const git = (args, input) => cp.execFileSync('git', args, { encoding: 'utf8', input, env }).trim();
 const base = git(['rev-parse', 'HEAD^1']);
 const blob = git(['hash-object', '-w', '--stdin'], 'later ' + base + '\\n');
-const tree = git(['mktree'], git(['ls-tree', base]) + '\\n100644 blob ' + blob + '\\tlater.txt\\n');
+const kept = git(['ls-tree', base]).split('\\n').filter((line) => !line.endsWith('\\tlater.txt'));
+const tree = git(['mktree'], [...kept, '100644 blob ' + blob + '\\tlater.txt'].join('\\n') + '\\n');
 git(['update-ref', 'refs/heads/main', git(['commit-tree', tree, '-p', base, '-m', 'base advances during the check'])]);
 `;
 
@@ -141,6 +144,8 @@ test('main moving during a local CI run leaves a valid receipt on the pinned tre
     new RegExp(`current merged tree, and its checked base ${h.baseSha.slice(0, 10)} is not in the selected base's history`));
   h.ok(['accept', 'T1']);
   assert.equal(h.readState('tasks.json').tasks[0].evidence.findLast((x) => x.type === 'ci').receipt.base_sha, rewritten);
+  assert.deepEqual(h.git(['ls-tree', '--name-only', 'main']).split('\n').filter((name) => name === 'later.txt'), ['later.txt'],
+    'the rerun on the rewritten base replaces later.txt');
 });
 
 for (const [change, files, lands] of [
