@@ -433,6 +433,7 @@ test('local CI reports a worktree it could not set up, for the first run and for
     const e = h.readState('tasks.json').tasks[0].evidence.at(-1);
     assert.equal(e.ok, false, name);
     assert.match(e.summary, want.summary, name);
+    // read-published: appended only, by one gate run at a time, and the gate has ended.
     const runs = fs.existsSync(`${h.log}.runs`) ? fs.readFileSync(`${h.log}.runs`, 'utf8').length : 0;
     assert.equal(runs, want.runs, `${name}: runs`);
     if (want.runs) assert.deepEqual([e.receipt.rerun.exit, e.receipt.rerun.signal], [null, null], name);
