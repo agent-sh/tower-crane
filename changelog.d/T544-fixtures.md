@@ -1,0 +1,1 @@
+- Build mutant and wait-lint fixtures with their documentation references so shared checks reach the intended validation.

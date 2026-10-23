@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
 const { makeRepo, ROOT } = require('./helpers');
+const { makeDocsRepo } = require('./docs-fixture');
 const { readText } = require('../scripts/text');
 const { runContained, windowsCommandLine } = require('../scripts/mutants');
 const { detachedAlive } = require('./helpers');
@@ -50,11 +51,8 @@ function assertNoneLeft(file) {
 }
 
 test('check:shared rejects missing and duplicate mutant targets without running tests', (t) => {
-  const h = makeRepo(t);
-  for (const name of ['bin', 'lib', 'scripts', 'docs', 'changelog.d', '.github']) {
-    fs.cpSync(path.join(ROOT, name), path.join(h.repo, name), { recursive: true });
-  }
-  fs.copyFileSync(path.join(ROOT, 'CHANGELOG.md'), path.join(h.repo, 'CHANGELOG.md'));
+  const h = makeDocsRepo(t);
+  assert.equal(fs.existsSync(path.join(h.repo, 'test')), false, 'target validation needs no test tree');
   const { scripts } = require('../package.json');
   assert.equal(scripts['check:shared'], 'node scripts/check-shared-files.js --mutants');
   const script = (name, args) => cp.spawnSync(process.execPath,
@@ -64,7 +62,8 @@ test('check:shared rejects missing and duplicate mutant targets without running 
   const file = path.join(h.repo, 'lib/gates/tests.js');
   const source = readText(file);
   const anchor = 'if (without.ok) {';
-  assert.equal(check().status, 0, 'a fixture without a test tree still validates every target');
+  const baseline = check();
+  assert.equal(baseline.status, 0, baseline.stdout + baseline.stderr);
   const targets = script('mutants.js', ['--check', '--root', h.repo]);
   assert.equal(targets.status, 0, targets.stderr);
   assert.match(targets.stdout, /^\d+ mutant targets match once\n$/);
