@@ -26,9 +26,13 @@ test('wait cancels an asynchronous stack merge query or backoff on the second si
 }, async (t) => {
   const cases = ['query', 'backoff'].flatMap((stage) =>
     [['SIGTERM', 'SIGINT'], ['SIGINT', 'SIGTERM']].flatMap(([first, second]) =>
-      [false, true].map((delayed) => ({ stage, first, second, delayed }))));
-  for (const { stage, first, second, delayed } of cases) {
-    await t.test(`${stage}, ${first}/${second}, ${delayed ? 'delayed' : 'immediate'} shutdown`, async (t) => {
+      [
+        { label: 'immediate shutdown', delayed: false, signalDelay: 0 },
+        { label: 'delayed shutdown', delayed: true, signalDelay: 0 },
+        { label: 'delayed signal dispatch', delayed: false, signalDelay: 4000 },
+      ].map((variant) => ({ stage, first, second, ...variant }))));
+  for (const { stage, first, second, label, delayed, signalDelay } of cases) {
+    await t.test(`${stage}, ${first}/${second}, ${label}`, async (t) => {
       const f = stacked(t);
       f.accept('T1');
       f.accept('T2');
@@ -51,7 +55,11 @@ if (process.argv[1] === ${JSON.stringify(BIN)}) {
   let signals = 0;
   for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => {
     fs.appendFileSync(${JSON.stringify(observed)}, signal + '\\n');
-    if (++signals === 2 && ${delayed}) timeout(() => {}, 3500); // wait-allow: cancellation is independent of a live shutdown handle
+    if (++signals === 2) {
+      if (${delayed}) timeout(() => {}, 3500); // wait-allow: cancellation is independent of a live shutdown handle
+      // A busy event loop can delay the cancellation handler.
+      if (${signalDelay}) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ${signalDelay}); // wait-allow: reproduces delayed signal dispatch
+    }
   });
 }
 `);
@@ -77,7 +85,9 @@ if (process.argv[1] === ${JSON.stringify(BIN)}) {
         assert.deepEqual(readPublished(observed, 'utf8').trim().split('\n'), [first, second]);
         assert.deepEqual(routes(f), ['async 11'], 'the upper merge never starts');
         const task = f.h.json(['task', 'show', 'T2']);
-        assert.equal(task.evidence.findLast((entry) => entry.type === 'merge').ok, false, 'interrupted merge is retryable');
+        const evidence = task.evidence.findLast((entry) => entry.type === 'merge');
+        assert.equal(evidence.ok, false, 'interrupted merge is retryable');
+        assert.match(evidence.summary, /asynchronous merge of PR #11 interrupted/, 'cancellation ends the held poll');
         const events = fs.readFileSync(path.join(f.h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
         assert.equal(events.findLast((event) => event.cmd === 'automation').detail.phase, 'deferred');
         assert.equal(f.read().prs[11].state, 'OPEN');
