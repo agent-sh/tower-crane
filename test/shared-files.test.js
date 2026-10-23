@@ -5,9 +5,10 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
-const { makeRepo, ROOT } = require('./helpers');
+const { ROOT } = require('./helpers');
 const { readText, escapeTableCell } = require('../scripts/text');
 const { fakeAgentEnvFindings } = require('../scripts/fake-agent-env');
+const { makeDocsRepo } = require('./docs-fixture');
 
 test('gate command contracts describe recorded failure exclusions and preserve proof and required-check limits', () => {
   const { COMMANDS } = require('../bin/tower-crane');
@@ -23,6 +24,20 @@ test('gate command contracts describe recorded failure exclusions and preserve p
       assert.match(row, requirement, `${name} generated contract`);
     }
   }
+});
+
+test('split gate contracts keep base exclusions, evidence and proof limits', () => {
+  const missing = [];
+  for (const [file, requirements] of [
+    ['docs/state.md', [/state\/gates\.md#base-failures/]],
+    ['docs/state/gates.md', [/<a id="base-failures">/, /both runs must match independently/,
+      /log\.showSignature/, /excluded base failure in the reverted run cannot prove/, /fix_task/]],
+    ['scripts/cli-reference.md', [/Both failed test-command runs must match independently/, /receipt\.base_exclusions/]],
+  ]) {
+    const text = readText(path.join(ROOT, file));
+    for (const requirement of requirements) if (!requirement.test(text)) missing.push(`${file}: ${requirement}`);
+  }
+  assert.deepEqual(missing, []);
 });
 
 test('the shared check rejects CLI-running fake fixtures without the env helper', (t) => {
@@ -67,13 +82,8 @@ test('the shared check rejects CLI-running fake fixtures without the env helper'
 });
 
 function fixture(t, { crlfProtected = false, windowsCheckout = false } = {}) {
-  const h = makeRepo(t);
+  const h = makeDocsRepo(t);
   if (windowsCheckout) h.git(['config', 'core.autocrlf', 'true']);
-  for (const name of ['bin', 'lib', 'scripts', 'docs', 'changelog.d', '.github']) {
-    fs.cpSync(path.join(ROOT, name), path.join(h.repo, name), { recursive: true });
-  }
-  fs.copyFileSync(path.join(ROOT, 'CHANGELOG.md'), path.join(h.repo, 'CHANGELOG.md'));
-  fs.copyFileSync(path.join(ROOT, '.gitattributes'), path.join(h.repo, '.gitattributes'));
   if (windowsCheckout) {
     for (const name of ['bin/tower-crane.js', 'docs/cli.md']) {
       const file = path.join(h.repo, name);
@@ -86,8 +96,10 @@ function fixture(t, { crlfProtected = false, windowsCheckout = false } = {}) {
       fs.writeFileSync(file, readText(file).replace(/\n/g, '\r\n'));
     }
   }
-  h.git(['add', '.']);
-  h.git(['commit', '-qm', 'shared file fixture']);
+  if (windowsCheckout || crlfProtected) {
+    h.git(['add', '.']);
+    h.git(['commit', '--allow-empty', '-qm', 'shared file fixture']);
+  }
   if (windowsCheckout) {
     for (const name of ['bin/tower-crane.js', 'docs/cli.md']) fs.rmSync(path.join(h.repo, name));
     h.git(['checkout', '--', 'bin/tower-crane.js', 'docs/cli.md']);
@@ -108,7 +120,7 @@ function fixture(t, { crlfProtected = false, windowsCheckout = false } = {}) {
 function commandMetadata(f, name, changes) {
   let found = false;
   const literal = String.raw`(?:'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*")`;
-  const source = f.read('bin/tower-crane.js').split('\n').map((line) => {
+  const source = f.read('lib/commands-tasks.js').split('\n').map((line) => {
     if (!line.includes(`name: '${name}'`)) return line;
     found = true;
     for (const [field, value] of Object.entries(changes)) {
@@ -120,7 +132,7 @@ function commandMetadata(f, name, changes) {
     return line;
   }).join('\n');
   assert.ok(found, name);
-  f.write('bin/tower-crane.js', source);
+  f.write('lib/commands-tasks.js', source);
 }
 
 test('generated command rows match real CLI help, preserve details and reject drift', (t) => {
@@ -135,6 +147,7 @@ test('generated command rows match real CLI help, preserve details and reject dr
     assert.equal(help.status, 0, help.stderr);
     const usage = command.name + (command.usage ? ` ${command.usage}` : '');
     assert.ok(help.stdout.startsWith(`usage: tower-crane ${usage}\n`));
+    assert.ok(docs.includes(help.stdout.trimEnd()), `${command.name}: the reference contains the real help output`);
     assert.ok(docs.includes(`| \`${escapeTableCell(usage)}\` | ${escapeTableCell(command.description || command.summary)} |`));
   }
   const note = COMMANDS.find((command) => command.name === 'task note');
@@ -152,7 +165,7 @@ test('generated command rows match real CLI help, preserve details and reject dr
   assert.equal(f.script('cli-docs.js').status, 0);
   assert.equal(f.check().status, 0);
   assert.ok(f.read('docs/cli.md').includes('| append a task note |'));
-  const prose = (text) => text.replace(/<!-- commands:[^\n]+:start -->[\s\S]*?<!-- commands:[^\n]+:end -->/g, '');
+  const prose = (text) => text.split('## Command help')[0].replace(/<!-- commands:[^\n]+:start -->[\s\S]*?<!-- commands:[^\n]+:end -->/g, '');
   assert.equal(prose(f.read('docs/cli.md')), prose(docs), 'all contract descriptions and authority rules survive regeneration');
   assert.ok(f.read('docs/cli.md').includes('create the state directory and `project.json` with the default harness and ladder'), 'long descriptions are preserved in generated rows');
 
@@ -177,10 +190,49 @@ test('long command descriptions are generated from metadata while CLI help keeps
   assert.equal(help.status, 0, help.stderr);
   assert.match(help.stdout, /\nappend a note\n/);
   assert.ok(!help.stdout.includes(description));
-  f.write('bin/tower-crane.js', f.read('bin/tower-crane.js').replace(JSON.stringify(description), JSON.stringify(description + ' and text')));
+  f.write('lib/commands-tasks.js', f.read('lib/commands-tasks.js').replace(JSON.stringify(description), JSON.stringify(description + ' and text')));
   assert.equal(f.script('cli-docs.js', ['--check']).status, 1, 'a description change makes docs stale');
   assert.equal(f.script('cli-docs.js').status, 0);
   assert.ok(f.read('docs/cli.md').includes(`| ${description} and text |`));
+});
+
+test('help-only changes and hand edits drift until the complete reference is regenerated', (t) => {
+  const f = fixture(t);
+  const original = f.read('docs/cli.md');
+  const file = f.read('bin/tower-crane.js').includes('const COMMANDS = [') ? 'bin/tower-crane.js' : 'lib/commands-tasks.js';
+  const source = f.read(file);
+  const changed = source.replace("many('A', 'replaces all acceptance lines')", "many('A', 'new acceptance help')");
+  assert.notEqual(changed, source);
+  f.write(file, changed);
+  assert.equal(f.script('cli-docs.js', ['--check']).status, 1, 'a flag-help-only change requires generation');
+  assert.equal(f.script('cli-docs.js').status, 0);
+  assert.ok(f.read('docs/cli.md').includes('new acceptance help'));
+  assert.equal(f.script('cli-docs.js', ['--check']).status, 0);
+  f.write(file, source);
+  f.write('docs/cli.md', original.replace('# CLI', '# Hand edit'));
+  assert.equal(f.script('cli-docs.js', ['--check']).status, 1, 'prose is generated too');
+  assert.equal(f.script('cli-docs.js').status, 0);
+  assert.equal(f.read('docs/cli.md'), original);
+});
+
+test('a new module registers its command without editing the CLI entry point', (t) => {
+  const f = fixture(t);
+  const entryPoint = f.read('bin/tower-crane.js');
+  f.write('lib/commands-probe.js', [
+    "'use strict';", '',
+    'const COMMANDS = [',
+    "  { section: 'Views', name: 'probe', summary: 'show the registration probe', run: () => ({ text: 'registered' }) },",
+    '];', '', 'module.exports = COMMANDS;', '',
+  ].join('\n'));
+  const help = cp.spawnSync(process.execPath, [path.join(f.h.repo, 'bin', 'tower-crane.js'), 'probe', '--help'],
+    { cwd: f.h.repo, env: f.h.env, encoding: 'utf8', timeout: 300000 });
+  assert.equal(help.status, 0, help.stderr);
+  assert.match(help.stdout, /usage: tower-crane probe\n\nshow the registration probe/);
+  assert.equal(f.script('cli-docs.js', ['--check']).status, 1);
+  assert.equal(f.script('cli-docs.js').status, 0);
+  assert.equal(f.script('cli-docs.js', ['--check']).status, 0);
+  assert.ok(f.read('docs/cli.md').includes('| `probe` | show the registration probe |'));
+  assert.equal(f.read('bin/tower-crane.js'), entryPoint);
 });
 
 for (const windowsCheckout of [false, true]) {
@@ -193,7 +245,7 @@ for (const windowsCheckout of [false, true]) {
     const { COMMANDS } = require(path.join(f.h.repo, 'bin', 'tower-crane.js'));
     const addFlag = (command, flag, fragment) => {
       let found = false;
-      const source = f.read('bin/tower-crane.js').split('\n').map((line) => {
+      const source = f.read('lib/commands-tasks.js').split('\n').map((line) => {
         if (!line.includes(`name: '${command}'`)) return line;
         found = true;
         line = line.replace(/usage: '([^']*)'/, (_, usage) => `usage: '${usage} [--${flag} LABEL]'`);
@@ -202,7 +254,7 @@ for (const windowsCheckout of [false, true]) {
           : line.replace(', run:', `, flags: { ${spec} }, run:`);
       }).join('\n');
       assert.ok(found, command);
-      f.write('bin/tower-crane.js', source);
+      f.write('lib/commands-tasks.js', source);
       f.write(`changelog.d/${fragment}.md`, `- Add --${flag} to ${command}.\n`);
       assert.equal(f.script('cli-docs.js').status, 0);
       const check = f.check();
@@ -235,18 +287,18 @@ for (const windowsCheckout of [false, true]) {
 
 test('the shared file check enforces sorted single-line command entries with space between them', (t) => {
   const f = fixture(t);
-  const source = f.read('bin/tower-crane.js');
+  const source = f.read('lib/commands-tasks.js');
   const first = source.match(/const COMMANDS = \[\n(  \{[^\n]+\n)\n(  \{[^\n]+\n)/);
   assert.ok(first);
-  f.write('bin/tower-crane.js', source.replace(first[0], 'const COMMANDS = [\n' + first[2] + '\n' + first[1]));
+  f.write('lib/commands-tasks.js', source.replace(first[0], 'const COMMANDS = [\n' + first[2] + '\n' + first[1]));
   const unsorted = f.check();
   assert.equal(unsorted.status, 1);
   assert.match(unsorted.stderr, /sorted by name/);
-  f.write('bin/tower-crane.js', source.replace(first[1], first[1].replace('summary:', '\n    summary:')));
+  f.write('lib/commands-tasks.js', source.replace(first[1], first[1].replace('summary:', '\n    summary:')));
   const multiline = f.check();
   assert.equal(multiline.status, 1);
   assert.match(multiline.stderr, /one entry per line/);
-  f.write('bin/tower-crane.js', source.replace(first[0], 'const COMMANDS = [\n' + first[1] + first[2]));
+  f.write('lib/commands-tasks.js', source.replace(first[0], 'const COMMANDS = [\n' + first[1] + first[2]));
   const adjacent = f.check();
   assert.equal(adjacent.status, 1);
   assert.match(adjacent.stderr, /blank line/);
@@ -283,19 +335,19 @@ test('the shared file check rejects bare stdin reads in lib and bin, and points 
   assert.equal(f.check().status, 0, 'lib/util.js is where readStdin reads fd 0');
 });
 
-test('the suite deadline sets the proof job timeouts and warns when the configured tests gate timeout differs', (t) => {
-  const { DEADLINE_MIN } = require('../scripts/suite-time');
+test('the proof deadline sets job timeouts independently of the configured full-suite gate', (t) => {
+  const { DEADLINE_MIN, PROOF_DEADLINE_MIN } = require('../scripts/suite-time');
   const f = fixture(t);
   f.change();
   assert.equal(f.check().status, 0);
   const workflow = f.read('.github/workflows/ci.yml');
   const timeout = (job) => Number(new RegExp(`\\n  ${job}:\\n(?:    .*\\n|\\s*\\n)*?    timeout-minutes: (\\d+)`).exec(workflow)[1]);
-  assert.equal(timeout('model-swap'), DEADLINE_MIN + 5);
-  assert.equal(timeout('gate-scratch'), 2 * DEADLINE_MIN + 10);
-  f.write('.github/workflows/ci.yml', workflow.replace(`    timeout-minutes: ${DEADLINE_MIN + 5}\n`, '    timeout-minutes: 60\n'));
+  assert.equal(timeout('model-swap'), PROOF_DEADLINE_MIN + 5);
+  assert.equal(timeout('gate-scratch'), 2 * PROOF_DEADLINE_MIN + 10);
+  f.write('.github/workflows/ci.yml', workflow.replace(/(  model-swap:[\s\S]*?timeout-minutes: )\d+/, (_, prefix) => `${prefix}60`));
   const drifted = f.check();
   assert.equal(drifted.status, 1);
-  assert.match(drifted.stderr, new RegExp(`job model-swap has timeout-minutes 60; DEADLINE_MIN ${DEADLINE_MIN} in scripts/suite-time.js sets it to ${DEADLINE_MIN + 5}`));
+  assert.match(drifted.stderr, new RegExp(`job model-swap has timeout-minutes 60; PROOF_DEADLINE_MIN ${PROOF_DEADLINE_MIN} in scripts/suite-time.js sets it to ${PROOF_DEADLINE_MIN + 5}`));
   fs.rmSync(path.join(f.h.repo, '.github'), { recursive: true });
   assert.equal(f.check().status, 0, 'a tree without its workflows has no proof jobs to check');
   fs.mkdirSync(path.join(f.h.repo, '.github', 'workflows'), { recursive: true });

@@ -1,0 +1,1 @@
+- Base-failure and known-flake contracts follow the split gate command and state documentation layout. The state index retains the base-failures link.
