@@ -245,7 +245,7 @@ test('status shows the test-thread budget, every holder and its grant', (t) => {
   assert.match(h.ok(['status']), /^test threads: budget 2 of 2 on 3 cores, other work load 0; 0 runs hold 0 of 0 requested$/m);
 });
 
-test('CPU pressure or load past the defer lines stops a run from growing but does not shrink it; other work taking the cores does', (t) => {
+test('CPU pressure or load past the defer lines steps a run down by the overshoot, once per interval and not below one thread a run', (t) => {
   const h = makeRepo(t);
   h.init();
   const host = h.env.TOWER_CRANE_HOST_ROOT;
@@ -253,14 +253,19 @@ test('CPU pressure or load past the defer lines stops a run from growing but doe
   const lease = G.testLease({ env: h.env, stateDir: h.state }, { requested: 4, task: 'T1' });
   t.after(() => lease.release());
   assert.equal(lease.grant, 4);
-  // A run's own files raise pressure: it keeps what it holds, and a second run gets only its one thread.
-  writeHost(host, { cores: 8, load: 0, cpuSome: 70 });
-  assert.equal(lease.refresh().grant, 4);
+  // Pressure 80 against a line of 60 cuts the threads held by 60/80: 4 becomes 3,
+  // whoever caused it, the run's own files included.
+  writeHost(host, { cores: 8, load: 0, cpuSome: 80 });
+  assert.equal(lease.refresh().grant, 3);
+  // The next step waits for the interval, so a reading that lags does not ratchet the run down.
+  assert.equal(lease.refresh().grant, 3);
+  // No growth past the line: a second run gets its one thread out of what is held.
   const second = G.testLease({ env: h.env, stateDir: h.state }, { requested: 4, task: 'T2' });
   t.after(() => second.release());
-  assert.equal(lease.refresh().grant + second.refresh().grant, 4, 'no growth past what the runs held');
+  assert.equal(second.grant, 1);
+  assert.ok(lease.refresh().grant + second.refresh().grant <= 3, 'no growth past what the runs held');
   second.release();
-  // Load past the cores is other work: the run shrinks.
+  // Load past the cores is other work: the room itself shrinks.
   writeHost(host, { cores: 8, load: 20 });
   assert.equal(lease.refresh().grant, 1);
 });
