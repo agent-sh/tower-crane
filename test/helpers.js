@@ -449,6 +449,16 @@ function cachedFixture(t, key, build) {
     }
   };
   walk(h.base);
+  // The template's orchestrator lease names the process tree that built it. A
+  // copy made minutes later can run under another tree, as when the tests
+  // gate outlives a restarted wait host, so each copy takes its own lease.
+  if (fs.existsSync(path.join(h.state, 'tasks.json'))) {
+    const doc = h.readState('tasks.json');
+    if (doc.orchestrator_lease) {
+      delete doc.orchestrator_lease;
+      h.writeState('tasks.json', doc);
+    }
+  }
   for (const [k, v] of Object.entries(from.env)) if (typeof v === 'string') h.env[k] = rewrite(v);
   h.env.HOME = path.join(h.base, 'home');
   h.env.GIT_CONFIG_GLOBAL = path.join(h.base, 'gitconfig');

@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
 const crypto = require('node:crypto');
-const { makeRepo, copyRepo, shortCacheRoot, fakeAgentEnv, ACCOUNT_HOME, BIN, TMP_ROOT, ROOT, HARNESS_GUARD, processesIn, assertNoProcessesIn } = require('./helpers');
+const { makeRepo, copyRepo, cachedFixture, shortCacheRoot, fakeAgentEnv, ACCOUNT_HOME, BIN, TMP_ROOT, ROOT, HARNESS_GUARD, processesIn, assertNoProcessesIn } = require('./helpers');
 const { gateFixture, gateEvidence } = require('./gate-helpers');
 const { waitUntil, childExit, HUNG_TEST_MS } = require('./signals');
 
@@ -77,6 +77,20 @@ test('a fixture copy that fails leaves no temp directory behind', (t) => {
   });
   assert.equal(made.length, 1);
   assert.equal(fs.existsSync(made[0]), false, made[0]);
+});
+
+test('a cached fixture copy takes its own orchestrator lease, not the one its build held', (t) => {
+  const h = cachedFixture(t, 'fixture-lease', (repo) => {
+    repo.init();
+    repo.ok(['task', 'add', '--title', 'built', '--acceptance', 'checked', '--agent', 'orchestrator']);
+    // The build's process tree, as the copy sees it after the tests gate's wait host restarts.
+    const doc = repo.readState('tasks.json');
+    doc.orchestrator_lease = { ...doc.orchestrator_lease, session_id: 'f'.repeat(64), harness_session_id: null, persistent: false };
+    repo.writeState('tasks.json', doc);
+  });
+  assert.equal(h.readState('tasks.json').orchestrator_lease, undefined);
+  h.ok(['task', 'add', '--title', 'copied', '--acceptance', 'checked', '--agent', 'orchestrator']);
+  assert.ok(h.readState('tasks.json').orchestrator_lease, 'the copy took a lease');
 });
 
 test('a fresh fixture whose setup fails leaves no temp directory behind', (t) => {
