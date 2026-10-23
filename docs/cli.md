@@ -867,7 +867,7 @@ A budget stop keeps a ranged task on its current rung and opens a `kind: "spend"
 
 The orchestrator or owner can pin a quick check with `project set --presubmit '["node","scripts/check-shared-files.js"]'`, or include a timeout with `--presubmit '{"command":["node","scripts/check-shared-files.js"],"timeout_sec":10}'`. `null` clears it. Argv runs directly, so spaces and shell metacharacters are literal. The default timeout is 10 seconds, bounded to at most 60. The check runs in the worker's existing sandbox and environment at the submitted worktree HEAD. Tracked changes and non-ignored untracked files refuse before and after execution. Failure refuses submit, records bounded redacted diagnostics and keeps the same attempt and claim.
 
-Three identical failures, or a diagnostic outside the task diff or about a missing tool or dependency, open `presubmit_failed` in the orchestrator inbox and pause further hook runs. Stop retrying. The orchestrator or owner can record `presubmit retry ID --reason R` after fixing the cause, or `presubmit override ID --reason R` to bypass once at that exact head and configuration. See [Presubmit](state.md#presubmit) for receipt and escalation details.
+Three identical failures, or a diagnostic outside the task diff or about a missing tool or dependency, open `presubmit_failed` in the orchestrator inbox and pause further hook runs. Stop retrying. The orchestrator or owner can record `presubmit retry ID --reason R` after fixing the cause, or `presubmit override ID --reason R` to bypass once at that exact head and configuration. See [Presubmit](../docs/state/storage.md#presubmit) for receipt and escalation details.
 
 ## Decisions
 
