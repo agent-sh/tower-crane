@@ -172,6 +172,81 @@ process.exit(files.length ? cp.spawnSync(process.execPath, ['--test', ...files],
   assertCleanedUp();
 });
 
+// The ordinary command and the host-only commands beside it end together: a side that throws stops
+// the other, and a failing ordinary command stops the host-only side, before the step returns. A
+// command still running when the gate returned would run on in its removed worktree.
+test('a step returns only after both sides end, and one side throwing or the suite failing stops the other', async () => {
+  const SLOW_MS = 20000;
+  const slow = (dir, name) => `const fs = require('node:fs');
+require('node:test')('${name} waits', async () => {
+  fs.writeFileSync(${JSON.stringify(path.join(dir, `${name}-started`))}, '');
+  await new Promise((r) => setTimeout(r, ${SLOW_MS})); // wait-allow: a command that only a stop ends early
+  fs.writeFileSync(${JSON.stringify(path.join(dir, `${name}-finished`))}, '');
+});
+`;
+  const quick = (dir, name, error) => `require('node:fs').writeFileSync(${JSON.stringify(path.join(dir, `${name}-started`))}, '');
+require('node:test')('${name} ${error ? 'fails' : 'passes'}', () => {${error ? ` throw new Error('${name} broke');` : ''} });
+`;
+  const runner = path.join(tmp, 'lanes-runner.cjs');
+  fs.writeFileSync(runner, `const cp = require('node:child_process');
+const excluded = JSON.parse(process.env.TOWER_CRANE_TEST_EXCLUDE || '[]');
+const files = process.argv.slice(2).filter(f => !excluded.includes(f));
+process.exit(files.length ? cp.spawnSync(process.execPath, ['--test', ...files], { stdio: 'inherit' }).status : 0);
+`);
+  const suite = `${NODE} ${quote(runner)} test/plain.test.js`;
+  const project = {
+    tests: { mode: 'run-only', host_only: ['test/*-host.test.js'] },
+    gates: { tests_cmd: suite, tests_proof_cmd: `${NODE} --test {tests}` },
+  };
+  for (const [name, files, throwOn, outcome] of [
+    ['the suite throws while a host-only command runs', (d) => ({ 'test/plain.test.js': quick(d, 'plain'), 'test/a-host.test.js': slow(d, 'a') }),
+      (cmd) => cmd === suite, 'throws'],
+    ['a host-only command throws while the suite runs', (d) => ({ 'test/plain.test.js': slow(d, 'plain'), 'test/a-host.test.js': quick(d, 'a') }),
+      (cmd) => cmd.includes('a-host'), 'throws'],
+    ['the suite fails while a host-only command runs', (d) => ({ 'test/plain.test.js': quick(d, 'plain', true), 'test/a-host.test.js': slow(d, 'a') }),
+      () => false, 'fails'],
+  ]) {
+    const dir = path.join(tmp, `lanes-${name.replace(/\W+/g, '-')}`);
+    fs.mkdirSync(dir);
+    // A second host-only file the stopped side must never start.
+    const sha = task({ ...files(dir), 'test/b-host.test.js': quick(dir, 'b') });
+    let running = 0;
+    const exec = async (cmd, args, opts) => {
+      if (!opts.shell && !opts.processTree) return require('node:child_process').spawnSync(cmd, args, opts);
+      running++;
+      let r;
+      try {
+        r = await treeExec(cmd, args, opts);
+      } finally {
+        running--;
+      }
+      if (throwOn(cmd)) throw new Error(`engine code missing after ${cmd}`);
+      return r;
+    };
+    const began = Date.now();
+    let result = null;
+    let error = null;
+    try {
+      result = await gate.run({ ...ctx(sha, { args: { cmd: suite }, project }), exec });
+    } catch (e) {
+      error = e;
+    }
+    assert.equal(running, 0, `${name}: no command runs once the gate returned`);
+    assert.ok(Date.now() - began < SLOW_MS / 2, `${name}: the other side was stopped, not waited out`);
+    assert.equal(fs.existsSync(path.join(dir, 'b-started')), false, `${name}: the stopped side starts no further file`);
+    assert.deepEqual(fs.readdirSync(dir).filter((f) => f.endsWith('-finished')), [], name);
+    if (outcome === 'throws') {
+      assert.match(error?.message ?? '', /engine code missing/, name);
+    } else {
+      assert.equal(error, null, name);
+      assert.equal(result.ok, false, name);
+      assert.deepEqual(result.test_failure.names, ['plain fails'], name);
+      assert.deepEqual(result.receipt.host_only.run, [], `${name}: the stopped host-only file is not recorded as run`);
+    }
+    assertCleanedUp();
+  }
+});
+
 // Claude Code's sandbox bridge socket, measured on 2.1.296: <TMPDIR>/claude-socks-<16 hex>.sock, at most 108 bytes.
 const HARNESS_SOCKET = 'claude-socks-0123456789abcdef.sock';
 const socketFits = (dir) => Buffer.byteLength(path.join(dir, HARNESS_SOCKET)) <= 108;

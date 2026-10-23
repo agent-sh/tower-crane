@@ -270,9 +270,8 @@ test('a tests run leases until every command it may start could have used its fu
   fs.writeFileSync(h.release, '');
   const r = h.run(['check', 'tests', 'T1']);
   assert.equal(r.code, 0, r.stderr);
-  // Head, scoped proof and the reverted run each start their command with the host-only file
-  // beside it; the reverted run's ordinary command fails, which is its proof.
-  assert.equal(runs(h), 6, 'one passing run starts six timed commands');
+  // Head and scoped proof each with the host-only file, then the reverted run, which fails at its first command.
+  assert.equal(runs(h), 5, 'one passing run starts five timed commands');
   const lease = testLeases(h).find((e) => e.detail.phase === 'running');
   // The fixture has one ordinary test and one host-only file; both may fail, and each command may rerun once.
   const planned = 16 * (MINUTES * 60000 + 60000);
