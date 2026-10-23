@@ -850,6 +850,12 @@ test('status names what each merge waits behind', (t) => {
   const receipt = (source, id, detail) => ({ cmd: 'automation', task: id, at: at(9), detail: { source, ...detail } });
   const lease = (id, kind) => ({ cmd: 'executor', task: id, at: at(9), detail: { lease: `cpu:${id}`, phase: 'running', kind, ...self } });
   const governor = { task: 'T4', kind: 'suite', reason: 'memory: the host is full', until: Date.now() + 5000, since: at(9), at: at(9) };
+  // What queue() records when the pass ends at T4: a deferral or a refusal.
+  const pass = (reason, deferred) => ({ cmd: 'merge queue', at: at(9),
+    detail: { phase: 'error', error: reason, blocked: { task: 'T4', reason, ...(deferred ? { deferred } : {}) }, skipped: [] } });
+  const executorPass = pass('T4: head check waits for a gate executor (2 of 2 in use)', { kind: 'executor' });
+  const governorPass = pass('T4: merge-queue suite deferred by the host governor: memory: the host is full',
+    { kind: 'governor', reason: 'memory: the host is full' });
   let failing = new Set();
   t.mock.method(T, 'gateReport', (x) => ({ ok: !failing.has(x.id), gates: [], missing: failing.has(x.id) ? ['ci failed'] : [] }));
   for (const [name, five, events, fails, want] of [
@@ -858,6 +864,17 @@ test('status names what each merge waits behind', (t) => {
     [['T4', 'a gate executor: 2 of 2 in use: T1 tests, T2 clean']]],
     ['the host governor', null, [queued('accept-T4', 'T4'), receipt('accept-T4', 'T4', { phase: 'deferred', governor })], [],
       [['T4', 'the host governor: memory: the host is full']]],
+    ['a full executor cap the queue recorded', null, [lease('T1', 'tests'), lease('T2', 'clean'), queued('merge-T3', 'T3'),
+      receipt('merge-T3', 'T3', { phase: 'executor', kind: 'head check', merge: 'T4' }), executorPass], [],
+    [['T4', 'a gate executor: 2 of 2 in use: T1 tests, T2 clean']]],
+    ['a governor deferral the queue recorded', null, [queued('accept-T4', 'T4'),
+      receipt('accept-T4', 'T4', { phase: 'deferred', governor }), governorPass], [],
+    [['T4', 'the host governor: memory: the host is full']]],
+    ['an executor deferral only the queue recorded', null, [lease('T1', 'tests'), lease('T2', 'clean'), executorPass], [],
+      [['T4', 'a gate executor: 2 of 2 in use: T1 tests, T2 clean']]],
+    ['a governor deferral only the queue recorded', null, [governorPass], [],
+      [['T4', 'the host governor: memory: the host is full']]],
+    ['a head the queue refused', null, [pass('T4: PR mergeability is CONFLICTING')], [], []],
     ['an earlier acceptance', 1, [], [], [['T5', 'the next merge queue pass'], ['T4', 'T5 ahead in the merge line']]],
     ['an earlier acceptance whose merge is blocked', 1, [], ['T5'], [['T4', 'the next merge queue pass']]],
     ['a head check that runs', null, [lease('T4', 'head check')], [], []],
@@ -1047,6 +1064,38 @@ test('past the load line a waiting merge suite runs beside the gate runs that ho
   assert.equal(deferred?.phase, 'deferred', 'the new gate run waits');
   assert.equal(deferred.governor.kind, 'tests');
   assert.match(deferred.governor.reason, /^load: 1000 on \d+ cores is at or over \d+/);
+});
+
+// The merge queue records a deferred head as its blocked entry; that entry
+// is a wait, not a refusal, so status still lists the merge.
+test('a head check deferred on a full executor cap stays in status merge waits', async (t) => {
+  const h = setup(t);
+  const events = path.join(h.state, 'events.jsonl');
+  const hold = holdSuite(h);
+  h.ok(['project', 'set', '--executors', '2', '--agent', 'orchestrator']);
+  h.ok(['claim', 'T1', '--agent', 'worker']);
+  const offset = fs.statSync(events).size;
+  h.ok(['submit', 'T1', '--sha', h.sha, '--agent', 'worker']);
+  const holder = h.runAsync(['wait', '--after', String(offset), '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
+  let text, waits, record;
+  try {
+    await waitFor(hold.stalled, { what: "T1's tests hold an executor" });
+    acceptAll(h, [['T2', '8']], hold);
+    // T1's tests now fill the cap, so T2's head check defers.
+    h.ok(['project', 'set', '--executors', '1', '--agent', 'orchestrator']);
+    h.run(['wait', '--after', String(offset), '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
+    record = h.logs().findLast((e) => e.cmd === 'merge queue' && e.detail.phase !== 'requested')?.detail;
+    text = h.ok(['status']);
+    waits = h.json(['status']).merge_waits;
+  } finally {
+    fs.writeFileSync(hold.release, '');
+    await holder;
+  }
+  assert.equal(record?.blocked?.task, 'T2', 'the queue records the deferred head');
+  assert.deepEqual(record.blocked.deferred, { kind: 'executor' });
+  const accepted = h.logs().findLast((e) => e.cmd === 'accept' && e.task === 'T2').at;
+  assert.deepEqual(waits, [{ id: 'T2', since: accepted, behind: 'a gate executor: 1 of 1 in use: T1 tests' }]);
+  assert.match(text, new RegExp(`^merge waits: T2 since ${accepted}, behind a gate executor: 1 of 1 in use: T1 tests$`, 'm'));
 });
 
 test('gates prioritize runs the last queued task first; status and inbox show the gate queue', async (t) => {

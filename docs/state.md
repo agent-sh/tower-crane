@@ -2084,12 +2084,16 @@ global mode masked by the task's kind override queues nothing. Already merged ta
 `status` also lists `merge blocked: TASK REASON` for accepted, unmerged PRs.
 JSON carries `merge_blocked: [{id, reason}]`. It uses current gate evidence
 first, then the recorded merge queue refusal; it makes no GitHub request.
+A pass that ends at a head check deferred for a full executor cap or by the
+governor records that head as `blocked` with `deferred: {kind: "executor"}`
+or `deferred: {kind: "governor", reason}`. That is a wait, not a refusal.
 Every other accepted, unmerged PR task whose head check is not running is a
 merge wait, listed in merge-line order as `merge waits: TASK since AT, behind
 WHAT`, with JSON `merge_waits: [{id, since, behind}]`. `since` is its current
 `accept` event's time. `behind` is the first that holds: a `suite` deferral
 of the host governor (`the host governor: REASON`), a head check waiting for
-a full cap (`a gate executor: N of N in use: ...`), an earlier unblocked
+a full cap (`a gate executor: N of N in use: ...`), either one read from the
+reaction's receipt or from the queue's deferred record, an earlier unblocked
 entry (`T3 ahead in the merge line`), pending CI at its head (`GitHub
 checks`), else `the next merge queue pass`.
 Automatic state changes and evidence use `agent: orchestrator` and
