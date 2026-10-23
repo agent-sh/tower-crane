@@ -462,8 +462,10 @@ fs.readFileSync = (file, ...args) => {
     held = true;
     writeAtomic(process.env.REPLY_READY, 'ready');
     const deadline = Date.now() + 30000; // wait-allow: bounds the fixture read barrier
+    const parent = process.ppid;
     while (!fs.existsSync(process.env.REPLY_RELEASE)) {
       if (Date.now() > deadline) throw new Error('reply read barrier timed out');
+      if (process.ppid !== parent) process.exit(1);
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10); // wait-allow: fixture waits for its explicit release
     }
   }

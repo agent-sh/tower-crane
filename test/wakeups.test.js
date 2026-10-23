@@ -180,7 +180,8 @@ fs.openSync = function (file, ...args) {
   if (ours && fs.existsSync(hold) && waitRead()) {
     fs.writeFileSync(held, '');
     const deadline = Date.now() + 300000;
-    while (fs.existsSync(hold) && Date.now() < deadline) Atomics.wait(cell, 0, 0, 20);
+    const parent = process.ppid;
+    while (fs.existsSync(hold) && Date.now() < deadline && process.ppid === parent) Atomics.wait(cell, 0, 0, 20);
   }
   const fd = openSync.call(this, file, ...args);
   if (ours) fds.add(fd);
@@ -251,7 +252,8 @@ function hold() {
   fs.writeFileSync(${JSON.stringify(held)}, '');
   const cell = new Int32Array(new SharedArrayBuffer(4));
   const deadline = Date.now() + 300000;
-  while (!fs.existsSync(${JSON.stringify(release)}) && Date.now() < deadline) Atomics.wait(cell, 0, 0, 20);
+  const parent = process.ppid;
+  while (!fs.existsSync(${JSON.stringify(release)}) && Date.now() < deadline && process.ppid === parent) Atomics.wait(cell, 0, 0, 20);
 }
 const readFileSync = fs.readFileSync;
 fs.readFileSync = function (...args) { hold(); return readFileSync.apply(this, args); };

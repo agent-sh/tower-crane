@@ -19,7 +19,7 @@ if (path.basename(process.argv[1] || '') === 'spawn-monitor.js' && process.env.T
       const result = fn(...args);
       if (ready) fs.writeFileSync(ready, '');
       const until = Date.now() + HUNG_TEST_MS;
-      while (!fs.existsSync(file)) {
+      while (!fs.existsSync(file)) { // spin-allow: preloaded into the CLI under test, which can be a detached supervisor whose dispatcher exits by design; the deadline bounds it
         if (Date.now() >= until) throw new Error(`the harness never wrote ${file} while ${cmd} was held`);
         Atomics.wait(delay, 0, 0, 10);
       }

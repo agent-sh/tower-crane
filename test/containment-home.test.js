@@ -90,8 +90,10 @@ if(process.argv[1]===${JSON.stringify(BIN)}&&process.argv[2]==='wait'){
  }));
  if(${delayed}){
   const until=performance.now()+${HUNG_TEST_MS}; // wait-allow: injected startup barrier shares the test's hung backstop
+  const parent=process.ppid;
   while(!fs.existsSync(${JSON.stringify(release)})){
    if(performance.now()>=until)throw new Error('controller startup was not released');
+   if(process.ppid!==parent)process.exit(1);
    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,25);
   }
  }

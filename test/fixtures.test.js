@@ -6,9 +6,9 @@ const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
 const crypto = require('node:crypto');
-const { makeRepo, copyRepo, shortCacheRoot, fakeAgentEnv, ACCOUNT_HOME, BIN, TMP_ROOT, ROOT, HARNESS_GUARD, processesIn, assertNoProcessesIn } = require('./helpers');
+const { makeRepo, copyRepo, shortCacheRoot, fakeAgentEnv, ACCOUNT_HOME, BIN, TMP_ROOT, ROOT, HARNESS_GUARD, processesIn, assertNoProcessesIn, detachedAlive } = require('./helpers');
 const { gateFixture, gateEvidence } = require('./gate-helpers');
-const { waitUntil, childExit, HUNG_TEST_MS } = require('./signals');
+const { waitUntil, childExit, killPid, HUNG_TEST_MS } = require('./signals');
 
 test('fixture commands bypass the calling worker git and gh shims', (t) => {
   const outer = makeRepo(t);
@@ -322,4 +322,34 @@ test('gate fixture creation and restoration recover from an incomplete native di
   } finally {
     fs.cpSync = cpSync;
   }
+});
+
+// T545: the supervision test's busy child spun for four hours after its gate ended, because the
+// test was cut off before it wrote the file the loop waited for.
+test('the supervision busy child stops spinning when the test that started it is cut off', async (t) => {
+  const h = makeRepo(t);
+  const busy = path.join(__dirname, 'fixtures', 'busy-child.js');
+  const never = path.join(h.base, 'never');
+  const pids = [];
+  t.after(() => { for (const pid of pids) if (detachedAlive({ pid })) killPid(pid, 'SIGKILL'); });
+  // Its deadline: nothing writes the file, and the child ends on its own.
+  const timed = cp.spawn(process.execPath, [busy, path.join(h.base, 'timed'), never, '200'], { stdio: 'ignore' });
+  pids.push(timed.pid);
+  assert.deepEqual(await childExit(timed, { signal: t.signal }), { code: 1, signal: null });
+  if (process.platform === 'win32') return; // Windows keeps an exited parent's pid on its children, so only the deadline ends it there.
+  // Its parent: the worker that started it is killed, and the child, in a session of its own, ends.
+  const ready = path.join(h.base, 'busy');
+  const pidFile = path.join(h.base, 'busy.pid');
+  const worker = cp.spawn(process.execPath, ['-e', `const c = require('node:child_process').spawn(process.execPath, ${JSON.stringify([busy, ready, never])}, { stdio: 'ignore', detached: true });
+require('node:fs').writeFileSync(${JSON.stringify(pidFile + '.tmp')}, String(c.pid));
+require('node:fs').renameSync(${JSON.stringify(pidFile + '.tmp')}, ${JSON.stringify(pidFile)});
+process.stdin.resume();`], { stdio: ['pipe', 'ignore', 'ignore'] });
+  pids.push(worker.pid);
+  await waitUntil(() => fs.existsSync(ready) && fs.existsSync(pidFile), { paths: [h.base], signal: t.signal, alive: worker, what: 'busy child start' });
+  const child = Number(fs.readFileSync(pidFile, 'utf8'));
+  pids.push(child);
+  assert.equal(detachedAlive({ pid: child }), true);
+  killPid(worker.pid, 'SIGKILL');
+  await childExit(worker, { signal: t.signal });
+  await waitUntil(() => !detachedAlive({ pid: child }), { signal: t.signal, what: 'busy child exit after its parent died' });
 });

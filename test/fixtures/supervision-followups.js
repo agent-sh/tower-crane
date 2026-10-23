@@ -44,7 +44,7 @@ if (entry === 'tower-crane.js'
     held = true;
     writeAtomic(process.env.TOWER_CRANE_TEST_HOLD_SPAWN_SPEND, String(process.pid));
     const deadline = Date.now() + 300000;
-    while (!originalExistsSync.call(fs, process.env.TOWER_CRANE_TEST_RELEASE_SPAWN_SPEND)
+    while (!originalExistsSync.call(fs, process.env.TOWER_CRANE_TEST_RELEASE_SPAWN_SPEND) // spin-allow: preloaded into the CLI under test, which can be a detached supervisor whose dispatcher exits by design; the deadline bounds it
       && Date.now() < deadline) {
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
     }

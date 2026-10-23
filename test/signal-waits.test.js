@@ -9,7 +9,7 @@ const net = require('node:net');
 const { EventEmitter } = require('node:events');
 const { makeRepo, ROOT } = require('./helpers');
 const { fileWritten, eventAppended, childExit, childClosed, portListening, waitUntil, killPid, killGroup } = require('./signals');
-const { waitFindings, killFindings, checkTestWaits } = require('../scripts/test-waits');
+const { waitFindings, spinFindings, killFindings, checkTestWaits } = require('../scripts/test-waits');
 
 test('signal waits observe existing state, atomic writes, complete events, child exits and listening ports', async (t) => {
   const h = makeRepo(t);
@@ -418,15 +418,15 @@ test('the lint rejects sleeps, counted sleep loops and other clocks, and accepts
     assert.deepEqual(waitFindings(source.split('\n').map((line) => `${line} // wait-allow: fixture behaviour`).join('\n')), [], source);
   }
   for (const source of [
-    'while (!fs.existsSync(go)) Atomics.wait(cell, 0, 0, 10);',
-    'const end = Date.now() + 300000; while (!ok() && Date.now() < end) Atomics.wait(cell, 0, 0, 10);',
-    'while (!ok()) { if (failed()) break; Atomics.wait(cell, 0, 0, 10); }',
-    'do { Atomics.wait(cell, 0, 0, 10); } while (!ok());',
+    'while (!fs.existsSync(go)) Atomics.wait(cell, 0, 0, 10);', // spin-allow: wait lint fixture
+    'const end = Date.now() + 300000; while (!ok() && Date.now() < end) Atomics.wait(cell, 0, 0, 10);', // spin-allow: wait lint fixture
+    'while (!ok()) { if (failed()) break; Atomics.wait(cell, 0, 0, 10); }', // spin-allow: wait lint fixture
+    'do { Atomics.wait(cell, 0, 0, 10); } while (!ok());', // spin-allow: wait lint fixture
     'Atomics.wait(cell, 0, 0);',
     'for (let i = 0; i < items.length; i++) handle(items[i]);',
-    'for (let node = start; node; node = node.parent) Atomics.wait(cell, 0, 0, 10);',
-    'const script = `while(!fs.existsSync(go))Atomics.wait(s,0,0,100);`;',
-    'while (!fs.existsSync(go)) cp.spawnSync("sleep", ["1"]);',
+    'for (let node = start; node; node = node.parent) Atomics.wait(cell, 0, 0, 10);', // spin-allow: wait lint fixture
+    'const script = `while(!fs.existsSync(go))Atomics.wait(s,0,0,100);`;', // spin-allow: wait lint fixture
+    'while (!fs.existsSync(go)) cp.spawnSync("sleep", ["1"]);', // spin-allow: wait lint fixture
     'const hook = `while [ ! -f go ] && [ -d dir ]; do sleep 0.1; done`;',
     'const hook = `#!/bin/sh\\nwhile [ "$(wc -l < f)" -lt 2 ]; do sleep 0.1; done\\n`;',
     'const hook = `for f in a b; do touch $f; done; while [ ! -f go ]; do sleep 0.1; done`;',
@@ -434,10 +434,10 @@ test('the lint rejects sleeps, counted sleep loops and other clocks, and accepts
     'const hook = `for i in $(seq 5); do echo $i; done; while [ ! -f go ]; do sleep 0.1; done`;',
     'const hook = `for i in 1 2 3; do echo $i; done; while [ ! -f go ]; do sleep 0.1; done`;',
     "cp.spawnSync('sh', ['-c', 'while [ ! -f go ]; do sleep 0.1; done']);",
-    'while (true) { if (ok()) break; Atomics.wait(cell, 0, 0, 10); }',
-    'function waitGo() { while (!ok()) Atomics.wait(cell, 0, 0, 10); }\nfor (let i = 0; i < 3; i++) waitGo();',
+    'while (true) { if (ok()) break; Atomics.wait(cell, 0, 0, 10); }', // spin-allow: wait lint fixture
+    'function waitGo() { while (!ok()) Atomics.wait(cell, 0, 0, 10); }\nfor (let i = 0; i < 3; i++) waitGo();', // spin-allow: wait lint fixture
     // A return in a function the if block defines does not leave the loop.
-    'let n = 0; while (!ok()) { n++; if (n > 3) { list.forEach((x) => { return x; }); } Atomics.wait(cell, 0, 0, 10); }',
+    'let n = 0; while (!ok()) { n++; if (n > 3) { list.forEach((x) => { return x; }); } Atomics.wait(cell, 0, 0, 10); }', // spin-allow: wait lint fixture
     // A sh -c helper sleeps only when its command does.
     "const sh = (cmd) => cp.spawnSync('sh', ['-c', cmd]);\nfor (let i = 0; i < 3; i++) sh('git commit -qm x');",
     "function run() { cp.spawnSync('sh', ['-c', 'echo ok']); }\nfor (let i = 0; i < 3; i++) run();",
@@ -670,4 +670,16 @@ test('only the named interposers may hold an alias of the signal call, and only 
     assert.match(lines[1], /^test\/fixtures\/other\.js:1 `const forward = process\.kill;` aliases process\.kill/);
     return true;
   });
+});
+
+test('the spin lint requires a deadline on wait and spin loops, and a parent check in fixture processes', () => {
+  // Kept out of .js files, which both lints read. Each row: the findings with parent 'none', 'generated' and 'all'.
+  const cases = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'spin-lint-cases.json'), 'utf8'));
+  const text = (findings) => findings.map((f) => f.reason.replace(/^(\w+) loop has no (.*)$/, (all, kind, what) => `${kind}: ${what.replace(' and no ', ', ')}`));
+  for (const { source, none, generated, all } of cases) {
+    assert.deepEqual(text(spinFindings(source)), none, `none: ${source}`);
+    assert.deepEqual(text(spinFindings(source, { parent: 'generated' })), generated, `generated: ${source}`);
+    assert.deepEqual(text(spinFindings(source, { parent: 'all' })), all, `all: ${source}`);
+  }
+  assert.deepEqual(spinFindings('const a = 1;\n\nwhile (!fs.existsSync(go)) {}').map((f) => f.line), [3]); // spin-allow: lint fixture
 });

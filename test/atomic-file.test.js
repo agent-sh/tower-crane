@@ -75,7 +75,8 @@ const { updateJson } = require(${JSON.stringify(path.join(__dirname, 'atomic-fil
 const [ready, go, inside] = process.argv.slice(2);
 fs.writeFileSync(ready, '');
 const deadline = Date.now() + 300000;
-while (!fs.existsSync(go) && Date.now() < deadline) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1);
+const parent = process.ppid;
+while (!fs.existsSync(go) && Date.now() < deadline && process.ppid === parent) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1);
 updateJson(${JSON.stringify(file)}, (d) => {
   try { fs.writeFileSync(inside, String(process.pid), { flag: 'wx' }); } catch { d.overlaps++; }
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20); // wait-allow: a hold long enough that a second holder meets the first

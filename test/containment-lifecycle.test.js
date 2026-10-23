@@ -256,7 +256,8 @@ writeAtomic(path.join(dir,'probe.go'),'go');
 if(process.env.TC_KEEPER_HOLD){
  const [id]=JSON.parse(readPublished(path.join(dir,'identities.json'),'utf8'));
  const P=require(${JSON.stringify(require.resolve('../lib/processes'))});
- while(P.processState({pid:id.pid,start_ticks:id.start})!=='exited')Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,25); // wait-allow: hold the keeper until the kernel ended the probe
+ const deadline=Date.now()+300000;
+ while(P.processState({pid:id.pid,start_ticks:id.start})!=='exited'&&Date.now()<deadline)Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,25); // wait-allow: hold the keeper until the kernel ended the probe // spin-allow: a keeper is detached and outlives its launcher by design; the deadline bounds it
 }
 `);
         const spawn = cp.spawn;

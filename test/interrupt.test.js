@@ -71,8 +71,10 @@ const pause = () => {
   if (fs.existsSync(paused)) return;
   fs.writeFileSync(paused, '');
   const deadline = Date.now() + 300000;
+  const parent = process.ppid;
   while (!fs.existsSync(paused + '.go')) {
     if (Date.now() >= deadline) throw new Error('exit pause timed out');
+    if (process.ppid !== parent) process.exit(1);
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
   }
 };

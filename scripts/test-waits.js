@@ -4,9 +4,10 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const HUNG_TEST_MS = 300000;
-function allowed(line) {
-  if (tokenize(line).some((token) => token.type === 'comment'
-    && /^\/\/\s*wait-allow:\s*\S.*$/.test(token.value))) return true;
+function allowed(line, tag = 'wait-allow') {
+  // One line can carry a reason for each check: `// wait-allow: a // spin-allow: b`.
+  const reason = new RegExp(String.raw`^\/\/(?:.*\s\/\/)?\s*${tag}:\s*\S.*$`);
+  if (tokenize(line).some((token) => token.type === 'comment' && reason.test(token.value))) return true;
   let quote = null;
   for (let i = 0; i < line.length; i++) {
     const char = line[i];
@@ -14,7 +15,7 @@ function allowed(line) {
       if (char === '\\') i++;
       else if (char === quote) quote = null;
       // Generated fixture scripts can begin a line inside a template literal.
-      else if (quote === '`' && /^\/\/\s*wait-allow:\s*\S.*$/.test(line.slice(i))
+      else if (quote === '`' && reason.test(line.slice(i))
         && !line.slice(i).includes('`')) return true;
     } else if (['"', "'", '`'].includes(char)) quote = char;
   }
@@ -769,7 +770,8 @@ function loops(text, offset = 0, found = Object.assign([], { shell: [], helpers:
     }
     const bounded = condition.some((token) => token.type === 'identifier' && (counters.has(token.value) || inBody.has(token.value)))
       || exits(bodyTokens, new Set([...inBody, ...counters]));
-    found.push({ start: offset + keyword.start, from: offset + range.from, to: offset + range.to, bounded });
+    const test = condition.length ? { from: offset + condition[0].start, to: offset + condition.at(-1).end } : null;
+    found.push({ start: offset + keyword.start, from: offset + range.from, to: offset + range.to, bounded, test, generated: offset > 0 });
   };
   for (const [index, token] of tokens.entries()) {
     if (token.type !== 'keyword') continue;
@@ -994,6 +996,67 @@ function waitFindings(text) {
     }
   }
   return findings;
+}
+
+// A wait loop with no deadline runs forever once its signal never comes. On 2026-10-23 a
+// fixture child spun on `while (!fs.existsSync(finish))` for four hours after the gate that
+// started it ended. A loop that sleeps, or whose body does nothing (a spin), and that no count
+// bounds, needs a clock in its condition or body; an abort signal it checks is a bound too, since
+// its holder ends the wait. A fixture process's loop (a file under test/fixtures, or a script a test
+// writes) also needs a process.ppid check, so it ends once whoever started it is gone. The test
+// runner ends a test's own process, so code there needs only the deadline. A fixture that outlives
+// its parent by design says so with a spin-allow reason.
+const SPIN_BOUND = new RegExp(String.raw`${CLOCK}|\bdeadline\b|\bthrowIfAborted\b|\baborted\b`, 'i');
+// Sleeps that block the loop: synchronous ones, and timers it awaits. A timer it only schedules does not.
+const SPIN_SLEEP = new RegExp(String.raw`\bAtomics\.wait\s*\(|(?<![\w$.])sleep(?:Sync)?\s*\(|\b(?:spawnSync|execSync|execFileSync)\s*\(\s*['"\`]sleep\b`
+  + String.raw`|\bawait\s+(?:new\s+Promise\s*\([^;]*\bsetTimeout\b|(?:[\w$]+\.)?(?:delay|setTimeout|scheduler\.wait|wait)\s*\()`);
+// A spin is an empty body under a condition that only reads: a file probe, a flag, or nothing.
+const SPIN_PROBE = /\b(?:existsSync|statSync|lstatSync|accessSync|readFileSync|readdirSync)\s*\(/;
+function spinFindings(text, { parent = 'none' } = {}) {
+  const lines = text.replace(/\r\n/g, '\n').split('\n');
+  const lineOf = (position) => text.slice(0, position).split('\n').length - 1;
+  const found = loops(text);
+  const helpers = [...found.helpers].map(escaped);
+  const sleepCall = new RegExp(SPIN_SLEEP.source + (helpers.length ? String.raw`|(?<![\w$.])(?:${helpers.join('|')})\s*\(` : ''));
+  const findings = [];
+  for (const loop of found) {
+    if (loop.bounded) continue;
+    const test = loop.test ? text.slice(loop.test.from, loop.test.to) : '';
+    const body = text.slice(loop.from, loop.to);
+    const tokens = tokenize(body).filter((token) => token.type !== 'comment');
+    const idle = tokens.every((token, i) => (token.type === 'punctuation' && '{}();.'.includes(token.value))
+      || (token.type === 'identifier' && (token.value === 'Math' || (tokens[i - 1]?.value === '.' && tokens[i - 2]?.value === 'Math'))));
+    // The tail of a do-while without braces reads as a loop with an empty body.
+    if (idle && body.trim() === ';' && /\bdo\b[^;{}]*;\s*$/.test(text.slice(Math.max(0, loop.start - 400), loop.start))) continue;
+    const spin = idle && (!/\(/.test(test) || SPIN_PROBE.test(test));
+    if (!spin && !sleepCall.test(body)) continue;
+    const missing = [];
+    if (!SPIN_BOUND.test(test + body)) missing.push('deadline');
+    const child = parent === 'all' || (parent === 'generated' && loop.generated);
+    if (child && !/\bprocess\.ppid\b/.test(test + body)) missing.push('parent check');
+    const index = lineOf(loop.start);
+    if (missing.length && !allowed(lines[index], 'spin-allow')) {
+      findings.push({ line: index + 1, reason: `${spin ? 'spin' : 'wait'} loop has no ${missing.join(' and no ')}` });
+    }
+  }
+  return findings;
+}
+
+// Every file under test/ and lib/.
+function checkSpins(root) {
+  const findings = [];
+  for (const dir of ['test', 'lib']) {
+    if (!fs.existsSync(path.join(root, dir))) continue;
+    for (const name of fs.readdirSync(path.join(root, dir), { recursive: true })) {
+      if (!name.endsWith('.js')) continue;
+      const file = `${dir}/${name.replaceAll('\\', '/')}`;
+      const parent = file.startsWith('test/fixtures/') ? 'all' : dir === 'test' ? 'generated' : 'none';
+      for (const finding of spinFindings(fs.readFileSync(path.join(root, file), 'utf8'), { parent })) {
+        findings.push(`${file}:${finding.line} ${finding.reason}; give it a deadline${parent === 'none' ? '' : ' and, in a fixture process, end it when process.ppid changes'}, or // spin-allow: reason`);
+      }
+    }
+  }
+  if (findings.length) throw new Error(findings.join('\n'));
 }
 
 // A test that signals a pid it read from a file or an event signals its own
@@ -1272,4 +1335,4 @@ function checkTestWaits(root) {
   if (findings.length) throw new Error(findings.join('\n'));
 }
 
-module.exports = { tokenize, callArguments, waitFindings, killFindings, checkTestWaits };
+module.exports = { tokenize, callArguments, waitFindings, spinFindings, killFindings, checkTestWaits, checkSpins };

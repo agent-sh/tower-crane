@@ -182,7 +182,7 @@ function stop(signal) {
   writeAtomic(signal, String(process.pid), undefined, real);
   const go = `${signal}.go`;
   const end = Date.now() + 300000;
-  while (!real.existsSync(go) && Date.now() < end) sleep(10);
+  while (!real.existsSync(go) && Date.now() < end) sleep(10); // spin-allow: preloaded into the CLI under test, which can be a detached supervisor whose dispatcher exits by design; the deadline bounds it
 }
 
 // HOOK_BARRIER=DIR with HOOK_BARRIER_N=N: the first time this process finds
@@ -194,7 +194,7 @@ function barrier() {
   barrierDone = true;
   real.writeFileSync(path.join(env.HOOK_BARRIER, String(process.pid)), '');
   const end = Date.now() + 300000;
-  while (real.readdirSync(env.HOOK_BARRIER).length < Number(env.HOOK_BARRIER_N) && Date.now() < end) sleep(5);
+  while (real.readdirSync(env.HOOK_BARRIER).length < Number(env.HOOK_BARRIER_N) && Date.now() < end) sleep(5); // spin-allow: preloaded into the CLI under test, which can be a detached supervisor whose dispatcher exits by design; the deadline bounds it
 }
 
 const once = {};
@@ -349,7 +349,7 @@ function before(name, args, raw = args) {
   if (env.HOOK_SUPERVISOR_LOCK_AFTER && name === 'mkdirSync' && inState(target) && /^lock\.\d+\.[0-9a-f]+\.new$/.test(path.basename(String(target)))
     && path.basename(process.argv[1] || '') === 'spawn-monitor.js') {
     const end = Date.now() + 300000;
-    while (!real.existsSync(env.HOOK_SUPERVISOR_LOCK_AFTER) && Date.now() < end) sleep(10);
+    while (!real.existsSync(env.HOOK_SUPERVISOR_LOCK_AFTER) && Date.now() < end) sleep(10); // spin-allow: preloaded into the CLI under test, which can be a detached supervisor whose dispatcher exits by design; the deadline bounds it
   }
   // HOOK_JITTER_MS=MS: a random pause of up to MS before each call on the state.
   if (env.HOOK_JITTER_MS && (inState(target) || inState(args[1]))) sleep(Math.floor(Math.random() * Number(env.HOOK_JITTER_MS)));

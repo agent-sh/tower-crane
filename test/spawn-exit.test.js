@@ -241,10 +241,11 @@ const sleep = () => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0,
 process.once('exit', () => {
   fs.writeFileSync(${JSON.stringify(marked)}, '');
   const deadline = Date.now() + 30000; // wait-allow: hold an exit listener alive to exercise native-process teardown
-  while (Date.now() < deadline) sleep();
+  while (Date.now() < deadline && process.ppid === parent) sleep();
 });
+const parent = process.ppid;
 const deadline = Date.now() + 300000;
-while (!fs.existsSync(${JSON.stringify(start)}) && Date.now() < deadline) sleep();
+while (!fs.existsSync(${JSON.stringify(start)}) && Date.now() < deadline && process.ppid === parent) sleep();
 process.exit(0);
 `);
   const child = cp.spawn(process.execPath, ['--require', HOOKS, monitor], {
@@ -343,9 +344,12 @@ const fs = require('node:fs');
 const cp = require('node:child_process');
 const [bin, files] = [process.argv[2], JSON.parse(process.argv[3])];
 cp.execFileSync(process.execPath, [bin, 'claim', process.env.TOWER_CRANE_TASK], { env: fakeAgentEnv(process.env) });
+const parent = process.ppid;
+const deadline = Date.now() + 300000;
+const reported = (file) => fs.existsSync(file) || Date.now() > deadline || process.ppid !== parent;
 const start = (file, script, options) => {
   cp.spawn(process.execPath, ['-e', script, file], { windowsHide: true, ...options }).unref();
-  while (!fs.existsSync(file)) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20); // wait-allow: the harness exits only once its children run
+  while (!reported(file)) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20); // wait-allow: the harness exits only once its children run // spin-allow: reported() checks the deadline and the parent
 };
 if (${!!nested}) {
   const env = { ...process.env, TOWER_CRANE_AGENT: 'orchestrator' };
@@ -355,7 +359,7 @@ if (${!!nested}) {
   } else {
     cp.execFileSync(process.execPath, [bin, 'spawn', '--role', 'medium', '--task', 'T2', '--json'], { env: fakeAgentEnv(env), stdio: ['ignore', 'ignore', 'inherit'] });
   }
-  while (!fs.existsSync(files.nested)) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20); // wait-allow: the nested harness reports its pid
+  while (!reported(files.nested)) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20); // wait-allow: the nested harness reports its pid // spin-allow: reported() checks the deadline and the parent
 }
 if (${holder}) start(files.holder, ${JSON.stringify(child(false))}, { detached: true, stdio: ['ignore', 'inherit', 'inherit'] });
 if (${member}) start(files.member, ${JSON.stringify(child(true))}, { stdio: ['ignore', 'inherit', 'inherit'] });

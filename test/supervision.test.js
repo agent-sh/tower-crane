@@ -80,7 +80,8 @@ ${publishBarrier ? `if (attempts.length === 2) {
   fs.writeFileSync = (target, data) => {
     const fd = fs.openSync(target, 'w');
     write(file + '.writing', '');
-    while (!fs.existsSync(file + '.publish')) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+    const parent = process.ppid, deadline = Date.now() + 300000;
+    while (!fs.existsSync(file + '.publish') && process.ppid === parent && Date.now() < deadline) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
     try { write(fd, data); } finally { fs.closeSync(fd); }
   };
 }` : ''}
@@ -88,8 +89,7 @@ const pending = file + '.next-' + process.pid;
 fs.writeFileSync(pending, JSON.stringify(attempts));
 fs.renameSync(pending, file);
 ${sessionReceipt ? "console.log(JSON.stringify({ type: 'thread.started', thread_id: 'supervised-session' }));" : ''}
-${busy ? `cp.spawn(process.execPath, ['-e', ${JSON.stringify("const fs = require('node:fs'); fs.writeFileSync(process.argv[1], 'ready'); while (!fs.existsSync(process.argv[2])) { Math.sqrt(Math.random()); }")},
-  file + '.busy', file + '.finish'], { stdio: 'ignore' });` : ''}
+${busy ? `cp.spawn(process.execPath, [${JSON.stringify(path.join(__dirname, 'fixtures', 'busy-child.js'))}, file + '.busy', file + '.finish'], { stdio: 'ignore' });` : ''}
 const finish = () => {
   if (attempts.length <= ${failures}) {
     ${records ? `for (const record of ${JSON.stringify(records)}) console.log(JSON.stringify(record)); process.exit(1);`
@@ -423,7 +423,8 @@ for (const [launch, launchEnv] of [['platform launch', {}], ['launch handshake',
     } else {
       if (task === 'T1' && retry === 1) {
         fs.writeFileSync(${JSON.stringify(retryReady)}, '');
-        while (!fs.existsSync(${JSON.stringify(`${retryReady}.go`)})) Atomics.wait(delay, 0, 0, 10);
+        const parent = process.ppid, deadline = Date.now() + 300000;
+        while (!fs.existsSync(${JSON.stringify(`${retryReady}.go`)}) && process.ppid === parent && Date.now() < deadline) Atomics.wait(delay, 0, 0, 10);
       }
       console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'last report from ' + agent } }));
     }

@@ -109,7 +109,7 @@ if (process.env.TOWER_CRANE_VIA === 'broker' && process.argv.includes('late')) {
     // broker is running it.
     const background = `
 const { fakeAgentEnv } = require(${JSON.stringify(path.join(__dirname, 'agent-env.js'))});
-const cp=require("child_process"),f=require("fs");cp.spawn(process.execPath,${JSON.stringify([BIN, 'task', 'note', 'T1', 'late'])},{ env: fakeAgentEnv(process.env),detached:true,stdio:"ignore"}).unref();const end=Date.now()+300000;while(!f.existsSync(${JSON.stringify(pidFile)})&&Date.now()<end)Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,50)`;
+const cp=require("child_process"),f=require("fs");cp.spawn(process.execPath,${JSON.stringify([BIN, 'task', 'note', 'T1', 'late'])},{ env: fakeAgentEnv(process.env),detached:true,stdio:"ignore"}).unref();const end=Date.now()+300000,parent=process.ppid;while(!f.existsSync(${JSON.stringify(pidFile)})&&Date.now()<end&&process.ppid===parent)Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,50)`;
     let pid = null;
     t.after(() => {
       if (pid && detachedAlive({ pid })) killPid(pid, 'SIGKILL');

@@ -9,6 +9,8 @@ const { pathToFileURL } = require('node:url');
 const TOML = require('../../lib/toml');
 const { writeAtomic } = require('../atomic-file');
 const BIN = path.join(__dirname, '..', '..', 'bin', 'tower-crane.js');
+// Its waits end once the process that started it is gone.
+const launcher = process.ppid;
 
 async function main() {
   const harness = process.env.MESSAGE_HARNESS;
@@ -51,6 +53,7 @@ async function main() {
   const deadline = Date.now() + 300000;
   while (!fs.existsSync(process.env.MESSAGE_READY + '.go')) {
     if (Date.now() >= deadline) throw new Error('message test never released harness');
+    if (process.ppid !== launcher) process.exit(1);
     await new Promise((resolve) => setTimeout(resolve, 10)); // wait-allow: probe cadence only; the release signal and hung-test timeout bound this fixture
   }
   if (harness === 'claude' && process.env.MESSAGE_HEADLESS) {
@@ -96,6 +99,7 @@ async function main() {
     const stopDeadline = Date.now() + 300000;
     while (!fs.existsSync(process.env.MESSAGE_READY + '.stop.go')) {
       if (Date.now() >= stopDeadline) throw new Error('stop test never released harness');
+      if (process.ppid !== launcher) process.exit(1);
       await new Promise((resolve) => setTimeout(resolve, 10)); // wait-allow: probe cadence only; the release signal and hung-test timeout bound this fixture
     }
     const held = hook('Stop');
@@ -118,6 +122,7 @@ async function main() {
     const stopDeadline = Date.now() + 300000;
     while (!fs.existsSync(process.env.MESSAGE_READY + '.stop.go')) {
       if (Date.now() >= stopDeadline) throw new Error('stop test never released harness');
+      if (process.ppid !== launcher) process.exit(1);
       await new Promise((resolve) => setTimeout(resolve, 10)); // wait-allow: probe cadence only; the release signal and hung-test timeout bound this fixture
     }
     await handlers.agent_end({ messages: [{ role: 'assistant', content: [{ type: 'text', text: 'last report from pi' }] }] });
@@ -152,6 +157,7 @@ async function main() {
     const stopDeadline = Date.now() + 300000;
     while (!fs.existsSync(process.env.MESSAGE_READY + '.stop.go')) {
       if (Date.now() >= stopDeadline) throw new Error('stop test never released harness');
+      if (process.ppid !== launcher) process.exit(1);
       await new Promise((resolve) => setTimeout(resolve, 10)); // wait-allow: probe cadence only; the release signal and hung-test timeout bound this fixture
     }
     await idle('parent');

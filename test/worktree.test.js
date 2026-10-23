@@ -401,7 +401,7 @@ test('a surviving post-checkout child cannot write into a replacement worktree',
 const fs = require('node:fs');
 fs.writeFileSync(${JSON.stringify(paused)}, '');
 const end = Date.now() + 300000;
-while (!fs.existsSync(${JSON.stringify(paused + '.go')}) && Date.now() < end) {
+while (!fs.existsSync(${JSON.stringify(paused + '.go')}) && Date.now() < end) { // spin-allow: the test orphans this hook on purpose and reads what it writes after the release; the deadline bounds it
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
 }
 fs.writeFileSync('orphan.txt', 'original Git child');

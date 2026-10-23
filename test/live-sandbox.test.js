@@ -237,7 +237,7 @@ function engineCheckout(h, dir) {
   const [out, ready, retired] = ['seen.json', 'ready', 'retired'].map((n) => path.join(dir, n));
   // The command marks itself started and waits for the test to retire the copy.
   const script = `const fs=require("fs"),cp=require("child_process");fs.writeFileSync(${JSON.stringify(ready)},"");`
-    + `const until=Date.now()+100000;while(!fs.existsSync(${JSON.stringify(retired)})&&Date.now()<until)cp.spawnSync("sleep",["1"]);` // wait-allow: runs in the sandbox, where test/signals.js is hidden; the test writes the file within a second of ready
+    + `const until=Date.now()+100000,parent=process.ppid;while(!fs.existsSync(${JSON.stringify(retired)})&&Date.now()<until&&process.ppid===parent)cp.spawnSync("sleep",["1"]);` // wait-allow: runs in the sandbox, where test/signals.js is hidden; the test writes the file within a second of ready
     + `const run=(a)=>{const r=cp.spawnSync("tower-crane",a,{encoding:"utf8"});return{code:r.status,stdout:r.stdout,stderr:r.stderr,error:r.error&&r.error.code}};`
     + `fs.writeFileSync(${JSON.stringify(out)},JSON.stringify({show:run(["task","show","T1","--json"]),note:run(["task","note","T1","after-retirement"])}))`;
   // spawn from the copy, with the hooks h.runAsync adds, and without --wait:
