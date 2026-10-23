@@ -792,10 +792,13 @@ test('incremental CLI rejects fragment-only and test-only defects through direct
         fs.writeFileSync(path.join(h.repo, 'changelog.d/probe.md'), '- Valid fragment.\n');
         fs.writeFileSync(path.join(h.repo, 'test/probe.test.js'), "require('node:test')('probe', () => {});\n");
         fs.writeFileSync(path.join(h.repo, 'test/package.test.js'), "console.log('package suite');\n");
-        fs.writeFileSync(path.join(h.repo, 'test/shared-files.test.js'), `const { fragments } = require(${JSON.stringify(path.join(ROOT, 'scripts/changelog.js'))});
+        fs.writeFileSync(path.join(h.repo, 'test/shared-files.test.js'), `const { test } = require('node:test');
+const { fragments } = require(${JSON.stringify(path.join(ROOT, 'scripts/changelog.js'))});
 const { checkTestWaits } = require(${JSON.stringify(path.join(ROOT, 'scripts/test-waits.js'))});
-fragments(process.cwd());
-checkTestWaits(process.cwd());
+test('directory reader contracts', () => {
+  fragments(process.cwd());
+  checkTestWaits(process.cwd());
+});
 `);
         h.git(['add', '.']);
         h.git(['commit', '-qm', 'directory reader contracts']);
