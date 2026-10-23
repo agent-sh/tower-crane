@@ -58,7 +58,9 @@ map['**/*.json'] = new Set(['test/model-config.test.js']);
 map['test/fixtures/npm-pack/**'] = new Set(['test/package.test.js']);
 // npm discovers packed markdown at runtime, including files the test never names.
 map['**/*.md'] = new Set(['test/package.test.js']);
-map['docs/**'] = new Set(['test/ci-required.test.js', 'test/shared-files.test.js']);
+const docsChecks = ['test/ci-required.test.js', 'test/docs.test.js', 'test/shared-files.test.js'];
+map['docs/**'] = new Set(docsChecks);
+map['scripts/cli-reference.md'] = new Set(docsChecks);
 // Unknown executable coverage remains unmapped and therefore runs the full suite.
 const pinned = Object.fromEntries(Object.entries(map).filter(([p, tests]) => tests.size || p === '**/*.md').sort(([a], [b]) => a.localeCompare(b)).map(([p, tests]) => [p, [...tests].sort()]));
 process.stdout.write(`{\n${Object.entries(pinned).map(([source, tests]) => `  ${JSON.stringify(source)}: ${JSON.stringify(tests)}`).join(',\n')}\n}\n`);

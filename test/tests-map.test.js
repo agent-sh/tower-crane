@@ -729,7 +729,7 @@ test('a resubmission touching a by-name gate runs the pinned full command', (t) 
 
 test('incremental CLI contract covers anchors, seed trust and empty head receipts', () => {
   const cli = fs.readFileSync(path.join(ROOT, 'docs/cli.md'), 'utf8');
-  const state = fs.readFileSync(path.join(ROOT, 'docs/state.md'), 'utf8');
+  const state = fs.readFileSync(path.join(ROOT, 'docs/state/tasks.md'), 'utf8');
   for (const text of [cli, state]) {
     assert.ok(text.includes('incremental_from'));
     assert.match(text, /empty incremental selections/);
@@ -737,11 +737,30 @@ test('incremental CLI contract covers anchors, seed trust and empty head receipt
   }
   assert.match(cli, /incremental.*earlier.*full pass/);
   assert.match(cli, /shared.*runtime.*full/i);
+  const publish = fs.readFileSync(path.join(ROOT, 'docs/state/ci.md'), 'utf8');
+  assert.match(publish, /full_suite.*incremental.*earlier full pass/);
+  assert.ok(fs.readFileSync(path.join(ROOT, 'scripts/cli-reference.md'), 'utf8').includes('incremental_from'));
 });
 
-test('repository seed maps docs contract checks from docs paths', () => {
+test('repository seed maps docs contract checks from docs and CLI source paths', () => {
+  const { select } = require('../lib/tests-incremental');
+  const { testMatcher, isSupportFile, globToRegExp } = require('../lib/gates/tests');
+  const matcher = testMatcher({ base: 'main' });
+  const isTest = file => matcher.match(file) && !isSupportFile(file);
+  const available = new Set(['test', 'test/gates'].flatMap(dir => fs.readdirSync(path.join(ROOT, dir))
+    .map(file => `${dir}/${file}`)).filter(isTest));
   const seed = require('../tools/tests-map.json');
-  assert.deepEqual(seed['docs/**'], ['test/ci-required.test.js', 'test/shared-files.test.js']);
+  const checks = ['test/ci-required.test.js', 'test/docs.test.js', 'test/shared-files.test.js'];
+  assert.deepEqual(seed['docs/**'], checks);
+  assert.deepEqual(seed['scripts/cli-reference.md'], checks);
+  for (const file of ['docs/state.md', 'docs/cli.md', 'scripts/cli-reference.md',
+    ...['ci', 'containment', 'decisions', 'gates', 'review', 'stacks', 'storage', 'tasks']
+      .map(area => `docs/state/${area}.md`)]) for (const status of ['A', 'M', 'D']) {
+    const selection = select(seed, [{ path: file, status }], isTest, available,
+      globToRegExp, 'node test/run.js {tests}');
+    assert.equal(selection.mode, 'incremental', `${file}: ${status}`);
+    for (const suite of checks) assert.ok(selection.tests.includes(suite), `${file}: ${status} needs ${suite}`);
+  }
 });
 
 test('incremental seed selects directory readers for every delta status and nested path', () => {
