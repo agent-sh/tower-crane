@@ -435,8 +435,8 @@ rework, while skipping submission automation and capacity refill.
 exits 1, and returns `review_failed: true`, the failed `review` and the open
 `inbox` item in JSON, leaving the task submitted. A new head, a new revision
 or `accept ID --retry-review` (orchestrator or owner) allows another review.
-A review waiver cannot clear a failed verdict, including a PR-body false
-claim. Combining `--retry-review` with `--waive review` does not bypass that
+A review waiver cannot clear a failed verdict containing a blocker, including
+a PR-body false claim. Title-only findings remain nonblocking follow-ups. Combining `--retry-review` with `--waive review` does not bypass that
 refusal. This is checked again after software gates and under the acceptance
 lock before any waiver is recorded.
 A real `spawn --role review` still sends a current code FAIL to full-findings

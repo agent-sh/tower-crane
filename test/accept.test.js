@@ -422,6 +422,7 @@ for (const row of [
   { name: 'earlier no-verdict exit', out: reviewerDown },
   { name: 'owner waiver of live review', agent: 'owner' },
   { name: 'false PR-body claim', out: reviewerDown, kind: 'false-claim', path: 'PR body' },
+  { name: 'title follow-up alongside a body blocker', out: reviewerDown, kind: 'false-claim', path: 'PR body', title: true },
   { name: 'false changelog claim', out: reviewerDown, kind: 'false-claim', path: 'changelog.d/T1.md' },
   { name: 'mixed waivers', out: reviewerDown, agent: 'owner', extra: ['--waive', 'clean'] },
   { name: 'retry combined with waiver', out: reviewerDown, extra: ['--retry-review'] },
@@ -435,7 +436,8 @@ for (const row of [
     const recordFailure = () => h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', h.sha,
       '--agent', 'failing-reviewer', '--summary', '1 blocking finding: incorrect behavior',
       '--findings', JSON.stringify([{ kind: row.kind || 'defect', path: row.path || 'value.js',
-        claim: 'Incorrect behavior or false claim' }])]);
+        claim: 'Incorrect behavior or false claim' },
+      ...(row.title ? [{ kind: 'defect', path: 'PR title', claim: 'Overstated title' }] : [])])]);
     const args = ['accept', 'T1', '--waive', 'review', '--reason', 'reviewer unavailable',
       '--agent', row.agent || 'orchestrator', '--json', ...(row.extra || [])];
     let result;
@@ -495,6 +497,17 @@ while (!fs.existsSync(process.argv[3])) {
     assert.ok(!events(h).some((e) => e.cmd === 'accept'));
   });
 }
+
+test('a title-only follow-up does not block an authorized review waiver', (t) => {
+  const h = submitted(t);
+  reviewerDown(h);
+  h.reviewer('T1', 'title-reviewer', h.sha);
+  h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', h.sha, '--agent', 'title-reviewer',
+    '--findings', JSON.stringify([{ kind: 'defect', path: 'PR title', claim: 'Overstated title' }])]);
+  h.ok(['accept', 'T1', '--waive', 'review', '--reason', 'Only a title follow-up', '--agent', 'orchestrator']);
+  assert.equal(h.readState('tasks.json').tasks[0].status, 'accepted');
+  assert.equal(reviewerSpawns(h).length, 2, 'no additional full review for the title');
+});
 
 test('rework sends the task back with the reason in the brief, and it can be claimed again', (t) => {
   const h = submitted(t);
