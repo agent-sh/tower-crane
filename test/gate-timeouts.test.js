@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { makeRepo } = require('./helpers');
+const { makeRepo, TMP_ROOT } = require('./helpers');
 const { shellQuote } = require('../lib/gates/common');
 
 test('timeout validation and runner interruption formats', () => {
@@ -94,10 +94,27 @@ setTimeout(() => process.exit(0), 10000); // wait-allow: the gate must time out 
 
 // inbox reads PRs with synchronous gh calls while its base CI read runs in the background, so a
 // timer can come due while the event loop is blocked, before the child's exit or output is seen.
-test('a timeout that comes due during a blocked event loop stops only a child with nothing to show', async () => {
+test('a timeout that comes due during a blocked event loop stops only a child with nothing to show', async (t) => {
   const C = require('../lib/gates/common');
-  const run = (script) => C.exec({ exec: C.treeExec }, process.execPath, ['-e', script], { timeout: 300 }); // wait-allow: the gate timeout itself is under test
-  const block = () => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1500); // wait-allow: blocks the event loop past the gate timeout, the condition under test
+  const dir = fs.mkdtempSync(path.join(TMP_ROOT, 'blocked-loop-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  let started;
+  const run = (script) => {
+    started = path.join(dir, String(fs.readdirSync(dir).length));
+    const marked = `require('fs').writeFileSync(${JSON.stringify(started)}, ''); ${script}`;
+    return C.exec({ exec: C.treeExec }, process.execPath, ['-e', marked], { timeout: 300 }); // wait-allow: the gate timeout itself is under test
+  };
+  const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); // wait-allow: blocks the event loop, the condition under test
+  // A loaded host can take longer than the block to start node, and a child that has not written
+  // yet is rightly stopped, so the block counts from the child's start.
+  const block = () => {
+    const deadline = Date.now() + 60000;
+    while (!fs.existsSync(started)) {
+      assert.ok(Date.now() < deadline, 'the child starts');
+      pause(10);
+    }
+    pause(1500);
+  };
   const cases = [
     ['exited', "process.stdout.write('done')", (r) => assert.equal(r.stdout, 'done')],
     // More than a pipe buffer: the child cannot exit until the parent reads.
