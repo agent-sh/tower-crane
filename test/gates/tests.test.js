@@ -639,7 +639,7 @@ test('a failing test reruns once: one that then passes is flaky with both runs, 
     ['fails twice', { times: 2 }, { ok: false, flaky: false, runs: 2, counted: 1, rerun: ['test/flaky.test.js'], note: /Rerun: reran test\/flaky\.test\.js once in the same checkout: exit 1; the failure stands\. Failing on the rerun: sometimes fails\./ }],
     ['fails once under the full suite command', { times: 1, head: 'suite' }, { ok: true, flaky: true, runs: 2, counted: 2, rerun: [], note: unnamed }],
     // The first part's flaky failure stops the chain, so only a whole rerun reaches the broken part.
-    ['fails once before a part that always fails', { times: 1, head: 'chain' }, { ok: false, flaky: false, runs: 2, counted: 0, broken: 1, rerun: [], note: new RegExp(`${unnamed.source}: exit 1; the failure stands\\. Failing on the rerun: test/broken\\.test\\.js`) }],
+    ['fails once before a part that always fails', { times: 1, head: 'chain' }, { ok: false, flaky: false, runs: 2, counted: 0, broken: 1, rerun: [], note: new RegExp(`${unnamed.source}: exit 1; the failure stands\\. Failing on the rerun: test[\\\\/]broken\\.test\\.js`) }],
     ['fails once with no file selector', { times: 1, head: 'suite', selector: false }, { ok: true, flaky: true, runs: 2, counted: 2, rerun: [], note: whole('the pinned runner has no file selector \\(gates\\.tests_proof_cmd with \\{tests\\}\\)') }],
     // A failure printed before the kept tail would go unnamed, so the whole command reruns.
     ['fails once with its output cut', { times: 1, cut: true }, { ok: true, flaky: true, runs: 2, counted: 2, rerun: [], note: whole("the first run's output was cut to its last \\d+ characters") }],
