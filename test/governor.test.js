@@ -246,8 +246,11 @@ test('the governor key lists in the contract and the --governor help name every 
   const variants = [
     ['docs/state/storage.md', [...listed.matchAll(/`([a-z_]+)`/g)].map((m) => m[1])],
     ...[['SETTINGS', SETTINGS.governor.help], ...['init', 'project set'].map((name) =>
-      [name, COMMANDS.find((command) => command.name === name).flags.governor.help])].map(([name, help]) =>
-      [name, /admissions \{([^}]*)\}/.exec(help)[1].split(', ')]),
+      [name, COMMANDS.find((command) => command.name === name).flags.governor.help])].map(([name, help]) => {
+      const schema = /\{([^}]*)\}/.exec(help);
+      assert.ok(schema, `${name}: missing governor schema`);
+      return [name, schema[1].split(', ')];
+    }),
   ];
   for (const [name, listedKeys] of variants) assert.deepEqual(listedKeys.sort(), keys, name);
 });
