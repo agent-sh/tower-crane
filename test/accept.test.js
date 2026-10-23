@@ -8,6 +8,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { makeRepo, cachedFixture } = require('./helpers');
 const { gateFixture, gateEvidence } = require('./gate-helpers');
+const Actions = require('../lib/actions');
+const Reviewer = require('../lib/reviewer');
 
 // A submitted task, built once per process for each submit shape and kind.
 function submitted(t, extra = [], kind = 'code') {
@@ -173,6 +175,78 @@ test('other kinds need only a review from another agent', async (t) => {
   await reviewerExited(h);
   ev(h, 'review', 'r-1');
   acceptAfterReview(h);
+});
+
+for (const retry of ['unchanged', 'override', 'head', 'revision']) {
+  test(`accept does not repeat a failed review without a new input: ${retry}`, async (t) => {
+    const h = submitted(t, [], 'docs');
+    silentReviewer(h);
+    assert.equal(h.json(['accept', 'T1', '--agent', 'orchestrator']).review_pending, true);
+    await reviewerExited(h);
+    const reviewer = reviewerSpawns(h)[0].detail.agent;
+    h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', h.sha, '--agent', reviewer,
+      '--summary', '1 blocker: value.md:1 - missing behavior',
+      '--findings', JSON.stringify([{ kind: 'defect', path: 'value.md', claim: 'missing behavior' }])]);
+    const failed = h.run(['accept', 'T1', '--agent', 'orchestrator', '--json']);
+    assert.equal(failed.code, 1, failed.stderr);
+    const result = JSON.parse(failed.stdout);
+    assert.equal(result.review_failed, true);
+    assert.equal(result.status, 'submitted');
+    assert.equal(result.review.agent, reviewer);
+    assert.equal(result.inbox.id, 'review_failed:T1');
+    assert.deepEqual(result.inbox.action.argv, ['rework', '--from-review', 'T1']);
+    assert.equal(reviewerSpawns(h).length, 1, 'two accepts start one review');
+    if (retry === 'unchanged') return;
+    if (retry === 'head') {
+      fs.writeFileSync(path.join(h.repo, 'retry.md'), 'Changed implementation.\n');
+      h.git(['add', '.']);
+      h.git(['commit', '-qm', 'Fix behavior']);
+      h.sha = h.git(['rev-parse', 'HEAD']);
+      h.ok(['submit', 'T1', '--sha', h.sha, '--agent', 'w-1']);
+    } else if (retry === 'revision') {
+      h.ok(['task', 'update', 'T1', '--acceptance', 'it works with retries', '--agent', 'orchestrator']);
+    } else {
+      const denied = h.run(['accept', 'T1', '--retry-review', '--agent', 'w-1']);
+      assert.equal(denied.code, 1);
+      assert.match(denied.stderr, /operational|orchestrator/);
+      assert.equal(reviewerSpawns(h).length, 1);
+    }
+    assert.equal(h.json(['accept', 'T1', '--agent', 'orchestrator',
+      ...(retry === 'override' ? ['--retry-review'] : [])]).review_pending, true);
+    assert.equal(reviewerSpawns(h).length, 2);
+    if (retry === 'override') assert.equal(reviewerSpawns(h).at(-1).detail.review_retry.sha, h.sha);
+    await reviewerExited(h);
+    if (retry === 'override') {
+      h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
+      const task = h.json(['task', 'show', 'T1']);
+      assert.equal(task.status, 'submitted', 'automation must let the explicit retry finish without replaying the old failure');
+      assert.equal(reviewerSpawns(h).length, 2);
+      const held = h.json(['inbox', '--agent', 'orchestrator']).items.find((i) => i.kind === 'review_held');
+      assert.deepEqual(held.action.argv, ['accept', 'T1', '--retry-review']);
+    }
+  });
+}
+
+test('an explicit retry snapshot survives governor deferral only at its failed head and revision', () => {
+  const sha = 'a'.repeat(40);
+  const review = { type: 'review', ok: false, sha, revision: 1, agent: 'owner', summary: 'Missing behavior' };
+  const task = { id: 'T1', status: 'submitted', sha, revision: 1, evidence: [review] };
+  const retry = { sha, revision: 1, review };
+  for (const row of [
+    { name: 'deferred explicit retry', cmd: 'review dispatch deferred', valid: true },
+    { name: 'started explicit retry', cmd: 'spawn', valid: true },
+    { name: 'updated explicit retry context', cmd: 'review dispatch context', valid: true },
+    { name: 'new head', cmd: 'review dispatch deferred', sha: 'b'.repeat(40), valid: false },
+    { name: 'new revision', cmd: 'review dispatch deferred', revision: 2, valid: false },
+    { name: 'new verdict', cmd: 'review dispatch deferred', review: { ...review, summary: 'Different failure' }, valid: false },
+    { name: 'ordinary deferred review', cmd: 'review dispatch deferred', ordinary: true, valid: false },
+  ]) {
+    const current = { ...task, sha: row.sha || sha, revision: row.revision || 1, evidence: [row.review || review] };
+    const st = { tasks: { tasks: [current] }, events: [{ task: task.id, cmd: row.cmd,
+      detail: { role: 'reviewer', sha, revision: 1, ...(row.ordinary ? {} : { review_retry: retry }) } }] };
+    assert.equal(Actions.pendingRetry(st, current, current.evidence[0]), row.valid, row.name);
+    assert.equal(Reviewer.deferredDispatches(st).length, row.cmd === 'review dispatch deferred' && row.valid ? 1 : 0, row.name);
+  }
 });
 
 test('review evidence counts only from a reviewer spawned for that head and revision, or the owner', async (t) => {
