@@ -157,8 +157,8 @@ test('the claimant resubmits a newer head and its gates need evidence at that he
   const before = h.json(['task', 'show', 'T1']);
   assert.equal(before.gates.ok, true);
 
-  fs.appendFileSync(path.join(h.repo, 'README.md'), 'The newer change.\n');
-  h.git(['add', 'README.md']);
+  fs.appendFileSync(path.join(h.repo, 'value.js'), '\n// The newer change.\n');
+  h.git(['add', 'value.js']);
   h.git(['commit', '-q', '-m', 'newer change']);
   const newSha = h.git(['rev-parse', 'HEAD']);
   const submitted = h.json(['submit', 'T1', '--sha', newSha.toUpperCase(), '--branch', 'fixture-change', '--pr', '7',

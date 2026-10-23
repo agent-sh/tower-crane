@@ -59,7 +59,7 @@ test('status reports when no test or cleanup command is pinned', (t) => {
 });
 
 test('only the orchestrator or the explicit owner can set or clear gate commands at init and project set', (t) => {
-  for (const flag of ['--tests-cmd', '--clean-cmd', '--tests-proof-cmd']) {
+  for (const flag of ['--tests-cmd', '--clean-cmd', '--docs-cmd', '--tests-proof-cmd']) {
     const h = makeRepo(t);
     const init = h.run(['init', '--name', 'demo', '--goal', 'work', flag, 'node check.js', '--agent', 'worker']);
     assert.equal(init.code, 1, init.stderr);

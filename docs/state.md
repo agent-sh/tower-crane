@@ -1622,17 +1622,35 @@ A gate that runs a command on this host (`tests`, `clean`, the [final review](#f
 
 When software gates pass and no review has been attempted at the current head and revision, `accept` dispatches a reviewer and exits 0 with `review_pending: true` and its agent name in JSON; the task stays submitted. A repeated accept reuses a live review dispatch. Call accept again after review evidence arrives. A current independent FAIL makes `accept` and a real `spawn --role review` run `rework --from-review` and exit 1 before software gates or another review dispatch, except the PR-body correction path below. If the linked findings cannot be fetched or matched, they refuse and keep the submission unchanged. `spawn --role review` otherwise refuses until all software gates pass; `--dry-run` checks them for a submitted task without reworking it. For an unsubmitted task a dry run previews the fallback command only, and cannot dispatch a review.
 
-Failed review evidence may include `findings`, a non-empty array listing every blocker as `{ "kind": "...", "path": "...", "claim": "..." }`, with non-blank strings and no other fields. Only when every finding has `kind: "false-claim"` and `path: "PR body"`, `path: "CHANGELOG.md"` or a single Markdown fragment under `changelog.d/` does it qualify for a light check. The reviewer uses this kind only when a prose correction resolves the finding without changing behavior or a contract. Missing metadata, other kinds, other locations and mixed blockers keep the full review path. In particular, `docs/cli.md` and `docs/state.md` claims remain contract blockers.
+Failed review evidence lists every blocker in `--findings` as
+`{kind, path, claim}`, with optional positive `line` and `end_line`. A finding
+classified as `nit`, `doc-fix` or `title-body-fix` is eligible for a small fix
+round; substantive docs findings remain `important`. PR-body false claims keep
+an automatic repair path: the worker corrects the body, the engine verifies the
+edit and unchanged checkout, then carries the reviewed code without another
+reviewer or test run. `rework --from-review` refuses body-only findings so the
+repair can stay at the same head. An ordinary `rework --reason` is still available
+when the correction requires code changes.
 
 When every finding is in the PR body, automation dispatches a worker restricted to editing that body. The task stays submitted at the same revision and keeps its SHA and software evidence; false claims still block until fresh independent review evidence passes. `rework --from-review` refuses with correction instructions, without changing state. Submissions without a linked PR and recorded branch retain the explicit body edit and `accept` path.
 
-PR-body repair uses the task worker rung and the supported worker session resume path. Its `spawn` event carries `body_fix` with the failed review snapshot, submitted head and revision, PR, branch, original body hash, `title` and `base`. It takes a worker reservation, not a claim, so the task stays submitted. Status shows `fixing PR body` while its repair or light check runs. The repair prompt replaces the ordinary worker workflow and carries its repair instructions once. The broker refuses commits pushed through it, claim and submit calls, and PR writes other than body edits. On exit, automation reads the current body, PR head, title and base and checks the local head and tracked checkout files before calling the light `accept` path. Untracked files, including a body file written for `gh pr edit --body-file`, do not block the repair. The base may match either the dispatch snapshot or the current expected target from `stack.targetBase`, allowing the engine or GitHub to retarget a dependent PR after its parent merges. This comparison uses state read after the GitHub request, so a concurrent parent merge counts. A moved head, changed tracked file, title or unexpected base enters normal rework, including for an unsandboxed harness.
+PR-body repair uses the task worker rung and its supported session resume.
+The worker's `spawn` event carries `body_fix` with the failed review, submitted
+head and revision, PR, branch, original body digest, title and base. The broker
+permits reading the PR and editing its body, and refuses claim, renew, release,
+submit, push, PR creation, title and base edits. Repair leaves the task submitted
+at its existing revision. The engine reads the body after exit and verifies the
+head, tracked checkout, title and base stayed fixed, allowing an engine stack
+retarget. A verified edit calls acceptance with `bodyRecheck` as its correction
+proof and appends carried review evidence; it dispatches no light reviewer.
+A changed checkout, remote head, title or unrelated base requires ordinary
+rework. An untracked scratch file does not count as a tracked edit.
 
-Light checks use the ordinary reviewer exit policy. A retryable crash or outage, or a missing receipt after the monitor window expires, requests a replacement check at the same head without another body edit. A monitor that can still record its exit remains pending. A clean exit without a verdict or the three-crash reviewer cap holds dispatch and exposes `review_held`, even while the original body-only failure is the latest review evidence. Status stops showing `fixing PR body` for an exited, held reviewer. The item's `accept ID` action retries the corrected body's check after the cause is handled. Exits without a verdict do not count toward the two body-check failure limit.
-
-The light reviewer spawn carries `body_recheck`, and its evidence records `body_recheck: true`. Two consecutive failed automatic body-only checks at the current head and revision stop further automatic repairs, leaving `review_body_stuck` in inbox with the latest summary, structured blockers and a `correction` hint to edit the body before running its `accept ID` action. The initial full review failure does not count, so two repair rounds fit. A fixer that makes no body edit also stops and supplies its reason, except an exit marked `availability_failure` gets one further repair dispatch with `body_fix.availability_retry: true`. Another exit without an edit stops; an outage after a successful edit still allows the light check. The `review body stuck` event preserves that stop across reaction replays and restarts. A passing verdict clears the stop for that submission. The orchestrator can correct the body and request another check with explicit `accept`; it can use ordinary `rework --reason` for code changes.
-
-A prose-only failure that names `CHANGELOG.md` or a `changelog.d/` fragment needs a new head, so it goes through `rework --from-review` like any failure; the `rework` event records `from_review: true`. When the next revision is submitted with no eligible review yet, its review uses the latest eligible failed review of the previous revision, provided that `from_review` rework moved the task from it at the reviewed SHA. The light path then requires that the diff since that review changes only its named changelog fragments. A submitter may also resubmit a changelog-only head at the same revision before rework. The new head needs software gates as usual. Other changes, an unreadable correction diff, any other revision change, ineligible evidence and a later passing review restore full review. Prose-only failures do not escalate worker or reviewer rungs. Introduced security or data-loss defects still block.
+Changelog corrections need a new head. After review rework, a docs-only or
+named small fix round carries the review, tests and CI evidence. Substantive
+findings and wider code changes retain ordinary review. An explicit reviewer
+dispatch can still narrow its packet to prior blockers; carryover does not queue
+that dispatch.
 
 Unfinished CI blocks dispatch without requiring rework. The orchestrator watches it through a gate runner, then re-runs `check ci` when it completes before accepting again. Reviewers judge code and acceptance; missing or unfinished CI evidence is reported to the orchestrator rather than recorded as a failed code review. Review policy and prices are operational: the orchestrator or the owner changes them, and a worker asks the orchestrator.
 
@@ -1670,7 +1688,73 @@ Local CI adds `receipt` to its evidence and event detail. Both copies must match
 
 With `ci.local` configured, an ok CI gate needs a local receipt with exit 0, no signal, nonnegative duration, the resolved argv and timeout, and a matching successful command receipt. The receipt's `variant` is `default`, `kind:KIND` or `task:ID`, matching the selected default, kind mapping or task override. A different or missing variant fails even when argv and timeout are identical. The full head SHA must match the submitted head. The tree hash and source digest must match the head merged with the selected base, or with the receipt's `base_sha` while the selected base still contains it: a receipt stays valid on its pinned merged tree while the base moves forward. A selected base that no longer contains `base_sha`, such as a force-pushed one, invalidates it with a reason that names the checked base. The latest audited evidence is checked by acceptance, merge and task gate reports. A different head fails even if the tree is identical. A changed merge result at an unchanged head fails acceptance and task gate reports only when the selected base no longer contains `base_sha`; merge and the merge queue also require the base to equal `base_sha`, as below. A base move with the same merged tree and source digest preserves the receipt for acceptance and task gate reports too, including when a lower dependency lands with changes the checked head already contains. Reports keep each unmerged task's last pinned result in `local-ci-pin-cache.json` in the state directory, keyed by `base_sha`, the selected base and the head, all commit ids, so they run `merge-tree` and `ls-tree` for the pinned base once per base move; a cache that cannot be read or written, as in a sandbox, only means the next report computes it again. Changing the resolved variant, command or timeout, or switching CI modes, invalidates its earlier pass. Changing an unselected mapping has no effect. Invalid local policy or task overrides fail closed. Base selection follows dispatch using existing local and origin refs without fetching during `check ci`, acceptance or task reports; metadata queries each have a 60 s deadline. The origin/base pin is a separate merge precondition. Before merge validates a local receipt, it fetches origin's base with a 60 s timeout and requires that tip to equal the receipt's `base_sha`. Fetch failures and moved bases refuse before GitHub merge; a moved base needs `tower-crane check ci ID` again. Without origin, the base the receipt checks select must equal `base_sha` the same way, and merge reads it through its own git commands, so its command receipts show the read. Once the latest audited merge evidence for the current head and revision is successful, reports retain the recorded CI result without validating it against later base changes, and repeated merges skip the fetch. An unaudited merge marker cannot bypass validation. No hosted API is needed for local CI. The existing hosted CI rules apply when local CI is absent.
 
-Resubmitting replaces `sha` without deleting evidence. It preserves `revision` unless the probe list changes at the same commit, when the revision advances to retire the old declaration and its gate runs. Evidence at the older head stays in the audit trail and no longer counts for the new head. Resubmitting the same sha preserves gates only within the same revision and, for tests, with the same declared probes; rework or a changed brief requires fresh evidence. The task remains `submitted`, with no claim lease; omitted branch and PR values stay unchanged. When `--branch` or `--pr` is supplied and the task already has a PR, `submit` reads its state and head branch with `gh pr view`. An open PR blocks a different PR number or a different submitted branch. If the old PR is closed or merged and the PR number changes, `submit` reads the new PR's head branch, uses it when `--branch` is omitted, and checks a supplied branch against it. Failed or unreadable lookups refuse without changing state. Accepted tasks must go through `rework` and a new claim before submission, and that claimant becomes the new `submitted_by` agent.
+Resubmitting replaces `sha` without deleting evidence. It preserves `revision` unless the probe list changes at the same commit, when the revision advances to retire the old declaration and its gate runs. Software gate evidence at the older head stays in the audit trail and no longer counts for the new head. Review, tests and CI have the docs and small-fix carryover exception below. Resubmitting the same sha preserves gates only within the same revision and, for tests, with the same declared probes; rework retains the carryover exception below, while a changed brief requires fresh evidence. The task remains `submitted`, with no claim lease; omitted branch and PR values stay unchanged. When `--branch` or `--pr` is supplied and the task already has a PR, `submit` reads its state and head branch with `gh pr view`. An open PR blocks a different PR number or a different submitted branch. If the old PR is closed or merged and the PR number changes, `submit` reads the new PR's head branch, uses it when `--branch` is omitted, and checks a supplied branch against it. Failed or unreadable lookups refuse without changing state. Accepted tasks must go through `rework` and a new claim before submission, and that claimant becomes the new `submitted_by` agent.
+
+### Docs and small fix rounds
+
+Submission compares the latest eligible independent review's head with the new
+head. A passing or `followups_only: true` verdict carries across docs-only
+changes. A failed verdict also carries when every blocker is explicitly a
+`nit`, `doc-fix`, `title-body-fix`, or a disputed finding whose path is unchanged.
+False claims confined to the PR title or body are clerical findings. Each code
+hunk must fit a finding's named `path`, positive `line` and optional `end_line`.
+A substantive docs finding, any unclassified blocker, a wider code hunk, a
+binary or mode-only code change, or an instruction change keeps ordinary review.
+A whole docs-only diff skips the tests suite even when its review needs another
+round.
+
+The default `review.docs_paths` is `["docs/**", "**/*.md", "changelog.d/**"]`.
+A configured array replaces it; `[]` disables docs classification.
+`review.docs_exclude` excludes matching paths, so a project can keep pinned
+contract documents on its normal tests path. `prompts/`, `agents/` and `skills/`
+are always excluded. Renames count both old and new paths. Missing commits,
+unreadable diffs and rewritten history fail closed. An acceptance, dependency,
+needs, kind or brief edit after the review prevents carryover; rework alone does
+not. The reviewed commit must be an ancestor of the submitted head.
+
+Each carried review is an ok entry for the new SHA and revision, with
+`source: "review carry"`. `carried_from: {type, sha, revision, agent, at}` names
+its source evidence; `reviewed_head` retains the original reviewed commit across
+repeated rounds. `receipt` records `reason` (`docs only`, `title or body only`,
+`fix round` or `attestation`), `files`, `docs_paths`, `docs_exclude` and
+`diff_sha256`. A `review carry` event records the same entry. Eligibility requires
+that matching event and eligible source evidence. An attestation also requires
+the orchestrator or owner as its event author. Waivers do not carry.
+
+Passing tests and CI used by that review carry as entries with
+`source: "gate carry"`, the previous command receipts, `carried_from`,
+`reviewed_head` and `carry_reason`, plus matching `gate carry` events. Their
+command policy must still match. Acceptance queues no tests, CI or review rerun,
+and the merge queue skips its test suite for carried tests or a docs-only tests
+receipt. Cleanup still runs for the new head.
+
+`check tests` independently reads the whole diff against the task's selected
+base. If every path is docs, it records a `docs only` pass and
+`receipt.docs_only: {base, full, files, docs_paths, docs_exclude}` without running
+a suite. It runs the optional `gates.docs_cmd` instead, recording `docs_cmd` in
+its receipt. `project set --docs-cmd CMD` sets that operational pin; `null` clears
+it. When configured, docs-only submissions require the separate `docs` gate (`check docs`), whose
+receipt records `docs_cmd` and whose audited commands prove the configured cheap
+link or lint check ran. A failed docs check blocks acceptance. With no command,
+the docs gate verifies the submitted commit and records that no optional command
+was configured. Its runner uses the standard gate lease and timeout.
+
+`evidence --fail --followups-only` records a review with no blocking findings;
+it cannot be combined with `--findings`. Structured blockers accept optional
+`line` and `end_line`. `submit` and `accept` accept `--disputes JSON`, an array of
+`{finding, reason}` with unique positive, one-based finding numbers and nonblank
+reasons. The disputed paths must stay unchanged. Carried review receipts keep
+those reasons, and the orchestrator inbox exposes `review_dispute` as information
+with an acknowledgement id, without blocking acceptance.
+
+`accept --attest-fix REVIEW_SHA --reason R` is operational, restricted to the
+orchestrator and owner. It attests exactly the latest review's named code fixes
+and records `{from, by, reason}` in `receipt.attestation`, bound to the target
+head and diff digest. An extra path, a hunk beyond its named range, or an
+instruction edit refuses the attestation. `accept --metadata-fixed --reason R`
+has the same authority for corrected PR title or body findings at an unchanged
+head. The automatic body fixer verifies its edit and unchanged checkout before
+using the same carry path. Neither path dispatches a new reviewer.
 
 A submitted head can move at any time until acceptance or rework. Reviewers must pin `evidence --sha` to the commit they reviewed so a result recorded after a resubmission still belongs to the older head. After rework, a fresh worker needs a claim. A session resume through `spawn` restores the submitting worker's claim under the dispatch lock, keeping its agent and original `since` with a new default lease and `from: rework`. An existing live claim by that worker stays unchanged. If an isolated Codex session is missing while the prior worker holds the rework claim, `spawn` transfers the claim to the fresh worker with a new default lease and records `took_over_from` in the claim event. An expired claim must pass readiness and worker-limit checks before transfer. If preparation or launch fails before a child pid is created, `spawn` restores the prior claim and records `rollback: true` in a claim event. A worker spawn on Windows or a host without `/bin/sh` commits its lease before launch. When that launch fails, it restores a prior claim the same way; for a task with no prior claim it records a `release` event with `rollback: true` instead. Another claimant cannot inherit the session.
 

@@ -65,7 +65,7 @@ const bound = (agent) => ({ env: { TOWER_CRANE_AGENT: agent, TOWER_CRANE_TASK: '
 
 // Sends a changelog failure back through review rework and resubmits a correction
 // from a verified worker on the next revision.
-function correctChangelog(h, text) {
+function correctChangelog(h, text, options = {}) {
   const back = h.json(['rework', '--from-review', 'T1', '--agent', 'orchestrator']);
   assert.equal(back.status, 'rework');
   assert.equal(back.revision, 2);
@@ -77,7 +77,7 @@ function correctChangelog(h, text) {
   h.git(['add', '.']);
   h.git(['commit', '-qm', 'Correct changelog claim']);
   const sha = h.git(['rev-parse', 'HEAD']);
-  h.ok(['submit', 'T1', '--agent', worker, '--sha', sha], bound(worker));
+  h.ok(['submit', 'T1', '--agent', worker, '--sha', sha], { ...bound(worker), ...options });
   return { worker, sha };
 }
 
@@ -96,7 +96,7 @@ test('prose-only failure stays submitted and the reviewer checks the edited body
   assert.deepEqual(item.action.argv, ['accept', 'T1']);
   const refused = h.run(['rework', '--from-review', 'T1', '--agent', 'orchestrator']);
   assert.equal(refused.code, 1);
-  assert.match(refused.stderr, /edit.*light check/);
+  assert.match(refused.stderr, /edit.*carry review/);
   assert.equal(h.json(['task', 'show', 'T1']).revision, before.revision);
   const { preview, text } = prompt(h);
   assert.equal(preview.review_rung, 'easy', 'wording corrections do not escalate the review');
@@ -166,50 +166,35 @@ test('automatic reactions do not repeat a light check before the body is correct
   assert.equal(h.json(['task', 'show', 'T1']).status, 'submitted');
 });
 
-test('a changelog failure goes to rework and the next revision gets a light check unless the implementation changes', (t) => {
+test('a changelog correction carries review; an additional implementation change needs review', (t) => {
   const h = setup(t);
   fail(h, [claim('changelog.d/T1.md')]);
-  const inbox = h.json(['inbox', '--agent', 'orchestrator']);
-  const failed = inbox.items.find((i) => i.kind === 'review_failed' && i.task === 'T1');
-  assert.deepEqual(failed.action.argv, ['rework', '--from-review', 'T1']);
-  assert.equal(failed.prose_only, undefined);
   const { worker } = correctChangelog(h, 'The diagnostic reason is recorded in state.\n');
-  let review = prompt(h).text;
-  assert.match(review, /## Light claim check/);
-  assert.match(review, /revision 1, found only false prose claims/);
-  assert.match(review, /## Claim correction diff/);
-  assert.match(review, /diagnostic reason is recorded/);
-  assert.doesNotMatch(review, /## Diff/);
-  assert.equal(h.json(['task', 'show', 'T1']).revision, 2);
-  fs.writeFileSync(path.join(h.repo, 'value.md'), 'A new implementation.\n');
+  const corrected = h.json(['task', 'show', 'T1']);
+  const review = corrected.evidence.findLast((e) => e.type === 'review');
+  assert.equal(review.reviewed_head, h.sha);
+  assert.equal(review.receipt.reason, 'fix round');
+  assert.equal(corrected.gates.ok, true);
+  assert.deepEqual(h.json(['status']).waiting_on.review, []);
+  fs.writeFileSync(path.join(h.repo, 'value.js'), 'module.exports = 2;\n');
   h.git(['add', '.']);
   h.git(['commit', '-qm', 'Change implementation']);
-  const sha = h.git(['rev-parse', 'HEAD']);
-  h.ok(['submit', 'T1', '--agent', worker, '--sha', sha], bound(worker));
-  review = prompt(h).text;
-  assert.doesNotMatch(review, /## Light claim check/);
-  assert.match(review, /## Diff/);
+  h.ok(['submit', 'T1', '--agent', worker, '--sha', h.git(['rev-parse', 'HEAD'])], bound(worker));
+  const text = prompt(h).text;
+  assert.doesNotMatch(text, /## Light claim check/);
+  assert.match(text, /## Diff/);
 });
 
-test('a light check takes the task tier, not the PR diff\'s size or risk rung', (t) => {
+test('a small docs correction carries review even when the whole PR has risk paths', (t) => {
   const h = setup(t);
-  // The fixture commits on main; move main back so the PR diff holds value.md.
   h.git(['checkout', '-qb', 'change']);
   h.git(['branch', '-f', 'main', 'HEAD~1']);
   h.ok(['project', 'set', '--review-policy', JSON.stringify({ risk_paths: ['value.md'] })]);
   assert.equal(prompt(h).preview.review_rung, 'hard');
   fail(h, [claim('changelog.d/T1.md')]);
-  const { worker } = correctChangelog(h, 'The diagnostic reason is recorded in state.\n');
-  let { preview, text } = prompt(h);
-  assert.match(text, /## Light claim check/);
-  assert.equal(preview.review_rung, 'easy');
-  fs.writeFileSync(path.join(h.repo, 'value.md'), 'A new implementation.\n');
-  h.git(['add', '.']);
-  h.git(['commit', '-qm', 'Change implementation']);
-  h.ok(['submit', 'T1', '--agent', worker, '--sha', h.git(['rev-parse', 'HEAD'])], bound(worker));
-  ({ preview, text } = prompt(h));
-  assert.doesNotMatch(text, /## Light claim check/);
-  assert.equal(preview.review_rung, 'hard');
+  correctChangelog(h, 'The diagnostic reason is recorded in state.\n');
+  assert.equal(h.json(['task', 'show', 'T1']).gates.ok, true);
+  assert.deepEqual(h.json(['status']).waiting_on.review, []);
 });
 
 test('a late review of an older head at the reworked revision cannot select the light path', (t) => {
@@ -242,17 +227,14 @@ test('a late review of an older head at the reworked revision cannot select the 
   assert.doesNotMatch(prompt(h).text, /## Light claim check/);
 });
 
-test('changelog correction diffs are prepared once outside the spawn state lock', (t) => {
+test('changelog carryover reads its diffs outside the submit state lock', (t) => {
   const h = setup(t);
   fail(h, [claim('changelog.d/T1.md')]);
-  const { sha } = correctChangelog(h, 'The reason is recorded in state.\n');
   const report = path.join(h.base, 'diff-calls.jsonl');
-  h.json(['spawn', '--task', 'T1', '--role', 'review', '--wait'], {
-    hooks: { HOOK_REVIEW_DIFF_REPORT: report },
-  });
+  correctChangelog(h, 'The reason is recorded in state.\n', { hooks: { HOOK_REVIEW_DIFF_REPORT: report } });
   const calls = fs.readFileSync(report, 'utf8').trim().split('\n').map(JSON.parse);
   assert.deepEqual(calls, Array.from({ length: 5 }, () => ({ locked: false })));
-  assert.match(fs.readFileSync(path.join(h.state, 'reviews', `T1-${sha}.md`), 'utf8'), /## Light claim check/);
+  assert.equal(h.json(['task', 'show', 'T1']).gates.ok, true);
 });
 
 test('a newer verdict between preparation and spawn refuses the stale light packet', async (t) => {

@@ -715,11 +715,11 @@ test('deleting a test is not a test for the change', async () => {
   assert.match(r.summary, /no test covers this change/);
 });
 
-test('a docs task that changes no test: ok once the command passes', async () => {
+test('a docs-only task skips the suite; a mixed change still runs it', async () => {
   const sha = task({ 'README.md': '# app\n' });
   const r = await gate.run(ctx(sha, { kind: 'docs' }));
   assert.equal(r.ok, true, r.summary);
-  assert.match(r.summary, /exit 0/);
+  assert.match(r.summary, /docs only; no suite ran/);
   const broken = task({ 'README.md': '# app\n', 'lib/mul.js': 'module.exports = () => 0;\n' });
   assert.equal((await gate.run(ctx(broken, { kind: 'docs' }))).ok, false);
   assertCleanedUp();
@@ -1108,7 +1108,7 @@ test('run-only accepts Rust inline tests in source files, and still fails a fail
 });
 
 test('none mode needs no command but still verifies the submitted sha; prove and run-only need one; malformed policy fails first', async () => {
-  const sha = task({ 'README.md': '# none\n' });
+  const sha = task({ 'lib/add.js': FIX });
   const byKind = { tests: { by_kind: { docs: 'none', ops: 'none' } }, gates: {} };
   for (const kind of ['docs', 'ops']) {
     const r = await gate.run(ctx(sha, { kind, args: { cmd: undefined }, project: byKind }));
