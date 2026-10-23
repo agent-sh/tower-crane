@@ -1102,6 +1102,61 @@ test('a monitor closing after the agent\'s next spawn started leaves that spawn 
   assert.deepEqual(fs.readdirSync(brokers).filter((n) => n.endsWith('.lock')), [], 'every broker lock is released');
 });
 
+// Closing a Unix server unlinks its path, whoever listens there now. An
+// earlier monitor of the agent, in its own process, closes while the later
+// broker is between listening on the shared socket and arming its guard.
+test('an earlier monitor closing while the agent\'s next broker starts on the same socket leaves that broker listening', { skip: process.platform === 'win32' && 'Windows uses a named pipe' }, async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'overlap', '--acceptance', 'noted']);
+  const agent = 'worker-T1-1';
+  const leaf = agentDir(path.join(h.base, 'homes', agent), process.env);
+  t.after(() => fs.rmSync(leaf, { recursive: true, force: true }));
+  const job = { state: h.state, task: 'T1', agent, role: 'worker', harness: 'claude', broker_harnesses: ['claude'],
+    cwd: h.repo, broker: path.join(h.base, 'brokers', agent, B.FILE), agent_socket_dir: leaf };
+  const signals = path.join(h.base, 'signals');
+  fs.mkdirSync(signals);
+  const [ready, go, closed] = ['ready', 'go', 'closed'].map((n) => path.join(signals, n));
+  // The earlier monitor: starts, then closes once go appears.
+  const earlier = require('node:child_process').spawn(process.execPath, ['-e', `
+    const fs = require('node:fs');
+    const B = require(${JSON.stringify(path.join(ROOT, 'lib', 'broker'))});
+    B.start(${JSON.stringify(job)}).then((broker) => {
+      const watcher = fs.watch(${JSON.stringify(signals)}, () => {
+        if (!fs.existsSync(${JSON.stringify(go)})) return;
+        watcher.close();
+        broker.close();
+        fs.writeFileSync(${JSON.stringify(closed)}, '');
+        process.exit(0);
+      });
+      fs.writeFileSync(${JSON.stringify(ready)}, '');
+    });
+  `], { stdio: ['ignore', 'inherit', 'inherit'] });
+  t.after(() => earlier.exitCode === null && earlier.signalCode === null && earlier.kill('SIGKILL'));
+  const exited = new Promise((resolve) => earlier.once('exit', resolve));
+  await waitUntil(() => fs.existsSync(ready), { paths: [signals], what: 'the earlier broker started' });
+  const chmod = fs.chmodSync;
+  let held = null;
+  t.mock.method(fs, 'chmodSync', (p, mode) => {
+    if (p === path.join(leaf, 's') && held === null) {
+      fs.writeFileSync(go, '');
+      const s = new Int32Array(new SharedArrayBuffer(4));
+      for (let i = 0; i < 20 && !fs.existsSync(closed); i++) Atomics.wait(s, 0, 0, 100); // wait-allow: the earlier close waits for this start's lock and never writes closed here, so the bound is the expected path; an unlocked close lands within milliseconds
+      held = !fs.existsSync(closed);
+    }
+    return chmod(p, mode);
+  });
+  const later = await B.start(job);
+  t.mock.restoreAll();
+  t.after(() => later.close());
+  assert.equal(held, true, 'the earlier close waited for the later start');
+  await exited;
+  const { socket } = JSON.parse(fs.readFileSync(job.broker, 'utf8'));
+  await waitUntil(() => fs.lstatSync(socket, { throwIfNoEntry: false })?.isSocket(), { paths: [leaf], what: 'the later broker listens again' });
+  const r = await B.forward(job.broker, ['task', 'note', 'T1', 'after the overlap'], h.state);
+  assert.equal(r.code, 0, r.stderr);
+});
+
 test('a broker for claude and codex routes listens on both, and an agent that cannot use the socket uses TCP',{ skip: process.platform === 'win32' && 'Windows uses a named pipe for both' }, async (t) => {
   const h = makeRepo(t);
   h.init();
