@@ -716,8 +716,12 @@ const PAUSE_ENDS = {
     h.ok(['accept', 'T2', '--agent', 'orchestrator']);
     return {};
   },
+  // A failed gate: CI goes red at T2's head and automation sends it back.
   reworked: (h) => {
-    h.ok(['rework', 'T2', '--reason', 'review found a defect', '--agent', 'orchestrator']);
+    const github = h.github();
+    github.ci[h.second] = 'failure';
+    h.saveGithub(github);
+    h.run(['check', 'ci', 'T2', '--agent', 'orchestrator']);
     return {};
   },
   deadline: (h) => ({
@@ -726,7 +730,7 @@ const PAUSE_ENDS = {
   }),
 };
 for (const [why, end] of Object.entries(PAUSE_ENDS)) {
-  test(`a merge pause holds an accepted task until the paused task ${why === 'deadline' ? 'reaches its deadline' : why === 'merged' ? 'merges' : 'goes back to rework'}`, (t) => {
+  test(`a merge pause holds an accepted task until the paused task ${why === 'deadline' ? 'reaches its deadline' : why === 'merged' ? 'merges' : 'fails a gate'}`, (t) => {
     const h = queueFixture(t);
     h.ok(['merge', 'pause', 'T2', '--minutes', '30', '--reason', 'lands docs first', '--agent', 'orchestrator']);
     h.reviewer('T1', 'reviewer');
@@ -754,6 +758,7 @@ for (const [why, end] of Object.entries(PAUSE_ENDS)) {
     const after = h.logs().slice(start);
     assert.deepEqual(after.filter((e) => e.cmd === 'merge pause end').map((e) => [e.task, e.detail.why]), [['T2', why]]);
     assert.equal(h.github().prs['7'].state, 'MERGED', JSON.stringify(after.slice(-6)));
+    if (why === 'reworked') assert.equal(after.find((e) => e.cmd === 'rework' && e.task === 'T2')?.detail.gate, 'ci', 'the ci gate sent T2 back');
     const merges = after.filter((e) => e.cmd === 'merge' && e.detail.ok).map((e) => e.task);
     assert.deepEqual(merges, why === 'merged' ? ['T2', 'T1'] : ['T1']);
     assert.equal(h.json(['status'], { env }).merge_pause, null);
