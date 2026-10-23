@@ -9,6 +9,7 @@ const { makeRepo, BIN, HOOKS } = require('./helpers');
 const { CHROME, openBrowser, closeBrowser } = require('./browser');
 const Authority = require('../lib/authority');
 const { waitOnRepo, waitUntil } = require('./signals');
+const { gateFixture, gateEvidence } = require('./gate-helpers');
 
 test.after(closeBrowser);
 
@@ -66,6 +67,25 @@ test('board controls cover the authority table and use the CLI authority and aud
   for (const row of data.authority) assert.ok(row.control, row.setting);
   const page = await (await fetch(url + 'controls')).text();
   for (const row of data.authority) assert.ok(page.includes(`id="${row.control}"`), row.setting);
+  for (const [setting, id, fields] of [
+    ['gates.docs_cmd', 'project-docs-cmd', ['Value']],
+    ['review.attest_fix', 'attest-fix', ['Reviewed commit', 'Exact fix']],
+    ['review.metadata_fix', 'metadata-fixed', ['Correction']],
+  ]) {
+    assert.equal(data.authority.find((row) => row.setting === setting).control, id, setting);
+    const form = new RegExp(`<form id="${id}"[^]*?</form>`).exec(page)?.[0];
+    assert.ok(form, setting);
+    for (const label of fields) assert.ok(form.includes(label), `${setting}: ${label}`);
+    if (setting === 'review.metadata_fix') assert.match(form, /metadata-fixed&quot;:true/);
+  }
+  for (const flags of [
+    { 'attest-fix': 'a'.repeat(40), reason: 'Applied the named fix' },
+    { 'metadata-fixed': true, reason: 'Corrected the title' },
+  ]) {
+    const invalidTask = await post(request('accept', flags, ['T1']));
+    assert.equal(invalidTask.status, 400);
+    assert.match(invalidTask.data.error, /only submitted tasks can be accepted/);
+  }
   let result = await post(request('project set', { workers: '3' }));
   assert.equal(result.status, 200, JSON.stringify(result));
   assert.equal(h.readState('project.json').limits.workers, 3);
@@ -92,6 +112,42 @@ test('board controls cover the authority table and use the CLI authority and aud
   assert.equal((await post(request('merge', {}, ['T1']))).status, 400);
   assert.equal((await post(request('project set', { workers: '9' }), 'api/controls', { 'x-tower-crane-version': 'outdated' })).status, 409);
   assert.equal(h.readState('project.json').limits.workers, 3);
+});
+
+test('review correction controls apply named fixes and record board authority audits', async (t) => {
+  for (const [flag, pathName, setting] of [
+    ['attest-fix', 'value.js', 'review.attest_fix'],
+    ['metadata-fixed', 'PR body', 'review.metadata_fix'],
+  ]) {
+    const h = fixture(t);
+    const reviewed = gateFixture(h);
+    h.init(['--base', 'main']);
+    h.ok(['task', 'add', '--title', 'Value change', '--acceptance', 'Value becomes one']);
+    h.ok(['claim', 'T1', '--agent', 'builder']);
+    h.ok(['submit', 'T1', '--sha', reviewed, '--agent', 'builder']);
+    gateEvidence(h, 'tests', 'gates');
+    gateEvidence(h, 'clean', 'gates');
+    h.reviewer('T1', 'reviewer', reviewed);
+    h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', reviewed, '--revision', '1',
+      '--agent', 'reviewer', '--summary', 'Correct the named finding',
+      '--findings', JSON.stringify([{ kind: flag === 'attest-fix' ? 'defect' : 'title-body-fix',
+        path: pathName, claim: 'Correct this finding', ...(flag === 'attest-fix' ? { line: 1 } : {}) }])]);
+    if (flag === 'attest-fix') {
+      fs.writeFileSync(path.join(h.repo, 'value.js'), 'module.exports=1;\n');
+      h.git(['add', 'value.js']);
+      h.git(['commit', '-qm', 'Apply the named formatting fix']);
+      h.ok(['submit', 'T1', '--sha', h.git(['rev-parse', 'HEAD']), '--agent', 'builder']);
+    }
+    const { post } = await serve(t, h);
+    const result = await post(request('accept', {
+      [flag]: flag === 'attest-fix' ? reviewed : true, reason: 'Corrected exactly the named finding',
+    }, ['T1']));
+    assert.equal(result.status, 200, JSON.stringify(result));
+    assert.equal(h.json(['task', 'show', 'T1']).status, 'accepted');
+    assert.deepEqual(audits(h).findLast((e) => e.detail.settings[setting])?.detail, {
+      command: 'accept', actor: 'owner', mode: 'board', settings: { [setting]: 'operational' },
+    }, setting);
+  }
 });
 
 test('project, ladder, personal and task controls persist through shared handlers, including pause and budget direction', async (t) => {

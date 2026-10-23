@@ -55,7 +55,8 @@ Workers, reviewers and every other identity are refused both. For an operational
 
 | Setting | Class | Changed by |
 | --- | --- | --- |
-| `gates.tests_cmd`, `gates.clean_cmd`, `gates.tests_proof_cmd` | operational | `project set --tests-cmd`, `--clean-cmd`, `--tests-proof-cmd`; gate self-pinning below |
+| `gates.tests_cmd`, `gates.clean_cmd`, `gates.docs_cmd`, `gates.tests_proof_cmd` | operational | `project set --tests-cmd`, `--clean-cmd`, `--docs-cmd`, `--tests-proof-cmd`; gate self-pinning below |
+| `review.attest_fix`, `review.metadata_fix` | operational | `accept --attest-fix SHA --reason R`, `accept --metadata-fixed --reason R`; the Controls page exposes both and the carryover write records their authority audit |
 | `gates.clean_paths` | operational | `project set --clean-paths`: read-only tool dependency paths for sandboxed agents |
 | `gates.executors` | operational | `project set --executors` |
 | `gates.tests_timeout_min`, `gates.clean_timeout_min`, `gates.host_probe_timeout_min` | operational | `project set --tests-timeout-min`, `--clean-timeout-min`, `--host-probe-timeout-min` |
