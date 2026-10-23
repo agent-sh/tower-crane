@@ -982,13 +982,14 @@ test('GitHub-only findings wake the watcher and endpoint failures retain other f
   h.submit(id, 8);
   const after = () => String(StateFiles.logEnd(h.state));
   // Async GitHub reads must finish within the wait, including a cold cache.
-  const wait = () => h.run(['wait', '--inbox', '--observe', '--after', after(), '--types', 'inbox item', '--timeout', '2', '--agent', 'orchestrator']); // wait-allow: verify the CLI observation, filtering or timeout contract with already-published state
+  // The wake returns as soon as the item lands, so its deadline only bounds a loaded host.
+  const wait = (timeout = '2') => h.run(['wait', '--inbox', '--observe', '--after', after(), '--types', 'inbox item', '--timeout', timeout, '--agent', 'orchestrator']); // wait-allow: verify the CLI observation, filtering or timeout contract with already-published state
   assert.equal(wait().code, 2);
   const github = h.github();
   github.revuto = { name: 'review', app: { slug: 'revuto-review' }, status: 'completed', conclusion: 'failure', output: { summary: 'Bounds check missing' } };
   github.failEndpoint = '/code-scanning/';
   h.save(github);
-  const wake = wait();
+  const wake = wait('60');
   assert.equal(wake.code, 0, wake.stderr);
   assert.equal(JSON.parse(wake.stdout).detail.item, `revuto_failed:${id}`);
   const kinds = h.inbox().items.map((i) => i.kind);

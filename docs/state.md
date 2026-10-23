@@ -971,6 +971,10 @@ detaches and loses its parent before the first snapshot, enforce kernel thread
 counts, account for page cache or shared memory like cgroups, or prevent a
 same-user process from deliberately escaping. On Windows there is no POSIX
 process group; the watchdog tracks parent relationships and creation times.
+Windows keeps an exited parent's pid on its children and gives that pid to
+new processes, so a process counts as a child only if it started no earlier
+than the parent it names: an earlier process's orphans, such as a detached
+supervisor whose dispatch exited, stay out of the tree, its caps and its stop.
 Hard fork-storm isolation requires the Linux cgroup backend.
 
 Containment tests use finite fake harnesses: at most twelve child processes and
@@ -2077,20 +2081,32 @@ tasks run first, in the order of their current `accept` events. This includes
 older notifications that now run a merge and any merged-tree test the merge
 needs. Running reactions are never preempted.
 Submitted tasks follow in submission order, except that the queued
-notifications a `gates prioritize` event names run first among submitted
-work, the most recent request first. An explicit request cannot move
+notifications of a prioritized task run first among submitted work.
+Priority belongs to the task, so later notifications, rework and resubmission
+keep it until acceptance, cancellation or an explicit clear. Priorities run
+in first-request order by default. Repeating a request updates its reason
+without changing its place. `--rank N` sets a nonnegative safe integer rank;
+lower ranks run first, ties use first-request order. New priorities without
+a rank append after existing ranks. An explicit request cannot move
 submitted work ahead of accepted merges or change acceptance order.
 While a higher-ranked reaction waits for an executor, a later one that reaches
 CPU work waits behind it even if a slot is free. A queued reaction that died
 running counts as waiting, so the slot it freed goes to its retry before later
-work, even when a drain passed over it while it was alive. A notification queued after a priority request keeps
-submission order unless its task becomes accepted.
-`gates prioritize ID --reason R` is operational ([Authority](#authority)); it
-records a `gates prioritize` event with `reason`, `sources` (the sources of
+work, even when a drain passed over it while it was alive.
+`gates prioritize ID --reason R [--rank N]` is operational ([Authority](#authority)); it
+records a `gates prioritize` event with `reason`, optional `rank`, `sources` (the sources of
 the task's queued notifications at that moment), `queued` (their count) and
-`authority`. Only those notifications move. It is refused when the task is
-an accepted, unmerged PR task, whose merge already runs first, and when the
-task has no queued notification, since either would change nothing. A notification queued
+`authority`. Sources and count are audit details; priority applies to the task's
+future queued notifications too. Existing events without a rank acquire
+first-request order when read. Setting priority is refused when the task is
+accepted, whose merge already runs first, and when the
+task has no queued notification. `gates prioritize ID --clear` records
+`clear: true` and `authority`, removing priority even during rework with no
+queued work. It needs no reason and refuses `--reason` or `--rank`.
+Acceptance and cancellation retire earlier requests, so reopening a task
+does not restore them. Hotfix cancellation (`hotfix rework`) and cancellation
+of a superseded hotfix follow-up (`hotfix supersede`) also retire its priority.
+A notification queued
 behind the task's own running reaction counts, but the running reaction does
 not: its receipt is running and its process is live, so it is no longer
 queued. A dead reaction's notification stays queued for its retry. `status`
@@ -2104,7 +2120,7 @@ for submitted tasks whose software gates pass and whose review is missing.
 `--json` carries these as `gate_executors: {cap, in_use: [{task, kind}]}` and
 `waiting_on: {github, review}`. `--json` carries it as `gate_queue` with
 `running`, `queued`, `blocked` and `deferred`, each queued, blocked or deferred task with its
-`prioritized` request or `null`. An accepted task shows `null`, since its
+`prioritized` request (`reason`, `agent`, `at`, resolved `rank`) or `null`. An accepted task shows `null`, since its
 acceptance sets its place. `deferred` lists the owed tasks held by the governor,
 including those still in their retry interval; the text gate queue line appends
 `deferred by the governor: TASKS`. `inbox` carries the same `gate_queue`. Each reaction drains the queue when it ends, after releasing its executor; watchers
