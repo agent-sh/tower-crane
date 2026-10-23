@@ -1385,4 +1385,4 @@ Orphan removal with `worktree prune --orphans` checks current task ownership and
 
 ## Standing publish policy
 
-The `full_suite` publish condition requires current pinned test commands and settings, a full head-suite run without a waiver, and actual passing cases for every configured host-only file at the release head. Skipped or unreported host cases and changed host settings require a fresh gate. Git file listing and main CI reads happen before the state write; changed release or policy inputs refuse the request. See [publish policy](state.md#publish-policy).
+The `full_suite` publish condition requires current pinned test commands and settings, a full head-suite run without a waiver, and actual passing cases for every configured host-only file at the release head. Mapped, crucial and incremental head runs do not satisfy this condition, even with an earlier full pass. Skipped or unreported host cases and changed host settings require a fresh gate. Git file listing and main CI reads happen before the state write; changed release or policy inputs refuse the request. See [publish policy](state.md#publish-policy).
