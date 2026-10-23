@@ -474,14 +474,25 @@ ${code.join('\n')}
 `);
   h.git(['add', '.']);
   h.git(['commit', '-qm', 'open flags fixture']);
-  const dir = path.join(h.base, 'coverage');
-  const r = cp.spawnSync(process.execPath, [path.join(ROOT, 'scripts/tests-coverage-map.js'), 'run', '--dir', dir, '--',
-    process.execPath, '--test', 'test/open.test.js'], { cwd: h.repo, env: h.env, encoding: 'utf8' });
-  assert.equal(r.status, 0, r.stderr + r.stdout);
-  const artifact = JSON.parse(fs.readFileSync(path.join(dir, 'tests-coverage-map.json'), 'utf8'));
-  for (const [name, , measured] of rows) {
-    await t.test(name, () => {
-      assert.deepEqual(artifact.map[`${name}.json`], measured ? ['test/open.test.js'] : undefined);
-    });
+  for (const mode of ['map', 'inherited']) {
+    const dir = path.join(h.base, `coverage-${mode}`);
+    // The map runner redirects profiles. Direct installation also exercises the
+    // recorder under the caller's coverage, as a scoped proof sees it.
+    const args = mode === 'map'
+      ? [path.join(ROOT, 'scripts/tests-coverage-map.js'), 'run', '--dir', dir, '--',
+        process.execPath, '--test', 'test/open.test.js']
+      : ['-e', `require(${JSON.stringify(path.join(ROOT, 'lib/tests-coverage-reads.js'))})
+        .install(${JSON.stringify(dir)}, ${JSON.stringify(h.repo)});
+        require(${JSON.stringify(path.join(h.repo, 'test/open.test.js'))});`];
+    const r = cp.spawnSync(process.execPath, args, { cwd: h.repo, env: h.env, encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+    const artifact = mode === 'map' ? JSON.parse(fs.readFileSync(path.join(dir, 'tests-coverage-map.json'), 'utf8')) : null;
+    const reads = mode === 'inherited' ? require('../lib/tests-coverage').ranIn(dir, h.repo) : null;
+    for (const [name, , measured] of rows) {
+      await t.test(`${mode}: ${name}`, () => {
+        if (artifact) assert.deepEqual(artifact.map[`${name}.json`], measured ? ['test/open.test.js'] : undefined);
+        else assert.equal(reads.has(`${name}.json`), measured);
+      });
+    }
   }
 });
