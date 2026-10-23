@@ -143,7 +143,7 @@ test('the reaper spares live gates and tests, and kills what names a finished or
     { pid: process.pid, ppid: 1, cwd: `${root}/tower-crane-gone01`, args: ['node'] },
   ];
   const killed = [];
-  const found = Reaper.reap({ roots: [{ root, kind: 'gate' }, { root, kind: 'test' }], finished: [done],
+  const found = Reaper.reap({ roots: Reaper.gateRoots(root, { TOWER_CRANE_TMP: root }), finished: [done],
     list: () => rows, kill: (pid) => killed.push(pid) });
   assert.deepEqual(found.map((p) => [p.pid, path.basename(p.dir), p.kind, p.reason, p.via ?? null]).sort((a, b) => a[0] - b[0]), [
     [102, 'tower-crane-gone01', 'gate', 'deleted', null],
@@ -155,6 +155,42 @@ test('the reaper spares live gates and tests, and kills what names a finished or
   assert.deepEqual(killed.sort(), [102, 103, 104, 108, 110]);
   assert.equal(Reaper.named(`--dir=${root}/tower-crane-ab12CD/wt`, root), `${root}/tower-crane-ab12CD`);
   assert.equal(Reaper.named(`${root}x/tower-crane-ab12CD`, root), null);
+});
+
+test('a shared root the user chose for TOWER_CRANE_TMP or TOWER_CRANE_TEST_TMP counts only Tower Crane names; the default test root counts every name', { skip }, (t) => {
+  const base = fs.realpathSync(scratch('reaper-shared'));
+  t.after(() => fs.rmSync(base, { recursive: true, force: true }));
+  const shared = path.join(base, 'shared');
+  const gates = path.join(base, 'gates');
+  const cache = path.join(base, 'cache');
+  const owned = path.join(cache, 'tower-crane', 'test-tmp');
+  for (const dir of [shared, gates, owned]) fs.mkdirSync(dir, { recursive: true });
+  const foreign = (root) => [
+    { pid: 201, ppid: 1, cwd: `${root}/build-x1 (deleted)`, args: ['bash'] },
+    { pid: 202, ppid: 201, cwd: '/home', args: ['vim'] },
+    { pid: 203, ppid: 1, cwd: '/home', args: ['daemon', `--pid-file=${root}/daemon.pid`] },
+    { pid: 204, ppid: 1, cwd: '/home', args: ['node', `${root}/sock`] },
+  ];
+  const ours = (root) => [
+    { pid: 301, ppid: 1, cwd: `${root}/tc-test-gone01 (deleted)`, args: ['node'] },
+    { pid: 302, ppid: 1, cwd: '/home', args: ['node', `${root}/tower-crane-gone02/repo/x.js`] },
+  ];
+  const cases = [
+    { name: 'TOWER_CRANE_TMP shared by the gate and test roots', gate: shared, env: { TOWER_CRANE_TMP: shared },
+      rows: [...foreign(shared), ...ours(shared)], killed: [301, 302] },
+    { name: 'TOWER_CRANE_TEST_TMP shared', gate: gates, env: { TOWER_CRANE_TEST_TMP: shared },
+      rows: [...foreign(shared), ...ours(shared)], killed: [301, 302] },
+    { name: 'the default test root under the cache', gate: gates, env: { XDG_CACHE_HOME: cache, HOME: base },
+      rows: [...foreign(owned), ...ours(owned)], killed: [201, 202, 203, 204, 301, 302] },
+    { name: 'the gate root takes its own names only', gate: shared, env: { XDG_CACHE_HOME: cache, HOME: base },
+      rows: foreign(shared), killed: [] },
+  ];
+  for (const c of cases) {
+    const killed = [];
+    const found = Reaper.reap({ roots: Reaper.gateRoots(c.gate, c.env), list: () => c.rows, kill: (pid) => killed.push(pid) });
+    assert.deepEqual(killed.sort((a, b) => a - b), c.killed, c.name);
+    assert.deepEqual(found.map((p) => p.pid).sort((a, b) => a - b), c.killed, c.name);
+  }
 });
 
 test('a Windows gate command runs in a job object that stops its orphaned grandchild and reports the job empty', {
