@@ -9,7 +9,7 @@ const { ROOT, ACCOUNT_HOME, pinLiveRung, makeRepo, makeProjectRepo, makeTaskRepo
 const { readPublished } = require('./atomic-file');
 
 const { modelSelections } = require('../scripts/check-model-config');
-const { DEADLINE_MIN } = require('../scripts/suite-time');
+const { PROOF_DEADLINE_MIN } = require('../scripts/suite-time');
 
 test('cached fixtures pin their ladder and keep copies independent', (t) => {
   const tasks = [{ args: ['--title', 'Cached task', '--acceptance', 'pinned model'], brief: 'cached brief\n' }];
@@ -102,9 +102,12 @@ const cp = require('node:child_process');
 const original = cp.spawnSync;
 cp.spawnSync = function (command, args, options) {
   if (command !== process.execPath || (args[0] !== '--test' && args[0] !== path.join(options.cwd, 'test', 'run.js'))) return original.call(this, command, args, options);
-  if (args[0] !== path.join(options.cwd, 'test', 'run.js') || !args.includes('--test-concurrency=3') || options.timeout !== 45 * 60 * 1000) {
+  if (args[0] !== path.join(options.cwd, 'test', 'run.js') || !args.includes('--test-concurrency=3') || options.timeout !== ${PROOF_DEADLINE_MIN} * 60 * 1000) {
     throw new Error('probe must use the software-gate runner and deadline');
   }
+  require('node:assert/strict').deepEqual(args.slice(3),
+    ['test/ladder.test.js', 'test/broker.test.js', 'test/spawn.test.js', 'test/gates/tests.test.js']);
+  require('node:assert/strict').equal(options.env.TOWER_CRANE_SOCKET_DIR, process.env.TOWER_CRANE_SOCKET_DIR);
   for (const key of ['XDG_CACHE_HOME', 'LOCALAPPDATA', 'TC_TEST_SHARD', 'NODE_TEST_CONTEXT']) {
     if (key in options.env) throw new Error('probe inherited ' + key);
   }
@@ -128,10 +131,11 @@ cp.spawnSync = function (command, args, options) {
   const summary = path.join(h.base, 'step-summary.md');
   const result = cp.spawnSync(process.execPath, ['--require', hook, path.join(ROOT, 'scripts', 'probe-model-swap.js')],
     { cwd: ROOT, env: { ...h.env, TOWER_CRANE_TEST_TMP: cache, XDG_CACHE_HOME: 'caller-cache',
-      LOCALAPPDATA: 'caller-cache', TC_TEST_SHARD: '1/3', GITHUB_STEP_SUMMARY: summary }, encoding: 'utf8', timeout: 300000 });
+      LOCALAPPDATA: 'caller-cache', TC_TEST_SHARD: '1/3', GITHUB_STEP_SUMMARY: summary,
+      TOWER_CRANE_SOCKET_DIR: path.join(h.base, 'granted-sockets') }, encoding: 'utf8', timeout: 300000 });
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /Model swap probe passed/);
-  assert.match(result.stdout, new RegExp(`^Model swap probe: suite wall time \\d+\\.\\d min, \\d+% of the ${DEADLINE_MIN}-minute software-gate deadline$`, 'm'));
+  assert.match(result.stdout, new RegExp(`^Model swap probe: suite wall time \\d+\\.\\d min, \\d+% of the ${PROOF_DEADLINE_MIN}-minute software-gate deadline$`, 'm'));
   assert.match(fs.readFileSync(summary, 'utf8'), /^Model swap probe: suite wall time /);
   assert.equal(fs.readFileSync(path.join(cache, 'model-swap-probe.tap'), 'utf8'), 'not ok 1 - replaced log\n');
   const failed = cp.spawnSync(process.execPath, ['--require', hook, path.join(ROOT, 'scripts', 'probe-model-swap.js')],
