@@ -51,7 +51,7 @@ function assertNoneLeft(file) {
 
 test('check:shared rejects missing and duplicate mutant targets without running tests', (t) => {
   const h = makeRepo(t);
-  for (const name of ['bin', 'lib', 'scripts', 'docs', 'changelog.d', '.github']) {
+  for (const name of ['bin', 'lib', 'scripts', 'docs', 'changelog.d', '.github', 'skills', 'research']) {
     fs.cpSync(path.join(ROOT, name), path.join(h.repo, name), { recursive: true });
   }
   fs.copyFileSync(path.join(ROOT, 'CHANGELOG.md'), path.join(h.repo, 'CHANGELOG.md'));
