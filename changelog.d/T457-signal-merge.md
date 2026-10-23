@@ -1,0 +1,1 @@
+- Combine stack merge cancellation coverage for both signal orders and delayed second-signal dispatch, keeping explicit abort results and the hung-test backstop.

@@ -25,13 +25,17 @@ test('wait cancels an asynchronous stack merge query or backoff on the second si
   skip: process.platform === 'win32' ? 'Windows child.kill does not deliver POSIX signals' : false,
 }, async (t) => {
   for (const row of [
-    { stage: 'query', first: 'SIGTERM', second: 'SIGINT' },
-    { stage: 'backoff', first: 'SIGTERM', second: 'SIGINT' },
-    { stage: 'query', first: 'SIGINT', second: 'SIGTERM' },
-    { stage: 'backoff', first: 'SIGINT', second: 'SIGTERM' },
+    { stage: 'query', first: 'SIGTERM', second: 'SIGINT', signalDelay: 0 },
+    { stage: 'backoff', first: 'SIGTERM', second: 'SIGINT', signalDelay: 0 },
+    { stage: 'query', first: 'SIGINT', second: 'SIGTERM', signalDelay: 0 },
+    { stage: 'backoff', first: 'SIGINT', second: 'SIGTERM', signalDelay: 0 },
+    { stage: 'query', first: 'SIGTERM', second: 'SIGINT', signalDelay: 4000 },
+    { stage: 'backoff', first: 'SIGTERM', second: 'SIGINT', signalDelay: 4000 },
+    { stage: 'query', first: 'SIGINT', second: 'SIGTERM', signalDelay: 4000 },
+    { stage: 'backoff', first: 'SIGINT', second: 'SIGTERM', signalDelay: 4000 },
   ]) {
-    const { stage, first, second } = row;
-    await t.test(`${stage}: ${first} then ${second}`, async (t) => {
+    const { stage, first, second, signalDelay } = row;
+    await t.test(`${stage}: ${first} then ${second}${signalDelay ? ' with delayed signal dispatch' : ''}`, async (t) => {
       const f = stacked(t);
       f.accept('T1');
       f.accept('T2');
@@ -49,7 +53,7 @@ timers.setTimeout = (ms, ...args) => {
   const held = ms === 1000 && fs.existsSync(${JSON.stringify(poll)});
   if (!held) return delay(ms, ...args);
   fs.writeFileSync(${JSON.stringify(sleeping)}, '');
-  const pending = delay(10000, ...args); // wait-allow: hold the merge backoff at its maximum to distinguish abort from completion
+  const pending = delay(${HUNG_TEST_MS}, ...args);
   return pending.then(value => {
     writeAtomic(${JSON.stringify(outcome)}, 'resolved');
     return value;
@@ -61,10 +65,14 @@ timers.setTimeout = (ms, ...args) => {
   });
 };
 const seen = [];
-for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => setImmediate(() => {
-  seen.push(signal);
-  writeAtomic(${JSON.stringify(observed)}, seen.join('\\n') + '\\n');
-}));
+for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => {
+  // A busy event loop can dispatch cancellation after a short exit budget.
+  if (signal === ${JSON.stringify(second)} && ${signalDelay}) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ${signalDelay}); // wait-allow: reproduces delayed signal dispatch.
+  setImmediate(() => {
+    seen.push(signal);
+    writeAtomic(${JSON.stringify(observed)}, seen.join('\\n') + '\\n');
+  });
+});
 `);
       const env = { ...f.h.env, TEST_STACK_POLL_READY: poll,
         NODE_OPTIONS: `${f.h.env.NODE_OPTIONS} --require=${JSON.stringify(preload)}`,
@@ -93,7 +101,9 @@ for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => setImmediat
         assert.deepEqual(fs.readFileSync(observed, 'utf8').trim().split('\n'), [first, second]);
         assert.deepEqual(routes(f), ['async 11'], 'the upper merge never starts');
         const task = f.h.json(['task', 'show', 'T2']);
-        assert.equal(task.evidence.findLast((entry) => entry.type === 'merge').ok, false, 'interrupted merge is retryable');
+        const evidence = task.evidence.findLast((entry) => entry.type === 'merge');
+        assert.equal(evidence.ok, false, 'interrupted merge is retryable');
+        assert.match(evidence.summary, /asynchronous merge of PR #11 interrupted/, 'cancellation ends the held poll');
         const events = fs.readFileSync(path.join(f.h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
         assert.equal(events.findLast((event) => event.cmd === 'automation').detail.phase, 'deferred');
         assert.equal(f.read().prs[11].state, 'OPEN');
