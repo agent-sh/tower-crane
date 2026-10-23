@@ -17,11 +17,10 @@ test('scratch contracts agree across state areas, CLI prose and command help', (
     ['docs/state/containment.md', new RegExp(`then \`${name}\` under the user's cache`)],
     ['scripts/cli-reference.md', new RegExp(`\`${name}\` under the user's cache`)],
     ['docs/cli.md', new RegExp(`default ${name} under the user cache`)],
+    ['docs/state/tasks.md', /Agents do not inherit the dispatcher's Node runtime controls:[^\n]*`NODE_V8_COVERAGE`/],
+    ['docs/ladder.md', /each clears[^\n]*`NODE_V8_COVERAGE`/],
   ]) {
     assert.match(fs.readFileSync(path.join(ROOT, file), 'utf8'), pattern, file);
-  }
-  for (const file of ['docs/state/tasks.md', 'docs/ladder.md']) {
-    assert.match(fs.readFileSync(path.join(ROOT, file), 'utf8'), /NODE_V8_COVERAGE/, file);
   }
   const h = makeDocsRepo(t);
   const result = cp.spawnSync(process.execPath, [path.join(h.repo, 'bin', 'tower-crane.js'),
