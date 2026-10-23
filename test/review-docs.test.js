@@ -310,3 +310,77 @@ test('a late review of an older head cannot override important findings on a new
   h.ok(['submit', 'T1', '--sha', third, '--agent', 'builder']);
   assert.equal(h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'review').ok, false);
 });
+
+test('each undisputed finding needs its own correction before gates carry', () => {
+  const R = require('../lib/review-carry');
+  const rules = { docs_paths: R.docsPaths({}), docs_exclude: [] };
+  const nit = (line = 1, file = 'value.js') => ({ kind: 'nit', path: file, line, claim: 'Fix this line' });
+  const doc = (file = 'docs/state.md') => ({ kind: 'doc-fix', path: file, claim: 'Correct this statement' });
+  const meta = (file) => ({ kind: 'title-body-fix', path: file, claim: 'Correct the description' });
+  const patch = (line = 1, file = 'value.js') =>
+    `diff --git a/${file} b/${file}\n--- a/${file}\n+++ b/${file}\n@@ -${line} +${line} @@\n-old\n+new\n`;
+  const dispute = (finding) => [{ finding, reason: 'The reported behavior is already correct' }];
+  const cases = [
+    ['reported docs-only omission', ['docs/state.md'], '', [nit()], [], false, false],
+    ['second code file omitted', ['value.js'], patch(), [nit(), nit(1, 'other.js')], [], false, false],
+    ['second range omitted', ['value.js'], patch(), [nit(), nit(3)], [], false, false],
+    ['both ranges fixed', ['value.js'], patch() + patch(3), [nit(), nit(3)], [], false, true],
+    ['overlapping finding ranges fixed', ['value.js'], patch(), [nit(), { ...nit(), end_line: 2 }], [], false, true],
+    ['docs finding omitted', ['README.md'], '', [doc()], [], false, false],
+    ['second docs finding omitted', ['docs/state.md'], '', [doc(), doc('docs/cli.md')], [], false, false],
+    ['docs finding fixed', ['docs/state.md'], '', [doc()], [], false, true],
+    ['omitted code disputed', ['docs/state.md'], '', [nit()], dispute(1), false, true],
+    ['changed code cannot be disputed', ['value.js'], patch(), [nit()], dispute(1), false, false],
+    ['omitted docs disputed', ['README.md'], '', [doc()], dispute(1), false, true],
+    ['title unverified', ['docs/state.md'], '', [meta('PR title')], [], false, false],
+    ['body unverified', [], '', [meta('PR body')], [], false, false],
+    ['metadata verified', [], '', [meta('PR title'), meta('PR body')], [], true, true],
+    ['metadata disputed', [], '', [meta('PR body')], dispute(1), false, true],
+    ['mixed metadata unverified', ['value.js'], patch(), [nit(), meta('PR body')], [], false, false],
+    ['mixed metadata verified', ['value.js'], patch(), [nit(), meta('PR body')], [], true, true],
+  ];
+  for (const [name, files, diff, findings, disputes, metadata, expected] of cases) {
+    assert.equal(R.namedFixes(files, diff, findings, rules, disputes, false, metadata), expected, name);
+  }
+  for (const [name, files, diff, findings, expected] of [
+    ['attestation with omitted code', ['value.js'], patch(), [nit(), nit(1, 'other.js')], false],
+    ['attestation with omitted docs', ['value.js'], patch(), [nit(), doc()], false],
+    ['attestation with unverified body', ['value.js'], patch(), [nit(), meta('PR body')], false],
+    ['complete attested code fix', ['value.js'], patch(), [nit()], true],
+  ]) assert.equal(R.namedFixes(files, diff, findings, rules, [], true), expected, name);
+});
+
+test('submit refuses to carry an omitted nit even when other docs were corrected', (t) => {
+  const h = setup(t);
+  failedReview(h, [
+    { kind: 'nit', path: 'value.js', line: 1, claim: 'Remove assignment spaces' },
+    { kind: 'doc-fix', path: 'docs/state.md', claim: 'Correct the statement' },
+  ]);
+  const sha = change(h, ['docs/state.md']);
+  h.ok(['submit', 'T1', '--sha', sha, '--agent', 'builder']);
+  const task = h.json(['task', 'show', 'T1']);
+  for (const type of ['review', 'tests']) assert.equal(task.gates.gates.find((g) => g.type === type).ok, false, type);
+  h.ok(['submit', 'T1', '--sha', sha, '--agent', 'builder',
+    '--disputes', '[{"finding":1,"reason":"The assignment formatting is already accepted."}]']);
+  const disputed = h.json(['task', 'show', 'T1']);
+  assert.equal(disputed.gates.gates.find((g) => g.type === 'review').ok, true);
+  assert.ok(h.json(['inbox', '--agent', 'orchestrator']).items.some((i) => i.kind === 'review_dispute'));
+});
+
+test('a mixed code and metadata fix waits for verified metadata correction', (t) => {
+  const h = setup(t);
+  failedReview(h, [
+    { kind: 'nit', path: 'value.js', line: 1, claim: 'Remove assignment spaces' },
+    { kind: 'title-body-fix', path: 'PR body', claim: 'Correct the description' },
+  ]);
+  fs.writeFileSync(path.join(h.repo, 'value.js'), 'module.exports=1;\n');
+  h.git(['add', 'value.js']);
+  h.git(['commit', '-qm', 'Fix the named nit']);
+  const sha = h.git(['rev-parse', 'HEAD']);
+  h.ok(['submit', 'T1', '--sha', sha, '--agent', 'builder']);
+  assert.equal(h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'review').ok, false);
+  h.ok(['accept', 'T1', '--metadata-fixed', '--reason', 'Corrected the body and the named code nit']);
+  const task = h.json(['task', 'show', 'T1']);
+  assert.equal(task.status, 'accepted');
+  assert.equal(task.evidence.findLast((e) => e.type === 'tests').source, 'gate carry');
+});

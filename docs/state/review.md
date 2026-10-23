@@ -64,7 +64,7 @@ History compares explicit one-based acceptance references (`Acceptance item 1`, 
 
 ## Repeated review failures
 
-Two independent failed reviews with blocking findings in the same file area block claims, readiness and worker dispatch, including dry runs and explicit worker rungs. The area is a normalized finding file path: line numbers do not matter, `./` is removed and backslashes become slashes. A finding whose location is not a file path, such as `PR body`, adds no area. Failures accumulate across rework and requirement revisions. Failed verdicts at the same SHA and revision count once per area, whichever reviewers recorded them; multiple findings in one file in one review also count once. Passing reviews, software gate failures and untrusted review evidence do not add failures. A summary without a finding path supplies no area; use `rework --from-review` to retain the complete blocking findings.
+Two independent failed reviews with blocking findings in the same file area block claims, readiness and worker dispatch, including dry runs and explicit worker rungs. The area is a normalized finding file path: line numbers do not matter, `./` is removed and backslashes become slashes. A finding whose location is not a file path, such as `PR body`, adds no area. Failures accumulate across rework and requirement revisions. Failed verdicts at the same SHA and revision count once per area, whichever reviewers recorded them; multiple findings in one file in one review also count once. Passing reviews, follow-up-only verdicts (including old entries with stored areas), software gate failures and untrusted review evidence do not add failures. Follow-up-only verdicts also add no review churn, escalation or failed-review routing. A summary without a finding path supplies no area; use `rework --from-review` to retain the complete blocking findings.
 
 The inbox shows `review_redesign` with `areas`, `reason` and a scope-ruling command, and holds the task out of `rework_ready`. The orchestrator or owner clears the hold by either narrowing acceptance to a closed list with `task update ID --acceptance A ... --closed-acceptance`, or recording a design change with `task note ID TEXT --kind scope-ruling`. Closed acceptance requires an actual acceptance change. Ordinary notes, acceptance changes without that declaration, brief edits and title changes do not clear the hold.
 
@@ -78,6 +78,11 @@ changes. A failed verdict also carries when every blocker is explicitly a
 `nit`, `doc-fix`, `title-body-fix`, or a disputed finding whose path is unchanged.
 False claims confined to the PR title or body are clerical findings. Each code
 hunk must fit a finding's named `path`, positive `line` and optional `end_line`.
+Every undisputed code finding must have a hunk inside its own range; every
+undisputed docs finding must name a changed file. Title/body findings require
+verified correction through the automatic body fixer or the privileged metadata
+flag, even when a round also changes docs or code. Unchanged findings need an
+explicit dispute and reason.
 A substantive docs finding, any unclassified blocker, a wider code hunk, a
 binary or mode-only code change, or an instruction change keeps ordinary review.
 A whole docs-only diff skips the tests suite even when its review needs another
@@ -132,6 +137,6 @@ orchestrator and owner. It attests exactly the latest review's named code fixes
 and records `{from, by, reason}` in `receipt.attestation`, bound to the target
 head and diff digest. An extra path, a hunk beyond its named range, or an
 instruction edit refuses the attestation. `accept --metadata-fixed --reason R`
-has the same authority for corrected PR title or body findings at an unchanged
-head. The automatic body fixer verifies its edit and unchanged checkout before
+has the same authority for corrected PR title or body findings at the submitted
+head. Other changes in that round must independently satisfy the named-fix checks. The automatic body fixer verifies its edit and unchanged checkout before
 using the same carry path. Neither path dispatches a new reviewer.

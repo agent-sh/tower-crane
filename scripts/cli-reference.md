@@ -169,9 +169,13 @@ For a small fix round, the independent reviewer records every blocker with
 `--findings '[{"kind":"nit","path":"lib/value.js","line":12,"claim":"Use the named return value"}]'`.
 Use `doc-fix` for a docs correction and `title-body-fix` for a PR title or body
 correction. Code nits need a positive `line`; an optional `end_line` names the
-last affected line. Every changed code hunk must fit a named line range.
+last affected line. Every changed code hunk must fit a named line range, and
+every undisputed code finding must have a hunk in its own range. Each undisputed
+docs finding must name a changed file. An unchanged finding needs a dispute
+and reason; changing unrelated docs does not resolve it.
 Substantive or important docs findings keep review required. A failed review
-with follow-ups and no blockers uses `evidence --fail --followups-only`.
+with follow-ups and no blockers uses `evidence --fail --followups-only`. These
+verdicts add no redesign hold, review churn, escalation or failed-review scope.
 
 `submit --disputes '[{"finding":1,"reason":"The contract already requires this behavior"}]'`
 records a dispute by its one-based finding number. The finding's path must stay
@@ -182,10 +186,12 @@ The orchestrator or owner can use
 `accept ID --attest-fix REVIEW_SHA --reason "Applied the exact named fix"` to
 attest a small code fix from the latest independent review. Each code hunk must
 fit the review's named file and line range. The receipt records the attestor,
-reason and diff digest. Workers and reviewers cannot attest. For an unchanged
+reason and diff digest. Workers and reviewers cannot attest. For a submitted
 head whose title or body findings have been corrected, the orchestrator or owner
 uses `accept ID --metadata-fixed --reason "Corrected the PR description"`.
-The automatic body fixer carries review after verifying the edit and unchanged
+Any other changes must fit the named findings. Unverified metadata findings
+remain blockers even when docs or code changed. The automatic body fixer carries
+review after verifying the edit and unchanged
 checkout, without another reviewer. A passing review at the same head already
 survives title and body edits.
 

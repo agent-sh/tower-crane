@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
-const { cachedFixture } = require('./helpers');
+const { cachedFixture, makeRepo } = require('./helpers');
 const Reviews = require('../lib/review-findings');
 
 function setup(t) {
@@ -155,6 +155,13 @@ test('review failure counting distinguishes areas, verdicts, revisions and autho
     ['same file in two revisions', [failure('lib/a.js'), failure('lib/a.js', 2)], ['lib/a.js']],
     ['different files', [failure('lib/a.js'), failure('lib/b.js', 2)], []],
     ['passing review', [failure('lib/a.js'), failure('lib/a.js', 2, undefined, { ok: true })], []],
+    ['followups-only review', [failure('lib/a.js', 1, undefined, { followups_only: true }), failure('lib/a.js', 2)], []],
+    ['stored followups areas', [failure('lib/a.js', 1, undefined, { followups_only: true, areas: ['lib/a.js'] }),
+      failure('lib/a.js', 2)], []],
+    ['two followups-only reviews', [failure('lib/a.js', 1, undefined, { followups_only: true }),
+      failure('lib/a.js', 2, undefined, { followups_only: true })], []],
+    ['two real failures after followups', [failure('lib/a.js', 1, undefined, { followups_only: true }),
+      failure('lib/a.js', 2), failure('lib/a.js', 3)], ['lib/a.js']],
     ['untrusted reviewer', [failure('lib/a.js'), failure('lib/a.js', 2, undefined, { agent: 'stranger' })], []],
     ['separate heads', [failure('lib/a.js'), failure('lib/a.js', 1, 'b'.repeat(40))], ['lib/a.js']],
     ['ruling cutoff', [failure('lib/a.js'), failure('lib/a.js', 2)], [], 2],
@@ -194,4 +201,35 @@ test('review failure counting distinguishes areas, verdicts, revisions and autho
     detail: { role: 'reviewer', agent: 'reviewer-1', sha: 'b'.repeat(40), revision: 2 } }];
   assert.deepEqual(Reviews.repeatedAreas({ id: 'T1', evidence: moved }, movedEvents), ['lib/a.js'],
     'a failure at a new commit still counts');
+});
+
+test('followups-only evidence stays out of redesign, churn, escalation and narrowed re-review', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Retry handling', '--acceptance', 'Retries work', '--kind', 'docs']);
+  h.ok(['claim', 'T1', '--agent', 'builder']);
+  const first = 'a'.repeat(40);
+  h.ok(['submit', 'T1', '--sha', first, '--agent', 'builder']);
+  h.reviewer('T1', 'reviewer', first);
+  h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--followups-only', '--sha', first,
+    '--revision', '1', '--agent', 'reviewer', '--summary', 'lib/a.js:3 - consider simplifying later']);
+  const followups = h.json(['task', 'show', 'T1']);
+  assert.equal(followups.evidence.at(-1).areas, undefined);
+  const S = require('../lib/state');
+  const initial = S.loadState(h.state);
+  assert.equal(require('../lib/reviewer').reReview(initial, initial.tasks.tasks[0]), null);
+  assert.equal(require('../lib/escalation').failure(initial, initial.tasks.tasks[0]), null);
+  assert.equal(require('../lib/review-churn').count(initial.tasks.tasks[0], initial.events), 0);
+  for (const [index, digit] of ['b', 'c'].entries()) {
+    h.ok(['rework', 'T1', '--reason', 'Fix the implementation']);
+    h.ok(['claim', 'T1', '--agent', 'builder']);
+    const sha = digit.repeat(40);
+    h.ok(['submit', 'T1', '--sha', sha, '--agent', 'builder']);
+    h.reviewer('T1', `reviewer-${digit}`, sha);
+    h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', sha,
+      '--revision', h.revision(), '--agent', `reviewer-${digit}`, '--summary', 'lib/a.js:3 - duplicate delivery']);
+    const current = S.loadState(h.state);
+    assert.equal(require('../lib/review-churn').count(current.tasks.tasks[0], current.events), index + 1);
+    assert.equal(!!Reviews.redesign(current.tasks.tasks[0], current.events), index === 1);
+  }
 });
