@@ -264,7 +264,7 @@ for (const row of [
       // The engine's output and the task's events since its submit say why an owner was not held.
       const since = h.logs().slice(h.logs().findLastIndex((e) => e.cmd === 'submit')).filter((e) => e.task === 'T1')
         .map((e) => `${e.at} ${e.agent} ${e.cmd} ${JSON.stringify(e.detail)}`.slice(0, 400));
-      assert.deepEqual([rework.detail.gate, rework.detail.owner_held], ['tests', agent],
+      assert.deepEqual([rework?.detail?.gate, rework?.detail?.owner_held], ['tests', agent],
         `the gate rework names the owner it is held for\n${consumed.stdout}${consumed.stderr}\n${since.join('\n')}`);
       assert.deepEqual([h.task().status, h.task().claim], ['rework', null], 'the hold keeps the task unclaimed');
       const item = h.json(['inbox', '--agent', 'orchestrator']).items.find((i) => i.kind === 'rework_ready');
