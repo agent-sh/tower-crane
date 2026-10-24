@@ -632,6 +632,26 @@ A worker spawn event records the task's `revision`. The supervisor's write of a 
 
 Any agent recovers a verified exited task with `release ID --reason R`. The detector rechecks under the lock; a live or unverified process requires the claimant or the owner; the orchestrator's attempt opens a decision. The usual prior `todo` or `rework` status is restored. The supplied reason stays in the release note; only the observed pid, log path, exit code and log size are preserved in an additional note and the release event's `detail.exited_spawn`. Release does not read or persist log text; the views read the tail live from the log file. Releasing clears the diagnostic; a new claim does not inherit the old process.
 
+### Rework causes
+
+Every `rework` event records `cause`, why the task went back, so `tower-crane metrics` can tell work the task needed from work Tower Crane, the host or the base caused:
+
+| Cause | Raised by |
+| --- | --- |
+| `conflict_base` | a merge conflict with the project base, from conflict detection or a CI gate that reports the PR `CONFLICTING` |
+| `conflict_parent` | a conflict with a stack parent's branch, or a stack sync that cannot merge the parent's new head |
+| `stack_sync` | a stack sync that moved or merged into the branch, or deferred onto a dirty worktree |
+| `coverage_gap` | a tests gate failure because no `tests.map` entry covers a changed file |
+| `base_failure` | a tests gate failure whose every failing test also fails on the base |
+| `timeout` | a gate that timed out, or a stalled worker that escalation sends back |
+| `infrastructure` | an infrastructure or runner failure that its retry did not clear, or a worker that exited without submitting |
+| `head_check` | the merge queue's head check on the merge with the base |
+| `tests`, `clean`, `ci` | any other failure of that software gate |
+| `review` | a failed review, final review or PR-body fix |
+| `manual` | a `rework` command, board or MCP rework by a person or the orchestrator |
+
+`cross_task` (every failing test also failed in another task within 24 hours) is decided by `metrics` from the log, never recorded. Events written before `cause` existed are classified from their reason text and the failed check of the same head; see `tower-crane metrics` in the CLI reference.
+
 ## Dispatch events
 
 A `spawn` detail includes `role`, `rung`, `agent`, `harness`, `model`, `profile`, `billing`, `pid`, `host`, `start_ticks`, `pidns`, `cwd` and `log`. `billing` is the route's `api` or `subscription` (see `spend.entries`), or null for a harness without billing, a local Codex provider or a Codex route that cannot be resolved. `model` and `profile` may be null; `start_ticks` and `pidns` are the Linux process identity when available. `pidns` is the recorder's pid namespace (`/proc/self/ns/pid`), where the recorded pid names the process; every record that names a process this way carries it, and a reader in another pid namespace, or one that cannot read its own, never takes such a pid for exited, since a sandbox's namespace hides live processes outside it. The supervisor records `monitor_pid` in the same namespace, so every reader that rebuilds the supervisor or harness record from a spawn detail, such as a reservation or an exit probe, keeps `pidns`. Codex adds `codex_home` to find its exact session under a custom `CODEX_HOME`; legacy events fall back to the current `CODEX_HOME` or `~/.codex`. Both foreground and detached output has a log. A `spend` detail is the entry above; automatic entries name the spawned agent; the audit event names the collector or waiter that recorded them. `spawn exit` records the foreground exit code and rung, and `output_held` when its output stayed open after the harness exited (see the process group shutdown below). A release of an exited spawned claim records `{ reason, holder, status, exited_spawn }`, where `exited_spawn` contains only `{ pid, log, code, size }` observed at release. Unknown exit codes and unavailable log sizes are null. No log text is copied into task notes, release events or worker-exited events. The shared observer records exit wakeups and spend without releasing the claim.
