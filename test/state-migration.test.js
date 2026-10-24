@@ -8,9 +8,9 @@ const StateFiles = require('./state-files');
 const { makeRepo } = require('./helpers');
 const cp = require('node:child_process');
 const { runReleased, releasedBin } = require('./released-tool');
-const { waitUntil } = require('./signals');
+const { waitUntil, killPid } = require('./signals');
 
-const processAlive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+const processAlive = (pid) => { try { killPid(pid, 0); return true; } catch { return false; } };
 
 // The last release before the database: its file layout is what real
 // installs migrate, and it must refuse a migrated state.
@@ -266,10 +266,10 @@ setInterval(() => { if (fs.existsSync(${JSON.stringify(finish)})) { fs.writeFile
     const workerPid = Number(fs.readFileSync(ready, 'utf8'));
     monitor = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line))
       .findLast((e) => e.cmd === 'spawn').detail.monitor_pid;
-    process.kill(monitor, 'SIGSTOP');
+    killPid(monitor, 'SIGSTOP');
     h.ok(['task', 'show', 'T1']);
     assert.equal(fs.existsSync(StateFiles.dbFile(h.state)), true, 'the state migrated');
-    process.kill(monitor, 'SIGCONT');
+    killPid(monitor, 'SIGCONT');
     monitor = null;
     await waitUntil(() => /supervision stopped: state schema 2 is incompatible/.test(out) || /supervisor failed/.test(out),
       { poll: true, what: 'the 0.1.7 supervisor meets the migrated state' });
@@ -280,7 +280,7 @@ setInterval(() => { if (fs.existsSync(${JSON.stringify(finish)})) { fs.writeFile
     await closed;
     assert.equal(fs.readFileSync(edited, 'utf8'), 'done', 'the worker finished its edit');
   } finally {
-    if (monitor) try { process.kill(monitor, 'SIGCONT'); } catch { /* gone */ }
+    if (monitor) try { killPid(monitor, 'SIGCONT'); } catch { /* gone */ }
     fs.writeFileSync(finish, '');
     StateFiles.withDb(h.state, () => {});
   }
