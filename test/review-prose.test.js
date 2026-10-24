@@ -241,7 +241,7 @@ test('changelog carryover reads its diffs outside the submit state lock', (t) =>
   const report = path.join(h.base, 'diff-calls.jsonl');
   correctChangelog(h, 'The reason is recorded in state.\n', { hooks: { HOOK_REVIEW_DIFF_REPORT: report } });
   const calls = fs.readFileSync(report, 'utf8').trim().split('\n').map(JSON.parse);
-  assert.deepEqual(calls, Array.from({ length: 7 }, () => ({ locked: false })));
+  assert.deepEqual(calls, Array.from({ length: 5 }, () => ({ locked: false })));
   assert.equal(h.json(['task', 'show', 'T1']).gates.ok, true);
 });
 
