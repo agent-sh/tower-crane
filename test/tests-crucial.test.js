@@ -22,7 +22,7 @@ const selected = (files) => `${runner} ${files.map(shellQuote).join(' ')}`;
 
 // main holds other.js and three suites; the task changes value.js (with test/value.test.js, which
 // requires it) and README.md. valueTest, when given, replaces the task's test in a new commit.
-function fixture(t, settings = map, valueTest) {
+function fixture(t, settings = map, valueTest, kind = 'code') {
   const h = cachedFixture(t, 'tests-crucial-base', (h) => {
     delete h.env.NODE_TEST_CONTEXT;
     h.init();
@@ -51,7 +51,7 @@ function fixture(t, settings = map, valueTest) {
   // No PR and no ci.required: crucial mode needs no hosted full-suite job.
   h.ok(['project', 'set', '--tests-expensive', 'true', '--tests-map', JSON.stringify(settings), '--tests-crucial', JSON.stringify(crucial),
     '--tests-cmd', fullCommand, '--tests-proof-cmd', `${runner} {tests}`]);
-  h.ok(['task', 'add', '--title', 'Change', '--acceptance', 'works']);
+  h.ok(['task', 'add', '--title', 'Change', '--acceptance', 'works', '--kind', kind]);
   h.ok(['claim', 'T1', '--agent', 'worker']);
   h.ok(['submit', 'T1', '--sha', sha, '--agent', 'worker']);
   return h;
@@ -95,16 +95,105 @@ test('with tests.crucial and a map pinned, a change runs crucial plus the suites
   assert.equal(counts(h), true);
 });
 
-test('a crucial file missing at head is the orchestrator\'s setting to fix, not the task\'s', (t) => {
+for (const baseRef of ['main', 'origin/main']) for (const signed of [false, true]) for (const showSignature of [false, true]) test(`a crucial file added on ${baseRef} after the submitted head is skipped with a receipt (signed=${signed}, log.showSignature=${showSignature})`, (t) => {
   const h = fixture(t);
-  h.ok(['project', 'set', '--tests-crucial', '["test/missing.test.js"]']);
+  h.git(['config', 'log.showSignature', String(showSignature)]);
+  h.git(['switch', 'main']);
+  fs.writeFileSync(path.join(h.repo, 'test/new.test.js'), "console.log('new suite');\n");
+  h.git(['add', '.']);
+  h.git(['commit', '-qm', 'new crucial suite']);
+  let added = h.git(['rev-parse', 'HEAD']);
+  if (signed) {
+    // A signature header makes git emit verification output without needing a signing key.
+    const body = `tree ${h.git(['rev-parse', 'HEAD^{tree}'])}\nparent ${h.git(['rev-parse', 'HEAD^'])}\n`
+      + 'author a <a@example.com> 1700000000 +0000\ncommitter a <a@example.com> 1700000000 +0000\n'
+      + 'gpgsig -----BEGIN SSH SIGNATURE-----\n U1NIU0lH\n -----END SSH SIGNATURE-----\n\nnew signed crucial suite\n';
+    added = cp.execFileSync('git', ['hash-object', '-t', 'commit', '-w', '--stdin'],
+      { cwd: h.repo, env: h.env, input: body, encoding: 'utf8' }).trim();
+    h.git(['reset', '--hard', added]);
+    if (showSignature) assert.match(h.git(['log', '-1', '--format=%H', added]), /signature/i);
+  }
+  h.git(['commit', '--allow-empty', '-qm', 'later base tip']);
+  const tip = h.git(['rev-parse', 'HEAD']);
+  if (baseRef === 'origin/main') {
+    h.git(['update-ref', 'refs/remotes/origin/main', tip]);
+    h.git(['reset', '--hard', `${added}^`]);
+  }
+  h.git(['switch', 'fixture-change']);
+  const setting = h.run(['project', 'set', '--tests-crucial', '["test/crucial.test.js","test/new.test.js"]', '--json']);
+  assert.equal(setting.code, 0, setting.stderr);
+  assert.equal(JSON.parse(setting.stdout).warnings, undefined, 'a path present on base needs no warning');
+  const result = check(h);
+  assert.deepEqual(result.receipt.head_tests, ['test/crucial.test.js', 'test/mapped.test.js', 'test/value.test.js']);
+  assert.deepEqual(result.receipt.crucial_skipped, [{
+    path: 'test/new.test.js', added_on_base: added,
+    note: `crucial path not at head: test/new.test.js, added on base at ${added}`,
+  }]);
+  assert.ok(result.commands.filter((c) => c.command !== 'git').every((c) => !c.command.includes('new.test.js')));
+  assert.equal(counts(h), true);
+  const { mismatch } = require('../lib/gate-commands');
+  const project = h.readState('project.json');
+  const task = h.json(['task', 'show', 'T1']);
+  for (const skipped of [[], null, {}, [{ path: 'test/new.test.js', added_on_base: 'bad' }],
+    [{ ...result.receipt.crucial_skipped[0], path: 'test/wrong.test.js' }]]) {
+    const entry = { ...result, type: 'tests', receipt: { ...result.receipt, crucial_skipped: skipped } };
+    assert.match(mismatch(entry, project, task), /command receipts do not match/, 'missing or malformed skip evidence does not count');
+  }
+});
+
+for (const baseRef of ['main', 'origin/main']) for (const removal of ['missing on both', 'deleted at head', 'renamed at head']) test(`a crucial file ${removal} with base ${baseRef} is the orchestrator's setting to fix`, (t) => {
+  const h = fixture(t);
+  if (baseRef === 'origin/main') {
+    h.git(['switch', 'main']);
+    h.git(['commit', '--allow-empty', '-qm', 'newer remote base']);
+    h.git(['update-ref', 'refs/remotes/origin/main', h.git(['rev-parse', 'HEAD'])]);
+    h.git(['reset', '--hard', 'HEAD^']);
+    h.git(['switch', 'fixture-change']);
+  }
+  const missing = removal === 'missing on both';
+  const file = missing ? 'test/missing.test.js' : 'test/crucial.test.js';
+  if (!missing) {
+    h.git(removal === 'deleted at head' ? ['rm', '-q', file] : ['mv', file, 'test/renamed.test.js']);
+    h.git(['commit', '-qm', removal]);
+    h.ok(['submit', 'T1', '--sha', h.git(['rev-parse', 'HEAD']), '--agent', 'worker']);
+  }
+  const paths = JSON.stringify([file]);
+  const setting = h.run(['project', 'set', '--tests-crucial', paths, '--json']);
+  assert.equal(setting.code, 0, setting.stderr);
+  assert.deepEqual(JSON.parse(setting.stdout).warnings, missing ? [`tests.crucial path missing at base tip: ${file}`] : undefined);
+  if (missing) assert.match(h.ok(['project', 'set', '--tests-crucial', paths]), /warning: tests\.crucial path missing at base tip: test\/missing\.test\.js/);
   const result = check(h, 1);
   assert.deepEqual(result.config_failure, { key: 'tests_crucial' });
-  assert.match(result.summary, /tests\.crucial names paths that are not test files at head: test\/missing\.test\.js/);
+  assert.ok(result.summary.includes(`tests.crucial names paths that are not test files at head: ${file}`), result.summary);
+  assert.equal(result.receipt?.crucial_skipped, undefined, 'an inherited or nonexistent path is never a base addition');
   assert.equal(result.commands.filter((c) => c.command !== 'git').length, 0, 'nothing runs');
   const item = h.json(['inbox', '--agent', 'orchestrator']).items.find((i) => i.kind === 'gate_config');
   assert.equal(item.setting, 'tests.crucial');
   assert.deepEqual(item.action.argv, ['project', 'set', '--tests-crucial', '<JSON>']);
+});
+
+for (const [keep, kind, mode] of [[true, 'code', 'run-only (test-only diff)'], [false, 'docs', 'prove']]) test(`skipping every crucial file in ${mode} does not invoke an empty selector or the full suite`, (t) => {
+  const h = fixture(t, map, undefined, kind);
+  h.git(['switch', 'main']);
+  h.git(['switch', '-c', 'docs-change']);
+  fs.appendFileSync(path.join(h.repo, 'README.md'), 'Documentation only.\n');
+  h.git(['add', '.']);
+  h.git(['commit', '-qm', 'documentation change']);
+  const head = h.git(['rev-parse', 'HEAD']);
+  h.git(['switch', 'main']);
+  fs.writeFileSync(path.join(h.repo, 'test/new.test.js'), "console.log('new suite');\n");
+  h.git(['add', '.']);
+  h.git(['commit', '-qm', 'new crucial suite']);
+  h.ok(['project', 'set', '--tests-crucial', '["test/new.test.js"]', '--tests-keep', keep ? '["*.md"]' : 'null']);
+  h.ok(['submit', 'T1', '--sha', head, '--agent', 'worker']);
+  const result = check(h);
+  assert.equal(result.receipt.mode, mode);
+  assert.equal(result.receipt.head_mode, 'crucial');
+  assert.deepEqual(result.receipt.head_tests, []);
+  assert.equal(result.receipt.crucial_skipped[0].path, 'test/new.test.js');
+  assert.equal(result.commands.filter((c) => c.command !== 'git').length, 0);
+  assert.equal(require('../lib/gate-commands').mismatch({ ...result, type: 'tests' }, h.readState('project.json'),
+    h.json(['task', 'show', 'T1'])), null, 'the empty-selection receipt matches the pinned policy');
 });
 
 for (const [name, settings, valueTest, ok, pattern] of [
