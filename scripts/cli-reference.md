@@ -613,8 +613,9 @@ after resolving the hand-written files.
 In the gate executor queue, accepted tasks' merge reactions run ahead of
 queued submitted-task gates, in acceptance order. Their merged-tree tests
 keep that priority. Only CPU work waits in this queue: the tests gate with its
-host probes, the clean gate, local CI and head checks. Review dispatch, accept
-and CI reads run at once and take no executor. A running gate finishes before
+host probes, the clean gate, local CI and head checks. Review dispatch and
+hosted CI reads run at once and take no executor; an automatic accept takes
+one only for a CPU gate it runs. A running gate finishes before
 the next waiting reaction takes its executor.
 `gates prioritize` moves submitted work within the submitted queue; it
 cannot move it ahead of accepted merges or change acceptance order.
