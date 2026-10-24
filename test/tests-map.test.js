@@ -48,6 +48,30 @@ function check(h) {
   return JSON.parse(result.stdout);
 }
 
+test('the checked-in import seed has valid paths and supplies CLI map entries', async (t) => {
+  const seed = JSON.parse(fs.readFileSync(path.join(ROOT, 'tools/tests-map.json'), 'utf8'));
+  assert.ok(seed && typeof seed === 'object' && !Array.isArray(seed));
+  const rows = [
+    ['checked-in seed', seed, true],
+    ['array instead of map', [], false],
+    ['escaping source', { ...seed, '../outside.js': [] }, false],
+    ['escaping suite', { ...seed, 'bin/tower-crane.js': ['../outside.test.js'] }, false],
+    ['suite glob', { ...seed, 'bin/tower-crane.js': ['test/*.test.js'] }, false],
+    ['scalar suite', { ...seed, 'bin/tower-crane.js': 'test/commands.test.js' }, false],
+  ];
+  for (const [name, value, valid] of rows) {
+    await t.test(name, () => {
+      assert.equal(require('../lib/tests-map').settingError(value) === null, valid);
+    });
+  }
+  assert.ok(Array.isArray(seed['bin/tower-crane.js']));
+  // A representative entry keeps the CLI argument within Windows' command-line limit.
+  const selected = { 'bin/tower-crane.js': seed['bin/tower-crane.js'] };
+  const h = makeRepo(t);
+  h.init(['--tests-map', JSON.stringify(selected)]);
+  assert.deepEqual(h.json(['project', 'show']).tests.map, selected);
+});
+
 test('mapped head suites preserve scoped proof and policy-bound evidence through the CLI', (t) => {
   const h = fixture(t);
   assert.deepEqual(h.json(['project', 'show']).tests.map, map);
