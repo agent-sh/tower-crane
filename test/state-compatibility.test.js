@@ -515,7 +515,8 @@ test('the supervisor waits out a scanner holding its state files and log', async
   assert.equal(fs.readFileSync(worker.edited, 'utf8'), 'edit finished');
   assert.doesNotMatch(result.stderr, /supervisor failed|is gone/);
   const refused = fs.readFileSync(scanner, 'utf8');
-  for (const call of ['statSync project.json', 'statSync events.jsonl', 'openSync events.jsonl', 'readFileSync tasks.json']) {
+  // The supervisor's task view opens tasks.json and reads it through the descriptor.
+  for (const call of ['statSync project.json', 'statSync events.jsonl', 'openSync events.jsonl', 'openSync tasks.json']) {
     assert.ok(refused.includes(`${call}\n`), `the supervisor met a refused ${call}:\n${refused}`);
   }
 });
