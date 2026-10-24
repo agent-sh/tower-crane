@@ -1,6 +1,7 @@
 'use strict';
 
 const { waitOnRepo, killPid, killGroup } = require('./signals');
+const StateFiles = require('./state-files');
 const { readPublished } = require('./atomic-file');
 
 const test = require('node:test');
@@ -15,7 +16,7 @@ const P = require('../lib/processes');
 // A Windows worker spawn records its lease before its harness starts, so it never reserves a slot.
 const RESERVES = process.platform === 'win32' && 'a Windows worker spawn holds a lease, never a reservation';
 
-const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+const events = (h) => StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
 
 function setup(t, workers = 1, tasks = 3) {
   return cachedFixture(t, `${workers}:${tasks}`, (h) => {
@@ -89,14 +90,14 @@ test('five held worker slots refuse dispatch before process, home or spend', (t)
     env: { PATH: bin + path.delimiter + (h.env.PATH || h.env.Path || ''), CODEX_HOME: path.join(h.base, 'codex') },
     hooks: { HOOK_USAGE_HARNESS: 'codex', HOOK_USAGE_FILE: path.join(__dirname, 'fixtures', 'usage', 'codex-stream.jsonl') },
   };
-  const beforeTasks = fs.readFileSync(path.join(h.state, 'tasks.json'), 'utf8');
+  const beforeTasks = StateFiles.docText(h.state, 'tasks.json');
   const beforeEvents = events(h);
   for (const role of [[], ['--role', 'easy']]) {
     const r = h.run(['spawn', '--task', 'T6', ...role, '--wait'], opts);
     assert.equal(r.code, 1, r.stderr);
     assert.match(r.stderr, /workers limit is reached/);
     for (let i = 1; i <= 5; i++) assert.match(r.stderr, new RegExp(`T${i}.*held-${i}`));
-    assert.equal(fs.readFileSync(path.join(h.state, 'tasks.json'), 'utf8'), beforeTasks);
+    assert.equal(StateFiles.docText(h.state, 'tasks.json'), beforeTasks);
     assert.deepEqual(events(h), beforeEvents);
     assert.equal(h.detached().length, 0, 'no harness starts');
     assert.ok(!fs.existsSync(path.join(h.state, 'homes')), 'no home is written');
@@ -490,35 +491,15 @@ for (const cmd of ['spawn exit', 'worker-exited']) {
     const h = setup(t, 1);
     controlledHarness(h);
     const { spawned, release } = await pausedSpawn(h, 'T1');
-    const receipt = path.join(h.base, 'exit-receipt.json');
-    const hook = path.join(h.base, 'exit-receipt.js');
-    // The receipt shows in whole-log reads and, once per reader, in appended-event reads.
-    fs.writeFileSync(hook, `
-const fs = require('node:fs');
-const read = fs.readFileSync;
-const line = () => JSON.stringify(JSON.parse(read.call(fs, ${JSON.stringify(receipt)}, 'utf8')));
-fs.readFileSync = function(file, ...args) {
-  const value = read.call(this, file, ...args);
-  if (!String(file).endsWith('events.jsonl') || typeof value !== 'string') return value;
-  return value + line() + '\\n';
-};
-const { EventReader } = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'event-reader.js'))});
-const tail = EventReader.prototype.read;
-EventReader.prototype.read = function() {
-  const batch = tail.call(this);
-  if (this.file.endsWith('events.jsonl') && !this.receipt) {
-    this.receipt = true;
-    batch.rows.push(this.parse(line(), batch.offset));
-  }
-  return batch;
-};
-`);
     const detail = { agent: spawned.agent, pid: spawned.pid, code: 0 };
+    // Each receipt is logged for the claim alone: a refused claim commits
+    // nothing, and the log goes back to what it was, every cursor as before.
     const runClaim = (task, changes) => {
-      fs.writeFileSync(receipt, JSON.stringify({ cmd, task, detail: { ...detail, ...changes }, at: new Date().toISOString() }));
-      return h.run(['claim', 'T2', '--agent', 'replacement'], {
-        env: { NODE_OPTIONS: `--require "${hook.replace(/\\/g, '/')}"` },
-      });
+      const before = StateFiles.logText(h.state);
+      StateFiles.appendLog(h.state, `${JSON.stringify({ cmd, task, detail: { ...detail, ...changes }, at: new Date().toISOString() })}\n`);
+      const r = h.run(['claim', 'T2', '--agent', 'replacement']);
+      if (r.code !== 0) StateFiles.replaceLog(h.state, before);
+      return r;
     };
     try {
       for (const [task, changes] of [
@@ -589,8 +570,8 @@ test('historical worker spawns from the 2026-10-07 log hold no slot for a sandbo
   const fixture = fs.readFileSync(path.join(__dirname, 'fixtures', 'live-slots-2026-10-07.jsonl'), 'utf8');
   const h = setup(t, 5, 6);
   for (let i = 1; i <= 4; i++) h.ok(['claim', `T${i}`, '--agent', `held-${i}`]);
-  const log = path.join(h.state, 'events.jsonl');
-  fs.writeFileSync(log, fixture + fs.readFileSync(log, 'utf8'));
+  // The live records go first, as they were in the log before these claims.
+  StateFiles.replaceLog(h.state, fixture + StateFiles.logText(h.state));
   const pids = fixture.trim().split('\n').map(JSON.parse).flatMap((e) => [e.detail.pid, e.detail.monitor_pid]).filter(Boolean);
   const hidden = { hooks: { HOOK_HIDDEN_PIDS: JSON.stringify([...new Set(pids)]) } };
   const claim = h.run(['claim', 'T5', '--agent', 'worker-T5-9'], hidden);
@@ -610,7 +591,7 @@ function monitorLog(h, records) {
     at: new Date(now - ago * 1000).toISOString(), agent: cmd === 'claim' ? detail.agent : 'owner', cmd, task,
     detail: { role: 'worker', attempt: 1, ...detail },
   }));
-  fs.appendFileSync(path.join(h.state, 'events.jsonl'), lines.join('\n') + '\n');
+  StateFiles.appendLog(h.state, lines.join('\n') + '\n');
   return { hooks: { HOOK_HIDDEN_PIDS: JSON.stringify([424201, 424202, 424203]) } };
 }
 
@@ -659,4 +640,25 @@ test('a session receipt replaying the first attempt does not hide the retry exit
   ]);
   const r = h.run(['claim', 'T2', '--agent', 'worker-T2-1'], hidden);
   assert.equal(r.code, 0, r.stderr);
+});
+
+// The indexed read folds each task's slots apart and orders them by their
+// first record, which must match one fold over the whole log: a slot an
+// interrupt sets again keeps the place its spawn gave it.
+test('slots read by task keep the order a fold over the whole log gives', () => {
+  const T = require('../lib/tasks');
+  const base = Date.now() - 60000;
+  const at = (s) => new Date(base + s * 1000).toISOString();
+  const detail = (agent) => ({ role: 'worker', agent, attempt: 1, reserved: true, pid: 1, host: 'h' });
+  const events = [
+    { at: at(0), cmd: 'spawn', task: 'T1', agent: 'orchestrator', detail: detail('worker-T1-1') },
+    { at: at(1), cmd: 'spawn', task: 'T2', agent: 'orchestrator', detail: detail('worker-T2-1') },
+    { at: at(2), cmd: 'interrupt', task: 'T1', agent: 'orchestrator', detail: { ...detail('worker-T1-1'), active: true } },
+  ];
+  const project = { limits: { lease_minutes: 60 } };
+  const whole = T.reservations({ project, events }, Date.now()).map((s) => s.task);
+  const log = { slotTasks: () => ['T2', 'T1'], forTask: (id, cmds) => events.filter((e) => e.task === id && (!cmds || cmds.includes(e.cmd))) };
+  const indexed = T.reservations({ project, log, events: null }, Date.now()).map((s) => s.task);
+  assert.deepEqual(whole, ['T1', 'T2']);
+  assert.deepEqual(indexed, whole);
 });

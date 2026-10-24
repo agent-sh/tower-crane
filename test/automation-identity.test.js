@@ -15,6 +15,7 @@ const { waitFor } = require('./canary');
 const { shellQuote } = require('../lib/gates/common');
 const { readPublished } = require('./atomic-file');
 const { setup, configureHarness, refillFixture, harness } = require('./automation-helpers');
+const StateFiles = require('./state-files');
 
 // A gone holder's marker that cannot be removed stays until a person acts.
 test('the wait host reports a dispatch lock it cannot clear once, not on every pass', { skip: (process.platform === 'win32' || process.getuid?.() === 0) && 'permission bits do not bind' }, async (t) => {
@@ -395,7 +396,7 @@ test('a reviewer whose monitor never records its exit is replaced after the rece
   const at = new Date().toISOString();
   // The worker exited; the reviewer's process is gone, and its monitor (this
   // test process) runs on without writing the reviewer's spawn exit.
-  fs.appendFileSync(path.join(h.state, 'events.jsonl'), [
+  StateFiles.appendLog(h.state, [
     { at, agent: 'orchestrator', cmd: 'spawn', task: 'T1', detail: { agent: 'worker', role: 'worker', sha: task.sha, revision: task.revision, pid: 999998, attempt: 1 } },
     { at, agent: 'orchestrator', cmd: 'spawn exit', task: 'T1', detail: { agent: 'worker', pid: 999998, attempt: 1, code: 0 } },
     { at, agent: 'orchestrator', cmd: 'spawn', task: 'T1', detail: { agent: 'reviewer-T1-9', role: 'reviewer', rung: 'review',

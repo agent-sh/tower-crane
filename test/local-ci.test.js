@@ -5,6 +5,7 @@
 // and memory budgets of text redaction. local-ci-redaction.test.js has the rest.
 
 const test = require('node:test');
+const StateFiles = require('./state-files');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -42,7 +43,7 @@ test('local CI runs argv on the merged tree and records audited evidence without
   assert.equal(h.git(['worktree', 'list', '--porcelain']).match(/^worktree /gm).length, 1);
   assert.equal(fs.readFileSync(path.join(h.repo, 'head.txt'), 'utf8'), 'old\n');
   assert.ok(e.commands.some((c) => c.command === h.command[0] && c.status === 0));
-  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const events = StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
   assert.deepEqual(events.findLast((v) => v.cmd === 'check ci').detail.receipt, e.receipt);
   assert.equal(h.json(['task', 'show', 'T1']).gates.ok, true);
   h.ok(['accept', 'T1']);
@@ -270,9 +271,8 @@ test('completed local CI tasks keep their audited result without reading current
   h.ok(['merge', 'T1'], opts);
   assert.ok(!fs.existsSync(log), 'repeated merges do not recompute their merged tree');
 
-  const audit = path.join(h.state, 'events.jsonl');
-  const events = fs.readFileSync(audit, 'utf8').trim().split('\n').map(JSON.parse);
-  fs.writeFileSync(audit, events.filter((e) => e.cmd !== 'merge').map(JSON.stringify).join('\n') + '\n');
+  const events = StateFiles.readEvents(h.state);
+  StateFiles.replaceLog(h.state, events.filter((e) => e.cmd !== 'merge').map(JSON.stringify).join('\n') + '\n');
   assert.equal(h.json(['task', 'show', 'T1']).gates.ok, false, 'unaudited merge evidence cannot bypass CI');
 });
 
@@ -303,15 +303,14 @@ test('matching audit copies cannot bind a receipt to another head or tree', (t) 
   h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--ok', '--sha', next, '--agent', 'reviewer']);
   const doc = h.readState('tasks.json');
   const evidence = doc.tasks[0].evidence.findLast((e) => e.type === 'ci');
-  const log = path.join(h.state, 'events.jsonl');
-  const events = fs.readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse);
+  const events = StateFiles.readEvents(h.state);
   const event = events.findLast((e) => e.cmd === 'check ci');
   evidence.sha = next;
   event.detail.sha = next;
   const write = () => {
     event.detail.receipt = structuredClone(evidence.receipt);
     h.writeState('tasks.json', doc);
-    fs.writeFileSync(log, events.map((e) => JSON.stringify(e)).join('\n') + '\n');
+    StateFiles.replaceLog(h.state, events.map((e) => JSON.stringify(e)).join('\n') + '\n');
   };
   write();
   assert.match(h.json(['task', 'show', 'T1']).gates.missing.join('; '), /receipt.*submitted head/);
@@ -626,7 +625,7 @@ process.exitCode = 1;
   // The gate worktree is still removed.
   assert.deepEqual(fs.readdirSync(h.env.TOWER_CRANE_TMP), []);
   assert.equal(h.git(['worktree', 'list', '--porcelain']).match(/^worktree /gm).length, 1);
-  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const events = StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
   assert.deepEqual(events.findLast((v) => v.cmd === 'check ci').detail.local_ci, kept);
 });
 

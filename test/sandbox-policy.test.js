@@ -9,10 +9,11 @@ const path = require('node:path');
 const { cachedFixture } = require('./helpers');
 const P = require('../lib/sandbox-policy');
 const TOML = require('../lib/toml');
+const StateFiles = require('./state-files');
 
 const NO_STUBS = process.platform === 'win32' && 'harness stubs are shebang scripts';
 const as = (agent) => ({ env: { TOWER_CRANE_AGENT: agent } });
-const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+const events = (h) => StateFiles.readEvents(h.state);
 const task = (h, id) => h.readState('tasks.json').tasks.find((x) => x.id === id);
 // A Unix socket left at dir/name, as an ssh agent or X server leaves one. A
 // child binds it by a relative name, since a temp path can pass the socket

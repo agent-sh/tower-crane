@@ -1,6 +1,7 @@
 'use strict';
 
 const { waitOnRepo, childExit, killPid, killGroup } = require('./signals');
+const StateFiles = require('./state-files');
 
 const { test, describe } = require('node:test');
 const assert = require('node:assert/strict');
@@ -29,7 +30,7 @@ const S = require('../lib/state');
 const Governor = require('../lib/governor');
 const { MIN_USAGE_MS } = require('../lib/ladder');
 
-const log = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+const log = (h) => StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
 const sketches = (h) => ['sketch.md', 'sketch.html'].map((file) => ({
   file, text: fs.readFileSync(path.join(h.state, file), 'utf8'),
 }));
@@ -759,16 +760,16 @@ test('a schema bump before the supervisor first reads state stops its worker beh
   const spawned = h.json(['spawn', '--task', 'T1'], { hooks });
   await waitOnRepo(h, () => fs.existsSync(paused), 'supervisor did not pause');
   // The lease gate waits on its supervisor, and this supervisor can no longer read the state.
+  // A newer tool marks its schema in the marker.
   S.withLock(h.state, () => {
-    const project = JSON.parse(fs.readFileSync(path.join(h.state, 'project.json'), 'utf8'));
-    project.schema_version = 2;
-    S.writeAtomic(path.join(h.state, 'project.json'), S.json(project));
+    const marker = JSON.parse(fs.readFileSync(path.join(h.state, 'project.json'), 'utf8'));
+    S.writeAtomic(path.join(h.state, 'project.json'), S.json({ ...marker, schema_version: S.SCHEMA_VERSION + 1 }));
   });
   fs.writeFileSync(`${paused}.go`, '');
   await waitOnRepo(h, () => !detachedAlive({ pid: spawned.monitor_pid }), 'supervisor kept waiting behind its gate');
   assert.equal(detachedAlive({ pid: spawned.pid }), false, 'the gate was stopped with its supervisor');
   assert.equal(h.readAttempts().length, 0, 'the worker never started');
-  const tasks = JSON.parse(fs.readFileSync(path.join(h.state, 'tasks.json'), 'utf8')).tasks;
+  const tasks = JSON.parse(StateFiles.docText(h.state, 'tasks.json')).tasks;
   assert.equal(tasks.find((task) => task.id === 'T1').claim, null, 'no lease was taken');
 });
 
@@ -808,7 +809,7 @@ test('a worker without the lease gate whose supervisor stops waiting for its lea
   let result;
   try {
     await waitOnRepo(h, () => fs.existsSync(paused), 'dispatch did not pause before launching its worker');
-    const claim = JSON.parse(fs.readFileSync(path.join(h.state, 'tasks.json'), 'utf8')).tasks.find((task) => task.id === 'T1').claim;
+    const claim = JSON.parse(StateFiles.docText(h.state, 'tasks.json')).tasks.find((task) => task.id === 'T1').claim;
     assert.match(claim?.agent || '', /^worker-T1-/, 'the lease is on disk while the supervisor waits');
     assert.equal(h.readAttempts().length, 0, 'no harness runs before go');
     // The supervisor's wait for go closes while the paused dispatch holds the state lock.
@@ -820,7 +821,7 @@ test('a worker without the lease gate whose supervisor stops waiting for its lea
   assert.notEqual(result.code, 0, result.stderr);
   assert.match(result.stderr, new RegExp(`did not start: no lease: it was not recorded within ${SHORT_STARTUP_MS / 1000} s`));
   assert.equal(h.readAttempts().length, 0, 'the worker never started');
-  const task = JSON.parse(fs.readFileSync(path.join(h.state, 'tasks.json'), 'utf8')).tasks.find((x) => x.id === 'T1');
+  const task = JSON.parse(StateFiles.docText(h.state, 'tasks.json')).tasks.find((x) => x.id === 'T1');
   assert.equal(task.claim, null, 'the lease is rolled back');
   assert.equal(task.status, 'todo');
   assert.equal(task.branch, null, 'the rest of the failed spawn is not recorded either');
@@ -1187,6 +1188,25 @@ setInterval(() => {}, 1000);
   assert.equal(fs.readFileSync(terminated + '.parent', 'utf8'), 'parent');
   assert.equal(fs.readFileSync(terminated + '.child', 'utf8'), 'child');
   assert.equal(log(h).filter((e) => e.cmd === 'spawn retry').length, 0);
+  assert.equal(h.json(['task', 'show', 'T1']).run.reason, 'supervisor stopped by SIGTERM');
+});
+
+// The dispatch binds its supervisor to the host governor once the spawn is
+// recorded, so a stop can arrive before the supervisor has read that record.
+test('a supervisor stopped as soon as its dispatch returns still records the stop and its exit', {
+  skip: process.platform === 'win32' && 'POSIX signals',
+}, async (t) => {
+  const h = setup(t, { failures: 0 });
+  const script = `
+const { fakeAgentEnv } = require(${JSON.stringify(path.join(__dirname, 'agent-env.js'))});
+require('node:child_process').execFileSync(process.execPath, [process.argv[1], 'claim', 'T1'], { env: fakeAgentEnv(process.env) });
+setInterval(() => {}, 1000);
+`;
+  h.ok(['ladder', 'set', 'easy', '--command', JSON.stringify([process.execPath, '-e', script, BIN, '{prompt}'])]);
+  const spawned = h.json(['spawn', '--task', 'T1']);
+  killPid(spawned.monitor_pid, 'SIGTERM');
+  await waitOnRepo(h, () => !detachedAlive({ pid: spawned.monitor_pid }), 'stopped monitor survived');
+  assert.equal(log(h).filter((e) => e.cmd === 'spawn exit' && e.detail.agent === spawned.agent).length, 1);
   assert.equal(h.json(['task', 'show', 'T1']).run.reason, 'supervisor stopped by SIGTERM');
 });
 

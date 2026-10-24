@@ -43,8 +43,7 @@ function write(root, file, text) {
 }
 
 function outcome(h) {
-  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
-  return events.filter((e) => e.task === 'T1' && ['worktree removed', 'worktree kept'].includes(e.cmd)).at(-1);
+  return h.events().filter((e) => e.task === 'T1' && ['worktree removed', 'worktree kept'].includes(e.cmd)).at(-1);
 }
 
 function sparse(file, bytes) {

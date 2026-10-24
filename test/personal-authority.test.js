@@ -1,6 +1,7 @@
 'use strict';
 
 const test = require('node:test');
+const StateFiles = require('./state-files');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -11,7 +12,7 @@ const { readPublished } = require('./atomic-file');
 
 const asOrchestrator = { env: { TOWER_CRANE_AGENT: 'orchestrator' } };
 const decisions = h => h.readState('decisions.json').decisions;
-const audits = h => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse).filter(e => e.cmd === 'setting');
+const audits = h => StateFiles.logText(h.state).trim().split('\n').map(JSON.parse).filter(e => e.cmd === 'setting');
 const config = h => fs.existsSync(h.userConfig) ? readPublished(h.userConfig, 'utf8') : null;
 
 function setup(t) {

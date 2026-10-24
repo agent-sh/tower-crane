@@ -7,6 +7,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { setup, upper, resubmit } = require('./stack-fixture');
 const { events, reviewProbe, child } = require('./stack-parent-helpers');
+const StateFiles = require('./state-files');
 
 // A stacked child whose head holds the parent, a stopped git operation or a live session, and cached gates.
 
@@ -164,7 +165,7 @@ for (const entry of ['waived accept', 'accept review', 'review dry-run', 'review
         // A native submission needs an exited worker receipt for automatic review.
         const at = new Date().toISOString();
         const detail = { agent: 'worker-T2', role: 'worker', sha: top.sha, revision: 1, pid: 999999, attempt: 1 };
-        fs.appendFileSync(path.join(f.h.state, 'events.jsonl'), [
+        StateFiles.appendLog(f.h.state, [
           { at, agent: 'orchestrator', cmd: 'spawn', task: 'T2', detail },
           { at, agent: 'orchestrator', cmd: 'spawn exit', task: 'T2', detail: { agent: detail.agent, pid: detail.pid, attempt: 1, code: 0 } },
         ].map((e) => `${JSON.stringify(e)}\n`).join(''));

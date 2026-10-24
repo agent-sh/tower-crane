@@ -6,6 +6,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { cachedFixture } = require('./helpers');
 const Climb = require('../lib/climb');
+const StateFiles = require('./state-files');
 
 function setup(t) {
   return cachedFixture(t, 'climb', (h) => {
@@ -16,7 +17,7 @@ function setup(t) {
 }
 
 const rung = (h) => h.json(['spawn', '--task', 'T1', '--dry-run']).rung;
-const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+const events = (h) => StateFiles.readEvents(h.state);
 const tier = (h) => h.json(['task', 'show', 'T1']).tier;
 
 function reviewFail(h, digit, file) {

@@ -9,9 +9,10 @@ const cp = require('node:child_process');
 const { once } = require('node:events');
 const { HUNG_TEST_MS, killPid } = require('./signals');
 const { cachedFixture, BIN, HOOKS } = require('./helpers');
+const StateFiles = require('./state-files');
 
 function log(h) {
-  const raw = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
+  const raw = StateFiles.logText(h.state);
   // A concurrent append becomes readable only when its final newline arrives.
   return raw.slice(0, raw.lastIndexOf('\n') + 1).split('\n').filter(Boolean).map(JSON.parse);
 }

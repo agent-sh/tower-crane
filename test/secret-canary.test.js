@@ -1,6 +1,7 @@
 'use strict';
 
 const { waitUntil, killPid } = require('./signals');
+const StateFiles = require('./state-files');
 
 // A spawn with a unique secret in the rung env, the project env, an env_file
 // and the harness credentials leaves that secret nowhere but the files the
@@ -53,11 +54,10 @@ function setup(t, harness, mode, { big = 0 } = {}) {
   h.ok(['ladder', 'set', 'medium', '--fallbacks', JSON.stringify([{ harness, ...route, env: { ROUTE: 'fallback', TC_FALLBACK_SECRET: c.fallback } }])]);
   h.ok(['project', 'set', '--env', JSON.stringify({ TC_PROJECT_SECRET: c.project }), '--env_file', '~/secrets.env']);
   if (big) {
-    // Too long for ladder set's argv; the owner writes project.json instead.
-    const file = path.join(h.state, 'project.json');
-    const project = JSON.parse(fs.readFileSync(file, 'utf8'));
+    // Too long for ladder set's argv; the owner writes the project instead.
+    const project = h.readState('project.json');
     Object.assign(project.ladder.medium.env, bigVars);
-    fs.writeFileSync(file, JSON.stringify(project, null, 2) + '\n');
+    h.writeState('project.json', project);
   }
   const out = path.join(h.base, 'canary.jsonl');
   const values = { TC_RUNG_SECRET: c.rung, TC_PROJECT_SECRET: c.project, TC_FILE_SECRET: c.file,
@@ -70,9 +70,10 @@ function setup(t, harness, mode, { big = 0 } = {}) {
   };
   delete env.XDG_CACHE_HOME;
   const spawn = (args) => h.run(['spawn', '--task', 'T1', ...args], { env, hooks: { HOOK_KEEP_SPAWN_DIRS: '1' } });
-  // The configured sources: the ladder and project env live in project.json,
-  // the fallback env in the user file.
-  const allow = [path.join(h.state, 'project.json'), h.userConfig, ...sources];
+  // The configured sources: the ladder and project env live in the project
+  // document of state.db, the fallback env in the user file. The database is
+  // scanned below by what it holds besides the project.
+  const allow = [...[...StateFiles.DB_FILES].map((name) => path.join(h.state, name)), h.userConfig, ...sources];
   const reports = () => fs.readFileSync(out, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
   const expected = (names) => Object.fromEntries(Object.entries(values).map(([n, v]) => [n, names.includes(n) ? sha(v) : null]));
   // The spawning environment's GH_TOKEN never reaches a sandboxed agent: its
@@ -84,6 +85,7 @@ function setup(t, harness, mode, { big = 0 } = {}) {
     assert.ok(fs.readdirSync(cache).some((d) => fs.existsSync(path.join(cache, d, 'job.json'))), 'the kept job file is scanned');
     canary.assertNoHits([
       ...canary.scanTree(h.base, c, allow),
+      ...['tasks.json', 'decisions.json', 'events.jsonl'].flatMap((name) => canary.scanText(StateFiles.fileText(h.state, name), c, `${name} in state.db`)),
       ...outputs.flatMap((o, i) => canary.scanText(o, c, `spawn output ${i}`)),
     ], `files or output after a ${harness} ${mode} run`);
   };
@@ -128,7 +130,7 @@ for (const harness of ['claude', 'codex']) {
     assert.deepEqual(Object.keys(JSON.parse(r.stdout).route.env), ['ROUTE', 'TC_RUNG_SECRET']);
     assert.ok(await ready, 'the agent started');
     canary.assertNoHits(canary.scanText(canary.processListing(), s.c, 'the process listing'), 'a process listing');
-    const started = fs.readFileSync(path.join(s.h.state, 'events.jsonl'), 'utf8')
+    const started = StateFiles.logText(s.h.state)
       .trim().split('\n').map((l) => JSON.parse(l)).findLast((e) => e.cmd === 'spawn').detail;
     const monitor = { pid: started.monitor_pid, startTicks: started.monitor_start_ticks };
     killPid(monitor.pid, 'SIGTERM');
@@ -195,7 +197,7 @@ for (const harness of ['claude', 'codex']) {
     assert.equal(held.code, 0, held.stderr);
     const holderPid = Number(await canary.waitFor(`${out}.ready`, { nonempty: true }));
     assert.ok(holderPid, 'the holder started');
-    const holderSpawn = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l))
+    const holderSpawn = StateFiles.logText(h.state).trim().split('\n').map((l) => JSON.parse(l))
       .findLast((e) => e.cmd === 'spawn' && e.task === 'T1').detail;
     const monitor = { pid: holderSpawn.monitor_pid, startTicks: holderSpawn.monitor_start_ticks };
     t.after(async () => {
@@ -231,7 +233,7 @@ for (const harness of ['claude', 'codex']) {
     assert.equal(r.code, 0, r.stderr);
     const seen = JSON.parse(fs.readFileSync(result, 'utf8'));
     assert.match(String(seen.home), /^ERR /, 'the holder home is readable from the other agent\'s sandbox');
-    const agent = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l))
+    const agent = StateFiles.logText(h.state).trim().split('\n').map((l) => JSON.parse(l))
       .findLast((e) => e.cmd === 'spawn' && e.task === 'T2').detail.agent;
     const transcripts = harness === 'claude' ? path.join(h.state, 'homes', agent, 'projects') : path.join(h.state, 'homes', '.codex', agent, 'sessions');
     assert.ok(fs.existsSync(transcripts) && fs.readdirSync(transcripts).length, `${transcripts} holds the agent's transcript`);

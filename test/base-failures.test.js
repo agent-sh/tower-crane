@@ -8,6 +8,7 @@ const T = require('../lib/tasks');
 const { cachedFixture } = require('./helpers');
 const { setup } = require('./automation-helpers');
 const { shellQuote } = require('../lib/gates/common');
+const StateFiles = require('./state-files');
 
 const SHA = 'a'.repeat(40);
 const ERROR = 'Error: shared fixture is missing';
@@ -88,7 +89,7 @@ function fixture(t) {
     h.ok(['claim', 'T1', '--agent', 'worker']);
     h.ok(['submit', 'T1', '--sha', h.sha, '--pr', '7', '--agent', 'worker']);
   };
-  h.logs = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  h.logs = () => StateFiles.readEvents(h.state);
   h.consume = () => h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
   return h;
 }
@@ -215,10 +216,8 @@ if (${twice} || !fs.existsSync(marker)) {
 }\n`);
     h.ok(['project', 'set', '--tests-cmd', `node ${shellQuote(script)}`]);
     const fix = h.json(['task', 'add', '--title', 'Fix flaky test known flake', '--acceptance', 'passes']).id;
-    const eventsFile = path.join(h.state, 'events.jsonl');
-    const events = h.logs();
-    events.findLast((e) => e.cmd === 'task add').detail.flake = 'known flake';
-    fs.writeFileSync(eventsFile, events.map((e) => JSON.stringify(e) + '\n').join(''));
+    const added = h.logs().findLast((e) => e.cmd === 'task add').id;
+    StateFiles.editEvents(h.state, (e) => (e.id === added ? { ...e, detail: { ...e.detail, flake: 'known flake' } } : null));
     h.submit();
     h.consume();
     const task = h.json(['task', 'show', 'T1']);
@@ -376,7 +375,7 @@ test('status preserves the legacy base_failure object used by a hotfix waiver', 
   const tasks = h.readState('tasks.json');
   tasks.tasks[0].evidence.push({ type: 'tests', ok: true, waived: true, agent: 'owner',
     sha: h.sha, revision: 1, base_failure: { base: SHA, names: ['old host failure'] } });
-  fs.writeFileSync(path.join(h.state, 'tasks.json'), JSON.stringify(tasks));
+  h.writeState('tasks.json', tasks);
   assert.deepEqual(h.json(['status']).base_failures, []);
 });
 
@@ -398,7 +397,7 @@ test('generic test names do not attach failure evidence to unrelated active task
     unrelated.status = status;
     if (status === 'in_progress') unrelated.claim = { agent: 'other-worker', since: new Date().toISOString(),
       until: new Date(Date.now() + 3600000).toISOString(), from: 'todo' };
-    fs.writeFileSync(path.join(h.state, 'tasks.json'), JSON.stringify(tasks));
+    h.writeState('tasks.json', tasks);
     const before = fs.readFileSync(path.join(h.state, 'briefs', `${other}.md`), 'utf8');
     const script = path.join(h.base, 'failure.js');
     fs.writeFileSync(script, `console.log(${JSON.stringify(failedLog('submit'))}); process.exit(1);\n`);
@@ -419,12 +418,11 @@ test('closed flake tasks return recurrent passes to the two-task flake ledger', 
   for (const status of ['accepted', 'cancelled']) {
     const h = fixture(t);
     const fix = h.json(['task', 'add', '--title', 'Fix flaky test known flake', '--acceptance', 'passes']).id;
-    const events = h.logs();
-    events.findLast((e) => e.cmd === 'task add').detail.flake = 'known flake';
-    fs.writeFileSync(path.join(h.state, 'events.jsonl'), events.map((e) => JSON.stringify(e) + '\n').join(''));
+    const added = h.logs().findLast((e) => e.cmd === 'task add').id;
+    StateFiles.editEvents(h.state, (e) => (e.id === added ? { ...e, detail: { ...e.detail, flake: 'known flake' } } : null));
     const tasks = h.readState('tasks.json');
     tasks.tasks.find((t) => t.id === fix).status = status;
-    fs.writeFileSync(path.join(h.state, 'tasks.json'), JSON.stringify(tasks));
+    h.writeState('tasks.json', tasks);
     const marker = path.join(h.base, 'ran');
     const script = path.join(h.base, 'flake.js');
     fs.writeFileSync(script, `const fs=require('node:fs'), marker=${JSON.stringify(marker)};

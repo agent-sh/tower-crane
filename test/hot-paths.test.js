@@ -8,6 +8,7 @@ const { cachedFixture, ROOT } = require('./helpers');
 const Scope = require('../lib/scope');
 const S = require('../lib/state');
 const StackFixture = require('./stack-fixture');
+const StateFiles = require('./state-files');
 
 function fixture(t) {
   return cachedFixture(t, 'hot-paths', (h) => {
@@ -154,7 +155,7 @@ function merged(h, id) {
     source: 'merge', commands: ['git merge'], agent: 'orchestrator' };
   task.evidence.push(detail);
   h.writeState('tasks.json', doc);
-  fs.appendFileSync(path.join(h.state, 'events.jsonl'), JSON.stringify({
+  StateFiles.appendLog(h.state, JSON.stringify({
     at: new Date().toISOString(), cmd: 'merge', task: id, agent: 'orchestrator', detail,
   }) + '\n');
 }
@@ -211,7 +212,7 @@ function recoveryState(task, state, agent) {
 }
 
 function reservation(h, id, agent) {
-  fs.appendFileSync(path.join(h.state, 'events.jsonl'), JSON.stringify({
+  StateFiles.appendLog(h.state, JSON.stringify({
     at: new Date().toISOString(), cmd: 'spawn', task: id, agent: 'orchestrator',
     detail: { role: 'worker', agent, attempt: 1, pid: 424201, reserved: true, active: true },
   }) + '\n');

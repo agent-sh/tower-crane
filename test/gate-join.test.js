@@ -1,6 +1,7 @@
 'use strict';
 
 const test = require('node:test');
+const StateFiles = require('./state-files');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -45,7 +46,7 @@ while (!fs.existsSync(process.argv[3])) {
 }
 
 const runs = (h) => (fs.existsSync(h.runs) ? fs.readFileSync(h.runs, 'utf8').split('\n').filter(Boolean).length : 0); // read-published: the fake CI only appends lines, never replaces the file
-const logs = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+const logs = (h) => StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
 const ciEvidence = (h) => h.readState('tasks.json').tasks[0].evidence.filter((e) => e.type === 'ci');
 
 // Starts `first`, waits for its CI run, then starts `second` and releases the
@@ -114,7 +115,7 @@ function holderFixture(t, overrides = {}) {
   const h = fixture(t);
   fs.writeFileSync(h.release, '');
   const task = h.readState('tasks.json').tasks[0];
-  h.append = (e) => fs.appendFileSync(path.join(h.state, 'events.jsonl'), `${JSON.stringify(e)}\n`);
+  h.append = (e) => StateFiles.appendLog(h.state, `${JSON.stringify(e)}\n`);
   h.lease = (source, detail = {}) => h.append({ at: new Date(Date.now() - 600000).toISOString(), agent: 'orchestrator', via: 'automation', cmd: 'gate run', task: 'T1',
     detail: { type: 'ci', sha: task.sha, revision: task.revision, source, phase: 'running', deadline: new Date(Date.now() + 600000).toISOString(),
       pid: process.pid, ...require('../lib/processes').identity(process.pid), ...overrides, ...detail } });
@@ -242,7 +243,7 @@ test('an unobservable tests holder expires at the deadline its planner recorded'
   const preload = path.join(h.base, 'deadline-clock.cjs');
   fs.writeFileSync(preload, 'Date.now = () => Number(process.env.TC_DEADLINE_NOW);\n');
   const source = 'gate:unobservable-tests';
-  fs.appendFileSync(path.join(h.state, 'events.jsonl'), `${JSON.stringify({
+  StateFiles.appendLog(h.state, `${JSON.stringify({
     ...first, detail: { ...first.detail, source, host: 'another-host' },
   })}\n`);
   const r = h.run(['check', 'tests', 'T1'], { env: {
@@ -333,7 +334,7 @@ test('a holder without start ticks, past one command budget but inside its plann
   const span = Date.parse(first.detail.deadline) - Date.parse(first.at);
   // The lease names the first run's process; a macOS one carries none of these to tell it by.
   const { start_ticks: _ticks, pidns: _pidns, created: _created, seen: _seen, ...detail } = first.detail;
-  const append = (e) => fs.appendFileSync(path.join(h.state, 'events.jsonl'), `${JSON.stringify(e)}\n`);
+  const append = (e) => StateFiles.appendLog(h.state, `${JSON.stringify(e)}\n`);
   append({ ...first, at: new Date(at).toISOString(), detail: { ...detail, source: 'gate:mac', pid: process.pid, host: os.hostname(), deadline: new Date(at + span).toISOString() } });
   let stderr = '';
   let child;

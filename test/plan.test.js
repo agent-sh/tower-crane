@@ -1,6 +1,7 @@
 'use strict';
 
 const test = require('node:test');
+const StateFiles = require('./state-files');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -78,7 +79,7 @@ test('plan import resolves local names in order and is all or nothing', (t) => {
   assert.equal(tasks[4].needs_owner, null);
   assert.equal(tasks[1].size, 'S');
 
-  const before = fs.readFileSync(path.join(h.state, 'tasks.json'), 'utf8');
+  const before = StateFiles.docText(h.state, 'tasks.json');
   const cases = [
     [[{ id: 'a', title: 'A', acceptance: 'x' }, { title: 'B', acceptance: 'y', depends_on: ['later'] }, { id: 'later', title: 'L', acceptance: 'z' }], /unknown dependency later/],
     [[{ title: 'A', acceptance: 'x' }, { title: 'no acceptance' }], /plan entry 2 has no acceptance/],
@@ -90,7 +91,7 @@ test('plan import resolves local names in order and is all or nothing', (t) => {
     const r = h.run(['plan', 'import', plan]);
     assert.equal(r.code, 1, r.stderr);
     assert.match(r.stderr, msg);
-    assert.equal(fs.readFileSync(path.join(h.state, 'tasks.json'), 'utf8'), before, 'a refused import adds nothing');
+    assert.equal(StateFiles.docText(h.state, 'tasks.json'), before, 'a refused import adds nothing');
   }
 });
 
@@ -254,19 +255,19 @@ test('task add --brief writes the brief in the same command and refuses an unrea
   assert.equal(fs.existsSync(path.join(h.state, 'briefs', 'T2.md')), false);
 });
 
-test('task add whose audit append fails adds nothing and keeps no brief', { skip: process.platform === 'win32' || process.getuid?.() === 0 }, (t) => {
+test('task add whose commit fails adds nothing and keeps no brief', (t) => {
   const h = makeRepo(t);
   h.init();
   const file = path.join(h.base, 'brief.md');
   fs.writeFileSync(file, '# Context\n\nFrom a failed audit.\n');
-  // The event append is the commit point, so a failed append commits nothing.
-  fs.chmodSync(path.join(h.state, 'events.jsonl'), 0o400);
-  const audit = h.run(['task', 'add', '--title', 'Lost', '--acceptance', 'nothing stays', '--brief', file]);
-  fs.chmodSync(path.join(h.state, 'events.jsonl'), 0o644);
+  const before = h.events().length;
+  // The task and its event are one commit, so a failed commit keeps neither.
+  const audit = h.run(['task', 'add', '--title', 'Lost', '--acceptance', 'nothing stays', '--brief', file], { hooks: { HOOK_FAIL_COMMIT: '1' } });
   assert.equal(audit.code, 1);
+  assert.match(audit.stderr, /injected commit failure/);
   assert.deepEqual(h.readState('tasks.json').tasks, []);
+  assert.equal(h.events().length, before);
   assert.equal(fs.existsSync(path.join(h.state, 'briefs', 'T1.md')), false);
-  assert.deepEqual(fs.readdirSync(h.state).filter((name) => name.startsWith('tasks.json.')), []);
 });
 
 function racedAdd(h, fail) {

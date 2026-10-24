@@ -18,6 +18,8 @@ const path = require('node:path');
 globalThis[Symbol.for('tower-crane.test-fixture')] = true;
 
 // Every CLI fails when it resolves the user ladder file outside the test roots.
+// Every CLI's write draws its sketch before it returns.
+require('./render-inline');
 require('./user-config-guard');
 require('./no-fsync');
 

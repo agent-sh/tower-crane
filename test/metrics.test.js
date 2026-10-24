@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { makeRepo, TMP_ROOT } = require('./helpers');
 const S = require('../lib/state');
+const StateFiles = require('./state-files');
 const Cause = require('../lib/rework-cause');
 const M = require('../lib/metrics');
 
@@ -92,14 +93,20 @@ function history() {
   ];
 }
 
+// Writers append in time order; the fixture lists events by task for reading.
+const logText = (events) => events.map((e, i) => [e, i]).sort((a, b) => a[0].at.localeCompare(b[0].at) || a[1] - b[1])
+  .map(([e]) => `${JSON.stringify(e)}\n`).join('');
+
 function writeLog(file, events, torn) {
-  // Writers append in time order; the fixture lists events by task for reading.
-  const sorted = events.map((e, i) => [e, i]).sort((a, b) => a[0].at.localeCompare(b[0].at) || a[1] - b[1]).map(([e]) => e);
-  fs.appendFileSync(file, sorted.map((e) => `${JSON.stringify(e)}\n`).join('') + (torn || ''));
+  fs.appendFileSync(file, logText(events) + (torn || ''));
 }
 
+// SQLite's shared-memory index (state.db-shm) changes under every reader,
+// and the first connection since the last one closed makes an empty
+// state.db-wal; neither holds state.
 function snapshot(dir) {
-  return fs.readdirSync(dir, { recursive: true }).sort().map((name) => {
+  const sqlite = (name) => name.endsWith('-shm') || name.endsWith('-wal') && fs.statSync(path.join(dir, name)).size === 0;
+  return fs.readdirSync(dir, { recursive: true }).filter((name) => !sqlite(name)).sort().map((name) => {
     const st = fs.statSync(path.join(dir, name));
     return `${name} ${st.isDirectory() ? 'dir' : `${st.size} ${st.mtimeMs}`}`;
   });
@@ -111,7 +118,7 @@ const TORN = `{"at":"${at(100)}","agent":"orchestrator","cmd":"merge","task":"T9
 test('metrics reports merges, causes, the Tower Crane share, tokens and phases for a cohort, lock-free and read-only', (t) => {
   const h = makeRepo(t);
   h.init();
-  writeLog(path.join(h.state, 'events.jsonl'), history(), TORN);
+  StateFiles.appendLog(h.state, logText(history()));
   const window = ['--since', '2026-10-19T00:00:00Z', '--until', '2026-10-21T00:00:00Z'];
   const env = { ...h.env, TZ: 'UTC' };
   let all;
@@ -128,7 +135,14 @@ test('metrics reports merges, causes, the Tower Crane share, tokens and phases f
     after = snapshot(h.state);
   });
   assert.deepEqual(after, before, 'metrics wrote nothing in the state directory');
-  assert.equal(all.log.torn_last_line, true);
+  assert.equal(all.log.torn_last_line, false);
+  // A file layout's log reads the same, without its torn last line.
+  const layout = fs.mkdtempSync(path.join(TMP_ROOT, 'metrics-'));
+  t.after(() => fs.rmSync(layout, { recursive: true, force: true }));
+  writeLog(path.join(layout, 'events.jsonl'), history(), TORN);
+  const fromFile = M.report(layout, { since: Date.parse('2026-10-19T00:00:00Z'), until: Date.parse('2026-10-21T00:00:00Z') });
+  assert.equal(fromFile.log.torn_last_line, true);
+  assert.deepEqual([fromFile.merges, fromFile.reworks], [all.merges, all.reworks]);
 
   assert.deepEqual([all.merges.tasks, all.merges.total], [4, 4]);
   const causes = (r) => Object.fromEntries(Object.entries(r.by_cause).filter(([, n]) => n));

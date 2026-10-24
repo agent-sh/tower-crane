@@ -1,6 +1,6 @@
 # State
 
-Tower Crane keeps a project's plan and progress in plain files. The CLI is the state writer.
+Tower Crane keeps a project's plan and progress in one SQLite database, `state.db` in the state directory ([Storage](state/storage.md#database)). The CLI is the state writer.
 
 - [Tasks and lifecycle](state/tasks.md)
 - [Submission history](state/tasks.md#submission-history)

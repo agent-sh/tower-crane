@@ -7,7 +7,7 @@ const path = require('node:path');
 const { waitUntil } = require('./signals');
 const { makeRepo, cachedFixture, stubRungs, BIN, detachedAlive } = require('./helpers');
 const { gateFixture } = require('./gate-helpers');
-const { readJsonLines } = require('./atomic-file');
+const StateFiles = require('./state-files');
 
 const ghStub = path.join(__dirname, 'fixtures', 'automation-gh.js');
 const harness = path.join(__dirname, 'fixtures', 'automation-harness.js');
@@ -92,7 +92,7 @@ function attach(h) {
     h.saveGithub(after);
   };
   h.consume = () => h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
-  h.logs = () => readJsonLines(path.join(h.state, 'events.jsonl'));
+  h.logs = () => StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
   return h;
 }
 
@@ -119,9 +119,8 @@ poll();
 // Another task holds an executor on this host for as long as the test process
 // lives; the returned function releases it.
 function holdExecutor(h, task = 'T9') {
-  const file = path.join(h.state, 'events.jsonl');
   const lease = 'cpu:held';
-  const write = (detail) => fs.appendFileSync(file, JSON.stringify({ at: new Date().toISOString(), agent: 'orchestrator', cmd: 'executor', task, detail }) + '\n');
+  const write = (detail) => StateFiles.appendLog(h.state, JSON.stringify({ at: new Date().toISOString(), agent: 'orchestrator', cmd: 'executor', task, detail }) + '\n');
   write({ lease, phase: 'running', kind: 'tests', pid: process.pid });
   return () => write({ lease, phase: 'done' });
 }
@@ -195,7 +194,7 @@ poll();
     after.ci[h.sha] = ciAtSubmit;
     h.saveGithub(after);
   };
-  h.logs = () => readJsonLines(path.join(h.state, 'events.jsonl'));
+  h.logs = () => StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
   h.consume = () => h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
   h.marker = (id) => path.join(h.env.AUTOMATION_CONTEXT_DIR, id);
   t.after(async () => {

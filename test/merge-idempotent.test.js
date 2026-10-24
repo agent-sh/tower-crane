@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { cachedFixture } = require('./helpers');
 const { gateFixture, gateEvidence } = require('./gate-helpers');
+const StateFiles = require('./state-files');
 
 function acceptedTask(t) {
   return cachedFixture(t, 'accepted merge', (h) => {
@@ -32,7 +33,7 @@ for (const onGitHub of [false, true]) {
     const first = h.json(command);
     assert.equal(first.ok, true, first.summary);
     assert.equal(first.ref, h.sha);
-    const snapshot = () => ['tasks.json', 'events.jsonl'].map((file) => fs.readFileSync(path.join(h.state, file), 'utf8'));
+    const snapshot = () => [JSON.stringify(StateFiles.readDoc(h.state, 'tasks.json')), StateFiles.logText(h.state)];
     const before = snapshot();
     const calls = fs.readFileSync(h.env.FIXTURE_GH_LOG, 'utf8');
     const second = h.ok(command);

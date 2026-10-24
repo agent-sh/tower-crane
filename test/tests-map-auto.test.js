@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { cachedFixture } = require('./helpers');
+const StateFiles = require('./state-files');
 const { gateFixture } = require('./gate-helpers');
 const { readPublished, writeAtomic } = require('./atomic-file');
 
@@ -39,7 +40,8 @@ function setup(t) {
   h.advance = (ms) => writeAtomic(h.env.HOOK_CLOCK_FILE, String(h.now() + ms));
   h.github = () => JSON.parse(readPublished(h.env.TC_MAP_GITHUB, 'utf8'));
   h.save = (data) => writeAtomic(h.env.TC_MAP_GITHUB, JSON.stringify(data));
-  h.logs = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  h.logs = () => StateFiles.readEvents(h.state);
+  h.cache = () => JSON.parse(fs.readFileSync(path.join(h.state, 'tests-map-cache.json'), 'utf8'));
   h.refreshes = () => h.logs().filter((e) => e.cmd === 'tests map refresh');
   h.pass = (inbox = false) => {
     const args = ['wait', '--after', '0', '--types', 'never', '--timeout', '0.01', '--agent', 'orchestrator']; // wait-allow: one bounded automation pass, with no runnable tasks
@@ -83,7 +85,7 @@ test('automation refreshes scheduled and manual coverage once, preserving declar
 
 test('a wait host on a tool behind the engine leaves the coverage refresh to a current one', (t) => {
   const h = setup(t);
-  fs.appendFileSync(path.join(h.state, 'events.jsonl'), `${JSON.stringify({ at: new Date().toISOString(), agent: 'orchestrator',
+  StateFiles.appendLog(h.state, `${JSON.stringify({ at: new Date().toISOString(), agent: 'orchestrator',
     cmd: 'check tests', task: 'T1', detail: { tool: { sha: 'f'.repeat(40), version: '99.0.0', committed: null } } })}\n`);
   const map = h.readState('project.json').tests.map;
   const refreshes = h.refreshes().length;
@@ -136,7 +138,7 @@ test('automation rejects incomplete, older, divergent and missing coverage runs'
     h.pass();
     assert.deepEqual(h.readState('project.json'), before, name);
     assert.equal(h.refreshes().length, 1, name);
-    if (name === 'unavailable artifact commit') assert.match(h.readState('tests-map-cache.json').error, /cannot list tracked files/);
+    if (name === 'unavailable artifact commit') assert.match(h.cache().error, /cannot list tracked files/);
     const calls = h.github().calls;
     h.pass();
     assert.deepEqual(h.github().calls, calls, `${name}: retries are hourly`);
@@ -239,7 +241,7 @@ for (const [name, delay, reserved, polls] of [
     h.env.NODE_OPTIONS += ` --require=${JSON.stringify(path.join(__dirname, 'fixtures', 'tests-map-poll-delay.js'))}`;
     h.pass();
     assert.equal(h.github().calls.filter((a) => a[1]?.includes('/actions/runs?')).length, polls);
-    const receipt = h.readState('tests-map-cache.json');
+    const receipt = h.cache();
     assert.equal(Date.parse(receipt.read_at), start + (polls ? delay : reserved));
     delete h.env.TC_MAP_POLL_DELAY;
     writeAtomic(h.env.HOOK_CLOCK_FILE, String(Date.parse(receipt.read_at) + HOUR - 1));
@@ -255,7 +257,7 @@ for (const [name, offset] of [['the current reservation', 0], ['a newer host res
     h.save({ ...h.github(), fail: true,
       supersedingPoll: { file: path.join(h.state, 'tests-map-cache.json'), receipt } });
     assert.match(h.pass().stderr, /GitHub unavailable/);
-    const cached = h.readState('tests-map-cache.json');
+    const cached = h.cache();
     assert.equal(cached.read_at, receipt.read_at);
     assert.equal(Object.hasOwn(cached, 'error'), offset === 0, 'a failed read belongs only to its own reservation');
     h.advance(HOUR - 1);

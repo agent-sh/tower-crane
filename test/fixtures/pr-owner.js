@@ -56,7 +56,7 @@ if (process.argv.slice(3).some((arg) => arg.includes('## PR-body repair'))) {
   }
 } else {
   const heads = JSON.parse(process.env.OWNER_HEADS);
-  const events = fs.readFileSync(`${process.env.TOWER_CRANE_STATE}/events.jsonl`, 'utf8').trim().split('\n').map(JSON.parse);
+  const events = require('../state-files').readEvents(process.env.TOWER_CRANE_STATE);
   let next = events.filter((e) => e.cmd === 'submit' && e.task === task).length;
   ok(['claim', task]);
   for (;;) {

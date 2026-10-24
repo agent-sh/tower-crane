@@ -8,6 +8,7 @@ const { refillFixture, setup } = require('./automation-helpers');
 const { fileWritten } = require('./signals');
 const { waitOnRepo } = require('./signals');
 const S = require('../lib/state');
+const StateFiles = require('./state-files');
 
 const leased = (h) => h.json(['status']).gate_executors.in_use.map((u) => u.task).sort();
 const leasedBy = (h, id) => h.logs().some((e) => e.cmd === 'executor' && e.task === id && e.detail.phase === 'running');
@@ -45,11 +46,11 @@ poll();
   const setPRs = (restore) => S.withLock(h.state, () => {
     const tasks = h.readState('tasks.json');
     for (const task of tasks.tasks) if (saved.has(task.id)) task.pr = restore ? saved.get(task.id) : null;
-    h.writeState('tasks.json', tasks);
+    StateFiles.writeDoc(h.state, 'tasks.json', tasks, { locked: true });
   });
   if (saved.size) setPRs(false);
   fs.rmSync(release);
-  const offset = fs.statSync(path.join(h.state, 'events.jsonl')).size;
+  const offset = StateFiles.logEnd(h.state);
   for (const id of ['T5', 'T6', 'T7', 'T8']) {
     h.ok(['claim', id, '--agent', 'worker']);
     h.ok(['submit', id, '--sha', h.sha, '--agent', 'worker']);
@@ -73,7 +74,7 @@ poll();
 }
 
 async function watchQueued(h) {
-  const after = fs.statSync(path.join(h.state, 'events.jsonl')).size;
+  const after = StateFiles.logEnd(h.state);
   const result = await h.runAsync(['wait', '--after', String(after), '--types', 'never',
     '--timeout', '3', '--agent', 'orchestrator']); // wait-allow: observe watcher retries while every fake gate remains held
   assert.equal(result.code, 2, result.stderr);
@@ -220,10 +221,10 @@ for (const reaction of ['review dispatch', 'body findings', 'accepted merge', 'm
         S.withLock(h.state, () => {
           const at = new Date().toISOString();
           const detail = { role: 'worker', agent: 'worker', pid: 99999999 };
-          fs.appendFileSync(path.join(h.state, 'events.jsonl'), [
+          StateFiles.appendLog(h.state, [
             { at, agent: 'orchestrator', cmd: 'spawn', task: 'T1', detail },
             { at, agent: 'orchestrator', cmd: 'spawn exit', task: 'T1', detail: { ...detail, code: 0 } },
-          ].map((e) => `${JSON.stringify(e)}\n`).join(''));
+          ].map((e) => `${JSON.stringify(e)}\n`).join(''), { locked: true });
         });
       }
       const before = h.logs().filter((e) => e.cmd === 'check tests').length;

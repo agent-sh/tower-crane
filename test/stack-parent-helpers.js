@@ -6,8 +6,9 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { fakeAgentEnv } = require('./helpers');
 const { upper, resubmit } = require('./stack-fixture');
+const StateFiles = require('./state-files');
 
-const events = (f) => fs.readFileSync(path.join(f.h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+const events = (f) => StateFiles.readEvents(f.h.state);
 
 // A worker that records the head and prompt it was dispatched with.
 function inspector(f) {

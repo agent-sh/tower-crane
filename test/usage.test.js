@@ -1,6 +1,7 @@
 'use strict';
 
 const { fileWritten, waitOnRepo, HUNG_TEST_MS } = require('./signals');
+const StateFiles = require('./state-files');
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -99,7 +100,7 @@ function setup(t, harness = 'codex') {
 }
 
 const spends = (h, task = 'T1') => h.json(['task', 'show', task]).spend;
-const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+const events = (h) => StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
 
 test('native Claude alias spend records release-priced cost without rewriting its stored ID', (t) => {
   const [alias, release] = Object.entries(require('../lib/ladder').BUILTIN.claude_aliases)[0];
@@ -168,13 +169,14 @@ test('a base-valid provider price table loads and retains exact rows through pro
   const row = (output) => ({ input: 1, cache_write: 1, cache_read: 1, output });
   const prices = { 'claude-opus-5-5': row(20), 'global.anthropic.claude-opus-5-5': row(30) };
   const project = h.readState('project.json');
-  assert.equal(project.schema_version, 1);
+  const schema = require('../lib/state').SCHEMA_VERSION;
+  assert.equal(project.schema_version, schema);
   project.review = { ...project.review, prices };
   h.writeState('project.json', project);
   assert.deepEqual(h.json(['project', 'show']).review.prices, prices, 'a schema-1 table from the base still loads');
   h.ok(['project', 'set', '--review-policy', JSON.stringify({ prices })]);
   assert.deepEqual(h.readState('project.json').review.prices, prices, 'saving does not collapse provider rows');
-  assert.equal(h.readState('project.json').schema_version, 1);
+  assert.equal(h.readState('project.json').schema_version, schema, 'saving keeps the schema');
   for (const [model, usd] of [
     ['claude-opus-5-5', 0.02],
     ['global.anthropic.claude-opus-5-5', 0.03],
@@ -467,7 +469,7 @@ test('collectors and concurrent waiters share one private exit event and usage e
   assert.match(h.json(['status']).exited_claims[0].tail, /private task text/);
   h.ok(['release', 'T1', '--agent', 'recovery-agent', '--reason', 'worker exited']);
   for (const file of ['tasks.json', 'events.jsonl']) {
-    const text = fs.readFileSync(path.join(h.state, file), 'utf8');
+    const text = StateFiles.fileText(h.state, file);
     for (const line of privateText.split('\n')) assert.ok(!text.includes(line), `${file} contains harness text`);
   }
 });
@@ -666,14 +668,14 @@ for (const scenario of ['host', 'signal', 'stat']) {
     skip: scenario === 'stat' && process.platform !== 'linux',
   }, async (t) => {
     const h = setup(t);
-    const before = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
+    const before = StateFiles.logText(h.state);
     const { code, stderr } = await runMonitor(t, h, {
       pid: process.pid,
       ...(scenario === 'host' ? { host: require('node:os').hostname() + '-other' } : {}),
     }, { clock: true, env: { TOWER_CRANE_TEST_MONITOR_PERMISSION: scenario, TOWER_CRANE_TEST_MONITOR_PID: String(process.pid) } });
     assert.equal(code, 1, stderr);
     assert.match(stderr, /cannot observe.*retry spend T1 --from-spawn worker-T1-1/);
-    assert.equal(fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8'), before, 'unknown is not proof of exit');
+    assert.equal(StateFiles.logText(h.state), before, 'unknown is not proof of exit');
   });
 }
 

@@ -11,6 +11,7 @@ const { waitOnRepo } = require('./signals');
 const S = require('../lib/state');
 const Body = require('../lib/review-body');
 const { readPublished, writeAtomic, updateJson } = require('./atomic-file');
+const StateFiles = require('./state-files');
 
 // Review first, the tests gate waits for the review, so the fixture records no tests evidence.
 function fixture(t, { testsFirst = true } = {}) {
@@ -30,7 +31,7 @@ function fixture(t, { testsFirst = true } = {}) {
     }
     return h;
   });
-  h.logs = () => readPublished(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  h.logs = () => StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
   return h;
 }
 
@@ -77,7 +78,7 @@ G.admit = (ctx, unit) => {
     const status = h.json(['status']);
     const statusText = h.ok(['status']);
     // Each new wait performs a refill without needing a submission event.
-    const pass = () => h.run(['wait', '--after', String(fs.statSync(path.join(h.state, 'events.jsonl')).size),
+    const pass = () => h.run(['wait', '--after', String(StateFiles.logEnd(h.state)),
       '--types', 'never', '--timeout', '0.01', '--agent', 'orchestrator'], { pre: ['--require', preload] }); // wait-allow: each bounded wait drives one refill pass
     if (first === 'T1' && !late) {
       assert.equal(pass().code, 2);
@@ -157,7 +158,7 @@ Spawn.spawn = (ctx) => {
       }
       fs.unlinkSync(seed);
       fs.writeFileSync(trace, '');
-      const pass = () => h.run(['wait', '--after', String(fs.statSync(path.join(h.state, 'events.jsonl')).size),
+      const pass = () => h.run(['wait', '--after', String(StateFiles.logEnd(h.state)),
         '--types', 'never', '--timeout', '0.01', '--agent', 'orchestrator'], { pre: ['--require', preload] }); // wait-allow: each bounded wait drives a kind-specific refill
       const result = pass();
       assert.equal(result.code, 2, result.stderr);
@@ -255,7 +256,7 @@ for (const method of ['check', 'admit']) {
         fs.writeFileSync(held, '');
         assert.equal(h.run(['accept', 'T1', '--agent', 'orchestrator'], { pre: ['--require', preload] }).code, 3);
         const debt = h.json(['status']).deferred_reviewers[0];
-        const pass = () => h.run(['wait', '--after', String(fs.statSync(path.join(h.state, 'events.jsonl')).size),
+        const pass = () => h.run(['wait', '--after', String(StateFiles.logEnd(h.state)),
           '--types', 'never', '--timeout', '0.01', '--agent', 'orchestrator'], { pre: ['--require', preload] }); // wait-allow: bounded refill before and after lifting the light-review deferral
         assert.equal(pass().code, 2);
         fs.unlinkSync(held);
@@ -319,7 +320,7 @@ G.view = (ctx, project) => {
 `);
       assert.equal(h.run(['accept', 'T1', '--agent', 'orchestrator'], { pre: ['--require', preload] }).code, 3);
       const debt = h.logs().find((e) => e.cmd === 'review dispatch deferred').detail;
-      const result = h.run(['wait', '--after', String(fs.statSync(path.join(h.state, 'events.jsonl')).size),
+      const result = h.run(['wait', '--after', String(StateFiles.logEnd(h.state)),
         '--types', 'never', '--timeout', '2.1', '--agent', 'orchestrator'], { pre: ['--require', preload] }); // wait-allow: two fallback ticks exercise changing readings and the deadline
       assert.equal(h.logs().filter((e) => e.cmd === 'review dispatch deferred').length, 1, 'reading changes never append another outstanding debt');
       assert.equal(result.code, 2, result.stderr);
@@ -476,7 +477,7 @@ G.check = (ctx, unit) => {
   assert.equal(debt?.id, 'T1');
   assert.equal(debt.waiting, undefined, 'a tests gate deferred to the review is not a retry blocker');
   fs.unlinkSync(held);
-  const pass = h.run(['wait', '--after', String(fs.statSync(path.join(h.state, 'events.jsonl')).size),
+  const pass = h.run(['wait', '--after', String(StateFiles.logEnd(h.state)),
     '--types', 'never', '--timeout', '0.01', '--agent', 'orchestrator'], { pre: ['--require', preload] }); // wait-allow: one bounded wait drives one refill pass
   assert.equal(pass.code, 2, pass.stderr);
   assert.equal(h.logs().filter((e) => e.task === 'T1' && e.cmd === 'spawn' && e.detail.role === 'reviewer').length, 1);

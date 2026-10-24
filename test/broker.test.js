@@ -1,6 +1,7 @@
 'use strict';
 
 const { waitUntil, HUNG_TEST_MS, killPid } = require('./signals');
+const StateFiles = require('./state-files');
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -232,22 +233,21 @@ test('a worker broker refuses unscoped dead-claim recovery and preserves peer cl
     h.ok(['task', 'add', '--title', id, '--acceptance', 'claim is scoped']);
     h.ok(['claim', id, '--agent', `worker-${id}-1`]);
   }
-  const file = path.join(h.state, 'events.jsonl');
-  fs.appendFileSync(file, JSON.stringify({ id: 'dead-peer', at: new Date().toISOString(), cmd: 'spawn',
-    agent: 'orchestrator', task: 'T2', detail: { agent: 'worker-T2-1', role: 'worker', pid: 2147483647 } }) + '\n');
+  StateFiles.appendLog(h.state, JSON.stringify({ id: 'dead-peer', at: new Date().toISOString(), cmd: 'spawn',
+    agent: 'orchestrator', task: 'T2', detail: { agent: 'worker-T2-1', role: 'worker', pid: 2147483647 } }));
   const job = { state: h.state, task: 'T1', agent: 'worker-T1-1', role: 'worker', harness: 'codex',
     cwd: h.repo, broker: path.join(h.base, 'brokers', 'worker-T1-1', B.FILE) };
   const broker = await B.start(job);
   t.after(() => broker.close());
   const before = h.readState('tasks.json');
-  const events = fs.readFileSync(file, 'utf8');
+  const events = StateFiles.logText(h.state);
   const result = await h.runAsync(['release', '--dead'], {
     env: { ...broker.env, TOWER_CRANE_AGENT: job.agent, TOWER_CRANE_TASK: job.task },
   });
   assert.equal(result.code, 1, result.stdout + result.stderr);
   assert.match(result.stderr, /release --dead.*orchestrator|unscoped/i);
   assert.deepEqual(h.readState('tasks.json'), before);
-  assert.equal(fs.readFileSync(file, 'utf8'), events);
+  assert.equal(StateFiles.logText(h.state), events);
   assert.throws(() => B.authorize(job, ['release', '--dead']), /release --dead.*orchestrator|unscoped/i);
   const own = await h.runAsync(['release', 'T1', '--reason', 'handoff'], {
     env: { ...broker.env, TOWER_CRANE_AGENT: job.agent, TOWER_CRANE_TASK: job.task },
@@ -287,7 +287,7 @@ for (const role of ['worker', 'reviewer', 'small']) test(`a sandboxed ${role} an
   const broker = await B.start(job);
   t.after(() => broker.close());
   const env = { ...broker.env, TOWER_CRANE_AGENT: job.agent, TOWER_CRANE_TASK: job.task };
-  const log = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
+  const log = () => StateFiles.logText(h.state);
   const before = log();
   const denied = await h.runAsync(['answer', 'D1', '--choice', 'redis'], { env });
   assert.equal(denied.code, 1, denied.stderr);
@@ -328,7 +328,7 @@ test('a sandboxed worker withdraws its own question through the broker; a review
     t.after(() => broker.close());
     return { ...broker.env, TOWER_CRANE_AGENT: job.agent, TOWER_CRANE_TASK: job.task };
   };
-  const log = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
+  const log = () => StateFiles.logText(h.state);
   const withdraw = ['decision', 'withdraw', 'D1', '--reason', 'the question went away'];
   const before = log();
 
@@ -384,7 +384,7 @@ test('a sandboxed reviewer asks through the broker: technical and escalated ques
   h.ok(['answer', 'D2', '--choice', 'yes', '--agent', 'orchestrator']);
   assert.equal(h.readState('decisions.json').decisions[1].answer_rule, 'orchestrator-escalated-question');
 
-  const asks = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse).filter((event) => event.cmd === 'ask');
+  const asks = StateFiles.logText(h.state).trim().split('\n').map(JSON.parse).filter((event) => event.cmd === 'ask');
   assert.deepEqual(asks.map((event) => [event.agent, event.via]), [[job.agent, 'broker'], [job.agent, 'broker']]);
 });
 
@@ -1284,7 +1284,7 @@ cp.spawnSync = function (command, args, opts) {
     assert.match(query.searchParams.get('created'), /^>=\d{4}-/, row.name);
     assert.ok(history[0].args.includes('--paginate'), row.name);
     assert.equal(h.readState('tasks.json').tasks[0].pushes_since_last_submit, row.denied ? null : 0, row.name);
-    const receipt = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim()
+    const receipt = StateFiles.logText(h.state).trim()
       .split('\n').map(JSON.parse).findLast((e) => e.cmd === 'submit');
     if (row.denied) {
       assert.equal(receipt.detail.push_history_error, undefined, row.name);
@@ -1369,7 +1369,7 @@ test('a brokered worker or reviewer messages only the orchestrator or the owner'
   h.init();
   h.ok(['task', 'add', '--title', 'one', '--acceptance', 'noted']);
   h.ok(['task', 'add', '--title', 'two', '--acceptance', 'noted']);
-  const events = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  const events = () => StateFiles.logText(h.state).trim().split('\n').map((l) => JSON.parse(l));
   const reviewer = { state: h.state, task: 'T2', agent: 'reviewer-T2-1', role: 'reviewer' };
   assert.throws(() => B.authorize(reviewer, ['msg', '--to', 'worker-T1-1', 'note from T2']), /messages only the orchestrator or the owner, not worker-T1-1/);
   assert.throws(() => B.authorize(reviewer, ['msg', '--to=worker-T1-1', 'note from T2']), /not worker-T1-1/);
@@ -1387,7 +1387,7 @@ test('a brokered worker or reviewer messages only the orchestrator or the owner'
   // The attempt is logged for the orchestrator and the board, without its text.
   const refusals = events().filter((e) => e.cmd === 'msg refused');
   assert.deepEqual(refusals.map((e) => [e.agent, e.task, e.to, e.detail.to]), [['worker-T2-1', 'T2', 'orchestrator', 'worker-T1-1']]);
-  assert.ok(!fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').includes('note from T2'), 'the refusal keeps the text out of the log');
+  assert.ok(!StateFiles.logText(h.state).includes('note from T2'), 'the refusal keeps the text out of the log');
 
   for (const to of ['orchestrator', 'owner']) {
     const r = await B.forward(job.broker, ['msg', '--to', to, `status from T2 to ${to}`], h.state);
@@ -1407,7 +1407,7 @@ test('a sandboxed worker can print and list its prepared worktree without state 
   t.after(() => broker.close());
   const env = { ...broker.env, TOWER_CRANE_AGENT: job.agent, TOWER_CRANE_TASK: job.task };
   const before = h.readState('tasks.json');
-  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
+  const events = StateFiles.logText(h.state);
   for (const args of [['worktree', 'T1'], ['worktree', 'list']]) {
     const result = await h.runAsync([...args, '--json'], { env });
     assert.equal(result.code, 0, result.stderr);
@@ -1415,7 +1415,7 @@ test('a sandboxed worker can print and list its prepared worktree without state 
     assert.equal(args[1] === 'T1' ? data.path : data.worktrees[0].path, wt.path);
   }
   assert.deepEqual(h.readState('tasks.json'), before);
-  assert.equal(fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8'), events);
+  assert.equal(StateFiles.logText(h.state), events);
   const denied = await h.runAsync(['worktree', 'prune'], { env });
   assert.equal(denied.code, 1);
   assert.match(denied.stderr, /not worktree prune/);
@@ -1431,8 +1431,13 @@ test('a sandboxed worker prints its worktree without the state lock, though a st
   const job = { state: f.h.state, task: 'T2', agent: 'worker-T2-1', role: 'worker', cwd: wt.path, broker: path.join(f.h.base, 'brokers', 'worker-T2-1', B.FILE) };
   const broker = await B.start(job);
   t.after(() => broker.close());
-  const tasks = path.join(f.h.state, 'tasks.json');
-  const before = fs.readFileSync(tasks, 'utf8');
+  // A read-only directory reads the database through the -wal and -shm files a
+  // host process leaves. The test's reads close their connection and, as the
+  // last one, delete both; this one stands in for the host process.
+  const host = new (require('node:sqlite').DatabaseSync)(StateFiles.dbFile(f.h.state));
+  host.prepare('SELECT 1 FROM meta').get();
+  const before = f.h.readState('tasks.json');
+  const events = StateFiles.logText(f.h.state);
   // The sandbox leaves the state directory read-only, so the lock cannot be created.
   fs.chmodSync(f.h.state, 0o555);
   let r;
@@ -1440,10 +1445,12 @@ test('a sandboxed worker prints its worktree without the state lock, though a st
     r = f.h.run(['worktree', 'T2'], { cwd: wt.path, env: { ...broker.env, TOWER_CRANE_AGENT: job.agent, TOWER_CRANE_TASK: job.task } });
   } finally {
     fs.chmodSync(f.h.state, 0o755);
+    host.close();
   }
   assert.equal(r.code, 0, r.stderr);
   assert.equal(r.stdout.trim(), wt.path);
-  assert.equal(fs.readFileSync(tasks, 'utf8'), before, 'the sandboxed worktree wrote no state');
+  assert.deepEqual(f.h.readState('tasks.json'), before, 'the sandboxed worktree wrote no state');
+  assert.equal(StateFiles.logText(f.h.state), events);
   assert.equal(fs.existsSync(path.join(f.h.state, 'lock')), false, 'no state lock was taken');
 });
 
@@ -2830,7 +2837,7 @@ test('a sandboxed agent waits in its sandbox on its own task, bounded and withou
   h.ok(['task', 'add', '--title', 'one', '--acceptance', 'noted']);
   h.ok(['task', 'add', '--title', 'two', '--acceptance', 'noted']);
   h.ok(['brief', 'set', 'T2', '-'], { input: '# Two\n\nDo two.\n' });
-  const offset = fs.statSync(path.join(h.state, 'events.jsonl')).size;
+  const offset = StateFiles.logEnd(h.state);
   h.ok(['msg', '--to', 'worker-T1-1', '--task', 'T1', 'rebase on main', '--agent', 'orchestrator']);
   assert.ok(h.json(['ready']).ready.some((x) => x.id === 'T2'), 'T2 is ready for a refill to dispatch');
   const job = { state: h.state, task: 'T1', agent: 'worker-T1-1', role: 'worker', cwd: h.repo, broker: path.join(h.base, 'brokers', 'worker-T1-1', B.FILE) };

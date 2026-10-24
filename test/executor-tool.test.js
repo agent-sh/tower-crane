@@ -10,6 +10,7 @@ const P = require('../lib/processes');
 const { waitOnRepo, waitUntil } = require('./signals');
 const { makeRepo, ROOT } = require('./helpers');
 const { setup, configureHarness } = require('./automation-helpers');
+const StateFiles = require('./state-files');
 
 const OLD = { sha: `a79075ad${'0'.repeat(32)}`, version: '0.0.0' };
 
@@ -69,7 +70,7 @@ const midReaction = [
     fs.writeFileSync(scanner, `const fs = require('node:fs');
 if (!fs.existsSync(__filename + '.done')) {
   fs.writeFileSync(__filename + '.done', '');
-  fs.appendFileSync(${JSON.stringify(path.join(h.state, 'events.jsonl'))}, ${JSON.stringify(`${JSON.stringify(engineRecord())}\n`)});
+  require(${JSON.stringify(path.join(__dirname, 'state-files'))}).appendLog(${JSON.stringify(h.state)}, ${JSON.stringify(`${JSON.stringify(engineRecord())}\n`)}, { locked: true });
 }
 console.log(JSON.stringify({ items: [] }));\n`);
   }, ['tests', 'clean']],
@@ -185,7 +186,7 @@ test('a supervisor whose agent exits runs only its own task\'s reactions; the wa
   h.submit('T2', h.sha, '8');
   // T2's reaction waits in the shared queue with no wait host running.
   const other = h.logs().findLast((e) => e.cmd === 'submit' && e.task === 'T2');
-  fs.appendFileSync(path.join(h.state, 'events.jsonl'), `${JSON.stringify({ at: new Date().toISOString(), agent: 'orchestrator',
+  StateFiles.appendLog(h.state, `${JSON.stringify({ at: new Date().toISOString(), agent: 'orchestrator',
     cmd: 'automation queued', task: 'T2', detail: { source: other.id, executors: 2 } })}\n`);
   const spawned = await h.runAsync(['spawn', '--task', 'T1', '--wait', '--agent', 'orchestrator']);
   assert.equal(spawned.code, 0, dump(spawned));
@@ -219,7 +220,7 @@ test('status lists live executors with tool version and age and flags one behind
   const live = { pid: process.pid, ...P.identity(process.pid) };
   const at = new Date(Date.now() - 3 * 3600 * 1000).toISOString();
   const now = new Date().toISOString();
-  fs.appendFileSync(path.join(h.state, 'events.jsonl'), [
+  StateFiles.appendLog(h.state, [
     { at: now, agent: 'orchestrator', cmd: 'automation', task: 'T1', detail: { source: 's1', phase: 'running', ...live, tool: Tool.current() } },
     { at, agent: 'orchestrator', cmd: 'automation', task: 'T2', detail: { source: 's2', phase: 'running', ...live, tool: OLD } },
     { at, agent: 'orchestrator', cmd: 'spawn', task: 'T2', detail: { agent: 'worker-T2-1', role: 'worker', pid: 999999,

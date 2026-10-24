@@ -1,5 +1,7 @@
 'use strict';
 
+const StateFiles = require('./state-files');
+
 const { fileWritten } = require('./signals');
 
 const test = require('node:test');
@@ -52,7 +54,7 @@ function request(url, { method = 'GET', body, headers = {} } = {}) {
 }
 
 const tokenOf = (page) => /<meta name="tower-crane-token" content="([0-9a-f]{48})?">/.exec(page)[1] || '';
-const read = (h, f) => fs.readFileSync(path.join(h.state, f), 'utf8');
+const read = (h, f) => StateFiles.fileText(h.state, f);
 
 // What the Settings page was drawn from, as its script reads it.
 async function loadedOf(url) {

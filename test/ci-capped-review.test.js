@@ -7,6 +7,7 @@ const path = require('node:path');
 const cp = require('node:child_process');
 const { BIN, cachedFixture } = require('./helpers');
 const { gateFixture } = require('./gate-helpers');
+const StateFiles = require('./state-files');
 
 const APP = 'revuto-review';
 const CAP = { title: 'Revuto did not review this pull request', summary: 'reached the 2-round review limit', text: null };
@@ -92,7 +93,7 @@ test('check ci records when the CI it waited for started and completed, leaving 
   ] });
   assert.equal(r.code, 0, r.summary);
   assert.deepEqual([r.ci_started_at, r.ci_completed_at], [at('05'), at('30')]);
-  const log = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  const log = StateFiles.readEvents(h.state);
   const event = log.findLast((e) => e.cmd === 'check ci');
   assert.deepEqual([event.detail.ci_started_at, event.detail.ci_completed_at], [at('05'), at('30')]);
 });

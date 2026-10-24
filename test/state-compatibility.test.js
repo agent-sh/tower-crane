@@ -1,6 +1,7 @@
 'use strict';
 
 const { waitOnRepo, killPid } = require('./signals');
+const StateFiles = require('./state-files');
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
@@ -10,9 +11,14 @@ const path = require('node:path');
 const { makeTaskRepo, dispatch } = require('./helpers');
 const S = require('../lib/state');
 const Sharing = require('../lib/sharing');
+const Db = require('../lib/db');
 const { performance } = require('node:perf_hooks');
 
-const writeState = (h, file, value) => S.writeAtomic(path.join(h.state, file), S.json(value));
+// A document written as a newer tool writes it; `locked` inside a lock the test holds.
+const writeState = (h, file, value, locked = false) => StateFiles.writeDoc(h.state, file, value, { locked });
+// Everything a write would change: the marker, the documents and the log.
+const stateText = (h) => [fs.readFileSync(path.join(h.state, 'project.json'), 'utf8'),
+  ...['project.json', 'tasks.json', 'decisions.json'].map((file) => StateFiles.docText(h.state, file)), StateFiles.logText(h.state)];
 
 function fixture(t) {
   return makeTaskRepo(t, [
@@ -21,7 +27,7 @@ function fixture(t) {
   ]);
 }
 
-function futureState(h) {
+function futureState(h, locked = false) {
   const tasks = h.readState('tasks.json');
   tasks.tasks[0].future_worker_field = { keep: true };
   if (tasks.tasks[0].claim) tasks.tasks[0].claim.until = new Date(Date.now() + 1000).toISOString();
@@ -39,16 +45,17 @@ function futureState(h) {
       live: { state: 'future-reading', interval_ms: 1000, error: 'FutureReadError', future_field: { keep: true } },
     }] },
   });
-  writeState(h, 'tasks.json', tasks);
+  writeState(h, 'tasks.json', tasks, locked);
   writeState(h, 'decisions.json', {
     version: 1, next: 3, future_index: true, decisions: [
       { id: 'D1', question: 'Obsolete?', status: 'withdrawn', withdrawn_by: 'owner', withdraw_reason: 'No longer needed' },
       { id: 'D2', question: 'Future decision?', status: 'superseded', answer_rule: 'future-rule', future_field: { by: 'D3' } },
     ],
-  });
-  const event = { at: new Date().toISOString(), cmd: 'future command', type: 'future-event',
+  }, locked);
+  // Every event in the database has an id, as a newer tool's would.
+  const event = { id: `E${require('node:crypto').randomUUID()}`, at: new Date().toISOString(), cmd: 'future command', type: 'future-event',
     task: 'T2', agent: 'future-tool', detail: { opaque: true }, future_field: ['unchanged'] };
-  fs.appendFileSync(path.join(h.state, 'events.jsonl'), JSON.stringify(event) + '\n');
+  StateFiles.appendLog(h.state, JSON.stringify(event) + '\n', { locked });
   return { task: tasks.tasks[1], event };
 }
 
@@ -88,7 +95,7 @@ test('additive state stays readable and survives unrelated CLI writes', (t) => {
   assert.equal(decisions.decisions[1].status, 'superseded');
   assert.equal(decisions.decisions[1].answer_rule, 'future-rule');
   assert.deepEqual(decisions.decisions[1].future_field, { by: 'D3' });
-  assert.ok(fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').includes(JSON.stringify(future.event)));
+  assert.ok(StateFiles.logText(h.state).includes(JSON.stringify(future.event)));
   const refused = h.run(['spawn', '--task', 'T2', '--dry-run']);
   assert.equal(refused.code, 1);
   assert.match(refused.stderr, /T2.*unsupported.*(status|kind|tier)/);
@@ -111,9 +118,9 @@ test('a supervised worker survives additive state from a newer tool', async (t) 
   try {
     await waitOnRepo(h, () => fs.existsSync(worker.ready), 'worker did not start');
     h.ok(['claim', 'T1', '--agent', 'worker-T1-1', '--lease', '1']);
-    S.withLock(h.state, () => futureState(h));
+    S.withLock(h.state, () => futureState(h, true));
     // The shortened lease and future event force a state read and renewal.
-    await waitOnRepo(h, () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8')
+    await waitOnRepo(h, () => StateFiles.logText(h.state)
       .split('\n').some((line) => line && JSON.parse(line).cmd === 'renew'), 'supervisor did not renew through the new state');
   } finally {
     fs.writeFileSync(worker.finish, '');
@@ -195,58 +202,56 @@ test(`recovery and rework preserve unfamiliar routing with current tier ${tier}`
   assert.deepEqual(task.tier_range, tasks.tasks[0].tier_range);
   assert.equal(task.escalations, undefined);
   assert.equal(task.evidence.at(-1).ok, false, 'the review verdict remains recorded');
-  const before = ['tasks.json', 'events.jsonl'].map((file) => fs.readFileSync(path.join(h.state, file), 'utf8'));
+  const before = stateText(h);
   const recovery = h.json(['recover', 'T1']);
   assert.match(recovery.waiting, /unsupported tier.*upgrade/);
   const rework = h.run(['rework', 'T1', '--reason', 'fix the result']);
   assert.equal(rework.code, 1);
   assert.match(rework.stderr, /unsupported tier.*upgrade/);
-  assert.deepEqual(['tasks.json', 'events.jsonl'].map((file) => fs.readFileSync(path.join(h.state, file), 'utf8')), before);
+  assert.deepEqual(stateText(h), before);
   assert.equal(fs.readFileSync(path.join(h.state, 'briefs', 'T1.md'), 'utf8'), brief);
 });
 }
 
-test('newer schemas refuse dispatch and writes before any side effects', (t) => {
+// A newer tool marks its schema in project.json, the marker every command
+// reads first, and may record it in the project document too.
+for (const where of ['marker', 'document']) {
+test(`newer schemas refuse dispatch and writes before any side effects (${where})`, (t) => {
   const h = fixture(t);
-  assert.equal(h.readState('project.json').schema_version, 1);
+  const markerFile = path.join(h.state, 'project.json');
+  const marker = JSON.parse(fs.readFileSync(markerFile, 'utf8'));
+  assert.equal(marker.schema_version, S.SCHEMA_VERSION);
+  const newer = S.SCHEMA_VERSION + 1;
   const project = h.readState('project.json');
-  project.schema_version = 2;
-  h.writeState('project.json', project);
-  const before = ['project.json', 'tasks.json', 'events.jsonl'].map((file) => fs.readFileSync(path.join(h.state, file), 'utf8'));
+  if (where === 'marker') S.writeAtomic(markerFile, S.json({ ...marker, schema_version: newer }));
+  else h.writeState('project.json', { ...project, schema_version: newer });
+  const before = stateText(h);
   for (const args of [['spawn', '--task', 'T1'], ['task', 'note', 'T1', 'cannot write']]) {
     const result = h.run(args);
     assert.equal(result.code, 1);
-    assert.match(result.stderr, /state schema 2.*supports.*1.*upgrade/i);
+    assert.match(result.stderr, new RegExp(`state schema ${newer}.*supports.*${S.SCHEMA_VERSION}.*upgrade`, 'i'));
   }
-  assert.deepEqual(['project.json', 'tasks.json', 'events.jsonl'].map((file) => fs.readFileSync(path.join(h.state, file), 'utf8')), before);
+  assert.deepEqual(stateText(h), before);
   assert.equal(fs.existsSync(path.join(h.state, 'homes')), false);
-  // Existing projects need no migration for the first schema contract.
-  delete project.schema_version;
-  h.writeState('project.json', project);
+  // A project document without a schema is the first schema contract.
+  if (where === 'marker') S.writeAtomic(markerFile, S.json(marker));
+  const { schema_version: _, ...unversioned } = project;
+  h.writeState('project.json', unversioned);
   h.ok(['task', 'note', 'T1', 'legacy schema']);
 });
+}
 
-test('a schema bump during a lock-free CLI read reports incompatibility before payload errors', (t) => {
+test('a schema bump a lock-free CLI read meets reports incompatibility before payload errors', (t) => {
   const h = fixture(t);
-  const hook = path.join(h.base, 'schema-bump.cjs');
-  fs.writeFileSync(hook, `
-const fs = require('node:fs');
-const read = fs.readFileSync;
-fs.readFileSync = function(file, ...args) {
-  const result = read.call(this, file, ...args);
-  if (file === ${JSON.stringify(path.join(h.state, 'tasks.json'))}) {
-    const project = JSON.parse(read(${JSON.stringify(path.join(h.state, 'project.json'))}, 'utf8'));
-    project.schema_version = 2;
-    fs.writeFileSync(${JSON.stringify(path.join(h.state, 'project.json'))}, JSON.stringify(project));
-    return JSON.stringify({ version: 2, tasks: 'new representation' });
-  }
-  return result;
-};
-`);
-  const result = h.run(['task', 'show', 'T1'], { env: { NODE_OPTIONS: `--require ${JSON.stringify(hook)}` } });
+  // A newer tool's one commit: its schema and a tasks document in a new representation.
+  const newer = S.SCHEMA_VERSION + 1;
+  StateFiles.withDb(h.state, () => S.withLock(h.state, () => require('../lib/db').commit(h.state, {
+    docs: { project: JSON.stringify({ ...h.readState('project.json'), schema_version: newer }), tasks: JSON.stringify({ version: 2, tasks: 'new representation' }) },
+  })));
+  const result = h.run(['task', 'show', 'T1']);
   assert.equal(result.code, 1);
-  assert.match(result.stderr, /state schema 2.*supports.*1.*upgrade/i);
-  assert.doesNotMatch(result.stderr, /tasks.json is invalid/);
+  assert.match(result.stderr, new RegExp(`state schema ${newer}.*supports.*${S.SCHEMA_VERSION}.*upgrade`, 'i'));
+  assert.doesNotMatch(result.stderr, /tasks.json.*(invalid|not valid)/);
 });
 
 for (const change of ['schema bump', 'unknown current task status', 'unknown blocking decision status']) {
@@ -266,21 +271,21 @@ test(`${change} drains the supervisor without killing an edit`, async (t) => {
       fs.writeFileSync(busy, '');
       if (change === 'schema bump') {
         const project = h.readState('project.json');
-        project.schema_version = 2;
-        writeState(h, 'project.json', project);
+        project.schema_version = S.SCHEMA_VERSION + 1;
+        writeState(h, 'project.json', project, true);
       } else {
         if (change === 'unknown current task status') {
           const tasks = h.readState('tasks.json');
           tasks.tasks[0].status = 'future-paused';
-          writeState(h, 'tasks.json', tasks);
+          writeState(h, 'tasks.json', tasks, true);
         } else {
           writeState(h, 'decisions.json', { version: 1, next: 2, decisions: [{
             id: 'D1', question: 'Future blocker?', status: 'future-pending', blocks: ['T1'],
-          }] });
+          }] }, true);
         }
-        fs.appendFileSync(path.join(h.state, 'events.jsonl'), JSON.stringify({
+        StateFiles.appendLog(h.state, JSON.stringify({
           at: new Date().toISOString(), cmd: 'future pause', task: 'T1', detail: {},
-        }) + '\n');
+        }) + '\n', { locked: true });
       }
     });
     await until(() => /supervision stopped.*worker.*finish/i.test(output()), 'the supervisor reports a clean schema stop');
@@ -344,13 +349,14 @@ test('a sharing refusal is waited out with backoff and a lasting one fails at th
 // Where a scanner's refusal starts within a read decides which part of the
 // read meets it first. Wherever that is, a read that meets a refusal lasting
 // past the bound fails after one wait; one that waited again from a later
-// read got through once the scanner let go, and the supervisor below never
-// failed. Each row opens the window at every state access of its operation in
-// turn, as the scanner hook does (test/fixtures/hooks.js HOOK_SHARING_WINDOW).
-// Each refusal moves a virtual clock on, so a wait is a few attempts.
+// read got through once the scanner let go. Each row opens the window at every
+// access to a state file of its operation in turn, as the scanner hook does
+// (test/fixtures/hooks.js HOOK_SHARING_WINDOW): project.json, the marker every
+// read checks for its schema, and, before migration, the file layout and a
+// commit's staged copies. SQLite opens state.db itself. Each refusal moves a
+// virtual clock on, so a wait is a few attempts.
 test('a lasting refusal fails a state read after one wait, wherever in the read it starts', (t) => {
   const h = fixture(t);
-  // The scanner hook's files, and a commit's staged copies, which a scanner holds as well.
   const STATE_FILE = /^((project|tasks|decisions)\.json(\.E[0-9a-f-]{36}\.commit)?|events(\.cuts)?\.jsonl|progress\/[^/]+\.jsonl)$/;
   const WINDOW_MS = Sharing.SHARING_RETRY_MS + 1500;
   const calls = ['statSync', 'lstatSync', 'openSync', 'readFileSync'];
@@ -365,16 +371,6 @@ test('a lasting refusal fails a state read after one wait, wherever in the read 
   let closed = false;
   // Every access to project.json while the lock is held is refused, for good.
   let whileLocked = false;
-  // Reads of decisions.json still to be followed by a commit's append.
-  let appends = 0;
-  const append = () => {
-    const fd = realFs.openSync(path.join(h.state, 'events.jsonl'), 'a');
-    try {
-      fs.writeSync(fd, JSON.stringify({ id: `E${crypto.randomUUID()}`, at: new Date().toISOString(), cmd: 'appended', task: null, detail: {} }) + '\n');
-    } finally {
-      fs.closeSync(fd);
-    }
-  };
   for (const name of calls) {
     fs[name] = function (target, ...rest) {
       const rel = typeof target === 'string' ? path.relative(h.state, path.resolve(target)).split(path.sep).join('/') : '';
@@ -385,36 +381,21 @@ test('a lasting refusal fails a state read after one wait, wherever in the read 
         skew += 500;
         throw Object.assign(new Error(`EPERM: operation not permitted, ${name} '${target}'`), { code: 'EPERM' });
       }
-      const result = realFs[name].call(this, target, ...rest);
-      if (name === 'readFileSync' && rel === 'decisions.json' && appends > 0) {
-        appends--;
-        append();
-      }
-      return result;
+      return realFs[name].call(this, target, ...rest);
     };
   }
   Object.defineProperty(performance, 'now', { value: () => realNow.call(performance) + skew, configurable: true });
   const ctx = { stateDir: h.state, agent: 'reader', env: {} };
-  // A commit past its commit point: its event ends the log and its file is still staged.
-  const staged = () => {
-    const id = `E${crypto.randomUUID()}`;
-    fs.writeFileSync(path.join(h.state, `tasks.json.${id}.commit`), fs.readFileSync(path.join(h.state, 'tasks.json')));
-    fs.appendFileSync(path.join(h.state, 'events.jsonl'), JSON.stringify({ id, at: new Date().toISOString(), cmd: 'staged', task: null, detail: {} }) + '\n');
-  };
   let release = null;
   try {
     for (const row of [
       { name: 'a read', run: () => S.loadState(h.state) },
       { name: 'a read that keeps its snapshot', before: () => { release = S.retainEvents(h.state); S.loadState(h.state); }, run: () => S.loadState(h.state) },
       { name: 'a write', run: () => S.mutate(ctx, 'read', () => {}) },
-      { name: 'a read while a logged commit is staged', before: staged, run: () => S.loadState(h.state) },
-      // Every lock-free read loses to an append, so the read ends under the lock.
-      { name: 'a read that falls back to the lock', before: () => { appends = 5; }, run: () => S.loadState(h.state) },
     ]) {
       const attempt = (start) => {
         release?.();
         release = null;
-        appends = 0;
         row.before?.();
         accesses = 0;
         from = start;
@@ -431,9 +412,8 @@ test('a lasting refusal fails a state read after one wait, wherever in the read 
       };
       const clean = attempt(Infinity);
       assert.ifError(clean.error);
-      assert.equal(appends, 0, `${row.name}: every append landed during the read`);
       const total = accesses;
-      assert.ok(total > 3, `${row.name}: ${total} state accesses`);
+      assert.ok(total >= 1, `${row.name}: ${total} state accesses`);
       for (let start = 1; start <= total; start++) {
         const { opened: met, error, elapsed } = attempt(start);
         // A path that took fewer accesses this time met no refusal.
@@ -445,27 +425,16 @@ test('a lasting refusal fails a state read after one wait, wherever in the read 
         assert.ok(elapsed < 2 * Sharing.SHARING_RETRY_MS, `${where}: failed ${elapsed} ms after the first refusal`); // wait-allow: the retry's time bound is the contract under test
       }
     }
-    // A reader that cannot write the state directory cannot take the lock
-    // either; that refusal is not the files', so it still returns its last read.
-    const mkdir = fs.mkdirSync;
-    fs.mkdirSync = (target, ...rest) => {
-      if (path.dirname(path.resolve(target)) === path.resolve(h.state) && path.basename(target).startsWith('lock')) {
-        throw Object.assign(new Error(`EPERM: operation not permitted, mkdir '${target}'`), { code: 'EPERM' });
-      }
-      return mkdir.call(fs, target, ...rest);
-    };
-    try {
-      appends = 5;
-      assert.ok(S.loadState(h.state).project, 'a read with an unwritable state directory returns its last read');
-      assert.equal(appends, 0);
-    } finally {
-      fs.mkdirSync = mkdir;
-    }
-    // A writer recovers a staged commit under the lock before it reads. A
-    // refusal there counts as a busy lock (docs/state/storage.md): the commit
-    // stays staged until recovery can read the schema, and the writer fails
-    // at the lock wait. One that read on finished the commit unchecked.
-    staged();
+    // Before migration, a writer recovers a staged commit of the file layout
+    // under the lock. A refusal there counts as a busy lock
+    // (docs/state/storage.md): the commit stays staged until recovery can read
+    // the schema, and the writer fails at the lock wait. One that read on
+    // finished the commit unchecked.
+    Db.closeAll();
+    StateFiles.toFileLayout(h.state);
+    const id = `E${crypto.randomUUID()}`;
+    fs.writeFileSync(path.join(h.state, `tasks.json.${id}.commit`), fs.readFileSync(path.join(h.state, 'tasks.json')));
+    fs.appendFileSync(path.join(h.state, 'events.jsonl'), JSON.stringify({ id, at: new Date().toISOString(), cmd: 'staged', task: null, detail: {} }) + '\n');
     const commits = () => fs.readdirSync(h.state).filter((name) => name.endsWith('.commit')).length;
     assert.equal(commits(), 1);
     whileLocked = true;
@@ -480,6 +449,7 @@ test('a lasting refusal fails a state read after one wait, wherever in the read 
     if (ownNow) Object.defineProperty(performance, 'now', ownNow);
     else delete performance.now;
     Sharing.SHARING_BUSY.splice(0, Infinity, ...busy);
+    Db.closeAll();
   }
 });
 
@@ -491,10 +461,10 @@ function holdStateFiles(h, scanner) {
     const tasks = h.readState('tasks.json');
     assert.ok(tasks.tasks[0].claim, 'the supervisor holds the lease');
     tasks.tasks[0].claim.until = new Date(Date.now() + 1000).toISOString();
-    writeState(h, 'tasks.json', tasks);
-    fs.appendFileSync(path.join(h.state, 'events.jsonl'), JSON.stringify({
+    writeState(h, 'tasks.json', tasks, true);
+    StateFiles.appendLog(h.state, JSON.stringify({
       at: new Date().toISOString(), cmd: 'scanner holds', task: 'T1', detail: {},
-    }) + '\n');
+    }) + '\n', { locked: true });
   });
 }
 
@@ -515,8 +485,9 @@ test('the supervisor waits out a scanner holding its state files and log', async
   assert.equal(fs.readFileSync(worker.edited, 'utf8'), 'edit finished');
   assert.doesNotMatch(result.stderr, /supervisor failed|is gone/);
   const refused = fs.readFileSync(scanner, 'utf8');
-  // The supervisor's task view opens tasks.json and reads it through the descriptor.
-  for (const call of ['statSync project.json', 'statSync events.jsonl', 'openSync events.jsonl', 'openSync tasks.json']) {
+  // The tasks and the log are in state.db, which SQLite opens; the marker is
+  // the state file the supervisor reads by name.
+  for (const call of ['statSync project.json', 'readFileSync project.json']) {
     assert.ok(refused.includes(`${call}\n`), `the supervisor met a refused ${call}:\n${refused}`);
   }
 });

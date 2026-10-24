@@ -10,6 +10,7 @@
 // login and config but never writes to the user's own directories.
 
 const test = require('node:test');
+const StateFiles = require('./state-files');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
@@ -84,7 +85,7 @@ for (const harness of ['claude', 'codex']) {
     pinLiveRung(h, harness);
     const env = { ...h.env, [harness === 'claude' ? 'CLAUDE_CONFIG_DIR' : 'CODEX_HOME']: global };
     const r = await h.runAsync(['spawn', '--role', 'small', '--task', 'T1', '--wait', '--json'], { env });
-    const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+    const events = StateFiles.logText(h.state).trim().split('\n').map((l) => JSON.parse(l));
     const spawned = events.find((e) => e.cmd === 'spawn');
     assert.ok(spawned, `spawned\n${r.stderr}`);
     const log = fs.readFileSync(spawned.detail.log, 'utf8');

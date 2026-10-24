@@ -1,6 +1,7 @@
 'use strict';
 
 const test = require('node:test');
+const StateFiles = require('./state-files');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -125,7 +126,7 @@ if (!fs.readFileSync(${JSON.stringify(body)}, 'utf8').includes('records a reason
 const r = cp.spawnSync(process.execPath, ${JSON.stringify([BIN, 'evidence', 'T1', '--type', 'review', '--ok', '--sha', h.sha, '--summary', 'Corrected claim checked.'])}, {env: fakeAgentEnv(process.env)});
 process.exit(r.status ?? 1);`;
   h.ok(['ladder', 'set', 'easy', '--command', JSON.stringify([process.execPath, '-e', script, '{prompt}'])]);
-  const cursor = fs.statSync(path.join(h.state, 'events.jsonl')).size;
+  const cursor = StateFiles.logEnd(h.state);
   assert.equal(h.json(['accept', 'T1', '--agent', 'orchestrator']).review_pending, true);
   h.json(['wait', '--after', String(cursor), '--task', 'T1', '--types', 'evidence', '--timeout', '300']);
   assert.match(fs.readFileSync(output, 'utf8'), /## Light claim check/);
@@ -156,8 +157,7 @@ test('body-only correction keeps passing software gates and does not escalate ra
 test('automatic reactions do not repeat a light check before the body is corrected', (t) => {
   const h = setup(t);
   const at = new Date().toISOString();
-  const file = path.join(h.state, 'events.jsonl');
-  fs.appendFileSync(file, [
+  StateFiles.appendLog(h.state, [
     { at, agent: 'orchestrator', cmd: 'spawn', task: 'T1',
       detail: { agent: 'worker', role: 'worker', pid: 999999, attempt: 1 } },
     { at, agent: 'orchestrator', cmd: 'spawn exit', task: 'T1',
@@ -165,7 +165,7 @@ test('automatic reactions do not repeat a light check before the body is correct
   ].map((e) => `${JSON.stringify(e)}\n`).join(''));
   fail(h, [claim()]);
   h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
-  const events = fs.readFileSync(file, 'utf8').trim().split('\n').map(JSON.parse);
+  const events = StateFiles.readEvents(h.state);
   const reactions = events.filter((e) => e.cmd === 'automation' && e.detail.phase !== 'running');
   assert.ok(reactions.length, 'the observer completed an automatic reaction');
   // Automatic rework would refuse prose-only findings; the reaction leaves the task for its correction.

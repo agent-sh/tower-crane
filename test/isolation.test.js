@@ -1,6 +1,7 @@
 'use strict';
 
 // Spawned agent homes: no user secrets, hooks or rules, provider configs,
+const StateFiles = require('./state-files');
 // research tools, sandbox placeholders and claude's own tool denials.
 // isolation-skills.test.js has owner-key denials, skills and browser kits.
 

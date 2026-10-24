@@ -10,6 +10,7 @@ const path = require('node:path');
 const { waitFor } = require('./canary');
 const { setup, holdSuite, holdExecutor, ghStub } = require('./automation-helpers');
 const Automation = require('../lib/automation');
+const StateFiles = require('./state-files');
 
 // Each executor lease once, at its start; a lease that moves from tests to clean records its new kind.
 const leases = (h) => h.logs().filter((e, i, all) => e.cmd === 'executor' && e.detail.phase === 'running'
@@ -32,9 +33,8 @@ test('with one executor, a tests run holds it while CI waits and a review progre
   h.ok(['submit', 'T4', '--sha', h.sha, '--agent', 'worker']);
   for (const id of ['T2', 'T3', 'T4']) for (const gate of ['tests', 'clean']) h.ok(['check', gate, id, '--agent', 'orchestrator']);
   fs.rmSync(stalled);
-  const events = path.join(h.state, 'events.jsonl');
   h.ok(['claim', 'T1', '--agent', 'worker']);
-  const offset = fs.statSync(events).size;
+  const offset = StateFiles.logEnd(h.state);
   h.ok(['submit', 'T1', '--sha', h.sha, '--agent', 'worker']);
   const holder = h.runAsync(['wait', '--after', String(offset), '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
   let status;
@@ -124,9 +124,8 @@ if (args[0] === 'api' && args[1].includes('check-runs')) {
   const reader = h.runAsync(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
   try {
     await waitFor(started, { what: 'T1 reads its checks' });
-    const events = path.join(h.state, 'events.jsonl');
     h.ok(['claim', 'T2', '--agent', 'worker']);
-    const offset = fs.statSync(events).size;
+    const offset = StateFiles.logEnd(h.state);
     h.ok(['submit', 'T2', '--sha', h.sha, '--agent', 'worker']);
     h.run(['wait', '--after', String(offset), '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
     const t2 = h.readState('tasks.json').tasks[1];
@@ -173,12 +172,9 @@ test('a recheck scheduled a minute after the last read reads, however late that 
   assert.ok(first > 0, 'the first reaction reads the checks');
   // The last read was scheduled a minute ago and its reaction reached the ci
   // gate only now, as one held behind other reactions or a suite does.
-  const file = path.join(h.state, 'events.jsonl');
-  const events = h.logs();
-  const poll = events.findLast((e) => e.cmd === 'ci poll');
-  poll.detail.scheduled = new Date(Date.now() - 60000).toISOString();
-  poll.at = new Date().toISOString();
-  fs.writeFileSync(file, events.map((e) => JSON.stringify(e)).join('\n') + '\n');
+  const poll = h.logs().findLast((e) => e.cmd === 'ci poll');
+  StateFiles.editEvents(h.state, (e) => (e.id === poll.id
+    ? { ...e, at: new Date().toISOString(), detail: { ...e.detail, scheduled: new Date(Date.now() - 60000).toISOString() } } : null));
   h.consume();
   assert.ok(reads() > first, 'the next minute\'s recheck reads');
 });

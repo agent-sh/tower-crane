@@ -1,6 +1,7 @@
 'use strict';
 
 const test = require('node:test');
+const StateFiles = require('./state-files');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -23,7 +24,7 @@ function accepted(t, settings = [], tier = null) {
   h.env.TOWER_CRANE_CLEAN_CMD = '';
   h.github = () => JSON.parse(fs.readFileSync(h.env.AUTOMATION_GITHUB, 'utf8'));
   h.saveGithub = (state) => fs.writeFileSync(h.env.AUTOMATION_GITHUB, JSON.stringify(state));
-  h.logs = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  h.logs = () => StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
   return h;
 }
 
@@ -67,7 +68,7 @@ for (const [name, settings, flags] of policyChanges) {
     assert.match(output, /queued gate re-checks: T1 \(tests(?:, ci)?\)/);
     assert.deepEqual(h.json(['status']).gate_queue.queued.map((q) => q.id), ['T1']);
     assert.equal(h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'tests').ok, false);
-    const offset = fs.statSync(path.join(h.state, 'events.jsonl')).size;
+    const offset = StateFiles.logEnd(h.state);
     h.run(['wait', '--after', String(offset), '--types', 'never', '--timeout', '0',
       '--agent', 'orchestrator']);
     assert.equal(h.github().prs['7'].state, 'MERGED');
@@ -135,7 +136,7 @@ test('a queued clean refresh runs without replaying old notifications and rework
   h.ok(['project', 'set', '--clean-cmd', `${h.clean} --fixture`, '--agent', 'orchestrator']);
   h.env.FIXTURE_GATE_OK = '0';
   // Observe from the end: the persistent queue request must suffice to run the refresh.
-  const offset = fs.statSync(path.join(h.state, 'events.jsonl')).size;
+  const offset = StateFiles.logEnd(h.state);
   h.run(['wait', '--after', String(offset), '--types', 'never', '--timeout', '0',
     '--agent', 'orchestrator']);
   const task = h.readState('tasks.json').tasks[0];

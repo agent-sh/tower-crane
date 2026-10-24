@@ -245,6 +245,17 @@ test('status shows the test-thread budget, every holder and its grant', (t) => {
   assert.match(h.ok(['status']), /^test threads: budget 2 of 2 on 3 cores, other work load 0; 0 runs hold 0 of 0 requested$/m);
 });
 
+test('a run on the host leases its threads under the project the state database names', async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['project', 'set', '--name', 'grant-fixture']);
+  writeHost(h.env.TOWER_CRANE_HOST_ROOT, { cores: 3, load: 0 });
+  const lease = await require('../lib/test-grants').open({ ...h.env, ...mark(h, { task: 'T1', kind: 'gate' }) }, 2);
+  t.after(() => lease.close());
+  assert.equal(lease.via, 'registry');
+  assert.match(h.ok(['status']), /^test threads: T1 gate in grant-fixture: \d of 2, pid /m);
+});
+
 test('CPU pressure or load past the defer lines steps a run down by the overshoot, once per interval and not below one thread a run', (t) => {
   const h = makeRepo(t);
   h.init();
@@ -311,10 +322,11 @@ async function brokerFixture(t) {
 
 test('a sandboxed agent\'s broker leases one run at a time and tells a second one to take one thread', async (t) => {
   const { h, file } = await brokerFixture(t);
+  h.ok(['project', 'set', '--name', 'grant-fixture']);
   const first = await B.testGrantSession(file, 2);
   t.after(() => first.close());
   await assert.rejects(B.testGrantSession(file, 2), (e) => e.leaseHeld === true && /already holds a test-thread lease/.test(e.message));
-  assert.equal(leases(h).length, 1);
+  assert.deepEqual(leases(h).map((l) => l.name), ['grant-fixture'], 'the lease names the project the state database holds');
   first.close();
   await waitUntil(() => leases(h).length === 0, { what: 'the first lease is released' });
   const again = await B.testGrantSession(file, 2);

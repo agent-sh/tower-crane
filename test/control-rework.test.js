@@ -1,6 +1,7 @@
 'use strict';
 
 const test = require('node:test');
+const StateFiles = require('./state-files');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -8,7 +9,7 @@ const { cachedFixture } = require('./helpers');
 const { gateFixture } = require('./gate-helpers');
 
 const as = (agent) => ({ env: { TOWER_CRANE_AGENT: agent } });
-const log = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+const log = (h) => StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
 const audits = (h) => log(h).filter(e => e.cmd === 'setting');
 const decisions = (h) => h.readState('decisions.json').decisions;
 const user = (h) => JSON.parse(fs.readFileSync(h.userConfig, 'utf8'));

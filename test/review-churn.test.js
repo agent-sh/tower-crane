@@ -1,6 +1,7 @@
 'use strict';
 
 const test = require('node:test');
+const StateFiles = require('./state-files');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -106,7 +107,7 @@ test('stack sync rework cannot restore reviews across an acceptance reset', (t) 
     const result = h.run(['stack', 'sync', 'T2']);
     assert.equal(result.code, 1);
     assert.match(result.stdout + result.stderr, /conflict/i);
-    const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+    const events = StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
     const rework = events.findLast((e) => e.cmd === 'rework' && e.task === 'T2');
     assert.equal(rework.detail.previous_revision, 3, 'stack sync keeps rejected-review context');
     assert.equal(rework.detail.revision, revision);

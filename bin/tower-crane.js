@@ -1,6 +1,12 @@
 #!/usr/bin/env node
 'use strict';
 
+// Every command and hook is a process of its own, and compiling the modules
+// was most of a hook's time. Node keeps the compiled code in its cache
+// directory, checked against each file's source; where it cannot write
+// one, it compiles as before.
+require('node:module').enableCompileCache?.();
+
 const OUTPUT_PIPE_CLOSED = 'tower-crane:output-pipe-closed';
 let outputPipeClosed = false;
 
@@ -24,7 +30,6 @@ for (const stream of [process.stdout, process.stderr]) {
 const { TowerCraneError, usage, refuse, readStdin } = require('../lib/util');
 const { isatty } = require('node:tty');
 const S = require('../lib/state');
-const T = require('../lib/tasks');
 
 const { str, bool } = require('../lib/commands-specs');
 
@@ -49,7 +54,7 @@ function flagLine(name, spec) {
 }
 
 function generalHelp() {
-  const lines = ['tower-crane: plan, dispatch, review and merge agent work, with state in plain files', '', 'usage: tower-crane <command> [args] [--state DIR] [--agent NAME] [--json]'];
+  const lines = ['tower-crane: plan, dispatch, review and merge agent work, with state in one SQLite file', '', 'usage: tower-crane <command> [args] [--state DIR] [--agent NAME] [--json]'];
   for (const section of SECTIONS) {
     lines.push('', `${section}:`);
     for (const c of COMMANDS.filter((x) => x.section === section)) lines.push(`  ${c.name.padEnd(16)} ${c.summary}`);
@@ -297,7 +302,7 @@ async function main(argv) {
       if (cmd.name === 'submit' && require('../lib/broker').serves(process.env.TOWER_CRANE_BROKER, locate())) {
         const workerCtx = { cwd: process.cwd(), env: process.env, stateDir: locate(),
           pos: parsed.pos, flags: own, agent: identity };
-        const sha = T.resolveSubmitSha(workerCtx, own.sha);
+        const sha = require('../lib/tasks').resolveSubmitSha(workerCtx, own.sha);
         presubmit = await require('../lib/presubmit').prepare(workerCtx, sha);
         const tokens = [...resolved.lead, ...resolved.rest];
         const span = parsed.spans.find((s) => s.name === 'sha');

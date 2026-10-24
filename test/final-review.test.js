@@ -51,7 +51,7 @@ function gatesPass(h, env) {
 const runs = (h) => (fs.existsSync(h.log) ? readPublished(h.log, 'utf8').trim().split('\n').map(JSON.parse) : []);
 const task = (h) => h.readState('tasks.json').tasks[0];
 const finals = (h) => task(h).evidence.filter((e) => e.type === 'final-review');
-const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+const events = (h) => h.events();
 const accepted = (h) => events(h).filter((e) => e.cmd === 'accept' && e.task === 'T1');
 
 function accept(h, env) {

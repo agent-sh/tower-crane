@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { cachedFixture, runAsync } = require('./helpers');
+const StateFiles = require('./state-files');
 
 function fixture(t) {
   return cachedFixture(t, 'presubmit', (h) => {
@@ -19,7 +20,7 @@ function fixture(t) {
 }
 
 function events(h) {
-  return fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  return StateFiles.readEvents(h.state);
 }
 
 function set(h, command, timeout_sec) {

@@ -1,6 +1,7 @@
 'use strict';
 
 const { waitOnRepo } = require('./signals');
+const StateFiles = require('./state-files');
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -33,13 +34,13 @@ test('submitted dependencies dispatch from the exact dependency head and spawn l
 // serializes.
 const racingNotes = (f) => {
   const byObserver = new Map();
-  for (const e of fs.readFileSync(path.join(f.h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)) {
+  for (const e of StateFiles.logText(f.h.state).trim().split('\n').map(JSON.parse)) {
     const pid = e.cmd === 'task note' && /^racing note from (\d+)$/.exec(e.detail?.text)?.[1];
     if (pid) byObserver.set(pid, (byObserver.get(pid) || 0) + 1);
   }
   return byObserver;
 };
-const linkFailures = (f) => fs.readFileSync(path.join(f.h.state, 'events.jsonl'), 'utf8').trim().split('\n')
+const linkFailures = (f) => StateFiles.logText(f.h.state).trim().split('\n')
   .map(JSON.parse).filter((e) => e.cmd === 'stack link failed');
 // The observer pass inside `wait --observe` links the PR; the wait returns on its event.
 const linkedByObserver = (f) => {
@@ -85,7 +86,7 @@ test('a chain member\'s rework during the link\'s GitHub call refuses the first 
   assert.equal(linkedByObserver(f), true);
   assert.equal(f.h.json(['task', 'show', 'T1']).status, 'rework');
   // Another observer may link at the same time; the racing one's own calls show its retry.
-  const reworks = fs.readFileSync(path.join(f.h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)
+  const reworks = StateFiles.logText(f.h.state).trim().split('\n').map(JSON.parse)
     .map((e) => e.cmd === 'rework' && /^racing rework from (\d+)$/.exec(e.detail?.reason)?.[1]).filter(Boolean);
   assert.equal(reworks.length, 1, 'one link attempt raced the rework');
   const calls = f.read().calls.filter((c) => c.args[0] === 'stack' && c.args[1] === 'link');
@@ -142,7 +143,7 @@ test('under a slow GitHub, reviewers that keep failing stop at the cap and the l
   f.write((d) => { d.delayMs = 300; });
   const spawned = f.h.json(['spawn', '--task', 'T2']);
   // Monitors append while this reads; the record after the last newline may be partial.
-  const events = () => fs.readFileSync(path.join(f.h.state, 'events.jsonl'), 'utf8').split('\n').slice(0, -1).map(JSON.parse);
+  const events = () => StateFiles.logText(f.h.state).split('\n').slice(0, -1).map(JSON.parse);
   const reviewers = () => events().filter((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer');
   const monitors = () => [spawned.monitor_pid, ...reviewers().map((e) => e.detail.monitor_pid)];
   const supervised = () => monitors().some((pid) => detachedAlive({ pid }));
@@ -301,7 +302,7 @@ test('spawn refuses with claim readiness when a submitted dependency returns to 
   const spawn = f.h.run(['spawn', '--task', 'T2', '--wait']);
   assert.equal(spawn.code, 1);
   assert.ok(spawn.stderr.includes(claim.stderr.trim().replace(/^tower-crane: /, '')), spawn.stderr);
-  const events = fs.readFileSync(path.join(f.h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const events = StateFiles.logText(f.h.state).trim().split('\n').map(JSON.parse);
   assert.equal(events.some((event) => event.cmd === 'spawn' && event.task === 'T2'), false);
   assert.equal(f.h.json(['task', 'show', 'T2']).status, 'todo');
 });
@@ -410,13 +411,12 @@ test('a spawned worker claims a task whose dependency merged while gh api is den
   f.h.git(['commit', '-qam', 'T2 rework'], wt.path);
   worker(f);
   const before = apiCalls(f).length;
-  const eventFile = path.join(f.h.state, 'events.jsonl');
-  const beforeEvents = fs.readFileSync(eventFile, 'utf8').trim().split('\n').length;
+  const beforeEvents = StateFiles.readEvents(f.h.state).length;
   f.write((d) => { d.apiFailure = DENIED_API; });
   const spawned = f.h.run(['spawn', '--task', 'T2', '--wait']);
   assert.equal(spawned.code, 0, spawned.stderr);
   const task = f.h.json(['task', 'show', 'T2']);
-  const events = fs.readFileSync(eventFile, 'utf8').trim().split('\n').slice(beforeEvents).map(JSON.parse);
+  const events = StateFiles.readEvents(f.h.state).slice(beforeEvents);
   const claim = events.find((e) => e.task === 'T2' && e.cmd === 'claim');
   const submit = events.find((e) => e.task === 'T2' && e.cmd === 'submit');
   assert.ok(claim, 'the worker claims the task after its dependency merged');

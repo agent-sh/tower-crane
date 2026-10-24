@@ -1,6 +1,7 @@
 'use strict';
 
 const { waitOnRepo } = require('./signals');
+const StateFiles = require('./state-files');
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -30,7 +31,7 @@ function pin(h) {
 }
 
 const shown = (h, type) => h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === type);
-const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+const events = (h) => StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
 
 test('unpinned agent commands cannot execute a shell payload', (t) => {
   const { h } = fixture(t);
@@ -150,7 +151,7 @@ for (const type of ['tests', 'clean']) {
     delete entry.gate_policy;
     delete detail.gate_policy;
     h.writeState('tasks.json', tasks);
-    fs.writeFileSync(path.join(h.state, 'events.jsonl'), audit.map(JSON.stringify).join('\n') + '\n');
+    StateFiles.replaceLog(h.state, audit.map(JSON.stringify).join('\n') + '\n');
     assert.equal(shown(h, type).ok, false);
     h.ok(['check', type, 'T1']);
     const fresh = h.readState('tasks.json');
@@ -159,7 +160,7 @@ for (const type of ['tests', 'clean']) {
     const auditedRun = freshAudit.at(-1).detail.commands.find((c) => c.command !== 'git');
     run.command = auditedRun.command = 'node -e "process.exit(0)"';
     h.writeState('tasks.json', fresh);
-    fs.writeFileSync(path.join(h.state, 'events.jsonl'), freshAudit.map(JSON.stringify).join('\n') + '\n');
+    StateFiles.replaceLog(h.state, freshAudit.map(JSON.stringify).join('\n') + '\n');
     assert.equal(shown(h, type).ok, false, 'matching audit alone cannot substitute a different command');
   });
 }
@@ -185,7 +186,7 @@ test('expensive proof uses an owner-pinned template and rejects caller-selected 
   const index = entry.commands.indexOf(proof);
   entry.commands[index].command = detail.commands[index].command = 'node -e "process.exit(1)"';
   h.writeState('tasks.json', tasks);
-  fs.writeFileSync(path.join(h.state, 'events.jsonl'), audit.map(JSON.stringify).join('\n') + '\n');
+  StateFiles.replaceLog(h.state, audit.map(JSON.stringify).join('\n') + '\n');
   assert.equal(shown(h, 'tests').ok, false);
   h.ok(['check', 'tests', 'T1']);
   h.ok(['project', 'set', '--tests-proof-cmd', 'node --trace-warnings {tests}']);
@@ -265,7 +266,7 @@ for (const mode of ['prove', 'run-only']) {
     entry.commands.push(extra);
     detail.commands.push(extra);
     h.writeState('tasks.json', tasks);
-    fs.writeFileSync(path.join(h.state, 'events.jsonl'), audit.map(JSON.stringify).join('\n') + '\n');
+    StateFiles.replaceLog(h.state, audit.map(JSON.stringify).join('\n') + '\n');
     assert.match(mismatch(entry, project, task), /command receipts do not match/);
     assert.equal(shown(h, 'tests').ok, false);
     assert.match(spawn().stderr, /command receipts do not match/);
