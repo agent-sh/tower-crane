@@ -299,6 +299,7 @@ const cp = require('node:child_process');
 const [count, repo, cli, out] = process.argv.slice(2);
 // The other task's own runs leave main alone.
 if (fs.existsSync('other.txt')) process.exit(0);
+// read-published: only this task's local CI runs write the count, one run at a time.
 const run = (fs.existsSync(count) ? Number(fs.readFileSync(count, 'utf8')) : 0) + 1;
 fs.writeFileSync(count, String(run));
 const identity = { ...process.env, GIT_AUTHOR_NAME: 'T', GIT_AUTHOR_EMAIL: 't@localhost', GIT_COMMITTER_NAME: 'T', GIT_COMMITTER_EMAIL: 't@localhost' };
