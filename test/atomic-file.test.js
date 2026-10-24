@@ -7,11 +7,39 @@ const path = require('node:path');
 const cp = require('node:child_process');
 const { makeRepo } = require('./helpers');
 const { waitFor } = require('./canary');
-const { writeAtomic, readPublished } = require('./atomic-file');
+const { writeAtomic, readPublished, readJsonLines } = require('./atomic-file');
 const { fileWritten } = require('./signals');
 
 const FIXTURES = path.join(__dirname, 'fixtures');
 const PARTIAL = path.join(FIXTURES, 'partial-write.js');
+
+test('JSONL fixture reads keep complete records and defer partial appends', () => {
+  const first = { cmd: 'msg', detail: { text: 'first' } };
+  const next = { cmd: 'msg', detail: { text: 'brace } שלום 🌍\nnext line' } };
+  const one = JSON.stringify(first);
+  const two = JSON.stringify(next);
+  const bytes = Buffer.from(two);
+  for (const [name, text, expected] of [
+    ['empty', '', []],
+    ['blank', '\n \t\r\n', []],
+    ['LF', one + '\n', [first]],
+    ['CRLF', one + '\r\n', [first]],
+    ['valid but unpublished', one, []],
+    ['partial first', one.slice(0, 12), []],
+    ['partial property', one + '\n{"cmd":', [first]],
+    ['brace inside a partial string', one + '\n' + two.slice(0, two.indexOf('}') + 1), [first]],
+    ['partial UTF-8', one + '\n' + bytes.subarray(0, bytes.indexOf(Buffer.from('🌍')) + 2).toString('utf8'), [first]],
+    ['unpublished next', one + '\n' + two, [first]],
+    ['several records with whitespace', '\n' + one + '\n \t\r\n' + two + '\r\n', [first, next]],
+  ]) {
+    assert.deepEqual(readJsonLines('fixture.jsonl', { readFileSync: () => text }), expected, name);
+  }
+  for (const text of ['{"cmd":\n', one + '\n{"cmd":\n', '{"cmd":\n' + two + '\n']) {
+    assert.throws(() => readJsonLines('fixture.jsonl', { readFileSync: () => text }), SyntaxError);
+  }
+  const missing = Object.assign(new Error('missing fixture'), { code: 'ENOENT' });
+  assert.throws(() => readJsonLines('fixture.jsonl', { readFileSync: () => { throw missing; } }), (error) => error === missing);
+});
 
 // Starts node with partial-write.js holding the first write to `target` halfway.
 function heldWriter(t, target, preload, script, env = {}) {
