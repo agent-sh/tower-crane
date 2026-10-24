@@ -149,7 +149,7 @@ test('masked merge scratch ignores inherited system temp directories', (t) => {
     const log = path.join(f.env.HOME, 'scratch.jsonl');
     fs.mkdirSync(sentinel);
     Object.assign(f.env, { XDG_CACHE_HOME: cache, LOCALAPPDATA: cache, TMP: sentinel, TEMP: sentinel,
-      TC_SCRATCH_LOG: log, NODE_OPTIONS: `--require "${path.join(__dirname, 'fixtures', 'scratch-record.js')}"` });
+      TC_SCRATCH_LOG: log, NODE_OPTIONS: `--require "${path.join(__dirname, 'fixtures', 'scratch-record.js').replace(/\\/g, '/')}"` });
     if (tmpdir === 'unset') delete f.env.TMPDIR;
     else f.env.TMPDIR = sentinel;
     const root = tmpdir === 'override' ? path.join(f.env.HOME, 'override') : path.join(cache, 'tower-crane');
@@ -182,7 +182,7 @@ test('sandboxed masked Git moves use private temp when the origin cache is unwri
       fs.writeFileSync(originCache, 'unwritable cache root');
       for (const name of ['TMPDIR', 'TMP', 'TEMP']) delete f.env[name];
       Object.assign(f.env, { XDG_CACHE_HOME: cache, LOCALAPPDATA: cache, USERPROFILE: f.env.HOME, TOWER_CRANE_SANDBOX: '1', [key]: privateTmp,
-        TC_SCRATCH_LOG: log, NODE_OPTIONS: `--require "${path.join(__dirname, 'fixtures', 'scratch-record.js')}"` });
+        TC_SCRATCH_LOG: log, NODE_OPTIONS: `--require "${path.join(__dirname, 'fixtures', 'scratch-record.js').replace(/\\/g, '/')}"` });
       const result = operation === 'merge' ? f.merge('--no-edit', 'origin/main') : f.checkout('--detach', 'origin/main');
       assert.equal(result.status, 0, `${operation} ${key}: ${result.stderr}`);
       assert.equal(f.show('HEAD:.mcp.json'), 'upstream');

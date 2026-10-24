@@ -17,11 +17,12 @@ const REQUIRED = [
   'test (ubuntu-latest, node 24, shard 1/3)',
   'test (ubuntu-latest, node 24, shard 2/3)',
   'test (ubuntu-latest, node 24, shard 3/3)',
-  'test (windows-latest, node 26, shard 1/5)',
-  'test (windows-latest, node 26, shard 2/5)',
-  'test (windows-latest, node 26, shard 3/5)',
-  'test (windows-latest, node 26, shard 4/5)',
-  'test (windows-latest, node 26, shard 5/5)',
+  'test (windows-latest, node 26, shard 1/6)',
+  'test (windows-latest, node 26, shard 2/6)',
+  'test (windows-latest, node 26, shard 3/6)',
+  'test (windows-latest, node 26, shard 4/6)',
+  'test (windows-latest, node 26, shard 5/6)',
+  'test (windows-latest, node 26, shard 6/6)',
 ];
 const CAP_POLICY = [{ app: 'revuto-review', pattern: 'reached the \\d+-round review limit' }];
 const github = path.join(__dirname, 'fixtures', 'github.js');
@@ -309,7 +310,7 @@ test('the focused step logs every named file for one or several files and refuse
   }
 });
 
-test('the matrix is all eleven shards, beside the proofs and the repeat job', () => {
+test('the matrix is all twelve shards, beside the proofs and the repeat job', () => {
   const workflow = readWorkflow(path.resolve(__dirname, '..'));
   assert.deepEqual(jobNames(workflowMatrix(workflow)), REQUIRED);
   assert.equal([...workflow.matchAll(/^ {2}test:\n/gm)].length, 1, 'one test job owns the matrix');
@@ -626,7 +627,7 @@ test('required checks also apply to a submitted head without a PR', (t) => {
 test('a superseded failed run does not block: the latest run of each required check decides', (t) => {
   // T160 at f361335: one windows shard failed on 2026-10-09 and passed on a rerun the next day.
   const h = fixture(t);
-  const name = 'test (windows-latest, node 26, shard 2/5)';
+  const name = 'test (windows-latest, node 26, shard 2/6)';
   const failed = { ...run(name, 'failure'), id: 114055863456, started_at: '2026-10-09T22:36:00Z' };
   const passed = { ...run(name, 'success'), id: 114217721960, started_at: '2026-10-10T12:54:00Z' };
   const others = REQUIRED.filter((n) => n !== name).map((n) => run(n));
@@ -661,7 +662,7 @@ test('a superseded failed run does not block: the latest run of each required ch
 
 test('an unfinished or partly read suite blocks even when its runs were superseded', (t) => {
   const h = fixture(t);
-  const name = 'test (windows-latest, node 26, shard 2/5)';
+  const name = 'test (windows-latest, node 26, shard 2/6)';
   const old = { ...run(name, 'success'), id: 114055863456, started_at: '2026-10-09T22:36:00Z', check_suite: { id: 1 } };
   const current = { ...run(name, 'success'), id: 114217721960, started_at: '2026-10-10T12:54:00Z', check_suite: { id: 2 } };
   const others = REQUIRED.filter((n) => n !== name).map((n) => ({ ...run(n), check_suite: { id: 2 } }));
@@ -725,7 +726,7 @@ test('a newer failed workflow still blocks and its older passing run is recorded
 test('a queued rerun newer than a success is the current run: the gate waits for it', (t) => {
   // A queued run has no started_at yet, so the earlier success must not supersede it by its start time.
   const h = fixture(t);
-  const name = 'test (windows-latest, node 26, shard 2/5)';
+  const name = 'test (windows-latest, node 26, shard 2/6)';
   const passed = { ...run(name, 'success'), id: 114217721960, started_at: '2026-10-10T12:54:00Z' };
   const queued = { ...run(name, null, 'queued'), id: 114300000000 };
   const others = REQUIRED.filter((n) => n !== name).map((n) => run(n));

@@ -1195,7 +1195,7 @@ test('the next accepted head check takes the freed executor ahead of a queued ga
   assert.equal(h.logs().some((e) => e.cmd === 'automation' && /T3: head check waits behind T1/.test(e.detail.error || '')), false);
 });
 
-test('past the load line a waiting merge suite runs beside the gate runs that hold places, and a new gate run waits', async (t) => {
+test('past the CPU pressure line a waiting merge suite runs beside the gate runs that hold places, and a new gate run waits', async (t) => {
   const h = setup(t);
   const events = path.join(h.state, 'events.jsonl');
   const hold = holdSuite(h);
@@ -1211,8 +1211,9 @@ test('past the load line a waiting merge suite runs beside the gate runs that ho
     acceptAll(h, [['T2', '8']], hold);
     h.ok(['task', 'add', '--title', 'Change T3', '--acceptance', 'it works', '--kind', 'code']);
     h.ok(['claim', 'T3', '--agent', 'worker']);
-    // The fake host's load passes the defer line; T1's tests keep running.
-    writeHost(h.env.TOWER_CRANE_HOST_ROOT, { load: 1000 });
+    // The fake host's CPU pressure passes the defer line; T1's tests keep running. The merge share
+    // passes the pressure line but never the saturated load line (lib/governor.js cpuLines).
+    writeHost(h.env.TOWER_CRANE_HOST_ROOT, { cpuSome: 90 });
     const after = fs.statSync(events).size;
     h.ok(['submit', 'T3', '--sha', h.sha, '--agent', 'worker']);
     h.run(['wait', '--after', String(after), '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
@@ -1229,7 +1230,7 @@ test('past the load line a waiting merge suite runs beside the gate runs that ho
   }
   assert.equal(deferred?.phase, 'deferred', 'the new gate run waits');
   assert.equal(deferred.governor.kind, 'tests');
-  assert.match(deferred.governor.reason, /^load: 1000 on \d+ cores is at or over \d+/);
+  assert.match(deferred.governor.reason, /^cpu pressure: some avg10 90% is at or over \d+%/);
 });
 
 // The merge queue records a deferred head as its blocked entry; that entry
