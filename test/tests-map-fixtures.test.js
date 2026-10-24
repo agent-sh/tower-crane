@@ -15,14 +15,14 @@ const artifact = { sha: 'a'.repeat(40), tests: [], map: {} };
 const observer = `
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const { readPublished } = require(${JSON.stringify(path.join(__dirname, 'atomic-file.js'))});
 const watched = JSON.parse(process.env.TC_MAP_WATCHED);
-const read = fs.readFileSync;
 const write = fs.writeFileSync;
 const open = fs.openSync;
 let checked = 0;
 const observe = () => {
   for (const [file, json] of watched) {
-    const text = read(file, 'utf8');
+    const text = readPublished(file, 'utf8');
     if (json) JSON.parse(text);
     else assert.match(text, /^\\d+$/);
   }
