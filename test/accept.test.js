@@ -1,6 +1,6 @@
 'use strict';
 
-const { waitOnRepo } = require('./signals');
+const { waitOnRepo, killPid } = require('./signals');
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -45,10 +45,17 @@ const events = (h) => {
 };
 const reviewerSpawns = (h) => events(h).filter((e) => e.cmd === 'spawn' && e.task === 'T1' && e.detail.role === 'reviewer');
 
+const gone = (pid) => {
+  try { killPid(pid, 0); return false; } catch (error) { if (error.code === 'ESRCH') return true; throw error; }
+};
+
 // The dispatched reviewer runs detached; the test must outlive it and its monitor.
+// The monitor reacts to the exit after recording it, and that reaction reworks a
+// task whose review failed, so evidence recorded before the monitor ends can race it.
 async function reviewerExited(h) {
-  const agents = reviewerSpawns(h).map((e) => e.detail.agent);
-  await waitOnRepo(h, () => agents.every((a) => events(h).some((e) => e.cmd === 'spawn exit' && e.detail.agent === a)));
+  const spawns = reviewerSpawns(h);
+  await waitOnRepo(h, () => spawns.every((s) => events(h).some((e) => e.cmd === 'spawn exit' && e.detail.agent === s.detail.agent)
+    && gone(s.detail.monitor_pid)));
 }
 
 // After a reviewer exits its monitor advances the task too, so either accept may win.
