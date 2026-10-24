@@ -5,8 +5,10 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
+const vm = require('node:vm');
 const { BIN, cachedFixture } = require('./helpers');
 const { gateFixture } = require('./gate-helpers');
+const { HUNG_TEST_MS } = require('./signals');
 
 const REQUIRED = [
   'test (ubuntu-latest, node 26, shard 1/3)',
@@ -111,7 +113,7 @@ const EVENTS = {
 test('main pushes and same-repo PRs run only the shared check; fork PRs, tags, daily and manual runs the full matrix', () => {
   const workflow = readWorkflow(path.resolve(__dirname, '..'));
   const jobs = [...workflow.split('\njobs:\n')[1].matchAll(/^ {2}([\w-]+):\n/gm)].map((m) => m[1]);
-  assert.deepEqual(jobs, ['checks', 'test', 'coverage-map', 'repeats', 'gate-scratch', 'model-swap', 'profile', 'mutants']);
+  assert.deepEqual(jobs, ['checks', 'test', 'coverage-map', 'repeats', 'gate-scratch', 'model-swap', 'profile', 'mutants', 'focused']);
   const full = ['test', 'repeats', 'gate-scratch', 'model-swap'];
   for (const [event, expected] of [
     ['main push', ['checks']],
@@ -134,6 +136,118 @@ test('main pushes and same-repo PRs run only the shared check; fork PRs, tags, d
   }
   assert.match(jobBlock(workflow, 'coverage-map'), /node scripts\/tests-coverage-map\.js merge --expect 3 /);
   assert.match(jobBlock(workflow, 'coverage-map'), /name: tests-coverage-map\n/);
+});
+
+test('focused dispatch selects its runners and skips every other job, including profile jobs', () => {
+  const workflow = readWorkflow(path.resolve(__dirname, '..'));
+  assert.match(workflow, /^ {6}tests:\n {8}description: [^\n]+\n {8}type: string\n {8}default: ''$/m);
+  assert.match(workflow, /^ {6}os:\n {8}description: [^\n]+\n {8}type: choice\n {8}default: both\n {8}options:\n {10}- both\n {10}- ubuntu-latest\n {10}- windows-latest$/m);
+  const jobs = [...workflow.split('\njobs:\n')[1].matchAll(/^ {2}([\w-]+):\n/gm)].map((m) => m[1]);
+  const focused = jobBlock(workflow, 'focused');
+  assert.match(focused, /^ {4}name: 'focused tests \(\$\{\{ matrix\.os \}\}: \$\{\{ inputs\.tests \}\}\)'$/m);
+  assert.match(focused, /^ {4}runs-on: \$\{\{ matrix\.os \}\}$/m);
+  assert.match(focused, /node-version: 26/);
+  assert.match(focused, /^ {4}timeout-minutes: 45$/m);
+  assert.match(focused, /^ {8}timeout-minutes: 40$/m);
+  assert.match(focused, /TOWER_CRANE_TEST_TMP: \$\{\{ runner\.temp \}\}\/tower-crane-tests/);
+  assert.match(focused, /TC_TEST_SHARD_LOG_DIR: \$\{\{ runner\.temp \}\}\/shard-log/);
+  assert.match(focused, /TC_TEST_SHARD_DEADLINE_MIN: 36/);
+  assert.match(focused, /TC_SHARD_GUARD_DEADLINE_MIN: 38/);
+  assert.match(focused, /if: always\(\)\n {8}uses: actions\/upload-artifact@[\s\S]*path: \$\{\{ runner\.temp \}\}\/shard-log/);
+  assert.doesNotMatch(focused, /TC_TEST_SHARD:|TC_TEST_COVERAGE_DIR:|npm test|check:shared/);
+  const matrix = /^ {8}os: \$\{\{ (.+) \}\}$/m.exec(focused)?.[1];
+  assert.ok(matrix, 'focused runner matrix comes from the os input');
+  for (const [os, expected] of [
+    [undefined, ['ubuntu-latest', 'windows-latest']],
+    ['both', ['ubuntu-latest', 'windows-latest']],
+    ['ubuntu-latest', ['ubuntu-latest']],
+    ['windows-latest', ['windows-latest']],
+  ]) {
+    const inputs = { tests: 'test/ci-required.test.js test/gates/ci.test.js', os };
+    assert.deepEqual(Function('inputs', 'fromJSON', `return (${matrix});`)(inputs, JSON.parse), expected, String(os));
+    for (const profile of [false, true]) {
+      const event = { ...EVENTS['manual run'], inputs: { ...inputs, profile, hang: true } };
+      assert.deepEqual(jobs.filter((id) => runsOn(workflow, id, event)), ['focused'], `${os}, profile ${profile}`);
+    }
+  }
+});
+
+test('focused dispatch validates every path before starting exactly the named files without a shell', () => {
+  const focused = jobBlock(readWorkflow(path.resolve(__dirname, '..')), 'focused');
+  const script = /node <<'NODE'\n([\s\S]*?)\n {10}NODE/.exec(focused)?.[1]?.replace(/^ {10}/gm, '');
+  assert.ok(script, 'the focused step runs its validator as node code');
+  assert.match(focused, /FOCUSED_TESTS: \$\{\{ inputs\.tests \}\}/);
+  assert.doesNotMatch(script, /\$\{\{/, 'untrusted input arrives through the environment');
+  for (const platform of ['linux', 'win32']) {
+    for (const [input, expected] of [
+      ['test/ci-required.test.js', ['test/ci-required.test.js']],
+      ['  test/ci-required.test.js \t test/gates/ci.test.js  ', ['test/ci-required.test.js', 'test/gates/ci.test.js']],
+      ['test/a.b/c.test.js', ['test/a.b/c.test.js']],
+      ['', null], ['   ', null], ['lib/ci.test.js', null], ['test/a.js', null],
+      ['test/../outside.test.js', null], ['test/gates/../../outside.test.js', null],
+      ['test/./a.test.js', null], ['test//a.test.js', null],
+      ['/test/a.test.js', null], ['test\\a.test.js', null], ['test/*.test.js', null],
+      ['test/ci-required.test.js --test-name-pattern=x', null],
+      ['test/ci-required.test.js test/a.test.js;echo', null],
+      ['test/ci-required.test.js $(echo).test.js', null],
+    ]) {
+      const calls = [];
+      const exit = {};
+      let status;
+      try {
+        vm.runInNewContext(script, {
+          require: (name) => {
+            assert.equal(name, 'node:child_process');
+            return { spawnSync: (...args) => { calls.push(args); return { status: 7 }; } };
+          },
+          console: { error: () => {} },
+          process: { env: { FOCUSED_TESTS: input }, platform, execPath: 'node',
+            exit: (code) => { status = code; throw exit; } },
+        });
+      } catch (error) {
+        if (error !== exit) throw error;
+      }
+      if (!expected) {
+        assert.equal(status, 1, `${platform}: refuses ${JSON.stringify(input)}`);
+        assert.equal(calls.length, 0, 'no test starts before all paths pass validation');
+      } else {
+        assert.equal(status, 7, 'the test exit status reaches the step');
+        assert.equal(calls.length, 1);
+        const [command, args, options] = calls[0];
+        assert.equal(command, platform === 'win32' ? 'pwsh' : 'node');
+        assert.deepEqual(Array.from(args), [
+          ...(platform === 'win32' ? ['-NoProfile', '-File', 'scripts/shard-guard.ps1', 'node'] : []),
+          'test/run.js', '--test-concurrency=3', ...expected,
+        ]);
+        assert.equal(options.stdio, 'inherit');
+        assert.ok(!options.shell);
+      }
+    }
+  }
+});
+
+test('the focused step starts the real runner for one file and refuses a mixed invalid list before running', () => {
+  const root = path.resolve(__dirname, '..');
+  const focused = jobBlock(readWorkflow(root), 'focused');
+  const script = /node <<'NODE'\n([\s\S]*?)\n {10}NODE/.exec(focused)[1].replace(/^ {10}/gm, '');
+  for (const [input, status] of [
+    ['test/gates/ci.test.js', 0],
+    ['test/gates/ci.test.js test/../outside.test.js', 1],
+  ]) {
+    const result = cp.spawnSync(process.execPath, ['-e', script], {
+      cwd: root, env: { ...process.env, FOCUSED_TESTS: input }, encoding: 'utf8', timeout: HUNG_TEST_MS,
+    });
+    assert.equal(result.status, status, result.stdout + result.stderr);
+    if (status === 0) {
+      assert.match(result.stdout, /hotfix checks only push workflows/);
+      assert.match(result.stdout, /ℹ fail 0/);
+      const count = [...fs.readFileSync(path.join(root, 'test/gates/ci.test.js'), 'utf8').matchAll(/^test\(/gm)].length;
+      assert.match(result.stdout, new RegExp(`ℹ tests ${count}\\n`), 'only the named file contributes tests');
+    } else {
+      assert.match(result.stderr, /Each path must be a literal/);
+      assert.doesNotMatch(result.stdout, /tower-crane: test\/|ℹ tests/);
+    }
+  }
 });
 
 test('the matrix is all ten shards, beside the proofs and the repeat job', () => {
@@ -159,7 +273,7 @@ test('the matrix is all ten shards, beside the proofs and the repeat job', () =>
   for (const [id, command] of [['profile', /- run: node scripts\/suite-profile\.js [^\n]*--baseline "\$BASELINE" --runs 3 [^\n]*\| tee /],
     ['mutants', /- run: node scripts\/mutants\.js --no-full 2>&1 \| tee /]]) {
     const job = workflow.split(`\n  ${id}:\n`)[1].split(/\n {2}[\w-]+:\n/)[0];
-    assert.match(job, /^ {4}if: github\.event_name == 'workflow_dispatch' && inputs\.profile$/m, `${id} runs on a profile dispatch only`);
+    assert.match(job, /^ {4}if: github\.event_name == 'workflow_dispatch' && !inputs\.tests && inputs\.profile$/m, `${id} runs on a profile dispatch only`);
     assert.match(job, command, id);
     assert.match(job, /\| tee [^\n]*\n(?: {8}#[^\n]*\n)* {8}shell: bash\n/, `${id}: pipefail keeps the exit status through tee`);
     assert.match(job, /uses: actions\/upload-artifact@/, `${id} keeps its output`);
