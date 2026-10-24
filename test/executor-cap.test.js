@@ -82,6 +82,24 @@ test('with one executor, a tests run holds it while CI waits and a review progre
     [['tests', true], ['clean', true]]);
 });
 
+// Review first, a task waits on its reviewer once clean and CI pass, before its tests run.
+for (const { name, testsFirst, gates, review } of [
+  { name: 'tests first, after tests, clean and CI', testsFirst: true, gates: ['tests', 'clean', 'ci'], review: ['T1'] },
+  { name: 'tests first, before its tests', testsFirst: true, gates: ['clean', 'ci'], review: [] },
+  { name: 'review first, after clean and CI', testsFirst: false, gates: ['clean', 'ci'], review: ['T1'] },
+  { name: 'review first, before clean', testsFirst: false, gates: ['ci'], review: [] },
+]) {
+  test(`status lists a task waiting on review: ${name}`, (t) => {
+    const h = setup(t, { testsFirst });
+    h.submit('T1');
+    for (const gate of gates) h.ok(['check', gate, 'T1', '--agent', 'orchestrator']);
+    assert.deepEqual(h.json(['status']).waiting_on.review, review);
+    assert.equal(/^waiting on review: T1$/m.test(h.ok(['status'])), review.length > 0);
+    assert.equal(h.run(['spawn', '--role', 'review', '--task', 'T1', '--dry-run', '--agent', 'orchestrator']).code === 0, review.length > 0,
+      'status agrees with review dispatch');
+  });
+}
+
 test('a CI read holds no executor, so another task\'s suite runs while the read waits on GitHub', {
   skip: process.platform === 'win32' ? 'the held gh stub is a POSIX script' : false,
 }, async (t) => {
