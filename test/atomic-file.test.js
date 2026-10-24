@@ -186,6 +186,7 @@ function writeBacks(text) {
 test('the write-back lint finds a fixture that writes back the file it read', () => {
   const flagged = [
     "const data = JSON.parse(fs.readFileSync(file, 'utf8'));\ndata.calls.push(args);\nwriteAtomic(file, JSON.stringify(data));",
+    "const data = JSON.parse(fs.readFileSync(file, 'utf8'));\ndata.calls.push(args);\nfs.writeFileSync(file, JSON.stringify(data));",
     "const rows = JSON.parse(readPublished(process.env.ROWS, 'utf8'));\nfs.writeFileSync(process.env.ROWS, JSON.stringify(rows));",
     "const file = process.env.GH;\nconst state = JSON.parse(fs.readFileSync(process.env.GH, 'utf8'));\nconst save = () => writeAtomic(file, JSON.stringify(state));",
     "const s = JSON.parse(real.readFileSync(f));\nreal.writeFileSync(f, JSON.stringify(s));",
@@ -193,6 +194,8 @@ test('the write-back lint finds a fixture that writes back the file it read', ()
   for (const text of flagged) assert.equal(writeBacks(text).length, 1, text);
   const clean = [
     "updateJson(file, (data) => { data.calls.push(args); return data; });",
+    "const data = updateJson(file, (current) => { current.calls.push(args); return current; });",
+    "const data = JSON.parse(readPublished(stateFile, 'utf8'));\nconst { file: receiptFile, receipt } = data.supersedingPoll;\nwriteAtomic(receiptFile, JSON.stringify(receipt));",
     "const data = JSON.parse(readPublished(file, 'utf8'));\nupdateJson(file, (d) => d);",
     "const data = JSON.parse(fs.readFileSync(input, 'utf8'));\nwriteAtomic(output, JSON.stringify(data));",
     "writeAtomic(file, '{}');\nconst data = JSON.parse(readPublished(file, 'utf8'));",
