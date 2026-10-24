@@ -645,8 +645,11 @@ owner for the same head, revision, PR and merge commit. With it, readers that
 ask whether a task merged see this one as merged: dependents unblock as for
 any accepted task, the merge queue skips it, and nothing redispatches it. The
 worktree is then retired as for a cancelled task, saving uncommitted and
-unmerged work. A landing is current only while the task is accepted and its
-latest merge evidence at its head and revision is that landing's. A rework
+unmerged work. A landing is current while the task is accepted and has that
+landing's merge evidence at its head and revision. A merge gate run that
+confirms the same merge afterwards, such as a merge reaction queued before
+the landing, adds merge evidence of its own and leaves the landing current;
+`metrics` counts its `merge` event as the landing, not a Tower Crane merge. A rework
 bumps the revision, so the old `landed` record stays as history (`task show`
 names it an earlier landing) and the task no longer shows `accepted (native)`,
 also after a later acceptance through the gates. Status counts include

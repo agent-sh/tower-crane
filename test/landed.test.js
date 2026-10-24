@@ -207,3 +207,51 @@ test('a rework after a native landing refuses the consumed PR, and a later gate 
   const Landed = require('../lib/landed');
   assert.equal(Landed.current(task(h)), null);
 });
+
+test('a landing at a later revision whose PR head moved past the task sha stays native after a merge gate confirms it', (t) => {
+  const h = fixture(t);
+  const wt = h.json(['worktree', 'T1']);
+  const commit = (file, text) => {
+    fs.writeFileSync(path.join(wt.path, file), text);
+    h.git(['add', file], wt.path);
+    h.git(['commit', '-qm', file], wt.path);
+    return h.git(['rev-parse', 'HEAD'], wt.path);
+  };
+  h.ok(['claim', 'T1', '--agent', 'w-1']);
+  const submittedSha = commit('probe.js', 'module.exports = 2;\n');
+  h.ok(['submit', 'T1', '--sha', submittedSha, '--branch', wt.branch, '--agent', 'w-1']);
+  h.ok(['rework', 'T1', '--reason', 'report units']);
+  h.ok(['claim', 'T1', '--agent', 'w-1']);
+  h.ok(['release', 'T1', '--reason', 'finished natively', '--agent', 'w-1']);
+  // The orchestrator pushed fixes to the branch itself, so the PR head is not the task's sha.
+  const head = commit('units.js', 'module.exports = "ms";\n');
+  h.git(['merge', '-q', '--squash', wt.branch]);
+  h.git(['commit', '-qm', 'Probe (#42)']);
+  const merge = h.git(['rev-parse', 'HEAD']);
+  fs.writeFileSync(h.env.FIXTURE_PR_FILE, JSON.stringify({ number: 42, state: 'MERGED', mergeCommit: { oid: merge }, baseRefName: 'main',
+    headRefName: wt.branch, headRefOid: head, url: 'https://github.com/acme/demo/pull/42', mergedAt: new Date().toISOString(),
+    mergedBy: { login: 'avifenesh' }, statusCheckRollup: [] }));
+  const before = task(h);
+  assert.equal(before.revision, 2);
+  assert.equal(before.sha, submittedSha);
+  assert.notEqual(before.sha, head);
+  assert.equal(landed(h, []).code, 0);
+
+  // A merge reaction queued before the landing runs afterwards and confirms the same merge,
+  // recording merge evidence of its own at the landed head and revision.
+  const doc = h.readState('tasks.json');
+  const t1 = doc.tasks.find((x) => x.id === 'T1');
+  const detail = { type: 'merge', ok: true, sha: head, ref: merge, revision: 2, source: 'merge',
+    commands: [{ command: 'gh', args: ['pr', 'view', '42', '-R', 'acme/demo'] }] };
+  const at = new Date().toISOString();
+  t1.evidence.push({ ...detail, agent: 'orchestrator', at, summary: `PR #42 already merged at ${merge}` });
+  h.writeState('tasks.json', doc);
+  fs.appendFileSync(path.join(h.state, 'events.jsonl'), `${JSON.stringify({ at, agent: 'orchestrator', via: 'automation', cmd: 'merge', task: 'T1', detail })}\n`);
+
+  assert.match(h.ok(['task', 'list']), /T1 +accepted \(native\)/);
+  assert.equal(h.json(['status']).counts.accepted_native, 1);
+  assert.match(h.ok(['task', 'show', 'T1']), /\nlanded: PR #42/);
+  const m = h.json(['metrics']);
+  assert.deepEqual([m.merges.total, m.merges.tower_crane, m.merges.native_landed], [1, 0, 1], 'the confirmation is the landing, not a second merge');
+  assert.equal(m.gate_runs.per_task.tests.n, 0);
+});
