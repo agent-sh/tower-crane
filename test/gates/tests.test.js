@@ -12,6 +12,34 @@ const { waitUntil, killPid } = require('../signals');
 const NODE = quote(process.execPath);
 const CMD = `${NODE} run-tests.js`;
 
+test('coverage scratch uses the gate private directory or cache overrides and never falls back on failure', (t) => {
+  const base = scratch('coverage-root-table');
+  t.after(() => fs.rmSync(base, { recursive: true, force: true }));
+  const cache = path.join(base, 'cache');
+  const override = path.join(base, 'override');
+  const privateTmp = path.join(base, 'private');
+  const sentinel = path.join(base, 'sentinel');
+  fs.mkdirSync(sentinel);
+  for (const [settings, expected] of [
+    [{ TMPDIR: privateTmp, TOWER_CRANE_TMP: override }, privateTmp],
+    [{ TOWER_CRANE_TMP: override }, override],
+    [{}, path.join(cache, 'tower-crane')],
+    [{ TOWER_CRANE_SANDBOX: '1', TMP: privateTmp }, privateTmp],
+    [{ TOWER_CRANE_SANDBOX: '1', TMP: '', TEMP: privateTmp }, privateTmp],
+  ]) {
+    const env = { XDG_CACHE_HOME: cache, LOCALAPPDATA: cache, TMP: sentinel, TEMP: sentinel, ...settings };
+    const dir = gate.coverageScratch(env);
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+    assert.equal(path.dirname(dir), expected);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  const file = path.join(base, 'not-a-directory');
+  fs.writeFileSync(file, 'unchanged');
+  assert.throws(() => gate.coverageScratch({ TMPDIR: file }), /EEXIST|ENOTDIR/);
+  assert.equal(fs.readFileSync(file, 'utf8'), 'unchanged');
+  assert.deepEqual(fs.readdirSync(sentinel), []);
+});
+
 // A tiny project whose runner requires every test/*.test.js and exits 1 if any throws.
 const BASE = {
   'run-tests.js': `const fs = require('fs');

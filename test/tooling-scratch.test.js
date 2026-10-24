@@ -8,8 +8,10 @@ const cp = require('node:child_process');
 const { makeRepo, ROOT } = require('./helpers');
 const { HUNG_TEST_MS } = require('./signals');
 
-for (const tool of ['test-coverage', 'test-options']) {
-  test(`${tool} executes scratch selection and removes its allocation`, async (t) => {
+for (const tool of ['test-coverage', 'test-options', 'suite-profile']) {
+  test(`${tool} executes scratch selection and removes its allocation`, {
+    skip: tool === 'suite-profile' && process.platform !== 'linux' ? 'profile CPU comes from /proc' : false,
+  }, async (t) => {
     for (const mode of ['home', 'cache', 'tmp', 'test-tmp', 'sandbox-tmpdir', 'sandbox-tmp', 'sandbox-temp']) {
       await t.test(mode, (t) => {
         const h = makeRepo(t);
@@ -51,7 +53,7 @@ for (const tool of ['test-coverage', 'test-options']) {
           argv.push('--require', path.join(ROOT, 'test', 'fixtures', 'options-scratch-stop.js'));
         }
         argv.push(path.join(ROOT, 'scripts', `${tool}.js`));
-        if (tool === 'test-coverage') {
+        if (tool !== 'test-options') {
           const fixture = path.join(h.base, 'tiny.test.js');
           fs.writeFileSync(fixture, `
 const test = require('node:test');
@@ -61,7 +63,8 @@ test('coverage fixture', () => {
   assert.ok(scratchRoot({}, 'fixture-home').endsWith('tower-crane'));
 });
 `);
-          argv.push('--jobs', '1', '--json', report, fixture);
+          argv.push(...(tool === 'test-coverage' ? ['--jobs', '1'] : ['--test-concurrency=1']),
+            '--json', report, fixture);
         }
         const result = cp.spawnSync(process.execPath, argv, {
           cwd: ROOT, env, encoding: 'utf8', timeout: HUNG_TEST_MS,
@@ -70,8 +73,10 @@ test('coverage fixture', () => {
         if (tool === 'test-options') {
           assert.match(result.stderr, /option measurement stopped for scratch probe/);
         }
+        const prefix = tool === 'suite-profile' ? 'suite-profile-'
+          : `tower-crane-${tool === 'test-options' ? 'options' : 'coverage'}-`;
         const dirs = fs.readFileSync(allocations, 'utf8').trim().split('\n').map(JSON.parse)
-          .filter((dir) => path.basename(dir).startsWith(`tower-crane-${tool === 'test-options' ? 'options' : 'coverage'}-`));
+          .filter((dir) => path.basename(dir).startsWith(prefix));
         assert.equal(dirs.length, 1, JSON.stringify(dirs));
         assert.equal(path.dirname(dirs[0]), expected, mode);
         assert.equal(fs.existsSync(dirs[0]), false, 'script cleanup removes its allocation');
@@ -81,9 +86,13 @@ test('coverage fixture', () => {
           assert.equal(data.scratch, dirs[0]);
           assert.equal(data.fixture, true);
           assert.equal(data.service, true);
-        } else {
+        } else if (tool === 'test-coverage') {
           assert.equal(data.length, 1);
           assert.ok(data[0].lines > 0, JSON.stringify(data));
+        } else {
+          assert.equal(data.status, 0);
+          assert.equal(data.files.length, 1);
+          assert.equal(data.tests.length, 1);
         }
       });
     }

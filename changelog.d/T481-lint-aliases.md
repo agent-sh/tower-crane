@@ -1,0 +1,1 @@
+- Shared scratch checks reject inline, destructured, renamed and computed system-temp access. Coverage-gap probes and suite profiling use the shared cache helper instead of a system-temp fallback.
