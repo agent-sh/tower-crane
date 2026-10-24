@@ -62,6 +62,7 @@ test('a merge sends another conflicting PR to rework with real filenames and pre
   const task = h.readState('tasks.json').tasks[1];
   assert.equal(task.status, 'rework');
   assert.match(task.notes.at(-1).text, /conflicts with main: value\.js/);
+  assert.equal(h.logs().findLast((e) => e.task === 'T2' && e.cmd === 'rework').detail.cause, 'conflict_base');
   assert.match(fs.readFileSync(path.join(h.state, 'briefs', 'T2.md'), 'utf8'), /value\.js/);
   assert.equal(h.git(['status', '--porcelain']), before);
   assert.equal(h.git(['rev-parse', 'HEAD']), other);
@@ -711,14 +712,76 @@ test('slow suites stop when their fixture is removed before they are released', 
   });
 });
 
-test('a killed executor releases its gate executor slot', (t) => {
+test('a killed executor releases its gate executor slot', async (t) => {
   const h = setup(t);
   const runs = slowSuite(h, { executors: 1, crash: true });
-  assert.notEqual(h.consume().code, 2, 'the suite kills the first executor');
-  h.consume();
-  assert.equal(runs().starts, 4, 'the killed run is retried and the other two run');
+  const preload = path.join(h.base, 'executor-creation.js');
+  fs.writeFileSync(preload, `const P = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'processes'))});
+const identity = P.identity;
+P.identity = (pid, options) => {
+  const record = identity(pid, options);
+  // Linux can exercise the receipt wiring while Windows uses its real creation time.
+  return process.platform !== 'win32' && pid === process.pid && options?.created
+    ? { ...record, created: 100 } : record;
+};
+`);
+  const consume = () => h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator'],
+    { pre: ['--require', preload] });
+  const killed = consume();
+  assert.notEqual(killed.code, 2, 'the suite kills the first executor');
+  const retried = await h.runAsync(['wait', '--after', '0', '--types', 'evidence', '--task', 'T3',
+    '--timeout', '300', '--agent', 'orchestrator'], { pre: ['--require', preload] });
+  assert.equal(retried.code, 0, JSON.stringify(retried));
+  assert.equal(runs().starts, 4, JSON.stringify({ killed, retried, events: h.logs() }));
+  const receipts = h.logs().filter((e) => ['automation', 'executor', 'gate run'].includes(e.cmd) && e.detail.phase === 'running');
+  assert.deepEqual(new Set(receipts.map((e) => e.cmd)), new Set(['automation', 'executor', 'gate run']));
+  for (const receipt of receipts) {
+    assert.ok(Number.isFinite(receipt.detail.created) || Number.isFinite(receipt.detail.seen), receipt.cmd);
+  }
   for (const task of h.readState('tasks.json').tasks) {
     assert.deepEqual(task.evidence.map((e) => e.type), ['tests', 'clean'], task.id);
+  }
+});
+
+test('Windows executor leases distinguish a reused PID from the recorded process', (t) => {
+  const A = require('../lib/automation');
+  const S = require('../lib/state');
+  const os = require('node:os');
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform');
+  const holderCreated = S.holderCreated;
+  for (const row of [
+    { name: 'same process', created: 100, observed: 100, count: 1 },
+    { name: 'reused PID', created: 100, observed: 200, count: 0 },
+    { name: 'creation time unavailable', created: 100, observed: null, count: 1 },
+    { name: 'process exits during the creation query', created: 100, observed: null, exits: true, count: 0 },
+    { name: 'legacy receipt without creation time', observed: 200, count: 1 },
+    { name: 'finished lease', created: 100, observed: 100, phase: 'done', count: 0 },
+    { name: 'lease on another host', created: 100, observed: 200, host: 'another-host', count: 0 },
+  ]) {
+    let leases;
+    try {
+      let gone = false;
+      t.mock.method(process, 'kill', (pid, signal) => {
+        assert.equal(pid, process.pid);
+        assert.equal(signal, 0);
+        if (gone) throw Object.assign(new Error('process exited'), { code: 'ESRCH' });
+      });
+      Object.defineProperty(process, 'platform', { ...platform, value: 'win32' });
+      S.holderCreated = (_pid, created) => {
+        gone = !!row.exits;
+        return row.observed === null ? null : row.observed === created;
+      };
+      leases = A.cpuLeases({ events: [{ cmd: 'executor', task: 'T1', detail: {
+        lease: 'killed-lease', phase: row.phase || 'running', pid: process.pid,
+        host: row.host || os.hostname(), ...(row.created === undefined ? {} : { created: row.created }),
+      } }] });
+    } finally {
+      t.mock.restoreAll();
+      Object.defineProperty(process, 'platform', platform);
+      if (holderCreated === undefined) delete S.holderCreated;
+      else S.holderCreated = holderCreated;
+    }
+    assert.equal(leases.length, row.count, row.name);
   }
 });
 
@@ -762,6 +825,39 @@ poll();
   h.ok(['submit', 'T3', '--sha', h.sha, '--agent', 'worker']);
   h.run(['wait', '--after', String(offset), '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
   assert.deepEqual(executorStarts(h), ['T1', 'T1', 'T2', 'T3'], 'queued T1 and T2 run before the newer T3');
+  for (const task of h.readState('tasks.json').tasks) {
+    assert.deepEqual(task.evidence.map((e) => [e.type, e.ok]), [['tests', true], ['clean', true]], task.id);
+  }
+});
+
+// A watcher's drain that reaches a task while that task's own reaction runs
+// queues the source with no executor. The reaction then finds every executor
+// busy, and the queue must still record the executor it waits for: watchers
+// that raced this way left no such record (T565).
+test('a source queued behind its own reaction still records the executor it then waits for', async (t) => {
+  const h = setup(t);
+  const { stalled, release } = holdSuite(h);
+  h.ok(['task', 'add', '--title', 'Change T2', '--acceptance', 'it works', '--kind', 'code']);
+  h.ok(['claim', 'T1', '--agent', 'worker']);
+  h.ok(['submit', 'T1', '--sha', h.sha, '--agent', 'worker']);
+  const holder = h.runAsync(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
+  try {
+    await waitFor(stalled, { what: 'the first executor starts' });
+    h.ok(['claim', 'T2', '--agent', 'worker']);
+    h.ok(['submit', 'T2', '--sha', h.sha, '--agent', 'worker']);
+    const source = h.logs().findLast((e) => e.cmd === 'submit' && e.task === 'T2').id;
+    fs.appendFileSync(path.join(h.state, 'events.jsonl'), JSON.stringify({
+      at: new Date().toISOString(), agent: 'orchestrator', cmd: 'automation queued', task: 'T2', detail: { source },
+    }) + '\n');
+    h.consume();
+    assert.equal(h.logs().findLast((e) => e.cmd === 'automation' && e.task === 'T2').detail.phase, 'executor');
+    assert.deepEqual(h.logs().filter((e) => e.cmd === 'automation queued' && e.task === 'T2').map((e) => e.detail),
+      [{ source }, { source, executors: 1 }]);
+  } finally {
+    fs.writeFileSync(release, '');
+    await holder;
+  }
+  assert.deepEqual(executorStarts(h), ['T1', 'T2'], 'the queued reaction takes the freed executor');
   for (const task of h.readState('tasks.json').tasks) {
     assert.deepEqual(task.evidence.map((e) => [e.type, e.ok]), [['tests', true], ['clean', true]], task.id);
   }

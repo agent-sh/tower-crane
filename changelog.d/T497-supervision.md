@@ -1,0 +1,1 @@
+- Keep supervision progress regression phases stable while delayed observers check CLI output and both saved boards. Cover configured-path and tool-hook progress with normal and delayed observers.
