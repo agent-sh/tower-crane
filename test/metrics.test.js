@@ -255,3 +255,24 @@ test('a failing test shared only with a task of the same stack is not cross_task
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('CI no check saw complete waits until the task leaves that head, since unchanged pending rechecks write no event', () => {
+  const dir = fs.mkdtempSync(path.join(TMP_ROOT, 'metrics-'));
+  try {
+    writeLog(path.join(dir, 'events.jsonl'), [
+      ev(0, 'task add', 'T1'), ev(1, 'claim', 'T1'), ev(2, 'submit', 'T1', { sha: 's1' }),
+      // The only pending entry at s1: later rechecks read the same result and record nothing.
+      ev(3, 'check ci', 'T1', { type: 'ci', ok: false, sha: 's1', pending: true, ci_started_at: at(2) }),
+      ev(20, 'rework', 'T1', { reason: 'PR #1 conflicts with main: a.js.', sha: 's1', cause: 'conflict_base' }),
+      ev(21, 'claim', 'T1'), ev(25, 'submit', 'T1', { sha: 's2' }),
+      ev(30, 'check ci', 'T1', { type: 'ci', ok: true, sha: 's2', ci_started_at: at(25), ci_completed_at: at(29) }),
+      ev(30, 'accept', 'T1'), ev(31, 'merge', 'T1', { ok: true, sha: 's2' }),
+    ]);
+    const r = M.report(dir, { since: B - MIN, until: B + 60 * MIN });
+    const p = r.lead_time.phases;
+    assert.deepEqual([p.ci_waiting.sum, p.waiting_for_gates.sum], [22 * MIN, 1 * MIN]);
+    assert.deepEqual(r.lead_time.ci_timing, { tasks_timed: 1, tasks_without_timing: 0 });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
