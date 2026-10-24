@@ -91,19 +91,47 @@ test('two conflict reworks at medium do not climb', (t) => {
   assert.equal(rung(h), 'medium');
 });
 
-test('only a failed review or a failed tests, clean or ci gate main does not share is the task\'s own work', () => {
+test('two review FAILs about changelog prose at medium do not climb', (t) => {
+  const h = setup(t);
+  for (const digit of ['a', 'b']) {
+    const sha = digit.repeat(40);
+    h.ok(['claim', 'T1', '--agent', 'worker']);
+    h.ok(['submit', 'T1', '--sha', sha, '--agent', 'worker']);
+    h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', sha, '--revision', h.revision(),
+      '--summary', 'A false changelog claim.',
+      '--findings', JSON.stringify([{ kind: 'false-claim', path: `changelog.d/T1-${digit}.md`, claim: 'Claims a Windows fix.' }])]);
+    h.ok(['rework', '--from-review', 'T1', '--agent', 'orchestrator']);
+  }
+  assert.equal(rung(h), 'medium');
+  assert.deepEqual(events(h).filter((e) => e.task === 'T1' && e.cmd === 'rework').map((e) => e.detail.own_work), [undefined, undefined]);
+});
+
+test('only a failed review with a code finding or a confirmed tests, clean or ci failure is the task\'s own work', () => {
+  const code = { ok: false, findings: [{ path: 'lib/retry.js', line: 3, claim: 'retries forever' }] };
+  const prose = { ok: false, findings: [{ path: 'PR body', kind: 'false-claim', claim: 'says it runs on Windows' }] };
   const rows = [
-    ['review FAIL', null, true, true],
-    ['tests failure', { type: 'tests', ok: false }, false, true],
-    ['host probe failure in the tests gate', { type: 'tests', ok: false, host_probes: [{ ok: false }] }, false, true],
-    ['clean failure', { type: 'clean', ok: false }, false, true],
-    ['ci failure', { type: 'ci', ok: false }, false, true],
-    ['tests failure main shares', { type: 'tests', ok: false, main_failure: { base: 'abc' } }, false, false],
-    ['ci failure main shares', { type: 'ci', ok: false, main_failure: { base: 'abc' } }, false, false],
-    ['merge conflict', { type: 'merge', ok: false }, false, false],
-    ['sources failure', { type: 'sources', ok: false }, false, false],
-    ['passing gate', { type: 'tests', ok: true }, false, false],
-    ['manual, conflict or stack sync rework', null, false, false],
+    ['review FAIL with a code finding', null, code, true],
+    ['review FAIL without findings', null, { ok: false }, true],
+    ['prose-only review FAIL', null, prose, false],
+    ['confirmed tests failure', { type: 'tests', ok: false, confirmed_failure: true }, null, true],
+    ['host probe failure in the tests gate', { type: 'tests', ok: false, worker_failure: true, host_probes: [{ ok: false }] }, null, true],
+    ['confirmed clean failure', { type: 'clean', ok: false, confirmed_failure: true }, null, true],
+    ['confirmed ci failure', { type: 'ci', ok: false, confirmed_failure: true }, null, true],
+    ['unconfirmed tests failure', { type: 'tests', ok: false }, null, false],
+    ['tests timeout', { type: 'tests', ok: false, infrastructure_failure: true }, null, false],
+    ['tests runner crash', { type: 'tests', ok: false, runner_crash: true }, null, false],
+    ['tests base rerun killed', { type: 'tests', ok: false, base_rerun_killed: true }, null, false],
+    ['tests base rerun timed out', { type: 'tests', ok: false, base_rerun_timed_out: true }, null, false],
+    ['clean tool gap', { type: 'clean', ok: false, infrastructure_failure: true }, null, false],
+    ['cancelled or timed out ci', { type: 'ci', ok: false, infrastructure_failure: true }, null, false],
+    ['ci action required', { type: 'ci', ok: false, worker_failure: true }, null, false],
+    ['tests failure main shares', { type: 'tests', ok: false, main_failure: { base: 'abc' } }, null, false],
+    ['confirmed failure marked infrastructure', { type: 'tests', ok: false, confirmed_failure: true, infrastructure_failure: true }, null, false],
+    ['ci failure main shares', { type: 'ci', ok: false, confirmed_failure: true, main_failure: { base: 'abc' } }, null, false],
+    ['merge conflict', { type: 'merge', ok: false, confirmed_failure: true }, null, false],
+    ['sources failure', { type: 'sources', ok: false, confirmed_failure: true }, null, false],
+    ['passing gate', { type: 'tests', ok: true }, null, false],
+    ['manual, conflict or stack sync rework', null, null, false],
   ];
-  for (const [name, failed, fromReview, own] of rows) assert.equal(Climb.ownWork(failed, fromReview), own, name);
+  for (const [name, failed, review, own] of rows) assert.equal(Climb.ownWork(failed, review), own, name);
 });

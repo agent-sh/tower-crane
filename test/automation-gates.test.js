@@ -879,6 +879,22 @@ test('two failing tests gates at medium climb to hard, and restoring the second 
   assert.equal(h.logs().findLast((e) => e.cmd === 'restore').detail.tier, 'medium');
 });
 
+test('two tests gate reworks from a killed runner at medium do not climb', { skip: process.platform === 'win32' }, (t) => {
+  const h = setup(t, { ci: 'pending' });
+  const script = path.join(h.base, 'killed.js');
+  fs.writeFileSync(script, 'process.kill(process.pid, \'SIGKILL\');\n');
+  h.ok(['project', 'set', '--tests-cmd', `node ${shellQuote(script)}`, '--tests-mode', 'run-only']);
+  h.submit();
+  h.consume();
+  h.ok(['claim', 'T1', '--agent', 'worker']);
+  h.ok(['submit', 'T1', '--sha', h.sha, '--pr', '7', '--agent', 'worker']);
+  h.consume();
+  const reworks = h.logs().filter((e) => e.cmd === 'rework' && e.task === 'T1');
+  assert.deepEqual(reworks.map((e) => [e.detail.gate, e.detail.own_work]), [['tests', undefined], ['tests', undefined]]);
+  assert.equal(h.readState('tasks.json').tasks[0].tier, 'medium');
+  assert.equal(h.logs().filter((e) => e.cmd === 'climb').length, 0);
+});
+
 test('gates retry exits nonzero while a retried gate still fails', (t) => {
   const h = setup(t, { ci: 'pending' });
   h.ok(['project', 'set', '--tests-cmd', 'node -e "process.exit(1)"', '--tests-mode', 'run-only']);
