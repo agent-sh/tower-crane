@@ -7,7 +7,7 @@ const path = require('node:path');
 const cp = require('node:child_process');
 const { ROOT, makeRepo } = require('./helpers');
 const { HUNG_TEST_MS, killPid } = require('./signals');
-const { testFiles, shardFiles, longestFirst, fileDurations } = require('./run');
+const { testFiles, shardFiles, longestFirst, startOrder, fileDurations } = require('./run');
 const { declarations, fileTimes, mergeTable } = require('../scripts/test-durations');
 
 const FIXTURES = ['a', 'b', 'c', 'd'].map((name) => path.join('test', 'fixtures', 'shard', `${name}.test.js`));
@@ -44,6 +44,60 @@ test('longestFirst starts the longest measured files first and keeps sorted orde
   assert.deepEqual(longestFirst(['y', 'x'], {}), ['x', 'y'], 'an empty table keeps the sorted order');
 });
 
+test('startOrder puts unmeasured files before measured files without changing shard costs', () => {
+  for (const [name, files, durations, expected] of [
+    ['one unlisted file', ['b', 'new', 'a', 'c'], { a: 9, b: 1, c: 2 }, ['new', 'a', 'c', 'b']],
+    ['several unlisted files', ['z', 'b', 'a', 'new'], { a: 9, b: 1 }, ['new', 'z', 'a', 'b']],
+    ['one worker and two files', ['a', 'new'], { a: 9 }, ['new', 'a']],
+    ['zero is measured', ['a', 'z', 'b'], { a: 0, b: 9 }, ['z', 'b', 'a']],
+    ['invalid costs are unmeasured', ['e', 'a', 'd', 'c', 'b'],
+      { a: 9, b: NaN, c: -1, d: Infinity, e: '1' }, ['b', 'c', 'd', 'e', 'a']],
+    ['measured ties', ['c', 'a', 'b'], { a: 2, b: 9, c: 2 }, ['b', 'a', 'c']],
+    ['no table', ['z', 'a', 'b'], {}, ['a', 'b', 'z']],
+    ['no files', [], { a: 9 }, []],
+  ]) {
+    const original = [...files];
+    assert.deepEqual(startOrder(files, durations), expected, name);
+    assert.deepEqual(files, original, `${name}: input order is preserved`);
+    const shards = [1, 2].map((i) => shardFiles(files, i, 2, durations));
+    assert.deepEqual([1, 2].map((i) => shardFiles(startOrder(files, durations), i, 2, durations)),
+      shards, `${name}: launch order does not change shard allocation`);
+  }
+});
+
+test('the runner starts an unmeasured file first with one worker, sharded or unsharded', (t) => {
+  const h = makeRepo(t);
+  const durations = { [FIXTURES[0]]: 100, [FIXTURES[1]]: 1, [FIXTURES[2]]: 10 };
+  for (const name of ['file-durations.cjs', 'file durations.cjs', 'nested\\file-durations.cjs']) {
+    const hook = path.join(h.base, name);
+    fs.mkdirSync(path.dirname(hook), { recursive: true });
+    fs.writeFileSync(hook, `
+const fs = require('node:fs');
+const read = fs.readFileSync;
+fs.readFileSync = function (file, ...args) {
+  if (String(file) === ${JSON.stringify(path.join(ROOT, 'test', 'durations.json'))}) {
+    return JSON.stringify({ [process.platform]: ${JSON.stringify(durations)} });
+  }
+  return read.call(this, file, ...args);
+};
+`);
+    for (const shard of ['', '1/1']) {
+      // An argv path keeps backslashes that NODE_OPTIONS treats as escapes.
+      const result = cp.spawnSync(process.execPath, ['--require', hook, path.join(ROOT, 'test', 'run.js'),
+        '--test-concurrency=1', '--test-reporter=tap', ...FIXTURES], {
+        cwd: ROOT, env: { ...h.env, TOWER_CRANE_TEST_GRANT: '', TC_TEST_SHARD: shard },
+        encoding: 'utf8', timeout: HUNG_TEST_MS,
+      });
+      const variant = `${name}: ${shard || 'unsharded'}`;
+      assert.equal(result.status, 0, `${variant}: ${result.stderr}${result.stdout}`);
+      const expected = [FIXTURES[3], FIXTURES[0], FIXTURES[2], FIXTURES[1]];
+      const titles = [...result.stdout.matchAll(/^# Subtest: (.+)$/gm)].map(([, name]) => name);
+      assert.deepEqual(titles, ['shard d', 'shard a', 'shard c', 'shard b'], variant);
+      if (shard) assert.deepEqual([...result.stdout.matchAll(/^file started: (.+)$/gm)].map(([, file]) => file), expected, variant);
+    }
+  }
+});
+
 test('every shard count covers the real suite with each file in exactly one shard', () => {
   const files = testFiles();
   for (const platform of ['linux', 'win32', 'darwin']) {
@@ -51,6 +105,47 @@ test('every shard count covers the real suite with each file in exactly one shar
       const shards = Array.from({ length: total }, (_, i) => shardFiles(files, i + 1, total, fileDurations(platform)));
       assert.deepEqual(shards.flat().sort(), files, `${platform}: ${total} shards run every file once`);
       for (const shard of shards) assert.ok(shard.length > 0, `${platform}: ${total} shards leave none empty`);
+    }
+  }
+});
+
+test('the long files that hit the shard deadline have timing entries on both CI platforms', () => {
+  for (const platform of ['linux', 'win32']) {
+    const durations = fileDurations(platform);
+    for (const file of ['test/reviewer-refill.test.js', 'test/stack-parent.test.js']) {
+      assert.ok(Number.isFinite(durations[file]) && durations[file] > 0,
+        `${platform}: ${file} must have a cost instead of the unknown-file median`);
+    }
+  }
+});
+
+test('cgroup keeper guard cases run in the shard proof on host and non-Linux platforms', (t) => {
+  const h = makeRepo(t);
+  const hook = path.join(h.base, 'cgroup-platform.cjs');
+  fs.writeFileSync(hook, `
+if (process.env.T503_CGROUP_PLATFORM) {
+  Object.defineProperty(process, 'platform', { value: process.env.T503_CGROUP_PLATFORM });
+}
+`);
+  const titles = [
+    'cgroup keepers read only cgroup membership, including nested groups',
+    'cgroup keeper ticks use population without any host process scan',
+  ];
+  // A cheap platform guard must be checked even when its standalone file is queued last.
+  for (const platform of [process.platform, 'win32', 'darwin'].filter((value, index, values) => values.indexOf(value) === index)) {
+    const result = cp.spawnSync(process.execPath, [
+      '--require', hook, '--test', '--test-reporter=tap',
+      `--test-name-pattern=${titles.join('|')}`, path.join(ROOT, 'test', 'containment-sampling.test.js'),
+    ], {
+      cwd: ROOT, env: { ...h.env, T503_CGROUP_PLATFORM: platform },
+      encoding: 'utf8', timeout: HUNG_TEST_MS,
+    });
+    assert.equal(result.status, 0, `${platform}: ${result.stderr}${result.stdout}`);
+    for (const title of titles) {
+      const line = result.stdout.split('\n').find((value) => /^ok \d+ - /.test(value) && value.includes(title));
+      assert.ok(line, `${platform}: ${title} was reported`);
+      assert.equal(line.includes('# SKIP Linux cgroups'), platform !== 'linux', `${platform}: ${title}`);
+      t.diagnostic(`${platform}: ${line}`);
     }
   }
 });
