@@ -3,6 +3,7 @@
 Tower Crane keeps a project's plan and progress in plain files. The CLI is the state writer.
 
 - [Tasks and lifecycle](state/tasks.md)
+- [Submission history](state/tasks.md#submission-history)
 - [Gates](state/gates.md)
 - [Review](state/review.md)
 - [CI](state/ci.md)

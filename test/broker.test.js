@@ -1058,6 +1058,8 @@ test('a brokered resubmit asks gh about its PR by name, with no repository for g
   h.ok(['claim', 'T1', '--agent', 'worker-T1-1']);
   h.ok(['submit', 'T1', '--agent', 'worker-T1-1', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736', '--branch', 'change', '--pr', '7']);
   const log = path.join(h.base, 'gh.log');
+  const historyMode = path.join(h.base, 'gh-history.json');
+  fs.writeFileSync(historyMode, JSON.stringify({ denied: false }));
   const preload = path.join(h.base, 'gh.js');
   fs.writeFileSync(preload, `
 const cp = require('node:child_process');
@@ -1068,14 +1070,20 @@ cp.spawnSync = function (command, args, opts) {
   // The submit also reads the head's green checks, so the stub answers those endpoints too.
   const green = { name: 'test (ubuntu)', status: 'completed', conclusion: 'success', app: 'github-actions', suite: 1, url: null, output: null };
   const suite = { id: 1, app: 'github-actions', status: 'completed', conclusion: 'success', runs: 1 };
-  const out = args[0] === 'pr' ? { state: 'OPEN', headRefName: 'change', mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }
+  if (args[0] === 'api' && args[1].includes('/actions/runs?branch=')) {
+    const denied = JSON.parse(require('node:fs').readFileSync(process.env.BROKER_GH_HISTORY, 'utf8')).denied;
+    return { status: denied ? 126 : 0, stdout: '', stderr: denied ? "gh api is not allowed by this agent's agent file" : '' };
+  }
+  const out = args[0] === 'pr' ? { state: 'OPEN', headRefName: 'change', headRefOid: '5bfcb6f56ab912a009883c798a61298c507dada4', mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }
     : args[1].includes('check-runs') ? green : args[1].includes('check-suites') ? suite : null;
   return { status: 0, stdout: out ? JSON.stringify(out) : '', stderr: '' };
 };
 `);
-  const saved = { NODE_OPTIONS: process.env.NODE_OPTIONS, BROKER_GH_LOG: process.env.BROKER_GH_LOG };
+  const saved = { NODE_OPTIONS: process.env.NODE_OPTIONS, BROKER_GH_LOG: process.env.BROKER_GH_LOG,
+    BROKER_GH_HISTORY: process.env.BROKER_GH_HISTORY };
   process.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`;
   process.env.BROKER_GH_LOG = log;
+  process.env.BROKER_GH_HISTORY = historyMode;
   t.after(() => {
     for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k]; else process.env[k] = v;
   });
@@ -1094,12 +1102,47 @@ cp.spawnSync = function (command, args, opts) {
     { env: { TOWER_CRANE_BROKER: job.broker } });
   assert.equal(r.code, 0, r.stderr);
   const calls = fs.readFileSync(log, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
-  // The submit reads the PR twice: its state and branch, then its mergeability.
+  // Each PR inspection must name the repository and run outside the worker's git config.
   const views = calls.filter((c) => c.args[0] === 'pr');
-  assert.equal(views.length, 2);
+  assert.equal(views.length, 3);
   for (const view of views) assert.deepEqual(view.args.slice(0, 5), ['pr', 'view', '7', '-R', 'acme/demo']);
   assert.ok(calls.some((c) => c.args[0] === 'api' && c.args[1].includes('/check-runs')), 'the submit reads the head checks');
-  for (const call of calls) {
+  assert.equal(h.readState('tasks.json').tasks[0].pushes_since_last_submit, 1);
+  for (const row of [
+    { name: 'explicit PR, history available', pr: ['--pr', '7'], denied: false },
+    { name: 'recorded PR, history available', pr: [], denied: false },
+    { name: 'explicit PR, history denied', pr: ['--pr', '7'], denied: true },
+    { name: 'recorded PR, history denied', pr: [], denied: true },
+  ]) {
+    fs.writeFileSync(historyMode, JSON.stringify({ denied: row.denied }));
+    const before = fs.readFileSync(log, 'utf8').trim().split('\n').length;
+    const result = await B.forward(job.broker, ['submit', 'T1', '--sha', '5bfcb6f56ab912a009883c798a61298c507dada4', ...row.pr], h.state);
+    assert.equal(result.code, 0, `${row.name}: ${result.stderr}`);
+    const added = fs.readFileSync(log, 'utf8').trim().split('\n').slice(before).map(JSON.parse);
+    assert.equal(added.filter((c) => c.args[0] === 'pr').length, row.pr.length ? 3 : 2, row.name);
+    for (const view of added.filter((c) => c.args[0] === 'pr')) {
+      assert.deepEqual(view.args.slice(0, 5), ['pr', 'view', '7', '-R', 'acme/demo'], row.name);
+    }
+    const history = added.filter((c) => c.args[0] === 'api' && c.args[1].includes('/actions/runs?branch='));
+    assert.equal(history.length, 1, row.name);
+    const query = new URL(`https://github.test/${history[0].args[1]}`);
+    assert.equal(query.pathname, '/repos/acme/demo/actions/runs', row.name);
+    assert.equal(query.searchParams.get('branch'), 'change', row.name);
+    assert.match(query.searchParams.get('created'), /^>=\d{4}-/, row.name);
+    assert.ok(history[0].args.includes('--paginate'), row.name);
+    assert.equal(h.readState('tasks.json').tasks[0].pushes_since_last_submit, row.denied ? null : 0, row.name);
+    const receipt = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim()
+      .split('\n').map(JSON.parse).findLast((e) => e.cmd === 'submit');
+    if (row.denied) {
+      assert.equal(receipt.detail.push_history_error, undefined, row.name);
+      assert.match(receipt.detail.push_history_note, /gh policy refuses PR head history/, row.name);
+      assert.match(result.stdout, /pushes_since_last_submit is unavailable/, row.name);
+      assert.doesNotMatch(result.stdout, /warning: pushes_since_last_submit/, row.name);
+    } else {
+      assert.equal(receipt.detail.push_history_error, undefined, row.name);
+    }
+  }
+  for (const call of fs.readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse)) {
     assert.equal(call.cwd, h.state);
     assert.ok(call.git_dir && !fs.existsSync(call.git_dir), 'git finds no repository');
   }
