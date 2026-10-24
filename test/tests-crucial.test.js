@@ -79,6 +79,12 @@ test('with tests.crucial and a map pinned, a change runs crucial plus the suites
   assert.deepEqual(runs.map((c) => c.status === 0), [true, true, false], 'head and scoped proof pass; the reverted proof fails');
   assert.ok(runs.every((c) => c.command !== fullCommand && !c.command.includes('other.test.js')));
   assert.match(result.summary, /Head suite mode crucial: tests\.crucial plus the changed tests and the tests\.map suites covering the change/);
+  // The evidence and its audit event time each step, so the gate's time can be read from receipts.
+  assert.deepEqual(Object.keys(result.receipt.phases).sort(), ['head', 'proof', 'reverted', 'total']);
+  // read-published: the check above has ended, so nothing appends to the event log.
+  const audited = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)
+    .findLast((e) => e.cmd === 'check tests').detail.receipt.phases;
+  assert.deepEqual(audited, result.receipt.phases);
   assert.equal(counts(h), true);
   // The map changes after every daily run; the receipt names what it ran, so it still counts.
   h.ok(['project', 'set', '--tests-map', JSON.stringify({ ...map, 'value.js': ['test/other.test.js'] })]);
@@ -93,6 +99,17 @@ test('with tests.crucial and a map pinned, a change runs crucial plus the suites
   assert.match(today.receipt.head_reason, /no PR/);
   assert.equal(today.commands.find((c) => c.command !== 'git').command, fullCommand);
   assert.equal(counts(h), true);
+});
+
+// Every task of a project in crucial mode takes this path: a changed test that also passes at the
+// base still fails the gate.
+test('in crucial mode a changed test that passes without the change does not prove it', (t) => {
+  const h = fixture(t, map, "console.log('asserts nothing');\n");
+  const result = check(h, 1);
+  assert.equal(result.ok, false);
+  assert.match(result.summary, /tests pass without the change; they do not prove it\./);
+  assert.match(result.summary, /2\. `.*test\/value\.test\.js` with 2 non-test files reverted to \w+ .*: exit 0/);
+  assert.equal(counts(h), false);
 });
 
 for (const baseRef of ['main', 'origin/main']) for (const signed of [false, true]) for (const showSignature of [false, true]) test(`a crucial file added on ${baseRef} after the submitted head is skipped with a receipt (signed=${signed}, log.showSignature=${showSignature})`, (t) => {
@@ -288,6 +305,7 @@ test('merges', () => {
   const p = makeRepo(t);
   p.init(['--repo', 'acme/demo']);
   gateFixture(p);
+  p.git(['fetch', h.repo, head]);
   const declared = { '**/*.md': [], 'docs/cli.md': ['test/other.test.js'], 'lib/gone.js': ['test/old.test.js'] };
   p.ok(['project', 'set', '--tests-map', JSON.stringify(declared)]);
   const before = p.readState('project.json');
@@ -313,9 +331,10 @@ fs.copyFileSync(${JSON.stringify(file)}, path.join(args[args.indexOf('-D') + 1],
   const pinned = p.json(['tests', 'map', 'refresh', '--from-run', '4242', '--agent', 'orchestrator']);
   assert.deepEqual(JSON.parse(fs.readFileSync(calls, 'utf8').trim()).slice(0, 7), ['run', 'download', '4242', '-R', 'acme/demo', '-n', 'tests-coverage-map']);
   assert.deepEqual({ run: pinned.run, sha: pinned.sha, declared: pinned.declared }, { run: 4242, sha: head, declared: 2 });
-  // Measured entries replace the pinned ones; the globs and files coverage cannot see stay as declared.
+  // Missing test coverage and files V8 cannot measure survive alongside declared globs.
   assert.deepEqual(p.readState('project.json').tests.map, {
-    '**/*.md': [], 'docs/cli.md': ['test/other.test.js'], 'lib/merge.js': ['test/cli.test.js'], 'tool/runner.js': ['test/cli.test.js'],
+    '**/*.md': [], 'docs/cli.md': ['test/other.test.js'],
+    'lib/merge.js': ['test/cli.test.js'], 'tool/runner.js': ['test/cli.test.js'],
   });
   const events = fs.readFileSync(path.join(p.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   assert.equal(events.filter((e) => e.cmd === 'tests map refresh').at(-1).detail.authority, 'orchestrator');

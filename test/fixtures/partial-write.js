@@ -22,7 +22,8 @@ if (target) {
     held = true;
     write.call(this, file, data.slice(0, Math.floor(data.length / 2)), ...args);
     write.call(this, `${target}.half`, '');
-    while (!exists.call(fs, `${target}.finish`)) {
+    const deadline = Date.now() + 300000;
+    while (!exists.call(fs, `${target}.finish`) && Date.now() < deadline) { // spin-allow: preloaded into the CLI under test, which can be a detached supervisor whose dispatcher exits by design; the deadline bounds it
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10); // wait-allow: probe cadence; the finish file and the hung-test timeout bound it
     }
     return write.call(this, file, data, ...args);

@@ -8,7 +8,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { BIN } = require('./helpers');
-const { waitUntil } = require('./signals');
+const { fileWritten, waitUntil } = require('./signals');
 const { shellQuote } = require('../lib/gates/common');
 const { setup, configureHarness } = require('./automation-helpers');
 
@@ -179,6 +179,23 @@ function ownerSpawn(h, id) {
   return started.agent;
 }
 
+for (const steer of [false, true]) {
+  test(`ownership wait keeps waiting after a direct ${steer ? 'steer' : 'message'}`, async (t) => {
+    const h = ownerFixture(t, { OWNER_NO_PR: '1' });
+    const agent = ownerSpawn(h, 'T1');
+    await waitUntil(() => h.task().status === 'submitted', { paths: [h.base], what: 'the owner submitted' });
+    const signal = path.join(h.base, 'own-watch-ready');
+    const ready = fileWritten(signal);
+    const waiting = h.runAsync(['wait', '--own', '--task', 'T1', '--agent', agent, '--timeout', '2'], { hooks: { HOOK_WATCH_READY: signal } }); // wait-allow: ordinary messages must leave an ownership wait running until its deadline
+    await Promise.race([ready, waiting.then((r) => { throw new Error(`ownership wait exited before watch setup: ${r.stdout} ${r.stderr}`); })]);
+    h.ok(['msg', '--agent', 'orchestrator', '--to', agent, '--task', 'T1', ...(steer ? ['--steer'] : []), 'direct instruction']);
+    const result = await waiting;
+    assert.equal(result.code, 2, result.stderr || result.stdout);
+    assert.deepEqual(JSON.parse(result.stdout), { type: 'timeout', outcome: 'wait', task: 'T1' });
+    h.ok(['interrupt', 'T1', '--agent', 'orchestrator']);
+  });
+}
+
 test('waiting owners hold no worker slot and have their own limit; a handback takes its claim past the worker limit; a crashed owner is a dead claim', async (t) => {
   const h = ownerFixture(t, { OWNER_NO_PR: '1', OWNER_CRASH_ON_FIX: '1' });
   h.ok(['project', 'set', '--workers', '1', '--owners', '1']);
@@ -267,9 +284,13 @@ for (const row of [
     await until(() => h.task().status === 'submitted' && h.json(['status']).governor.units.some((u) => u.agent === agent && u.waiting), 'T1 owner waits');
     if (row.manual) h.ok(['rework', 'T1', '--reason', 'value.js must be 2', '--agent', 'orchestrator']);
     else {
-      h.consume();
+      const consumed = h.consume();
       const rework = h.logs().findLast((e) => e.cmd === 'rework');
-      assert.deepEqual([rework.detail.gate, rework.detail.owner_held], ['tests', agent], 'the gate rework names the owner it is held for');
+      // The engine's output and the task's events since its submit say why an owner was not held.
+      const since = h.logs().slice(h.logs().findLastIndex((e) => e.cmd === 'submit')).filter((e) => e.task === 'T1')
+        .map((e) => `${e.at} ${e.agent} ${e.cmd} ${JSON.stringify(e.detail)}`.slice(0, 400));
+      assert.deepEqual([rework?.detail?.gate, rework?.detail?.owner_held], ['tests', agent],
+        `the gate rework names the owner it is held for\n${consumed.stdout}${consumed.stderr}\n${since.join('\n')}`);
       assert.deepEqual([h.task().status, h.task().claim], ['rework', null], 'the hold keeps the task unclaimed');
       const item = h.json(['inbox', '--agent', 'orchestrator']).items.find((i) => i.kind === 'rework_ready');
       assert.deepEqual([item?.restore, item?.owner, item?.action.argv], ['gates retry T1 --from-rework', agent, ['gates', 'retry', 'T1', '--from-rework']],
