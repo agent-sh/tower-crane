@@ -974,11 +974,11 @@ test('ci.max_dispatches is an operational project setting with default 2', (t) =
   assert.equal(bad.code, 2);
 });
 
-test('CI workflow dispatch concurrency replaces runs on the branch and preserves main and schedule groups', () => {
+test('CI workflow dispatch concurrency replaces runs on the branch, keeps profile and hang runs apart, and preserves main and schedule groups', () => {
   const yaml = fs.readFileSync(path.join(__dirname, '..', '.github/workflows/ci.yml'), 'utf8');
   const group = yaml.match(/^  group: (.+)$/m)[1];
   const cancel = yaml.match(/^  cancel-in-progress: (.+)$/m)[1];
-  assert.match(group, /github.event_name == 'workflow_dispatch' && format\('ci-dispatch-\{0\}', github.ref\)/);
+  assert.match(group, /github.event_name == 'workflow_dispatch' && format\('ci-dispatch-\{0\}\{1\}', github.ref, inputs.profile && '-profile' \|\| inputs.hang && '-hang' \|\| ''\)/);
   assert.match(group, /github.event_name == 'push' && 'ci-main-push'/);
   assert.match(group, /format\('ci-run-\{0\}', github.run_id\)/);
   assert.match(cancel, /github.event_name == 'pull_request' \|\| github.event_name == 'workflow_dispatch'/);

@@ -29,9 +29,10 @@ permissions:
 
 # GitHub keeps one running and one pending run per group; a newer run replaces the pending one.
 # Main pushes share one group: the newest pending head covers every earlier commit, and a running
-# main run is never cancelled. Tag and scheduled runs keep unique groups; manual runs replace older runs on their branch.
+# main run is never cancelled. Tag and scheduled runs keep unique groups; a manual run replaces an older
+# manual run on its branch, with profile and hang runs in groups of their own so a routine dispatch never cancels them.
 concurrency:
-  group: ${{ github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || github.ref == 'refs/heads/main' && github.event_name == 'push' && 'ci-main-push' || github.event_name == 'workflow_dispatch' && format('ci-dispatch-{0}', github.ref) || format('ci-run-{0}', github.run_id) }}
+  group: ${{ github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || github.ref == 'refs/heads/main' && github.event_name == 'push' && 'ci-main-push' || github.event_name == 'workflow_dispatch' && format('ci-dispatch-{0}{1}', github.ref, inputs.profile && '-profile' || inputs.hang && '-hang' || '') || format('ci-run-{0}', github.run_id) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' }}
 
 jobs:
