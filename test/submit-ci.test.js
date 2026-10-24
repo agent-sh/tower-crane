@@ -182,6 +182,83 @@ test('--json carries the CI report as ci_report, findings included', (t) => {
   assert.match(data.ci_report, /lib\/x\.js:12 \(comment 11\)\n {4}\*\*\[P3\]\*\* Quoted paths break on Windows\./);
 });
 
+test('submit records pushed PR heads, warns above one and resets at the next submission', (t) => {
+  const h = fixture(t);
+  const branch = 'task/change';
+  const data = { ...PENDING, heads: [
+    { head_sha: 'b'.repeat(40), head_branch: branch, event: 'pull_request',
+      created_at: '2026-10-01T10:00:00Z', pull_requests: [{ number: 7 }] },
+    { head_sha: h.sha, head_branch: branch, event: 'push',
+      created_at: '2026-10-01T10:00:01Z', pull_requests: [] },
+  ] };
+  const first = submitPr(h, data, ['--branch', branch, '--json']);
+  assert.equal(first.status, 0, first.stderr);
+  const submitted = JSON.parse(first.stdout);
+  assert.equal(submitted.pushes_since_last_submit, 2);
+  assert.match(submitted.push_warning, /2 observed pushed heads since the last submit/);
+  const receipts = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim()
+    .split('\n').map(JSON.parse).filter((e) => e.cmd === 'submit');
+  assert.equal(receipts().at(-1).detail.pushes_since_last_submit, 2);
+  assert.ok(h.readState('tasks.json').tasks[0].notes.some((n) => n.text === submitted.push_warning));
+  assert.match(h.ok(['status']), /pushes since last submit: T1 2/);
+  assert.deepEqual(h.json(['status']).pushes_since_last_submit, [{ id: 'T1', pushes_since_last_submit: 2 }]);
+
+  const second = submitPr(h, data, ['--json']);
+  assert.equal(second.status, 0, second.stderr);
+  assert.equal(JSON.parse(second.stdout).pushes_since_last_submit, 0);
+  assert.equal(receipts().at(-1).detail.pushes_since_last_submit, 0);
+  assert.doesNotMatch(h.ok(['status']), /pushes since last submit:/);
+  assert.deepEqual(h.json(['status']).pushes_since_last_submit, []);
+
+  fs.appendFileSync(path.join(h.repo, 'README.md'), 'Revision.\n');
+  h.git(['add', 'README.md']);
+  h.git(['commit', '-q', '-m', 'revision']);
+  const sha = h.git(['rev-parse', 'HEAD']);
+  const at = receipts().at(-1).at;
+  const third = withGithub(h, { ...PENDING, sha, heads: [
+    ...data.heads,
+    { head_sha: 'd'.repeat(40), head_branch: branch, event: 'pull_request', created_at: at },
+    { head_sha: sha, head_branch: branch, event: 'pull_request', created_at: at },
+    { head_sha: sha, head_branch: branch, event: 'pull_request', created_at: at },
+  ] }, ['submit', 'T1', '--agent', 'worker', '--sha', sha, '--json']);
+  assert.equal(third.status, 0, third.stderr);
+  assert.equal(JSON.parse(third.stdout).pushes_since_last_submit, 2);
+  assert.equal(receipts().at(-1).detail.previous_sha, h.sha);
+  assert.match(h.ok(['status']), /pushes since last submit: T1 2/);
+});
+
+test('submit records unavailable PR head history without refusing or reporting a clean count', (t) => {
+  const h = fixture(t);
+  for (const extra of [{ historyError: 'history fetch failed' }, { historyInvalid: true }]) {
+    const r = submitPr(h, { ...PENDING, ...extra }, ['--json']);
+    assert.equal(r.status, 0, r.stderr);
+    const data = JSON.parse(r.stdout);
+    assert.equal(data.pushes_since_last_submit, null);
+    assert.match(data.push_warning, /pushes_since_last_submit unavailable:/);
+    const receipt = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim()
+      .split('\n').map(JSON.parse).findLast((e) => e.cmd === 'submit');
+    assert.equal(receipt.detail.pushes_since_last_submit, null);
+    assert.ok(receipt.detail.push_history_error);
+  }
+});
+
+test('status lists multiple observed heads only for open tasks', (t) => {
+  const h = fixture(t);
+  for (const row of [
+    { status: 'submitted', visible: true },
+    { status: 'rework', visible: true },
+    { status: 'accepted', visible: false },
+    { status: 'cancelled', visible: false },
+  ]) {
+    const tasks = h.readState('tasks.json');
+    Object.assign(tasks.tasks[0], { status: row.status, pushes_since_last_submit: 2 });
+    h.writeState('tasks.json', tasks);
+    assert.deepEqual(h.json(['status']).pushes_since_last_submit,
+      row.visible ? [{ id: 'T1', pushes_since_last_submit: 2 }] : [], row.status);
+    assert.equal(/pushes since last submit:/.test(h.ok(['status'])), row.visible, row.status);
+  }
+});
+
 test('a PR that conflicts with its base refuses the submit, even with a failing required check', (t) => {
   const h = fixture(t);
   const r = submitPr(h, {
@@ -201,6 +278,14 @@ test('a shimmed agent whose gh policy refuses gh api submits with a notice that 
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /CI at \w+ in acme\/app was not checked: this agent's gh policy refuses gh api/);
   assert.equal(status(h), 'submitted');
+  assert.match(r.stdout, /gh policy refuses PR head history/);
+  assert.doesNotMatch(r.stdout, /warning: pushes_since_last_submit/);
+  const receipt = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim()
+    .split('\n').map(JSON.parse).findLast((e) => e.cmd === 'submit');
+  assert.equal(receipt.detail.pushes_since_last_submit, null);
+  assert.equal(receipt.detail.push_history_error, undefined);
+  assert.match(receipt.detail.push_history_note, /gh policy refuses PR head history/);
+  assert.ok(!h.readState('tasks.json').tasks[0].notes.some((n) => /warning: pushes_since_last_submit/.test(n.text)));
 });
 
 test('a [P1]/[P2] revuto finding with no change at its path and no [resolved] reply refuses the submit, as review ok would', (t) => {

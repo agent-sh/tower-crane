@@ -5,6 +5,7 @@
 // reports the exit of each detached worker and supervisor. Each suite file runs
 // in its own process.
 
+const assert = require('node:assert/strict');
 const cp = require('node:child_process');
 const fs = require('node:fs');
 const net = require('node:net');
@@ -63,7 +64,9 @@ fs.renameSync(process.argv[1] + '.ready.tmp', process.argv[1] + '.ready');
 setInterval(() => {}, 1000);
 \`, process.argv[2]], { stdio: 'ignore' });
 ` : ''}
-${index === 0 && ['stall', 'hold', 'orphan'].includes(trigger) ? 'setInterval(() => {}, 1000);'
+// Keep a stalled worker alive without a periodic callback producing CPU progress.
+${index === 0 && trigger === 'stall' ? "require('node:net').createServer().listen(0, '127.0.0.1');"
+    : index === 0 && ['hold', 'orphan'].includes(trigger) ? 'setInterval(() => {}, 1000);'
     : index === 0 && trigger === 'outage' ? "console.error('HTTP 503 service unavailable'); process.exit(1);"
       : index === 0 && trigger === 'refusal' ? "console.log(JSON.stringify({ type: 'refusal' })); process.exit(1);"
         : trigger === 'top' || index === 0 && ['exit', 'preclaim'].includes(trigger) ? 'process.exit(0);'
@@ -156,6 +159,14 @@ if (process.execArgv.includes('-e') && process.env.TOWER_CRANE_SESSION
     // Teardown must still observe exits after an expected ceiling decision.
     await until(t, [h.base], () => exits.has(child.pid) || !detachedAlive(child));
     return { exited: exits.get(child.pid) || Promise.resolve() };
+  };
+  // A submit or reviewer reaction can finish before this worker's monitor
+  // drains its own exit reactions. Its socket closure observes completion.
+  h.settled = async (agent) => {
+    const worker = events(h).findLast((e) => e.cmd === 'spawn' && e.detail.agent === agent);
+    assert.ok(worker, `no dispatch for ${agent}`);
+    const { exited } = await h.exitSignal({ pid: worker.detail.monitor_pid });
+    await exited;
   };
   t.after(async () => {
     try {

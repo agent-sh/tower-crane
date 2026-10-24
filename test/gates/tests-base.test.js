@@ -54,9 +54,15 @@ test('base runs only the file holding both failing names, then a later gate reus
   assert.deepEqual(first.receipt.base_rerun.files, ['test/fail.test.js']);
   assert.equal(first.receipt.base_rerun.results[0].cached, false);
   assert.equal(first.receipt.base_rerun.base, baseSha);
+  assert.deepEqual(first.receipt.test_logs.map((r) => r.phase), ['head', 'head', 'base']);
+  const baseLog = first.receipt.test_logs[2].log;
+  assert.match(fs.readFileSync(path.join(tmp, 'state', baseLog), 'utf8'), /old failure/);
   const second = await gate.run(context());
   assert.deepEqual(second.main_failure, first.main_failure);
   assert.equal(second.receipt.base_rerun.results[0].cached, true);
+  assert.equal(second.receipt.test_logs[2].cached, true);
+  assert.equal(fs.readFileSync(path.join(tmp, 'state', second.receipt.test_logs[2].log), 'utf8'),
+    fs.readFileSync(path.join(tmp, 'state', baseLog), 'utf8'));
   assert.equal(rows().length, 5, 'the second gate runs its head and rerun, and reads the base from the cache');
   assert.ok(logs.some((line) => /base .*test\/fail\.test\.js: cached$/.test(line)));
 });
@@ -191,16 +197,16 @@ process.exit(r.status ?? 1);
   }
 });
 
-test('the base lease budgets both joining a cache holder and a fresh run', () => {
+test('the base comparison contributes one shared timeout budget to the lease', () => {
   const cases = [
-    [{ mode: 'run-only' }, 0, 3, 8],
-    [{ mode: 'run-only' }, 2, 1, 8],
-    [{ mode: 'prove' }, 0, 1, 6],
-    [{ mode: 'prove', expensive: true }, 1, 2, 16],
-    [{ mode: 'none' }, 2, 3, 0],
+    [{ mode: 'run-only' }, 0, 3],
+    [{ mode: 'run-only' }, 2, 7],
+    [{ mode: 'prove' }, 0, 5],
+    [{ mode: 'prove', expensive: true }, 1, 13],
+    [{ mode: 'none' }, 2, 0],
   ];
-  for (const [tests, hosts, files, expected] of cases) {
-    assert.equal(gate.plannedCommands({ tests }, 'code', hosts, files), expected, JSON.stringify({ tests, hosts, files }));
+  for (const [tests, hosts, expected] of cases) {
+    assert.equal(gate.plannedCommands({ tests }, 'code', hosts), expected, JSON.stringify({ tests, hosts }));
   }
 });
 
@@ -240,10 +246,12 @@ test('host-only base commands keep host_env and clear exclusions, including cach
     assert.equal(result.receipt.base_rerun.results[0].cached, cached);
     const ran = rows().slice(before);
     // The ordinary suite, the host-only file and its rerun, then the base unless cached.
+    // The host-only file runs beside the suite, so either can write its row first.
     assert.equal(ran.length, cached ? 3 : 4);
-    assert.equal(ran[0].host, undefined);
-    assert.equal(ran[0].exclude, '["test/host.test.js"]');
-    for (const r of ran.slice(1)) {
+    const ordinary = ran.filter((r) => r.host === undefined);
+    assert.equal(ordinary.length, 1, JSON.stringify(ran));
+    assert.equal(ordinary[0].exclude, '["test/host.test.js"]');
+    for (const r of ran.filter((x) => x !== ordinary[0])) {
       assert.deepEqual(r.files, ['test/host.test.js']);
       assert.equal(r.host, 'opted-in');
       assert.equal(r.exclude, undefined);

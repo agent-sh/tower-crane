@@ -15,7 +15,7 @@ const release = process.argv[2];
 // write-atomic: readiness only; the test takes the writer's pid from the harness's file.
 fs.writeFileSync(ready, String(process.pid));
 const deadline = Date.now() + 300000;
-while (!fs.existsSync(release) && Date.now() < deadline) {
+while (!fs.existsSync(release) && Date.now() < deadline) { // spin-allow: the writer holds the output after its harness exits, which is what the test checks; the deadline bounds it
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
 }
 if (!fs.existsSync(release)) process.exit(91);

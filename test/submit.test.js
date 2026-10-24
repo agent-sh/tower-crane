@@ -160,17 +160,18 @@ test('the claimant resubmits a newer head and its gates need evidence at that he
   h.ok(['submit', 'T1', '--sha', oldSha, '--branch', 'fixture-change', '--pr', '7', '--agent', 'w-1']);
   assert.deepEqual(
     events(h).find((event) => event.cmd === 'submit').detail,
-    { previous_sha: null, sha: oldSha, branch: 'fixture-change', pr: 7, host_probes: [], summary: null, scope: { basis: 'repo', named: [], outside: [] } },
+    { previous_sha: null, sha: oldSha, branch: 'fixture-change', pr: 7, host_probes: [], summary: null, pushes_since_last_submit: 1, scope: { basis: 'repo', named: [], outside: [] } },
   );
   const gates = [['tests', 'w-1'], ['clean', 'w-1'], ['review', 'r-1'], ['ci', 'ci']];
   for (const [type, agent] of gates) pass(h, type, agent, oldSha);
   const before = h.json(['task', 'show', 'T1']);
   assert.equal(before.gates.ok, true);
 
-  fs.appendFileSync(path.join(h.repo, 'README.md'), 'The newer change.\n');
-  h.git(['add', 'README.md']);
+  fs.appendFileSync(path.join(h.repo, 'value.js'), '\n// The newer change.\n');
+  h.git(['add', 'value.js']);
   h.git(['commit', '-q', '-m', 'newer change']);
   const newSha = h.git(['rev-parse', 'HEAD']);
+  h.env.FIXTURE_SHA = newSha;
   const submitted = h.json(['submit', 'T1', '--sha', newSha.toUpperCase(), '--branch', 'fixture-change', '--pr', '7',
     '--summary', 'fixed review feedback', '--agent', 'w-1']);
   assert.deepEqual(
@@ -188,7 +189,8 @@ test('the claimant resubmits a newer head and its gates need evidence at that he
   const shown = h.json(['task', 'show', 'T1']);
   assert.equal(shown.gates.ok, false);
   assert.deepEqual(shown.gates.gates.map((gate) => [gate.type, gate.ok]), gates.map(([type]) => [type, false]));
-  h.ok(['project', 'set', '--tests-cmd', 'null']);
+  // Tests first, so accept stops at the missing tests gate and lists every missing gate.
+  h.ok(['project', 'set', '--tests-cmd', 'null', '--review-policy', '{"tests_first":true}']);
   const stale = h.run(['accept', 'T1']);
   assert.equal(stale.code, 1);
   for (const [type] of gates) assert.match(stale.stderr, new RegExp(`no ${type} evidence at ${newSha.slice(0, 7)}`));

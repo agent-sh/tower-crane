@@ -6,9 +6,9 @@ const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
 const crypto = require('node:crypto');
-const { makeRepo, copyRepo, shortCacheRoot, fakeAgentEnv, ACCOUNT_HOME, BIN, TMP_ROOT, ROOT, HARNESS_GUARD, processesIn, assertNoProcessesIn } = require('./helpers');
+const { makeRepo, copyRepo, cachedFixture, shortCacheRoot, fakeAgentEnv, ACCOUNT_HOME, BIN, TMP_ROOT, ROOT, HARNESS_GUARD, processesIn, assertNoProcessesIn, detachedAlive } = require('./helpers');
 const { gateFixture, gateEvidence } = require('./gate-helpers');
-const { waitUntil, childExit, HUNG_TEST_MS } = require('./signals');
+const { waitUntil, childExit, killPid, HUNG_TEST_MS } = require('./signals');
 
 test('fixture commands bypass the calling worker git and gh shims', (t) => {
   const outer = makeRepo(t);
@@ -77,6 +77,20 @@ test('a fixture copy that fails leaves no temp directory behind', (t) => {
   });
   assert.equal(made.length, 1);
   assert.equal(fs.existsSync(made[0]), false, made[0]);
+});
+
+test('a cached fixture copy takes its own orchestrator lease, not the one its build held', (t) => {
+  const h = cachedFixture(t, 'fixture-lease', (repo) => {
+    repo.init();
+    repo.ok(['task', 'add', '--title', 'built', '--acceptance', 'checked', '--agent', 'orchestrator']);
+    // The build's process tree, as the copy sees it after the tests gate's wait host restarts.
+    const doc = repo.readState('tasks.json');
+    doc.orchestrator_lease = { ...doc.orchestrator_lease, session_id: 'f'.repeat(64), harness_session_id: null, persistent: false };
+    repo.writeState('tasks.json', doc);
+  });
+  assert.equal(h.readState('tasks.json').orchestrator_lease, undefined);
+  h.ok(['task', 'add', '--title', 'copied', '--acceptance', 'checked', '--agent', 'orchestrator']);
+  assert.ok(h.readState('tasks.json').orchestrator_lease, 'the copy took a lease');
 });
 
 test('a fresh fixture whose setup fails leaves no temp directory behind', (t) => {
@@ -153,6 +167,41 @@ test('shortCacheRoot measures the real path of a linked cache and never makes a 
   assert.equal(fs.existsSync(kept.root), true);
   for (const hook of kept.ctx.hooks) hook();
   assert.deepEqual(fs.readdirSync(path.join(bare, '.cache')), [], 'the existing cache stays, without the root');
+});
+
+test('socket fixtures keep excluded roots out of the preferred and fallback candidates', {
+  skip: process.platform === 'win32' && 'Unix socket fixtures are POSIX only',
+}, (t) => {
+  const { socketDir } = require('./socket-dir');
+  const { MAX_SOCKET_PATH } = require('../lib/socket-path');
+  const base = socketDir(t, MAX_SOCKET_PATH - 40);
+  const parent = path.join(base, 'parent');
+  const preferred = path.join(parent, 'preferred');
+  const fallback = path.join(base, 'fallback');
+  const alias = path.join(base, 'alias');
+  const neighbor = path.join(base, 'parent-other');
+  for (const dir of [preferred, fallback, neighbor]) fs.mkdirSync(dir, { recursive: true });
+  fs.symlinkSync(preferred, alias, 'dir');
+  const saved = { own: process.env.TOWER_CRANE_SOCKET_DIR, runtime: process.env.XDG_RUNTIME_DIR };
+  Object.assign(process.env, { TOWER_CRANE_SOCKET_DIR: preferred, XDG_RUNTIME_DIR: fallback });
+  try {
+    for (const [outside, expected] of [
+      [[], preferred],
+      [[preferred], fallback],
+      [[parent], fallback],
+      [[alias], fallback],
+      [[neighbor], preferred],
+      [[path.join(base, 'missing')], preferred],
+    ]) {
+      const made = socketDir(t, MAX_SOCKET_PATH - 2, { outside });
+      assert.equal(path.dirname(made), fs.realpathSync(expected), JSON.stringify(outside));
+    }
+  } finally {
+    for (const [key, value] of [['TOWER_CRANE_SOCKET_DIR', saved.own], ['XDG_RUNTIME_DIR', saved.runtime]]) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
 });
 
 // Linux CI alone runs /proc; the lsof variants stand in for macOS, where the
@@ -322,4 +371,34 @@ test('gate fixture creation and restoration recover from an incomplete native di
   } finally {
     fs.cpSync = cpSync;
   }
+});
+
+// T545: the supervision test's busy child spun for four hours after its gate ended, because the
+// test was cut off before it wrote the file the loop waited for.
+test('the supervision busy child stops spinning when the test that started it is cut off', async (t) => {
+  const h = makeRepo(t);
+  const busy = path.join(__dirname, 'fixtures', 'busy-child.js');
+  const never = path.join(h.base, 'never');
+  const pids = [];
+  t.after(() => { for (const pid of pids) if (detachedAlive({ pid })) killPid(pid, 'SIGKILL'); });
+  // Its deadline: nothing writes the file, and the child ends on its own.
+  const timed = cp.spawn(process.execPath, [busy, path.join(h.base, 'timed'), never, '200'], { stdio: 'ignore' });
+  pids.push(timed.pid);
+  assert.deepEqual(await childExit(timed, { signal: t.signal }), { code: 1, signal: null });
+  if (process.platform === 'win32') return; // Windows keeps an exited parent's pid on its children, so only the deadline ends it there.
+  // Its parent: the worker that started it is killed, and the child, in a session of its own, ends.
+  const ready = path.join(h.base, 'busy');
+  const pidFile = path.join(h.base, 'busy.pid');
+  const worker = cp.spawn(process.execPath, ['-e', `const c = require('node:child_process').spawn(process.execPath, ${JSON.stringify([busy, ready, never])}, { stdio: 'ignore', detached: true });
+require('node:fs').writeFileSync(${JSON.stringify(pidFile + '.tmp')}, String(c.pid));
+require('node:fs').renameSync(${JSON.stringify(pidFile + '.tmp')}, ${JSON.stringify(pidFile)});
+process.stdin.resume();`], { stdio: ['pipe', 'ignore', 'ignore'] });
+  pids.push(worker.pid);
+  await waitUntil(() => fs.existsSync(ready) && fs.existsSync(pidFile), { paths: [h.base], signal: t.signal, alive: worker, what: 'busy child start' });
+  const child = Number(fs.readFileSync(pidFile, 'utf8'));
+  pids.push(child);
+  assert.equal(detachedAlive({ pid: child }), true);
+  killPid(worker.pid, 'SIGKILL');
+  await childExit(worker, { signal: t.signal });
+  await waitUntil(() => !detachedAlive({ pid: child }), { signal: t.signal, what: 'busy child exit after its parent died' });
 });

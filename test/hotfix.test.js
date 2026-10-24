@@ -9,6 +9,7 @@ const { waitOnRepo } = require('./signals');
 const { gateFixture, retireRevision } = require('./gate-helpers');
 const Reviewer = require('../lib/reviewer');
 const { shellQuote } = require('../lib/gates/common');
+const { holdExecutor } = require('./automation-helpers');
 
 function fixture(t) {
   return cachedFixture(t, 'merged-hotfix', (h) => {
@@ -173,6 +174,27 @@ test('accept runs missing software gates and dispatches one normal reviewer at t
   h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', h.sha, '--agent', r.reviewer]);
   h.ok(['wait', '--task', 'T1', '--types', 'accepted', '--after', cursor, '--timeout', '300']);
   assert.equal(task(h).status, 'accepted');
+});
+
+test('a hotfix reaction runs the tests and clean gates accept starts under the executor cap, and its CI read holds none', (t) => {
+  const h = fixture(t);
+  h.ok(['project', 'set', '--executors', '1']);
+  silentReviewer(h);
+  const free = holdExecutor(h);
+  record(h);
+  const consume = () => h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0']);
+  consume();
+  assert.deepEqual(task(h).evidence, [], 'no gate runs while another task holds the only executor');
+  assert.ok(events(h).some((e) => e.cmd === 'automation queued' && e.task === 'T1' && e.detail.executors === 1));
+  free();
+  consume();
+  assert.deepEqual(task(h).evidence.map((e) => [e.type, e.ok]), [['tests', true], ['clean', true], ['ci', true]]);
+  const log = events(h);
+  const own = log.filter((e) => e.cmd === 'executor' && e.task === 'T1');
+  assert.deepEqual(own.filter((e) => e.detail.phase === 'running').map((e) => e.detail.kind), ['tests', 'clean']);
+  assert.equal(new Set(own.map((e) => e.detail.lease)).size, 1, 'tests and clean share one lease');
+  const released = log.indexOf(own.find((e) => e.detail.phase === 'done'));
+  assert.ok(released >= 0 && released < log.findIndex((e) => e.cmd === 'check ci' && e.task === 'T1'), 'the lease is released before the CI read');
 });
 
 test('each failed software gate opens one follow-up against main with no old PR, sha or branch', (t) => {

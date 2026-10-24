@@ -237,7 +237,12 @@ test('research Claude gets native or explicit web MCP tools with worker file and
     // And under /run, which it hides, the resolver (runReads).
     assert.ok(shared.allowWrite.includes(report.socketDir));
     shared.allowWrite = shared.allowWrite.filter((p) => p !== report.socketDir);
-    assert.deepEqual(allowRead.filter((p) => p !== report.socketDir && !p.startsWith(fs.realpathSync(u.home) + path.sep)), [ownHome, path.join(h.state, 'brokers', path.basename(ownHome)), ...A.runReads(u.env)]);
+    if (report.ownTmpdir) {
+      assert.ok(allowRead.includes(report.ownTmpdir) && shared.denyWrite.includes(report.ownTmpdir));
+      assert.ok(!shared.allowWrite.includes(report.ownTmpdir));
+      shared.denyWrite = shared.denyWrite.filter((p) => p !== report.ownTmpdir);
+    }
+    assert.deepEqual(allowRead.filter((p) => ![report.socketDir, report.tmpdir, report.ownTmpdir].includes(p) && !p.startsWith(fs.realpathSync(u.home) + path.sep)), [ownHome, path.join(h.state, 'brokers', path.basename(ownHome)), ...A.runReads(u.env)]);
     assert.ok(shared.denyWrite.includes(h.state));
     // A mask on a path the host lacks leaves a placeholder there, so only existing paths are masked.
     for (const p of [...shared.denyRead, ...shared.denyWrite]) assert.ok(fs.existsSync(p), `${p} is masked but missing`);
@@ -374,7 +379,11 @@ test('a spawned claude agent imports the user\'s global rules by path, loads non
   assert.ok(box.filesystem.denyRead.includes(path.join(h.state, 'brokers')), 'no agent reads another agent\'s broker token');
   assert.ok(box.filesystem.denyRead.includes(path.join(h.state, 'ci-artifacts')), 'no agent reads unredacted local CI artifacts');
   assert.ok(box.filesystem.denyRead.includes(path.join(path.dirname(h.userConfig), 'owner')), 'no agent reads the owner key');
-  assert.deepEqual(box.filesystem.allowRead.filter((p) => p !== seen.tmpdir && p !== seen.socketDir), [path.join(u.home, '.claude', 'CLAUDE.md'), home, path.join(h.state, 'brokers', started.agent), ...A.runReads(u.env)],
+  if (seen.ownTmpdir) {
+    assert.ok(box.filesystem.allowRead.includes(seen.ownTmpdir) && box.filesystem.denyWrite.includes(seen.ownTmpdir));
+    assert.ok(!box.filesystem.allowWrite.includes(seen.ownTmpdir));
+  }
+  assert.deepEqual(box.filesystem.allowRead.filter((p) => ![seen.tmpdir, seen.ownTmpdir, seen.socketDir].includes(p)), [path.join(u.home, '.claude', 'CLAUDE.md'), home, path.join(h.state, 'brokers', started.agent), ...A.runReads(u.env)],
     'only the user\'s global rules under the home, this dispatch home, its own broker directory, the resolver under /run and its own temp directory are readable');
   // /run is hidden whole, with docker's, the buses' and every other host socket in it.
   for (const p of A.runDirs()) assert.ok(box.filesystem.denyRead.includes(p), p);
@@ -392,61 +401,114 @@ test('a spawned claude agent imports the user\'s global rules by path, loads non
   noSecretsCopied(h);
 });
 
-// /tmp holds the X11 and session bus sockets, and claude lets a command
-// connect to any socket it sees, so its sandbox hides /tmp, as codex never
-// mounts it. claude's own Read tools cannot connect to a socket, and a deny
-// rule for them would take no exception for a worktree in /tmp. An agent left
-// with a TMPDIR of /tmp keeps it: claude makes its proxy sockets there.
-test('a sandboxed claude command cannot see /tmp unless claude makes its proxy sockets there', { skip: (NO_STUBS || process.platform !== 'linux') && 'Linux only' }, (t) => {
-  const { h, u } = setup(t);
-  isolated(h, 'small', 'claude');
-  const tmp = fs.realpathSync('/tmp');
-  const caller = path.join(h.base, 'caller-tmp');
-  fs.mkdirSync(caller);
-  spawn(h, u, 'small', { TMPDIR: caller });
-  const seen = u.report();
-  assert.equal(seen.tmpdir, caller, 'the fixture\'s cache root is too deep for claude\'s own temp directory, so the agent keeps the caller\'s');
-  const box = seen.settings.sandbox.filesystem;
-  assert.ok(box.denyRead.includes(tmp), '/tmp is hidden whole');
-  for (const p of ['.X11-unix/X0', 'dbus-probe/socket']) assert.equal(commandsRead(seen, path.join(tmp, p)), false, p);
-  assert.ok(!box.allowRead.some((p) => p === tmp || p.startsWith(tmp + path.sep)), 'nothing in /tmp is allowed back: the agent needs nothing there');
-  assert.ok(!seen.settings.permissions.deny.some((rule) => rule.includes(`(/${tmp})`) || rule.includes(`(/${tmp}/**)`)), 'the Read tools keep /tmp');
-  spawn(h, u, 'small', { TMPDIR: tmp });
-  const kept = u.report();
-  assert.equal(kept.tmpdir, tmp);
-  assert.ok(!kept.settings.sandbox.filesystem.denyRead.includes(tmp), 'claude\'s proxy sockets in /tmp stay reachable');
-});
-
-// The TMPDIR that decides is the one claude starts with, after the project's
-// env and env_file, not the dispatcher's.
-function claudeTmpRoute(t, project, dispatcher) {
-  const { h, u } = setup(t);
-  isolated(h, 'small', 'claude');
-  const tmp = fs.realpathSync('/tmp');
-  const caller = path.join(h.base, 'caller-tmp');
-  fs.mkdirSync(caller);
-  const pick = (which) => (which === 'tmp' ? tmp : caller);
-  if (project.file) {
-    const envFile = path.join(h.base, 'private.env');
-    fs.writeFileSync(envFile, `TMPDIR=${pick(project.file)}\n`, { mode: 0o600 });
-    h.ok(['project', 'set', '--env_file', envFile]);
-  } else {
-    h.ok(['project', 'set', '--env', JSON.stringify({ TMPDIR: pick(project.env) })]);
+// Claude's commands can connect to any socket they see. A private TMPDIR
+// keeps the host sockets hidden even when the cache path is deep.
+test('a sandboxed claude keeps private temp and hides host sockets across dispatcher and project temp settings', { skip: (NO_STUBS || process.platform !== 'linux') && 'Linux only' }, (t) => {
+  const hasHostTemp = fs.existsSync('/tmp');
+  for (const source of ['dispatcher', 'env', 'env_file']) {
+    for (const hostTemp of [false, true]) {
+      const { h, u } = setup(t);
+      isolated(h, 'small', 'claude');
+      const tmp = hasHostTemp ? fs.realpathSync('/tmp') : '/tmp';
+      const caller = path.join(h.base, 'caller-tmp');
+      fs.mkdirSync(caller);
+      const selected = hostTemp ? tmp : caller;
+      if (source === 'env_file') {
+        const envFile = path.join(h.base, 'private.env');
+        fs.writeFileSync(envFile, `TMPDIR=${selected}\n`, { mode: 0o600 });
+        h.ok(['project', 'set', '--env_file', envFile]);
+      } else if (source === 'env') {
+        h.ok(['project', 'set', '--env', JSON.stringify({ TMPDIR: selected })]);
+      }
+      spawn(h, u, 'small', { TMPDIR: source === 'dispatcher' ? selected : hostTemp ? caller : tmp });
+      const seen = u.report();
+      const label = `${source}, host temp ${hostTemp}`;
+      assert.ok(seen.tmpdir && seen.tmpdir !== tmp && seen.tmpdir !== caller, `${label}: private temp replaces inherited settings`);
+      assert.ok(seen.tmpdir.startsWith(u.home + path.sep), `${label}: private temp stays in the user cache`);
+      const box = seen.settings.sandbox.filesystem;
+      if (hasHostTemp) {
+        assert.ok(box.denyRead.includes(tmp), `${label}: host temp is hidden whole`);
+        for (const p of ['.X11-unix/X0', 'dbus-probe/socket']) assert.equal(commandsRead(seen, path.join(tmp, p)), false, `${label}: ${p}`);
+        assert.ok(!box.allowRead.some((p) => p === tmp || p.startsWith(tmp + path.sep)), `${label}: no host temp socket is allowed back`);
+        assert.ok(!seen.settings.permissions.deny.some((rule) => rule.includes(`(/${tmp})`) || rule.includes(`(/${tmp}/**)`)), `${label}: file tools keep host temp`);
+      }
+      assert.deepEqual(fs.readdirSync(caller), [], `${label}: caller sentinel stays empty`);
+    }
   }
-  spawn(h, u, 'small', { TMPDIR: pick(dispatcher) });
-  return { seen: u.report(), tmp, caller };
-}
-
-test('a sandboxed claude keeps /tmp when env_file moves its TMPDIR there', { skip: (NO_STUBS || process.platform !== 'linux') && 'Linux only' }, (t) => {
-  const { seen, tmp } = claudeTmpRoute(t, { file: 'tmp' }, 'caller');
-  assert.equal(seen.tmpdir, tmp, 'env_file moves the agent to /tmp');
-  assert.ok(!seen.settings.sandbox.filesystem.denyRead.includes(tmp), 'claude\'s proxy sockets in /tmp stay reachable');
 });
 
-test('a sandboxed claude hides /tmp when the project\'s env moves its TMPDIR out of a dispatcher\'s /tmp', { skip: (NO_STUBS || process.platform !== 'linux') && 'Linux only' }, (t) => {
-  const { seen, tmp, caller } = claudeTmpRoute(t, { env: 'caller' }, 'tmp');
-  assert.equal(seen.tmpdir, caller, 'the project\'s env moves the agent out of /tmp');
-  assert.ok(seen.settings.sandbox.filesystem.denyRead.includes(tmp), '/tmp is hidden');
+// The parent of a PATH entry of /tmp is /, which opened the whole
+// filesystem, the user's home under it.
+// A gate path is granted as it is, so /tmp is refused there too; spawn
+// refuses one that holds the home or the worktree, / among them.
+test('a PATH entry of /tmp or /, or a gate path of /tmp, grants a sandboxed claude command neither, and spawn says why', { skip: (NO_STUBS || process.platform !== 'linux') && 'Linux only' }, (t) => {
+  const { h, u } = setup(t);
+  isolated(h, 'small', 'claude');
+  const tmp = fs.realpathSync('/tmp');
+  const PATH = `${u.env.PATH}${path.delimiter}/tmp${path.delimiter}/`;
+  const started = spawn(h, u, 'small', { PATH });
+  const seen = u.report();
+  const box = seen.settings.sandbox.filesystem;
+  assert.ok(!box.allowRead.includes('/'), `no grant of /: ${box.allowRead.join(' ')}`);
+  assert.ok(!box.allowRead.some((p) => p === tmp || p.startsWith(tmp + path.sep)), box.allowRead.join(' '));
+  assert.ok(box.denyRead.includes(tmp), '/tmp is hidden');
+  for (const p of [path.join(tmp, 'planted'), path.join(u.home, 'out-of-grant'), path.join(u.home, '.ssh', 'id_ed25519')]) assert.equal(commandsRead(seen, p), false, p);
+  for (const notice of [`the PATH directory ${tmp} is /tmp itself`, 'the PATH directory / is the filesystem root']) {
+    assert.ok(started.notices.includes(`claude's sandbox keeps /tmp hidden: ${notice}, so it is not allowed back`), started.notices.join('\n'));
+  }
+  // A fixture in /tmp makes /tmp hold the worktree, which spawn refuses.
+  if ([h.base, u.home].some((p) => fs.realpathSync(p).startsWith(tmp + path.sep))) return;
+  h.ok(['project', 'set', '--clean-paths', JSON.stringify(['/tmp'])]);
+  const gated = spawn(h, u, 'small', { PATH });
+  const allowed = u.report().settings.sandbox.filesystem.allowRead;
+  assert.ok(!allowed.some((p) => p === '/' || p === tmp), allowed.join(' '));
+  assert.ok(gated.notices.includes(`claude's sandbox does not grant the gate path ${tmp}: it is /tmp itself`), gated.notices.join('\n'));
+});
+
+// What claude's sandbox allows back in /tmp, over real paths. A path that is
+// /, /tmp, or holds /tmp, the home or (for PATH and TMPDIR) the state
+// directory is dropped, never widened to its parent.
+test('tmpGrants drops /, /tmp and parents of the home or state from claude\'s /tmp grants, with a reason each', () => {
+  const base = { dir: '/tmp', home: '/tmp/h/home', state: '/tmp/s/state', outside: [], caller: null, path: [] };
+  const rows = [
+    ['PATH /tmp', { path: ['/tmp'] }, [], ['the PATH directory /tmp is /tmp itself']],
+    ['PATH /', { path: ['/'] }, [], ['the PATH directory / is the filesystem root']],
+    ['PATH in /tmp', { path: ['/tmp/bin'] }, ['/tmp/bin'], []],
+    ['PATH with a prefix in /tmp', { path: ['/tmp/x/bin'] }, ['/tmp/x'], []],
+    ['PATH whose prefix holds the home', { path: ['/tmp/h/bin'] }, ['/tmp/h/bin'], ['the install prefix of PATH directory /tmp/h/bin, /tmp/h holds the user\'s home /tmp/h/home']],
+    ['PATH whose prefix holds the state', { path: ['/tmp/s/bin'] }, ['/tmp/s/bin'], ['the install prefix of PATH directory /tmp/s/bin, /tmp/s holds the state directory /tmp/s/state']],
+    ['PATH that holds the state', { state: '/tmp/s/bin/state', path: ['/tmp/s/bin'] }, [],
+      ['the install prefix of PATH directory /tmp/s/bin, /tmp/s holds the state directory /tmp/s/bin/state', 'the PATH directory /tmp/s/bin holds the state directory /tmp/s/bin/state']],
+    ['PATH outside /tmp', { path: ['/usr/bin', '/opt/x/bin'] }, [], []],
+    ['caller TMPDIR /tmp', { caller: '/tmp' }, [], ['the caller\'s TMPDIR /tmp is /tmp itself']],
+    ['caller TMPDIR /', { caller: '/' }, [], ['the caller\'s TMPDIR / is the filesystem root']],
+    ['caller TMPDIR in /tmp', { caller: '/tmp/c' }, ['/tmp/c'], []],
+    ['caller TMPDIR holding the state', { caller: '/tmp/s' }, [], ['the caller\'s TMPDIR /tmp/s holds the state directory /tmp/s/state']],
+    ['caller TMPDIR holding the home', { caller: '/tmp/h' }, [], ['the caller\'s TMPDIR /tmp/h holds the user\'s home /tmp/h/home']],
+    ['read path /tmp', { outside: ['/tmp'] }, [], ['the agent\'s read path /tmp is /tmp itself']],
+    ['read path holding the state', { outside: ['/tmp/s'] }, ['/tmp/s'], []],
+    ['read path outside /tmp', { outside: ['/opt/tool'] }, [], []],
+    ['/tmp behind a link', { dir: '/var/tmp', path: ['/var'], caller: '/var/tmp' }, [], ['the caller\'s TMPDIR /var/tmp is /tmp itself', 'the install prefix of PATH directory /var, / is the filesystem root', 'the PATH directory /var holds /tmp']],
+  ];
+  const wide = [
+    ['/', { dir: '/tmp' }, 'is the filesystem root'],
+    ['/', { dir: null }, 'is the filesystem root'],
+    ['/tmp', { dir: '/tmp' }, 'is /tmp itself'],
+    ['/opt', { dir: null }, null],
+    ['/tmp/x', { dir: '/tmp' }, null],
+    ['/var', { dir: '/var/tmp' }, 'holds /tmp'],
+    ['/tmp/h', { dir: '/tmp' }, 'holds the user\'s home /tmp/h/home'],
+    ['/tmp/s', { dir: '/tmp' }, 'holds the state directory /tmp/s/state'],
+    ['/tmp/s', { dir: '/tmp', own: true }, null],
+    ['/tmp/s/state', { dir: '/tmp' }, null],
+  ];
+  for (const [p, opts, why] of wide) assert.equal(A.wideRead(p, { home: base.home, state: base.state, ...opts }), why, `${p} ${JSON.stringify(opts)}`);
+  for (const [label, row, reads, dropped] of rows) {
+    const got = A.tmpGrants({ ...base, ...row });
+    assert.deepEqual(got.reads.sort(), [...reads].sort(), label);
+    assert.deepEqual(got.dropped.sort(), [...dropped].sort(), label);
+    assert.ok(!got.reads.includes('/'), label);
+  }
 });
 
 // claude gives its commands its own environment, so its sandbox unsets every
@@ -460,14 +522,19 @@ test('a sandboxed claude denies its commands every credential-shaped name it sta
   const envFile = path.join(h.base, 'private.env');
   fs.writeFileSync(envFile, `TC_FILE_TOKEN=${fake}\nTC_FILE_PLAIN=${fake}\n`, { mode: 0o600 });
   h.ok(['project', 'set', '--env_file', envFile, '--env', JSON.stringify({ TC_ENV_PASSWORD: fake, TC_ENV_PLAIN: fake })]);
-  spawn(h, u, 'small', { PROBE_FAKE_API_KEY: fake, AWS_BEARER_TOKEN_BEDROCK: fake, AWS_SECRET_ACCESS_KEY: fake, MY_PASSPHRASE: fake, GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.fake', GIT_CONFIG_VALUE_0: fake });
+  spawn(h, u, 'small', { PROBE_FAKE_API_KEY: fake, AWS_BEARER_TOKEN_BEDROCK: fake, AWS_SECRET_ACCESS_KEY: fake, MY_PASSPHRASE: fake,
+    FOO_KEY_1X: fake, API_KEY_1: fake, OPENAI_KEY_2: fake, GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.fake', GIT_CONFIG_VALUE_0: fake });
   const seen = u.report();
   const denied = (seen.flagSettings?.sandbox?.credentials?.envVars || []).map((v) => { assert.equal(v.mode, 'deny', v.name); return v.name; });
-  for (const name of ['PROBE_FAKE_API_KEY', 'AWS_BEARER_TOKEN_BEDROCK', 'AWS_SECRET_ACCESS_KEY', 'MY_PASSPHRASE', 'TC_FILE_TOKEN', 'TC_ENV_PASSWORD']) {
+  for (const name of ['PROBE_FAKE_API_KEY', 'AWS_BEARER_TOKEN_BEDROCK', 'AWS_SECRET_ACCESS_KEY', 'MY_PASSPHRASE', 'TC_FILE_TOKEN', 'TC_ENV_PASSWORD', 'FOO_KEY_1X', 'API_KEY_1', 'OPENAI_KEY_2']) {
     assert.ok(seen.envNames.includes(name), `${name} reaches claude itself`);
     assert.ok(denied.includes(name), `${name} is denied to its commands`);
   }
-  const shaped = seen.envNames.filter((n) => /(?:^AWS_)|(?:SECRET|TOKEN|PASSWORD|PASSWD|PASSPHRASE|CREDENTIAL|KEY(?!_\d))/i.test(n) && !/^(TOWER_CRANE_|GIT_|XDG_)/i.test(n));
+  // The dispatcher's entry moves to GIT_CONFIG_PARAMETERS, beside the
+  // placeholder excludes file and the harness's own entries.
+  assert.deepEqual(seen.envNames.filter((n) => /^GIT_CONFIG_(COUNT|KEY_|VALUE_)/i.test(n)), [], 'claude starts with no GIT_CONFIG_COUNT entry');
+  assert.ok(seen.envNames.includes('GIT_CONFIG_PARAMETERS'));
+  const shaped = seen.envNames.filter((n) => /(?:^AWS_)|(?:SECRET|TOKEN|PASSWORD|PASSWD|PASSPHRASE|CREDENTIAL|KEY)/i.test(n) && !/^(TOWER_CRANE_|GIT_|XDG_)/i.test(n));
   assert.deepEqual(shaped.filter((n) => !denied.includes(n)), [], 'every credential-shaped name claude starts with is denied');
   const kept = denied.filter((n) => /^(TOWER_CRANE_|GIT_|XDG_|PATH$|HOME$|TMPDIR$|GH_CONFIG_DIR$)/i.test(n) || ['TC_FILE_PLAIN', 'TC_ENV_PLAIN'].includes(n));
   assert.deepEqual(kept, [], 'Tower Crane\'s own, git\'s and plain names reach the commands');
@@ -614,6 +681,17 @@ test('an untracked empty read-only file with a placeholder name is a stale place
   }
   assert.equal(status(started.cwd), '');
   assert.equal(u.env.GIT_CONFIG_GLOBAL, global, 'Git uses the test-only global config');
+});
+
+test('a sandboxed claude\'s commands, whose GIT_CONFIG_PARAMETERS its sandbox replaces, still exclude the placeholders and keep background gc and maintenance off', { skip: NO_STUBS }, (t) => {
+  const { h, u, wt } = setup(t);
+  isolateGitEnvironment(h, u);
+  isolated(h, 'small', 'claude');
+  fs.rmSync(path.join(wt, '.claude', 'settings.local.json'));
+  spawn(h, u, 'small', { STUB_CLAUDE_SANDBOX_PLACEHOLDERS: JSON.stringify(CLAUDE_SANDBOX_PLACEHOLDERS) });
+  const seen = u.report();
+  assert.equal(seen.placeholderGitStatus.stdout, '', 'the harness\'s own git excludes them');
+  assert.deepEqual(seen.commandGit, { status: '', code: 0, gc: '0', maintenance: 'false' });
 });
 
 test('sandbox cleanup refuses placeholder paths under a symlinked parent', { skip: NO_STUBS }, (t) => {
@@ -787,19 +865,22 @@ test('sandbox cleanup puts back a directory that takes a placeholder name just b
   assert.deepEqual(fs.readdirSync(wt).filter((name) => name.startsWith('.tower-crane-cleanup-')), [], 'no moved name is left behind');
 });
 
-test('the Claude sandbox git env drops only core.excludesFile from an inherited GIT_CONFIG_PARAMETERS', () => {
-  const own = { GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.excludesFile', GIT_CONFIG_VALUE_0: '/x' };
+test('the Claude sandbox git env drops only core.excludesFile from an inherited GIT_CONFIG_PARAMETERS and appends its own there', () => {
+  const own = "'core.excludesFile'='/x'";
   const cases = [
-    ["'advice.detachedHead'", {}],
-    ["'core.excludesFile'='/g' 'advice.detachedHead'", { GIT_CONFIG_PARAMETERS: "'advice.detachedHead'" }],
-    ["'core.excludesFile=/g' 'advice.detachedHead'", { GIT_CONFIG_PARAMETERS: "'advice.detachedHead'" }],
-    ["'url.https://h/?a=b.insteadOf'='x' 'core.excludesfile'='/g'", { GIT_CONFIG_PARAMETERS: "'url.https://h/?a=b.insteadOf'='x'" }],
-    ["'core.excludesfile=/g' 'url.https://h/?a=b.insteadOf'='x'", { GIT_CONFIG_PARAMETERS: "'url.https://h/?a=b.insteadOf'='x'" }],
-    ["'a'\\''b'='c' 'core.excludesFile'='/g'", { GIT_CONFIG_PARAMETERS: "'a'\\''b'='c'" }],
+    [undefined, own],
+    ["'advice.detachedHead'", `'advice.detachedHead' ${own}`],
+    ["'core.excludesFile'='/g' 'advice.detachedHead'", `'advice.detachedHead' ${own}`],
+    ["'core.excludesFile=/g' 'advice.detachedHead'", `'advice.detachedHead' ${own}`],
+    ["'url.https://h/?a=b.insteadOf'='x' 'core.excludesfile'='/g'", `'url.https://h/?a=b.insteadOf'='x' ${own}`],
+    ["'core.excludesfile=/g' 'url.https://h/?a=b.insteadOf'='x'", `'url.https://h/?a=b.insteadOf'='x' ${own}`],
+    ["'a'\\''b'='c' 'core.excludesFile'='/g'", `'a'\\''b'='c' ${own}`],
   ];
-  for (const [parameters, kept] of cases) {
-    assert.deepEqual(ClaudeSandboxPlaceholders.gitEnvironment('/x', { GIT_CONFIG_PARAMETERS: parameters }), { ...kept, ...own }, parameters);
+  for (const [parameters, want] of cases) {
+    const env = parameters === undefined ? { GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'a.b', GIT_CONFIG_VALUE_0: 'c' } : { GIT_CONFIG_PARAMETERS: parameters };
+    assert.deepEqual(ClaudeSandboxPlaceholders.gitEnvironment('/x', env), { GIT_CONFIG_PARAMETERS: want }, String(parameters));
   }
+  assert.throws(() => ClaudeSandboxPlaceholders.gitEnvironment('/x', { GIT_CONFIG_PARAMETERS: "'open" }), /GIT_CONFIG_PARAMETERS is malformed/);
 });
 
 test('a valueless GIT_CONFIG_PARAMETERS entry does not stop a sandboxed claude from starting', { skip: NO_STUBS }, (t) => {

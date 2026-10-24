@@ -8,6 +8,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { makeRepo, makeProjectRepo, cachedFixture, pinRung, BIN, runPty, PTY_AVAILABLE } = require('./helpers');
 const { gateFixture, gateEvidence, changeKind } = require('./gate-helpers');
+const { harnessArgv, scopeEnv } = require('./containment-plan');
 
 const prices = {
   'fixture-light': { input: 0.10, cache_write: 0.125, cache_read: 0.01, output: 0.50 },
@@ -102,8 +103,9 @@ function reviewPacket(h) {
 }
 
 function model(out) {
-  const flag = out.harness === 'claude' ? '--model' : out.argv.includes('-m') ? '-m' : out.argv.includes('-p') ? '-p' : '--model';
-  return out.argv[out.argv.indexOf(flag) + 1];
+  const argv = harnessArgv(out.argv);
+  const flag = out.harness === 'claude' ? '--model' : argv.includes('-m') ? '-m' : argv.includes('-p') ? '-p' : '--model';
+  return argv[argv.indexOf(flag) + 1];
 }
 
 function sample(h, name, input, cached, output, cacheWrite = 0) {
@@ -169,23 +171,26 @@ test('review contract extraction covers split and legacy state layouts', (t) => 
     { split: 'no heading', legacy: true, expected: 'LEGACY_CONTRACT' },
   ];
   fs.mkdirSync(path.join(h.repo, 'docs', 'state'), { recursive: true });
-  fs.writeFileSync(path.join(h.repo, 'docs', 'cli.md'), '## Gates\nCLI_CONTRACT\n\n## Next\nOUTSIDE_CLI\n');
-  for (const variant of variants) {
-    const gates = path.join(h.repo, 'docs', 'state', 'gates.md');
-    if (!variant.split) fs.rmSync(gates, { force: true });
-    else fs.writeFileSync(gates, variant.split === true
-      ? '# Gates\n\n### Acceptance gates\nSPLIT_CONTRACT\n```md\n## FENCED_HEADING\n```\n\n### Next\nOUTSIDE_STATE\n'
-      : '# Gates\n');
-    fs.writeFileSync(path.join(h.repo, 'docs', 'state.md'), variant.legacy
-      ? '# State\n\n### Acceptance gates\nLEGACY_CONTRACT\n\n## Next\nOUTSIDE_STATE\n'
-      : '# State\n\n[Acceptance gates](state/gates.md#acceptance-gates)\n');
-    const context = staticContext(h.repo, [], 'default', 'ROLE', {});
-    assert.ok(context.includes(variant.expected), JSON.stringify(variant));
-    assert.ok(context.includes('CLI_CONTRACT'));
-    assert.ok(!context.includes('OUTSIDE_STATE') && !context.includes('OUTSIDE_CLI'));
-    if (variant.split === true) {
-      assert.ok(context.includes('FENCED_HEADING'));
-      assert.ok(!context.includes('LEGACY_CONTRACT'));
+  for (const eol of ['\n', '\r\n']) {
+    const write = (file, text) => fs.writeFileSync(file, text.replace(/\n/g, eol));
+    write(path.join(h.repo, 'docs', 'cli.md'), '## Gates\nCLI_CONTRACT\n\n## Next\nOUTSIDE_CLI\n');
+    for (const variant of variants) {
+      const gates = path.join(h.repo, 'docs', 'state', 'gates.md');
+      if (!variant.split) fs.rmSync(gates, { force: true });
+      else write(gates, variant.split === true
+        ? '# Gates\n\n### Acceptance gates\nSPLIT_CONTRACT\n```md\n## FENCED_HEADING\n```\n\n### Next\nOUTSIDE_STATE\n'
+        : '# Gates\n');
+      write(path.join(h.repo, 'docs', 'state.md'), variant.legacy
+        ? '# State\n\n### Acceptance gates\nLEGACY_CONTRACT\n\n## Next\nOUTSIDE_STATE\n'
+        : '# State\n\n[Acceptance gates](state/gates.md#acceptance-gates)\n');
+      const context = staticContext(h.repo, [], 'default', 'ROLE', {});
+      assert.ok(context.includes(variant.expected), JSON.stringify({ ...variant, eol }));
+      assert.ok(context.includes('CLI_CONTRACT'));
+      assert.ok(!context.includes('OUTSIDE_STATE') && !context.includes('OUTSIDE_CLI'));
+      if (variant.split === true) {
+        assert.ok(context.includes('FENCED_HEADING'));
+        assert.ok(!context.includes('LEGACY_CONTRACT'));
+      }
     }
   }
   const root = path.join(__dirname, '..');
@@ -459,12 +464,13 @@ test('Codex profile builders share canonical identity with provider spend and pr
     ['medium', 'fixture-main', 'fixture-main', 'hard', 'fixture-large', 'fixture-large'],
   ]) {
     const h = setup(t, tier, provider, profile, { gated: true });
+    const scoped = scopeEnv(h);
     // A later self-reported model and ladder edit cannot rename the builder route.
     h.ok(['spend', 'T1', '--agent', h.builder, '--tokens', '1', '--rung', tier, '--model', 'wrong-model']);
-    assert.deepEqual([choice(h).review_rung, model(choice(h))], [tier, profile]);
+    assert.deepEqual([choice(h, scoped).review_rung, model(choice(h, scoped))], [tier, profile]);
     sample(h, provider, 1000000, 0, 0);
     sample(h, promotedProvider, 0, 0, 1);
-    const out = choice(h);
+    const out = choice(h, scoped);
     assert.deepEqual([out.review_rung, model(out)], [promotedTier, promotedModel]);
     const prompt = out.argv.find((arg) => arg.includes('## Task'));
     assert.ok(prompt.includes(`builder model ${provider}`), prompt);
@@ -530,9 +536,10 @@ test('Codex review pricing follows the user origin from a private caller home', 
   assert.equal(choice(h, userEnv).review_rung, 'hard');
   const privateEnv = { ...userEnv, HOME: privateHome, USERPROFILE: privateHome };
   assert.equal(choice(h, privateEnv).review_rung, 'hard');
-  const dispatch = h.json(['spawn', '--task', 'T1', '--dry-run'], { env: { ...h.reviewEnv, ...privateEnv } });
+  const dispatch = h.json(['spawn', '--task', 'T1', '--dry-run'], { env: { ...h.reviewEnv, ...privateEnv, ...scopeEnv(h) } });
   assert.equal(dispatch.harness, 'codex');
-  assert.equal(dispatch.argv[dispatch.argv.indexOf('-p') + 1], 'origin-review');
+  const argv = harnessArgv(dispatch.argv);
+  assert.equal(argv[argv.indexOf('-p') + 1], 'origin-review');
 });
 
 test('a stronger model wins only when its median priced review cost is no higher', (t) => {
@@ -1076,10 +1083,12 @@ test('review dispatch refuses a submitted head, configured base or review scope 
   }
 });
 
-test('accept runs tests, clean and CI before dispatch, then automation accepts after review', async (t) => {
+for (const testsFirst of [false, true]) {
+test(`accept runs clean and CI before dispatch and tests ${testsFirst ? 'before it' : 'after review'}, then automation accepts`, async (t) => {
   const h = setup(t);
   const out = path.join(h.base, 'review-context.txt');
   commandReviewer(h, out);
+  if (testsFirst) h.ok(['project', 'set', '--review-policy', '{"tests_first":true}']);
   h.ok(['submit', 'T1', '--agent', 'builder', '--sha', h.sha, '--pr', '7']);
   const result = h.json(['accept', 'T1']);
   assert.equal(result.status, 'submitted');
@@ -1087,19 +1096,24 @@ test('accept runs tests, clean and CI before dispatch, then automation accepts a
   await waitOnRepo(h, () => h.readState('tasks.json').tasks[0].status === 'accepted');
   const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   const dispatch = events.findIndex((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer');
-  for (const type of ['tests', 'clean', 'ci']) assert.ok(events.findIndex((e) => e.cmd === `check ${type}` && e.detail.ok) < dispatch);
+  const review = events.findIndex((e) => e.cmd === 'evidence' && e.detail.type === 'review' && e.detail.ok);
+  for (const type of ['clean', 'ci']) assert.ok(events.findIndex((e) => e.cmd === `check ${type}` && e.detail.ok) < dispatch);
+  const tests = events.findIndex((e) => e.cmd === 'check tests' && e.detail.ok);
+  assert.ok(testsFirst ? tests >= 0 && tests < dispatch : tests > review, `tests at ${tests}, dispatch at ${dispatch}, review at ${review}`);
   assert.match(fs.readFileSync(out, 'utf8'), /Gate results/);
   const accepted = h.readState('tasks.json').tasks[0];
   assert.equal(accepted.status, 'accepted');
   assert.ok(accepted.evidence.some((e) => e.type === 'review' && e.ok));
 });
+}
 
 describe('remaining reviewer integration cases', { concurrency: caseConcurrency }, () => {
 test('a failed automatic gate never starts a reviewer', (t) => {
   const h = setup(t);
   const out = path.join(h.base, 'review-context.txt');
   commandReviewer(h, out);
-  h.ok(['project', 'set', '--tests-cmd', 'node -e "process.exit(1)"']);
+  // Tests first, so the failing suite runs before any review dispatch.
+  h.ok(['project', 'set', '--tests-cmd', 'node -e "process.exit(1)"', '--review-policy', '{"tests_first":true}']);
   const failed = h.run(['accept', 'T1', '--cmd', 'node -e "process.exit(1)"']);
   assert.equal(failed.code, 1);
   assert.ok(!fs.existsSync(out));
@@ -1111,7 +1125,9 @@ test('automatic tests honor owner none mode and forward expensive proof commands
   for (const expensive of [false, true]) {
     const h = setup(t);
     commandReviewer(h, path.join(h.base, 'review-context.txt'));
-    h.ok(['project', 'set', '--tests-mode', expensive ? 'prove' : 'none', '--tests-expensive', String(expensive), '--tests-proof-cmd', 'node {tests}']);
+    // Tests first, so accept runs the suite before it dispatches review.
+    h.ok(['project', 'set', '--tests-mode', expensive ? 'prove' : 'none', '--tests-expensive', String(expensive), '--tests-proof-cmd', 'node {tests}',
+      '--review-policy', '{"tests_first":true}']);
     const args = expensive ? ['--cmd', 'node test/value.test.js', '--proof-cmd', 'node {tests}'] : [];
     assert.equal(h.json(['accept', 'T1', ...args]).review_pending, true);
     const evidence = h.readState('tasks.json').tasks[0].evidence.find((e) => e.type === 'tests');
