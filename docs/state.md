@@ -48,6 +48,8 @@ Existing links use these anchors. Follow the link to the contract in its area.
 
 <a id="resource-containment"></a>[resource-containment](state/containment.md#resource-containment)
 
+<a id="cpu-shares"></a>[cpu-shares](state/containment.md#cpu-shares)
+
 <a id="host-resource-governor"></a>[host-resource-governor](state/containment.md#host-resource-governor)
 
 <a id="units"></a>[units](state/containment.md#units)

@@ -63,6 +63,7 @@ Workers, reviewers and every other identity are refused both. For an operational
 | `gates.rework_hold_min` | operational | `project set --rework-hold-min` |
 | `gates.presubmit` | operational | `project set --presubmit`: worker command before recording a submitted head; `presubmit retry` and `presubmit override` resolve refusals |
 | `gates.final_review` | operational | `project set --final-review`: the external reviewer command `accept` runs on the host |
+| `gates.cpu_weight`, `agents.cpu_weight` | operational | `project set --gates-cpu-weight`, `--agents-cpu-weight`: weights inside the project's own slice, so they take no CPU from another project |
 | `archive.retention_days` | operational | `project set --archive-retention-days` |
 | `gates.priority` | operational | `gates prioritize ID --reason R`: a task's queued submitted gate reactions run before older submitted work; accepted merges stay first |
 | `ci.required`, `ci.ignore_apps`, `ci.capped_review` | operational | `project set --ci-required`, `--ci-ignore-apps`, `--ci-capped-review` |
