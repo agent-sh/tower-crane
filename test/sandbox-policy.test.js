@@ -36,6 +36,8 @@ test('policy paths, owner-only classes and narrowing, as a variant table', { ski
   const runtime = path.join(base, 'runtime');
   for (const d of [home, project, runtime, path.join(base, 'link-target')]) fs.mkdirSync(d, { recursive: true });
   fs.symlinkSync(path.join(home, '.ssh'), path.join(base, 'link-target', 'keys'));
+  // A dangling link in the middle of a path: ~/.aws does not exist yet.
+  fs.symlinkSync(path.join(home, '.aws'), path.join(base, 'link-target', 'mid'));
   // Under a policy path, directories that hold a socket at any depth or a link to one.
   const agent = socketAt(path.join(base, 'link-target', 'ssh-agent', 'deep'), 'agent.1');
   fs.mkdirSync(path.join(base, 'link-target', 'x11'));
@@ -82,6 +84,9 @@ test('policy paths, owner-only classes and narrowing, as a variant table', { ski
     [{ field: 'write', value: `${project}-worktrees/T1-a` }, 'outside the sandbox policy'],
     // A link inside a granted directory is judged where it leads.
     [{ field: 'write', value: `${base}/link-target/keys` }, 'credentials stays owner-only'],
+    // So is a link in the middle of the path, one whose target does not exist yet included.
+    [{ field: 'write', value: `${base}/link-target/mid/credentials` }, 'credentials stays owner-only'],
+    [{ field: 'read', value: `${base}/link-target/keys/id_ed25519` }, 'credentials stays owner-only'],
     [{ field: 'write', value: '~/work' }, null],
     [{ field: 'write', value: path.join(runtime, 'bus') }, 'session_bus stays owner-only'],
     [{ field: 'write', value: path.join(runtime, 'docker.sock') }, 'sockets stays owner-only'],
@@ -99,6 +104,8 @@ test('policy paths, owner-only classes and narrowing, as a variant table', { ski
     fs.mkdirSync(path.join(shut, 'inner'), { recursive: true });
     fs.chmodSync(path.join(shut, 'inner'), 0o000);
     rows.push([{ field: 'write', value: shut }, 'sockets stays owner-only']);
+    // A path under a directory nobody can search cannot be resolved, so it counts as outside.
+    rows.push([{ field: 'write', value: path.join(shut, 'inner', 'sub') }, `${path.join(shut, 'inner', 'sub')} cannot be resolved (EACCES), so it counts as outside the sandbox policy`]);
   }
   for (const [item, why] of rows) assert.equal(P.refusal(policy, item, r), why, JSON.stringify(item));
   assert.equal(P.refusal(null, { field: 'write', value: '~/work' }, r), 'no sandbox policy is set');
@@ -376,3 +383,56 @@ test('a path spawn refuses is refused at every grant and ask, whoever makes it, 
   assert.match(started, new RegExp(`sandbox grants the policy no longer backs were left out: T1 write ${cache}`));
   assert.ok(!writable(out).some((p) => p === cache || p === state), 'the agent does not get the state directory');
 });
+
+// Found in review 2026-10-22: one policy-backed grant under a directory that
+// became unsearchable made every status, task show, dispatch and narrowing
+// project set exit 1 with EACCES. Such a grant cannot be judged, so it
+// counts as outside: it is left out of the dispatch and revoked by a policy
+// change, and every command goes on.
+test('a policy-backed grant under a directory nobody can search counts as outside: status, task show, dispatch and narrowing still work', { skip: (NO_STUBS || process.platform === 'win32' || process.getuid?.() === 0) && 'needs POSIX permissions and a user root does not bypass' }, (t) => {
+  const h = cachedFixture(t, 'sandbox policy unsearchable', (h) => {
+    h.init();
+    h.ok(['task', 'add', '--title', 'Needs a cache', '--acceptance', 'done']);
+    h.ok(['brief', 'set', 'T1', '-'], { input: 'probe' });
+    h.ok(['ladder', 'set', 'medium', '--harness', 'codex', '--profile', 'fixture-main', '--clear', 'model', '--clear', 'effort', '--clear', 'args']);
+  });
+  const bin = path.join(h.base, 'bin');
+  fs.mkdirSync(bin);
+  const out = path.join(h.base, 'config.toml');
+  writeCodexStub(bin, out);
+  const env = { ...h.env, PATH: `${bin}${path.delimiter}${process.env.PATH}`, CODEX_HOME: '' };
+  const grants = path.join(fs.realpathSync(h.base), 'grants');
+  const cache = path.join(grants, 'cache');
+  const sub = path.join(cache, 'sub');
+  fs.mkdirSync(sub, { recursive: true });
+  h.ok(['project', 'set', '--sandbox-policy', JSON.stringify({ orchestrator_may_grant: { write: [`${grants}/**`, '/srv/**'] } })]);
+  h.ok(['task', 'update', 'T1', '--sandbox', JSON.stringify({ write: [sub] })], as('orchestrator'));
+  fs.chmodSync(cache, 0o000);
+  // The fixture's cleanup runs before a later t.after, so the mode comes back here.
+  try {
+    unsearchable(h, env, out, grants, sub);
+  } finally {
+    fs.chmodSync(cache, 0o755);
+  }
+});
+
+function unsearchable(h, env, out, grants, sub) {
+  h.ok(['status']);
+  assert.match(h.ok(['task', 'show', 'T1']), new RegExp(`write ${sub} by orchestrator under sandbox policy v1 \\(revoked: no longer inside the policy\\)`));
+  const spawned = h.run(['spawn', '--task', 'T1', '--wait'], { env });
+  assert.equal(spawned.code, 0, spawned.stderr);
+  assert.match(spawned.stdout + spawned.stderr, new RegExp(`sandbox grants the policy no longer backs were left out: T1 write ${sub}`));
+  assert.ok(!writable(out).includes(sub), 'the dispatch leaves the grant out');
+
+  // Narrowing works and revokes the grant it can no longer judge.
+  h.ok(['project', 'set', '--sandbox-policy', JSON.stringify({ orchestrator_may_grant: { write: [`${grants}/**`] } })], as('orchestrator'));
+  assert.equal(task(h, 'T1').sandbox_grants, undefined);
+  const revoke = events(h).findLast((e) => e.cmd === 'sandbox revoke');
+  assert.equal(revoke.task, 'T1');
+  assert.deepEqual(revoke.detail.revoked, [{ field: 'write', value: sub, policy_version: 1 }]);
+  // A new grant there is outside too: the owner's decision, not the orchestrator's.
+  const again = h.run(['task', 'update', 'T1', '--sandbox', JSON.stringify({ write: [sub] })], as('orchestrator'));
+  assert.equal(again.code, 1, again.stderr);
+  assert.match(again.stderr, /sandbox is owner-required; opened D\d+/);
+  assert.match(h.readState('decisions.json').decisions.at(-1).why, /cannot be resolved \(EACCES\), so it counts as outside the sandbox policy/);
+}
