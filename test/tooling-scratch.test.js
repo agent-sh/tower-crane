@@ -57,7 +57,9 @@ for (const tool of ['test-coverage', 'test-options']) {
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { scratchRoot } = require(${JSON.stringify(path.join(ROOT, 'lib', 'scratch-root.js'))});
-test('coverage fixture', () => assert.ok(scratchRoot({}, 'fixture-home').endsWith('tower-crane')));
+test('coverage fixture', () => {
+  assert.ok(scratchRoot({}, 'fixture-home').endsWith('tower-crane'));
+});
 `);
           argv.push('--jobs', '1', '--json', report, fixture);
         }
