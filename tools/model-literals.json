@@ -218,5 +218,15 @@
     "path": "lib/sandbox-policy.js",
     "text": "claude-code",
     "reason": "Claude Code config directory under ~/.config, a credential store the sandbox policy keeps owner-only"
+  },
+  {
+    "path": "tools/tests-map.json",
+    "text": "claude-probe-cache.test.js",
+    "reason": "Test filename in the generated test coverage map"
+  },
+  {
+    "path": "tools/tests-map.json",
+    "text": "claude-probe-cache.js",
+    "reason": "Module filename in the generated test coverage map"
   }
 ]
