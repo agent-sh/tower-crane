@@ -36,7 +36,7 @@ test('the ci.overlap output contract accepts keep and shared steps, and names wh
 
 // A checker that logs each run's argv and checkout, and a hook that logs its argv and answers
 // from OVERLAP_OUT, OVERLAP_EXIT or OVERLAP_SLEEP.
-function overlapFixture(t, { hook = true } = {}) {
+function overlapFixture(t, { hook = true, inputs } = {}) {
   const h = mergeFixture(t);
   h.runs = path.join(h.base, 'runs.jsonl');
   h.asked = path.join(h.base, 'asked.jsonl');
@@ -55,7 +55,7 @@ if (process.env.OVERLAP_EXIT) { process.stderr.write('overlap broke\\n'); proces
 process.stdout.write(process.env.OVERLAP_OUT || '');
 `);
   h.ok(['project', 'set', '--ci-local', JSON.stringify({ command: [process.execPath, checker, h.runs], timeout: 5,
-    rerun_cmd: [process.execPath, checker, h.runs, '--only', '{steps}'] })]);
+    rerun_cmd: [process.execPath, checker, h.runs, '--only', '{steps}'], ...(inputs ? { inputs } : {}) })]);
   if (hook) h.ok(['project', 'set', '--ci-overlap', JSON.stringify({ command: [process.execPath, overlap, h.asked], timeout: 1 })]);
   h.ok(['check', 'ci', 'T1']);
   h.ok(['accept', 'T1']);
@@ -132,7 +132,8 @@ test('shared steps rerun alone on the new merged tree, and merge leaves that run
 });
 
 for (const [name, opts, env, reason] of [
-  ['no hook', { hook: false }, {}, /no ci.overlap hook is set/],
+  // Without a hook a move the command does not read lands on the built-in path rule, so this one is read.
+  ['no hook', { hook: false, inputs: ['later.txt'] }, {}, /no ci.overlap hook is set/],
   ['a failing hook', {}, { OVERLAP_EXIT: '3' }, /ci.overlap exit 3: overlap broke/],
   ['a timed out hook', {}, { OVERLAP_SLEEP: '4000' }, /ci.overlap timed out after 1 s/],
   ['bad JSON', {}, { OVERLAP_OUT: 'shared: none' }, /ci.overlap its output is not JSON: shared: none/],
