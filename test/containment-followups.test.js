@@ -295,7 +295,7 @@ test('CLI dry runs show the mandatory containment argv and scoped environment', 
   });
   const manager = path.join(__dirname, 'fixtures', 'containment-manager.js');
   const env = { NODE_OPTIONS: `--require ${JSON.stringify(manager)}`, TC_FAKE_MANAGER_LOG: path.join(h.base, 'manager') };
-  for (const [scope, executable] of [['{}', process.execPath], ['{"CPUQuota":"200%"}', 'systemd-run']]) {
+  for (const [scope, executable] of [['{}', 'systemd-run'], ['{"CPUQuota":"200%"}', 'systemd-run']]) {
     h.ok(['ladder', 'set', 'easy', '--scope', scope]);
     const result = h.json(['spawn', '--task', 'T1', '--dry-run'], { env });
     assert.equal(result.argv[0], executable);
