@@ -507,7 +507,7 @@ test('submit reports redact explained base errors with or without another failin
       assert.equal(result.status, mixed ? 1 : 0, `${context}: ${result.stderr}`);
       if (!mixed) assert.ok(result.stdout.includes(`Error: auth failed with ${marker}`), context);
       for (const text of [result.stdout, result.stderr, JSON.stringify(h.readState('tasks.json')),
-        fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8')]) {
+        StateFiles.logText(h.state)]) {
         assert.equal(text.includes(value), false, context);
         assert.equal(text.includes(shown), false, context);
       }
