@@ -7,7 +7,7 @@ const { check } = require('./cli-docs');
 const { check: checkDocLinks } = require('./doc-links');
 const { fragments, released } = require('./changelog');
 const { normalizeText, readText } = require('./text');
-const { checkTestWaits, tokenize } = require('./test-waits');
+const { checkTestWaits, checkSpins, tokenize } = require('./test-waits');
 const { checkSuiteDeadline } = require('./suite-time');
 const { checkFakeAgentEnvs } = require('./fake-agent-env');
 const { checkMutants } = require('./mutants');
@@ -143,6 +143,7 @@ function main(args) {
   checkStdinReads(root);
   checkScratchRoots(root);
   checkTestWaits(root);
+  checkSpins(root);
   checkFakeAgentEnvs(root);
   checkSuiteDeadline(root);
   // Mutation scoring runs shared checks on deliberately changed code.

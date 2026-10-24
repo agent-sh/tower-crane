@@ -239,7 +239,7 @@ function engineCheckout(h, dir) {
   const [out, ready, retired] = ['seen.json', 'ready', 'retired'].map((n) => path.join(dir, n));
   // The command marks itself started and waits for the test to retire the copy.
   const script = `const fs=require("fs"),cp=require("child_process");fs.writeFileSync(${JSON.stringify(ready)},"");`
-    + `const until=Date.now()+100000;while(!fs.existsSync(${JSON.stringify(retired)})&&Date.now()<until)cp.spawnSync("sleep",["1"]);` // wait-allow: runs in the sandbox, where test/signals.js is hidden; the test writes the file within a second of ready
+    + `const until=Date.now()+100000,parent=process.ppid;while(!fs.existsSync(${JSON.stringify(retired)})&&Date.now()<until&&process.ppid===parent)cp.spawnSync("sleep",["1"]);` // wait-allow: runs in the sandbox, where test/signals.js is hidden; the test writes the file within a second of ready
     + `const run=(a)=>{const r=cp.spawnSync("tower-crane",a,{encoding:"utf8"});return{code:r.status,stdout:r.stdout,stderr:r.stderr,error:r.error&&r.error.code}};`
     + `fs.writeFileSync(${JSON.stringify(out)},JSON.stringify({show:run(["task","show","T1","--json"]),note:run(["task","note","T1","after-retirement"])}))`;
   // spawn from the copy, with the hooks h.runAsync adds, and without --wait:
@@ -295,6 +295,52 @@ test('in a real codex sandbox the agent\'s tower-crane still answers after the d
   assert.ok(r.running, `the copy was retired while the agent ran\n${agentLog(h)}`);
   assert.equal(r.code, 0, agentLog(h));
   assertAnswered(h, started.agent, engine.out);
+});
+
+// Seen 2026-10-23 (worker-T499-14 attempt 18): a resume started the agent's
+// next spawn while its last monitor still ran gates, and that monitor's close
+// deleted the new broker.json and moved brokers/<agent>/ aside. codex binds
+// that directory by path for each command, under the masked brokers/, so
+// every brokered command failed with EACCES. Here the test is the earlier
+// monitor: its broker for the same agent starts before the spawn and closes
+// once the spawn's broker has started, before the sandboxed command runs.
+test('in a real codex sandbox a resumed agent reaches its broker after the agent\'s last monitor closes', { skip: realCodexSandbox(), timeout: 300000 }, async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Resume probe', '--acceptance', 'the broker answers']);
+  h.ok(['brief', 'set', 'T1', '-'], { input: 'resume probe\n' });
+  const dir = results(h);
+  const [out, go, closed] = ['resume-probe.json', 'go', 'closed'].map((n) => path.join(dir, n));
+  const B = require('../lib/broker');
+  const agent = 'small-T1-1';
+  const job = { state: h.state, task: 'T1', agent, role: 'small', harness: 'codex', broker_harnesses: ['codex'], cwd: h.repo, broker: path.join(B.dir(h.state, agent), B.FILE) };
+  const earlier = await B.start(job);
+  let open = true;
+  t.after(() => open && earlier.close());
+  // What the earlier agent's sandbox left in its broker directory.
+  fs.writeFileSync(path.join(path.dirname(job.broker), 'agent-file'), 'x');
+  const script = 'const fs=require("fs"),cp=require("child_process"),o={};'
+    + 'try{o.broker=JSON.parse(fs.readFileSync(process.env.TOWER_CRANE_BROKER,"utf8")).token?"READABLE":"NO TOKEN"}catch(e){o.broker="ERR "+e.code}'
+    + 'const r=cp.spawnSync("tower-crane",["task","note","T1","after-resume"],{encoding:"utf8"});o.note={code:r.status,stderr:r.stderr};'
+    + `fs.writeFileSync(${JSON.stringify(out)},JSON.stringify(o))`;
+  const before = `require("fs").writeFileSync(${JSON.stringify(go)},"");const s=new Int32Array(new SharedArrayBuffer(4));`
+    + `for(let i=0;i<600&&!require("fs").existsSync(${JSON.stringify(closed)});i++)Atomics.wait(s,0,0,100);run()`; // wait-allow: the stand-in waits on the host for the test to close the earlier broker, which it does within a second of go
+  const bin = standInCodex(h, script, 'small', before);
+  let done = false;
+  const spawned = h.runAsync(['spawn', '--role', 'small', '--task', 'T1', '--wait'], { env: { ...h.env, PATH: `${bin}${path.delimiter}${h.env.PATH}` } })
+    .finally(() => { done = true; });
+  await waitUntil(() => fs.existsSync(go) || done, { paths: [dir], what: 'the spawn\'s broker started' });
+  earlier.close();
+  open = false;
+  fs.writeFileSync(closed, '');
+  const r = await spawned;
+  assert.equal(r.code, 0, `${r.stderr}\n${agentLog(h)}`);
+  assert.ok(fs.existsSync(out), `the probe ran\n${agentLog(h)}`);
+  const seen = JSON.parse(fs.readFileSync(out, 'utf8'));
+  console.log(`codex resume probe: ${JSON.stringify(seen)}`);
+  assert.equal(seen.broker, 'READABLE', 'the resumed agent reads its broker.json');
+  assert.equal(seen.note.code, 0, `the note goes through the broker: ${seen.note.stderr}`);
+  assert.equal(h.readState('tasks.json').tasks[0].notes.find((n) => n.text === 'after-resume')?.agent, agent);
 });
 
 test('in a real claude sandbox the agent\'s tower-crane still answers after the dispatching checkout is retired', { skip, timeout: 600000 }, async (t) => {
@@ -401,6 +447,50 @@ for (const runtime of ['with', 'without']) test(`a real claude agent's commands 
   assert.ok(seen.own.startsWith(where), `claude's own temp files are in ${where}: ${seen.own}`);
   assert.match(seen.ownWrite, /^ERR /, 'the commands cannot write claude\'s own temp files');
 });
+
+// claude's sandbox hides /tmp and allows back only what the agent needs
+// there. The parent of a PATH entry of /tmp is /, and a caller's TMPDIR of
+// /tmp is where claude makes its proxy sockets; neither is allowed back, so
+// a command reads neither a file planted in /tmp nor one in the home outside
+// its grants. The fixture's cache root is too deep for claude's own TMPDIR,
+// so the agent keeps the caller's.
+for (const route of ['PATH', 'TMPDIR']) {
+  test(`in a real claude sandbox with ${route === 'PATH' ? '/tmp on PATH' : 'the caller\'s TMPDIR at /tmp'}, a command reads neither a file planted in /tmp nor one in the home outside its grants`, { skip, timeout: 300000 }, async (t) => {
+    const h = login(makeRepo(t));
+    h.init();
+    h.ok(['task', 'add', '--title', 'Tmp grant probe', '--acceptance', 'nothing planted is read']);
+    const out = path.join(results(h), 'tmp-grant-probe.json');
+    const planted = fs.mkdtempSync('/tmp/tower-crane-planted-');
+    t.after(() => fs.rmSync(planted, { recursive: true, force: true }));
+    fs.writeFileSync(path.join(planted, 'secret'), 'PLANTED-TMP\n');
+    const outOfGrant = path.join(h.env.HOME, 'out-of-grant');
+    fs.mkdirSync(outOfGrant, { recursive: true });
+    fs.writeFileSync(path.join(outOfGrant, 'secret'), 'PLANTED-HOME\n');
+    const files = { tmp: path.join(planted, 'secret'), home: path.join(outOfGrant, 'secret') };
+    const script = `const fs=require("fs"),o={tmpdir:process.env.TMPDIR||null};`
+      + `for(const [k,f] of Object.entries(${JSON.stringify(files)})){try{o[k]=fs.readFileSync(f,"utf8").trim()}catch(e){o[k]="ERR "+e.code}}`
+      + `try{o.tmpList=fs.readdirSync("/tmp").length}catch(e){o.tmpList="ERR "+e.code}`
+      + `fs.writeFileSync(${JSON.stringify(out)},JSON.stringify(o))`;
+    h.ok(['brief', 'set', 'T1', '-'], {
+      input: `Sandbox probe set up by the owner. It checks which files your commands may read. Run exactly this one command with your command tool, then reply with its exit code and stop. Do not use tower-crane.\n\n${node} -e '${script}'\n`,
+    });
+    pinLiveRung(h, 'claude');
+    const env = route === 'PATH' ? { ...h.env, PATH: `${h.env.PATH || process.env.PATH}${path.delimiter}/tmp` } : { ...h.env, TMPDIR: '/tmp', TMP: '/tmp', TEMP: '/tmp' };
+    const r = await h.runAsync(['spawn', '--role', 'small', '--task', 'T1', '--wait'], { env });
+    assert.equal(r.code, 0, `${r.stderr}\n${agentLog(h)}`);
+    assert.match(r.stdout, /claude's sandbox keeps \/tmp hidden: the (PATH directory|caller's TMPDIR) \/tmp is \/tmp itself, so it is not allowed back/);
+    const settings = JSON.parse(fs.readFileSync(path.join(h.state, 'homes', 'small-T1-1', 'settings.json'), 'utf8'));
+    const box = settings.sandbox.filesystem;
+    assert.ok(!box.allowRead.includes('/') && !box.allowRead.includes(fs.realpathSync('/tmp')), box.allowRead.join(' '));
+    assert.ok(box.denyRead.includes(fs.realpathSync('/tmp')), '/tmp is hidden');
+    assert.ok(fs.existsSync(out), `the probe ran\n${agentLog(h)}`);
+    const seen = JSON.parse(fs.readFileSync(out, 'utf8'));
+    console.log(`claude tmp grant probe, ${route}: ${JSON.stringify(seen)}`);
+    if (route === 'TMPDIR') assert.ok(seen.tmpdir === '/tmp' || seen.tmpdir?.startsWith('/tmp/'), `the agent keeps the caller's TMPDIR: ${seen.tmpdir}`);
+    assert.match(seen.tmp, /^ERR /, 'a file planted in /tmp is unreadable');
+    assert.match(seen.home, /^ERR /, 'a file in the home outside the grants is unreadable');
+  });
+}
 
 // Host sockets under /run that both sandboxes hide: the system bus,
 // snapd, docker (root on the host for a member of its group) and the user's
@@ -740,6 +830,11 @@ test('a real codex sandbox starts for a home among 5,000 entries and reads nothi
 // fails in git itself and never reaches a server.
 // With inject, the push runs with NODE_OPTIONS asking node to load a file
 // first, which the shim must not do. before runs first, extra after the push.
+// The push runs with NODE_V8_COVERAGE empty: the tests gate's coverage run
+// points it under the gate's TMPDIR, which the sandbox keeps read-only, and the
+// shim's node then ends its stderr with an EROFS line after the refusal. Empty,
+// not deleted: node's child_process copies its own NODE_V8_COVERAGE into an
+// env that lacks the name.
 // The claude probe leaves it out: a model asked to run it declined
 // (2026-10-14), and the stub test in isolation-shims.test.js covers claude's shim.
 function shimProbe(h, out, { before = '', extra = '', inject = false } = {}) {
@@ -753,7 +848,8 @@ function shimProbe(h, out, { before = '', extra = '', inject = false } = {}) {
   return `const fs=require("fs"),cp=require("child_process");const o={};${before}`
     + `for(const t of ["git","gh"]){const p=cp.spawnSync("sh",["-c","command -v "+t],{encoding:"utf8"}).stdout.trim();o[t]=p;`
     + `try{o[t+"Shim"]=fs.readFileSync(p,"utf8").includes("shim.js")}catch(e){o[t+"Shim"]="ERR "+e.code}}`
-    + `const r=cp.spawnSync("git",["push","origin","HEAD:refs/heads/tower-crane/T999-another-task"],{cwd:${JSON.stringify(repo)},encoding:"utf8",env:{...process.env,GIT_TERMINAL_PROMPT:"0"${inject ? `,NODE_OPTIONS:${JSON.stringify(`--require=${evil}`)}` : ''}}});`
+    + `const env={...process.env,GIT_TERMINAL_PROMPT:"0"${inject ? `,NODE_OPTIONS:${JSON.stringify(`--require=${evil}`)}` : ''},NODE_V8_COVERAGE:""};`
+    + `const r=cp.spawnSync("git",["push","origin","HEAD:refs/heads/tower-crane/T999-another-task"],{cwd:${JSON.stringify(repo)},encoding:"utf8",env});`
     + `o.push=r.status;o.pushErr=String(r.stderr).trim().split("\\n").pop();o.injected=fs.existsSync(${JSON.stringify(injected)});${extra}fs.writeFileSync(${JSON.stringify(out)},JSON.stringify(o))`;
 }
 

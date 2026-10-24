@@ -30,7 +30,13 @@ else if (checks) {
 } else if (suites) {
   for (const suite of data.suites || []) console.log(JSON.stringify(suite));
 } else if (/^repos\/[^/]+\/[^/]+\/actions\/runs\?/.test(endpoint)) {
-  for (const run of data.workflows || []) console.log(JSON.stringify(run));
+  const query = new URL(`https://api.github.com/${endpoint}`).searchParams;
+  if (query.get('event') === 'workflow_dispatch' && data.capacityError) fail(data.capacityError);
+  const runs = query.get('event') === 'workflow_dispatch' ? Object.values(data.runs || {}) : data.workflows || [];
+  for (const run of runs) {
+    if (query.get('status') && run.status !== query.get('status')) continue;
+    console.log(JSON.stringify(run));
+  }
 } else if (annotations) {
   for (const row of data.annotations[annotations[1]] || []) console.log(JSON.stringify(row));
 } else if (comments) {
@@ -62,7 +68,8 @@ else if (checks) {
     if (details && data.runDetails !== false) console.log(JSON.stringify({ workflow_run_id: Math.max(...Object.keys(updated.runs).map(Number)) }));
   }
 } else if (actionRun) {
-  if (!data.runs?.[actionRun[1]]) fail('gh: Not Found (HTTP 404)');
+  if (data.runErrors?.[actionRun[1]]) fail(data.runErrors[actionRun[1]]);
+  else if (!data.runs?.[actionRun[1]]) fail('gh: Not Found (HTTP 404)');
   else console.log(JSON.stringify(data.runs[actionRun[1]]));
 } else if (runJobs) {
   for (const row of data.runJobs?.[runJobs[1]] || []) console.log(JSON.stringify(row));

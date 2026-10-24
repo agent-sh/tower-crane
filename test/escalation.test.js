@@ -118,11 +118,22 @@ test('manual range changes use tier authority even when clearing the range at it
   assert.equal(h.json(['task', 'show', 'T1']).tier_range, undefined);
 });
 
-for (const trigger of ['exit', 'preclaim', 'stall', 'review']) {
-  test(`${trigger} climbs one rung automatically with a fresh session and unknown adapter spend`, {
+for (const row of [
+  { trigger: 'exit' },
+  { trigger: 'preclaim' },
+  { trigger: 'stall' },
+  { trigger: 'stall', timerCpu: true, name: 'stall with busy runtime timers' },
+  { trigger: 'review' },
+]) {
+  const { trigger } = row;
+  test(`${row.name || trigger} climbs one rung automatically with a fresh session and unknown adapter spend`, {
     skip: trigger === 'stall' && process.platform !== 'linux' && 'CPU stall observation needs Linux',
   }, async (t) => {
-    const h = await setup(t, trigger);
+    const h = await setup(t, trigger, 'easy..medium', (repo) => {
+      if (row.timerCpu) {
+        repo.env.NODE_OPTIONS += ` ${preloadOption(path.join(__dirname, 'fixtures', 'escalation-timer-cpu.js'))}`;
+      }
+    });
     h.ok(['project', 'set', '--review-policy', JSON.stringify({ prices: {
       'fixture-light': { input: 1, cache_write: 1, cache_read: 1, output: 1 },
     } })]);

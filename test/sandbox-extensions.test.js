@@ -837,7 +837,7 @@ test('codex: the profile hides /run but the resolver, and a runtime directory el
   assert.equal(on.rules['/var'], undefined, '/var is not mounted whole');
   assert.equal(mounted(on.rules, path.join(way, 'made-after-spawn')), false, 'nor is a later entry on the way to the runtime directory');
   assert.equal(mounted(on.rules, path.join('/var/tmp', 'made-after-spawn')), false, 'or in /var/tmp');
-  assert.equal(mounted(on.rules, beside), true, 'a directory beside it stays readable');
+  assert.equal(mounted(on.rules, beside), false, 'nor is a directory beside it, which its owner can remove from sticky /var/tmp');
   for (const p of ['/var/lib', '/var/cache']) if (fs.existsSync(p) && !fs.lstatSync(p).isSymbolicLink()) assert.equal(mounted(on.rules, p), true, `${p} stays readable`);
   assert.equal(on.rules[del], 'read', 'an entry named with DEL is listed');
   assert.doesNotMatch(on.config, /\x7f/, 'and written escaped, since TOML forbids DEL raw');
@@ -870,6 +870,44 @@ test('codex: the profile hides /run but the resolver, and a runtime directory el
   assert.match(inWorktree, /sandbox\.session_bus/);
   assert.ok(inWorktree.includes(`${inside} lies in the agent's worktree ${worktree}`), inWorktree);
   fs.rmSync(inside, { recursive: true });
+});
+
+// Found 2026-10-23 in the T510 host tests gate: the profile listed a
+// systemd-private-* directory of sticky /var/tmp, a service restart removed
+// it, and codex's bwrap, which binds each listed path for every command,
+// failed with "Can't get type of source". A sticky directory of the test's
+// own stands in for /var/tmp, so the case holds where /var/tmp is no root's.
+// The stub removes the entry and lists what is left while the agent runs:
+// the per-spawn socket leaf, which lands in the runtime directory when its
+// path is short, exists only until spawn ends.
+test('codex: an entry removed after spawn from a sticky directory on the way to the runtime directory leaves no profile path missing', { skip: (NO_STUBS || process.platform !== 'linux') && 'the session bus grant and its POSIX paths are Linux only' }, (t) => {
+  const h = setup(t, 'codex');
+  const bin = path.join(h.base, 'bin');
+  fs.mkdirSync(bin);
+  const out = path.join(h.base, 'result.json');
+  const shared = path.join(fs.realpathSync(h.base), 'vartmp');
+  const gone = path.join(shared, 'systemd-private-x');
+  fs.writeFileSync(path.join(bin, 'codex'), [
+    `#!${process.execPath}`, "'use strict';",
+    'const fs = require("node:fs"), path = require("node:path");',
+    `const shared = ${JSON.stringify(shared)};`,
+    `fs.rmSync(${JSON.stringify(gone)}, { recursive: true });`,
+    'const present = [shared, ...fs.readdirSync(shared, { recursive: true }).map((p) => path.join(shared, p))];',
+    `fs.writeFileSync(${JSON.stringify(out)}, JSON.stringify({ config: fs.readFileSync(path.join(process.env.CODEX_HOME, "config.toml"), "utf8"), present }));`,
+    'console.log(JSON.stringify({ type: "thread.started", thread_id: "gone" }));', '',
+  ].join('\n'), { mode: 0o755 });
+  const runtime = path.join(shared, 'rt');
+  fs.mkdirSync(runtime, { recursive: true });
+  fs.chmodSync(shared, 0o1777);
+  fs.writeFileSync(path.join(runtime, 'bus'), '');
+  fs.mkdirSync(gone);
+  h.ok(['project', 'set', '--sandbox', JSON.stringify({ read: [shared], session_bus: true })]);
+  h.ok(['spawn', '--task', 'T1', '--wait'], { env: { ...h.env, XDG_RUNTIME_DIR: runtime, DBUS_SESSION_BUS_ADDRESS: '', PATH: `${bin}${path.delimiter}${process.env.PATH}` } });
+  const { config, present } = JSON.parse(fs.readFileSync(out, 'utf8'));
+  const rules = TOML.parse(config).permissions['tower-crane'].filesystem;
+  assert.equal(rules[path.join(runtime, 'bus')], 'read', 'the bus socket is granted');
+  const bound = Object.keys(rules).filter((p) => rules[p] !== 'none' && (p === shared || p.startsWith(`${shared}/`)));
+  assert.deepEqual(bound.filter((p) => !present.includes(p)), [], 'every path the profile binds there still exists');
 });
 
 // codex's :minimal mounts /usr and /etc whole, so a runtime directory there
