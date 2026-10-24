@@ -856,6 +856,29 @@ test('a test that fails on a newer origin main retries once though the local bas
   assertReworked(h, task);
 });
 
+test('two failing tests gates at medium climb to hard, and restoring the second rework puts the tier back', (t) => {
+  const h = setup(t, { ci: 'pending' });
+  h.ok(['project', 'set', '--tests-cmd', 'node -e "process.exit(1)"', '--tests-mode', 'run-only']);
+  h.submit();
+  h.consume();
+  const tier = () => h.readState('tasks.json').tasks[0].tier;
+  assert.equal(tier(), 'medium', 'one gate rework does not climb');
+  h.ok(['claim', 'T1', '--agent', 'worker']);
+  h.ok(['submit', 'T1', '--sha', h.sha, '--pr', '7', '--agent', 'worker']);
+  h.consume();
+  const reworks = h.logs().filter((e) => e.cmd === 'rework' && e.task === 'T1');
+  assert.deepEqual(reworks.map((e) => [e.detail.gate, e.detail.own_work, e.detail.tier]), [['tests', true, 'medium'], ['tests', true, 'medium']]);
+  assert.equal(tier(), 'hard');
+  assert.equal(h.logs().filter((e) => e.cmd === 'climb').length, 1);
+  h.ok(['project', 'set', '--tests-cmd', 'node -e "process.exit(0)"']);
+  // Review and CI are still due here, so the restore reports them and exits 1.
+  const restored = h.run(['gates', 'retry', 'T1', '--from-rework', '--agent', 'orchestrator']);
+  assert.match(restored.stdout, /restored at revision 2/, `${restored.stdout}${restored.stderr}`);
+  assert.equal(h.readState('tasks.json').tasks[0].status, 'submitted');
+  assert.equal(tier(), 'medium', 'the undone rework no longer counts, so its climb is undone too');
+  assert.equal(h.logs().findLast((e) => e.cmd === 'restore').detail.tier, 'medium');
+});
+
 test('gates retry exits nonzero while a retried gate still fails', (t) => {
   const h = setup(t, { ci: 'pending' });
   h.ok(['project', 'set', '--tests-cmd', 'node -e "process.exit(1)"', '--tests-mode', 'run-only']);
