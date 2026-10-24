@@ -62,7 +62,10 @@ for (const source of sources.filter(p => p.startsWith('test/') && p.endsWith('.j
 map['test/*.test.js'] = new Set(jsChecks);
 map['test/gates/*.test.js'] = new Set(jsChecks);
 map['test/fixtures/**/*.js'] = new Set(jsChecks);
-map['test/fixtures/shard/**'] = new Set(['test/shard.test.js']);
+for (const name of ['a', 'b', 'c', 'd', 'hang', 'orphan']) {
+  const file = `test/fixtures/shard/${name}.test.js`;
+  if (files.includes(file)) map[file].add('test/shard.test.js');
+}
 map['**/*.json'] = new Set(['test/model-config.test.js']);
 map['test/fixtures/npm-pack/**'] = new Set(['test/package.test.js']);
 // npm discovers packed markdown at runtime, including files the test never names.

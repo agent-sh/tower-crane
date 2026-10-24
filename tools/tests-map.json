@@ -256,7 +256,6 @@
   "test/fixtures/report-guard.js": ["test/atomic-file.test.js","test/ci-required.test.js","test/report-guard.test.js","test/shard.test.js","test/shared-files.test.js","test/test-tools.test.js"],
   "test/fixtures/runtime-prune.js": ["test/atomic-file.test.js","test/runtime.test.js","test/shared-files.test.js"],
   "test/fixtures/runtime-wake.js": ["test/atomic-file.test.js","test/runtime.test.js","test/shared-files.test.js"],
-  "test/fixtures/shard/**": ["test/shard.test.js"],
   "test/fixtures/shard/a.test.js": ["test/atomic-file.test.js","test/flakes.test.js","test/gate-join.test.js","test/gates.test.js","test/gates/ci.test.js","test/gates/tests-base.test.js","test/gates/tests.test.js","test/rules.test.js","test/shard.test.js","test/shared-files.test.js","test/test-tools.test.js","test/tests-map.test.js"],
   "test/fixtures/shard/b.test.js": ["test/atomic-file.test.js","test/flakes.test.js","test/gate-join.test.js","test/gates/tests-base.test.js","test/gates/tests.test.js","test/shard.test.js","test/shared-files.test.js","test/test-tools.test.js","test/tests-map.test.js"],
   "test/fixtures/shard/c.test.js": ["test/atomic-file.test.js","test/gate-join.test.js","test/shard.test.js","test/shared-files.test.js"],
