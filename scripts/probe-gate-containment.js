@@ -41,7 +41,9 @@ const quote = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
 // Spins until its own deadline, so a probe that finds it alive still ends.
 const SPIN = 'const end = Date.now() + 60000; while (Date.now() < end) Math.sqrt(Math.random());';
 
-async function main() {
+// Runs the chosen cases and returns their lines and whether any "after" run failed. The planted
+// processes are killed and the scratch directory removed before it returns, pass or fail.
+async function probe({ versions = ['before', 'after'], leaks: leakNames = null, ends: endNames = null, write = () => {} } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-gate-containment-'));
   const resources = require('../lib/containment').resolveGate({});
   const setsid = ['/usr/bin/setsid', '/bin/setsid'].find((file) => fs.existsSync(file));
@@ -53,12 +55,13 @@ async function main() {
   };
   const ends = { success: 'exit 0', failure: 'exit 1', timeout: 'sleep 600' };
   let failed = false;
+  const lines = [];
   const planted = [];
   try {
-    for (const version of ['before', 'after']) {
+    for (const version of versions) {
       const { treeExec } = common(version);
-      for (const [leak, start] of Object.entries(leaks)) {
-        for (const [end, tail] of Object.entries(ends)) {
+      for (const [leak, start] of Object.entries(leaks).filter(([name]) => !leakNames || leakNames.includes(name))) {
+        for (const [end, tail] of Object.entries(ends).filter(([name]) => !endNames || endNames.includes(name))) {
           const pids = path.join(dir, `${version}-${leak}-${end}.pids`);
           // The leak writes its pid before the command goes on; give it a moment to do so.
           const command = `${start(pids)}; i=0; while [ ! -s ${quote(pids)} ] && [ $i -lt 100 ]; do sleep 0.05; i=$((i+1)); done; ${tail}`;
@@ -72,7 +75,8 @@ async function main() {
             line.fail = true;
             failed = true;
           }
-          process.stdout.write(`${JSON.stringify(line)}\n`);
+          lines.push(line);
+          write(line);
         }
       }
     }
@@ -80,10 +84,16 @@ async function main() {
     for (const pid of planted) if (alive(pid)) { try { process.kill(pid, 'SIGKILL'); } catch { /* Gone meanwhile. */ } }
     fs.rmSync(dir, { recursive: true, force: true });
   }
-  process.exitCode = failed ? 1 : 0;
+  return { lines, failed };
 }
 
-main().catch((error) => {
-  console.error(error.stack || error.message);
-  process.exitCode = 1;
-});
+module.exports = { probe };
+
+if (require.main === module) {
+  probe({ write: (line) => process.stdout.write(`${JSON.stringify(line)}\n`) }).then(({ failed }) => {
+    process.exitCode = failed ? 1 : 0;
+  }, (error) => {
+    console.error(error.stack || error.message);
+    process.exitCode = 1;
+  });
+}

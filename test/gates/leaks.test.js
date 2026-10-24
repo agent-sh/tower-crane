@@ -193,6 +193,23 @@ test('a shared root the user chose for TOWER_CRANE_TMP or TOWER_CRANE_TEST_TMP c
   }
 });
 
+// The host probe runs here without a cgroup, as a node test worker launches gate commands, so it
+// must fail the run rather than pass a host where the process group is the only boundary.
+test('the containment host probe fails a run without a cgroup and kills the grandchild that escaped it', { skip }, async (t) => {
+  const { probe } = require('../../scripts/probe-gate-containment');
+  const { lines, failed } = await probe({ versions: ['after'], leaks: ['node'], ends: ['success'] });
+  assert.equal(failed, true);
+  assert.equal(lines.length, 1);
+  const [line] = lines;
+  assert.equal(line.status, 0);
+  assert.equal(line.cleanup.backend, 'process-group');
+  assert.equal(line.fail, true);
+  assert.equal(line.planted.length, 1, 'the command planted its grandchild');
+  assert.deepEqual(line.alive_after_return, line.planted, 'the process group stopped a grandchild that left it');
+  // SIGKILL lands asynchronously; the test's timeout bounds the wait for the probe's kill.
+  await waitUntil(() => !detachedAlive({ pid: line.planted[0] }), { signal: t.signal, what: 'the probe kills its planted process' });
+});
+
 test('a Windows gate command runs in a job object that stops its orphaned grandchild and reports the job empty', {
   skip: process.platform !== 'win32' && 'Windows only; Linux gates use a cgroup, which scripts/probe-gate-containment.js checks on the host',
 }, async (t) => {
