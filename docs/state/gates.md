@@ -136,7 +136,8 @@ The evidence entry is `{ "type": "final-review", "ok", "sha", "revision", "sourc
 
 `automation` events record `{source, phase}` keyed by the triggering event
 ID, or a stable digest for older records without IDs.
-`running` adds the reaction's `pid`, `host` and Linux `start_ticks` and `pidns`.
+`running` adds the reaction's `pid`, `host`, Linux `start_ticks`, `pidns` and
+`tool`, the executor's `{sha, version, committed}` ([Executor tool](tasks.md#executor-tool)).
 On Windows, running reaction, `executor`, `gate run` and `merge queue` receipts also
 record `created`, the process's creation time in UTC epoch milliseconds, when
 it can be read, or `seen`, the recording time, otherwise. A different process
@@ -150,7 +151,10 @@ without `created` retain PID signal probing.
 `done` deduplicates completed work. `executor` records a reaction that reached CPU
 work while every executor was busy, or while an older reaction already waited
 for one, with the gate as `kind` and the wait as `error`; its source stays
-owed. `deferred` keeps unknown or moved heads,
+owed. `stale` records a reaction whose gate, accept or merge refused
+because a newer engine tool was recorded while it ran, with that tool as
+`engine_tool`; its source stays queued and owed for a current executor.
+`deferred` keeps unknown or moved heads,
 unknown mergeability and failed merge attempts retryable; `error` records
 an exception. Terminal receipts include `error`, null without an exception.
 Startup can retry deferred or errored work without a new lifecycle event.
@@ -189,18 +193,21 @@ unobservable one remains busy. A reaction starts at once and takes an
 executor only when it reaches CPU work: the tests gate with its host probes,
 the clean gate, local CI, or the merge line's head check. It keeps that
 executor across tests and clean and releases it before its next GitHub read
-and at its end, so review dispatch, accept, CI reads and the merge itself
-hold none. At most `gates.executors` executors are in use on one host across
-every watcher and supervisor. `executor` events are their leases:
+and at its end, so review dispatch, CI reads and the merge itself hold none;
+accept holds it only while it runs a missing tests, clean or local CI gate. At most
+`gates.executors` executors are in use on one host across every watcher and
+supervisor. `executor` events are their leases:
 `{lease, phase: "running", kind, source, pid, host, start_ticks}` with `kind`
 one of `tests`, `clean`, `ci` or `head check`, then `{lease, phase: "done"}`.
-A lease that moves from tests to clean, or from one head check to the next,
-records another `running` with its new `kind` and task. The done event releases
-it, and its PID identity releases it when the process dies. Leases from other
-hosts do not count against this host's cap. A reaction that finds the cap full,
-or an older waiter ahead of it, still runs its hosted CI read, so a CI failure
-sends the task back before its suite runs, then ends with `phase: "executor"`
-and stays owed. A CI completion or reconciliation for a task whose latest
+A lease that moves from tests to clean records another `running` with its new
+`kind`; each head check takes a lease of its own and releases it when its suite
+ends. The done event releases a lease, and its PID identity releases it when
+the process dies. Leases from other hosts do not count against this host's
+cap. An ordinary reaction that finds the cap full, or an older waiter ahead
+of it, still runs its hosted CI read, so a CI failure sends the task back
+before its suite runs, then ends with `phase: "executor"` and stays owed. A
+hotfix reaction runs its gates through `accept` in order, tests, clean, then
+CI, so a full cap queues it whole: it reads no CI until a slot frees. A CI completion or reconciliation for a task whose latest
 review failed with code findings reads no CI at all: the reaction reworks
 the task at once, so a failed review never waits behind a busy executor for
 local CI. After a review that failed only on the PR body, the task stays at its
@@ -211,8 +218,8 @@ reaction advances the task from its current state. A waiter is retried only
 once a slot is free and no older waiter ranks ahead, so retries read nothing
 from GitHub while the cap is full. A command run by hand (`merge --accepted`,
 `gates retry --from-rework`) that reaches this CPU work waits for a free
-executor instead; `check` and `gates retry` run their gate at once and take
-none. Reactions in one process still run one after another; concurrency comes
+executor instead; `check`, `gates retry` and `accept` run their gates at
+once and take none. Reactions in one process still run one after another; concurrency comes
 from separate watchers, supervisors and CLI calls.
 Rechecks of pending CI share one GitHub checks read per task per minute
 across every process. `ci poll` events `{sha, revision, scheduled}` record
@@ -255,7 +262,8 @@ ran records its outcome either way, so moved heads still go to rework.
 Stopped steps record no deferral; the next refresh retries them.
 `automation queued` records a blocked notification's source, with
 `executors` set to the cap when it waits for an executor rather than for
-another reaction of the same task. A source first queued behind its task's
+another reaction of the same task, or `tool` and `engine_tool` when the executor
+that read it runs a tool behind the project's engine tool. A source first queued behind its task's
 reaction that later waits for an executor gets a second record with
 `executors`. Queued notifications for accepted, unmerged PR
 tasks run first, in the order of their current `accept` events. This includes
