@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
 const { makeRepo, ROOT } = require('./helpers');
+const { HUNG_TEST_MS } = require('./signals');
 
 for (const tool of ['test-coverage', 'test-options']) {
   test(`${tool} executes scratch selection and removes its allocation`, async (t) => {
@@ -61,7 +62,7 @@ test('coverage fixture', () => assert.ok(scratchRoot({}, 'fixture-home').endsWit
           argv.push('--jobs', '1', '--json', report, fixture);
         }
         const result = cp.spawnSync(process.execPath, argv, {
-          cwd: ROOT, env, encoding: 'utf8', timeout: 60000,
+          cwd: ROOT, env, encoding: 'utf8', timeout: HUNG_TEST_MS,
         });
         assert.equal(result.status, tool === 'test-options' ? 1 : 0, result.stderr);
         if (tool === 'test-options') {
