@@ -26,6 +26,8 @@ const caseConcurrency = 2;
 // Windows, whose supervisor starts slower, keeps the production window.
 const SHORT_STARTUP_MS = process.platform === 'win32' ? 10000 : 4000;
 const S = require('../lib/state');
+const Governor = require('../lib/governor');
+const { MIN_USAGE_MS } = require('../lib/ladder');
 
 const log = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
 const sketches = (h) => ['sketch.md', 'sketch.html'].map((file) => ({
@@ -1121,6 +1123,22 @@ test('quiet supervision samples state and progress paths on a seconds-scale inte
   }
 });
 
+test('with no wait leading the host governor, a supervisor measures as a follower', async (t) => {
+  const h = setup(t, { failures: 0, waitForFinish: true });
+  h.json(['spawn', '--task', 'T1']);
+  try {
+    await waitOnRepo(h, () => fs.existsSync(h.attempts), 'worker did not start');
+    const monitor = log(h).findLast((e) => e.cmd === 'spawn').detail.monitor_pid;
+    await waitOnRepo(h, () => {
+      try { return Governor.read(h.env)?.ticked_by?.pid === monitor; } catch { return false; }
+    }, 'the supervisor did not tick');
+    assert.equal(Governor.read(h.env).ticked_by.lead, false);
+  } finally {
+    fs.writeFileSync(h.attempts + '.finish', '');
+    await waitOnRepo(h, () => log(h).some((e) => e.cmd === 'spawn phase' && e.detail.phase === 'waiting'), 'worker did not finish');
+  }
+});
+
 describe('supervision completion cases', { concurrency: caseConcurrency }, () => {
 test('Windows natural exits do not send taskkill to an exited or reused pid', (t) => {
   const h = setup(t, { failures: 0 });
@@ -1373,7 +1391,9 @@ const [planted, result, named] = process.argv.slice(1, 4);
 const spin = (ms) => { const until = Date.now() + ms; while (Date.now() < until); }; // wait-allow: paces the planted writes like a worker fighting the removal
 // Windows refuses to open a file the supervisor is deleting (EPERM).
 const plant = () => { try { fs.writeFileSync(planted, named + '\\n'); } catch (e) { if (e.code !== 'EPERM') throw e; } };
+const started = Date.now();
 for (let i = 0; i < 300; i++) { plant(); spin(5); }
+fs.writeFileSync(result + '.ms', String(Date.now() - started));
 const end = Date.now() + 300000;
 const check = () => {
   if (!fs.existsSync(planted)) fs.writeFileSync(result, 'removed');
@@ -1389,8 +1409,11 @@ check();
   assert.equal(fs.existsSync(result) && readPublished(result, 'utf8'), 'removed', r.stderr);
   assert.equal(fs.existsSync(planted), false);
   const removed = log(h).filter((e) => e.cmd === 'commondir removed');
-  // About 1.5 s of writes: one event per sample interval and one at exit.
-  assert.ok(removed.length >= 1 && removed.length <= 4, `${removed.length} events`);
+  // About 1.5 s of writes, longer on a loaded host: the first removal, one
+  // event per sample interval after it, one interval late at most, and one at exit.
+  const wrote = Number(readPublished(`${result}.ms`, 'utf8'));
+  const most = Math.ceil(wrote / MIN_USAGE_MS) + 2;
+  assert.ok(removed.length >= 1 && removed.length <= most, `${removed.length} events in ${wrote} ms of writes, at most ${most}`);
   assert.ok(removed.every((e) => e.detail.count >= 1));
   assert.ok(removed.reduce((n, e) => n + e.detail.count, 0) > removed.length, 'removals are counted, not recorded one by one');
   assert.equal(removed[0].task, 'T1');
