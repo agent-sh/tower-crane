@@ -23,8 +23,7 @@ updateJson(file, (state) => {
   return state;
 });
 if (crash) {
-  const events = fs.readFileSync(path.join(crash, '.tower-crane', 'events.jsonl'), 'utf8')
-    .trim().split('\n').map(JSON.parse);
+  const events = require('../state-files').readEvents(path.join(crash, '.tower-crane'));
   const executor = events.findLast((e) => e.cmd === 'automation' && e.detail.phase === 'running');
   killPid(executor.detail.pid, 'SIGKILL');
   // The killed executor is the test's CLI call, so the test resumes now.
@@ -75,9 +74,12 @@ function answer(state) {
       out = pr.invalidView ? '{' : JSON.stringify(destination);
       // appendAfter writes its event once, on the first view after an event of its cmd.
       if (state.appendAfter) {
-        const events = path.join(state.root, '.tower-crane', 'events.jsonl');
-        if (fs.readFileSync(events, 'utf8').trim().split('\n').some((line) => JSON.parse(line).cmd === state.appendAfter.cmd)) {
-          fs.appendFileSync(events, `${JSON.stringify(state.appendAfter.event)}\n`);
+        // The log is in state.db; the append never waits for the state lock,
+        // which the command that called gh may hold.
+        const StateFiles = require('../state-files');
+        const dir = path.join(state.root, '.tower-crane');
+        if (StateFiles.readEvents(dir).some((e) => e.cmd === state.appendAfter.cmd)) {
+          StateFiles.appendLog(dir, `${JSON.stringify(state.appendAfter.event)}\n`, { locked: true });
           delete state.appendAfter;
         }
       }

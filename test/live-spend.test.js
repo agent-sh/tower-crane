@@ -4,6 +4,7 @@
 // each harness's live usage crossing a task or project budget. live-spend-board.test.js has the rest.
 
 const test = require('node:test');
+const StateFiles = require('./state-files');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -169,7 +170,7 @@ for (const [harness, scope, logOnly] of [['claude', 'project'], ['claude', 'task
       assert.equal(h.readState('tasks.json').tasks[0].budget.tokens, 3000, 'lowering is operational');
     }
 
-    const text = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
+    const text = StateFiles.logText(h.state);
     for (const secret of [path.join(h.state, 'homes'), 'projects' + path.sep, 'rollout-']) {
       assert.ok(!live.some((e) => JSON.stringify(e).includes(secret)), `live usage events name ${secret}`);
     }

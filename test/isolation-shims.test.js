@@ -12,6 +12,7 @@ const { makeRepo, ROOT, BIN } = require('./helpers');
 const S = require('../lib/state');
 const TOML = require('../lib/toml');
 const { NO_STUBS, setup, walk, releaseExited, spawn, ALLOW, decide, isolated, commandsRead } = require('./isolation-helpers');
+const StateFiles = require('./state-files');
 
 test('a spawn from a supervisor running in another agent\'s env gets a cache of its own under the user cache root, never nested in the inherited one', { skip: NO_STUBS }, (t) => {
   const { h, u } = setup(t);
@@ -181,7 +182,7 @@ if (dispatch.status !== 0) throw new Error(dispatch.stderr);
   assert.equal(policy.hook, null);
   assert.ok(fs.readFileSync(path.join(shims, 'bin', 'git'), 'utf8').includes(path.join(shims, 'tool', 'lib', 'shim.js')), 'the git shim runs the copy');
   assert.equal(fs.readFileSync(path.join(shims, 'tool', 'lib', 'shim.js'), 'utf8'), fs.readFileSync(path.join(ROOT, 'lib', 'shim.js'), 'utf8'));
-  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const events = StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
   assert.equal(events.find((e) => e.cmd === 'spawn').detail.tool.sha, toolSha);
   assert.ok(events.some((e) => e.cmd === 'hook report' && e.agent === started.agent), 'hook report');
   for (const cmd of ['hook git-push', 'hook pr-created']) {
@@ -251,7 +252,7 @@ test('a sandboxed worker whose broker lost its socket directory is stopped block
   // Work the supervisor, which checks the broker every second, stops long before it ends.
   const work = 'setTimeout(() => {}, 60000);'; // wait-allow: agent work the supervisor stops, never a wait of this test
   const r = h.run(['spawn', '--role', 'medium', '--task', 'T1', '--wait', '--json'], { env: { ...u.env, STUB_RUN: JSON.stringify([[process.execPath, '-e', remove], [process.execPath, '-e', work]]) } });
-  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const events = StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
   const spawned = events.find((e) => e.cmd === 'spawn' && e.task === 'T1').detail.agent;
   const phase = events.findLast((e) => e.cmd === 'spawn phase' && e.detail.agent === spawned);
   assert.equal(phase?.detail.phase, 'blocked', `${r.stdout}\n${r.stderr}`);

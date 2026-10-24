@@ -6,11 +6,12 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { makeTaskRepo, ownerFallbacks } = require('./helpers');
 const { readPublished } = require('./atomic-file');
+const StateFiles = require('./state-files');
 
 // Independent cases run two at a time on every platform: most of each one waits on its child processes.
 const caseConcurrency = 2;
 
-const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+const events = (h) => StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
 const supervision = { retries: 2, backoff_ms: 10, max_backoff_ms: 20, stall_ms: 60000 };
 // A waiter blocks until its event arrives. The runner's per-test timeout
 // (test/run.js) is its only bound: three attempts and a route switch, each a

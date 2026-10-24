@@ -6,6 +6,7 @@ const cp = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const { BIN, cachedFixture } = require('./helpers');
+const StateFiles = require('./state-files');
 
 const github = path.join(__dirname, 'fixtures', 'github-submit.js');
 const JOB_LOG = 'https://github.com/acme/app/actions/runs/9/job/456';
@@ -196,7 +197,7 @@ test('submit records pushed PR heads, warns above one and resets at the next sub
   const submitted = JSON.parse(first.stdout);
   assert.equal(submitted.pushes_since_last_submit, 2);
   assert.match(submitted.push_warning, /2 observed pushed heads since the last submit/);
-  const receipts = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim()
+  const receipts = () => StateFiles.logText(h.state).trim()
     .split('\n').map(JSON.parse).filter((e) => e.cmd === 'submit');
   assert.equal(receipts().at(-1).detail.pushes_since_last_submit, 2);
   assert.ok(h.readState('tasks.json').tasks[0].notes.some((n) => n.text === submitted.push_warning));
@@ -235,7 +236,7 @@ test('submit records unavailable PR head history without refusing or reporting a
     const data = JSON.parse(r.stdout);
     assert.equal(data.pushes_since_last_submit, null);
     assert.match(data.push_warning, /pushes_since_last_submit unavailable:/);
-    const receipt = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim()
+    const receipt = StateFiles.logText(h.state).trim()
       .split('\n').map(JSON.parse).findLast((e) => e.cmd === 'submit');
     assert.equal(receipt.detail.pushes_since_last_submit, null);
     assert.ok(receipt.detail.push_history_error);
@@ -280,7 +281,7 @@ test('a shimmed agent whose gh policy refuses gh api submits with a notice that 
   assert.equal(status(h), 'submitted');
   assert.match(r.stdout, /gh policy refuses PR head history/);
   assert.doesNotMatch(r.stdout, /warning: pushes_since_last_submit/);
-  const receipt = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim()
+  const receipt = StateFiles.logText(h.state).trim()
     .split('\n').map(JSON.parse).findLast((e) => e.cmd === 'submit');
   assert.equal(receipt.detail.pushes_since_last_submit, null);
   assert.equal(receipt.detail.push_history_error, undefined);
@@ -506,7 +507,7 @@ test('submit reports redact explained base errors with or without another failin
       assert.equal(result.status, mixed ? 1 : 0, `${context}: ${result.stderr}`);
       if (!mixed) assert.ok(result.stdout.includes(`Error: auth failed with ${marker}`), context);
       for (const text of [result.stdout, result.stderr, JSON.stringify(h.readState('tasks.json')),
-        fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8')]) {
+        StateFiles.logText(h.state)]) {
         assert.equal(text.includes(value), false, context);
         assert.equal(text.includes(shown), false, context);
       }

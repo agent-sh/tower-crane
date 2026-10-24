@@ -11,6 +11,7 @@ const { once, EventEmitter } = require('node:events');
 const { BIN, ROOT } = require('./helpers');
 const { gateFixture, gateEvidence } = require('./gate-helpers');
 const { log, setup, child, event } = require('./events-helpers');
+const StateFiles = require('./state-files');
 
 const created = (file) => fileWritten(file);
 
@@ -50,27 +51,27 @@ function commandWorker(h, argv) {
     ...['model', 'profile', 'provider', 'effort', 'args'].flatMap((field) => ['--clear', field])]);
 }
 
-test('log waits for a final newline and rejects malformed completed records', (t) => {
-  const h = setup(t);
-  const before = log(h);
-  const appended = { ...before.at(-1), id: 'Epending' };
-  const encoded = JSON.stringify(appended);
-  const file = path.join(h.state, 'events.jsonl');
-  const read = fs.readFileSync;
-  let tail = '';
-  t.mock.method(fs, 'readFileSync', function (target, ...args) {
-    const raw = read.call(this, target, ...args);
-    return target === file ? raw + tail : raw;
+// A 0.1 log can end in a record still being appended, or hold a completed
+// line that is not JSON. Migration keeps either as a line, not an event, so
+// the events read the same, and the next event's cursor follows the line.
+for (const [kind, tail] of [['torn', (e) => e.slice(0, -1)], ['malformed', () => '{"broken":}\n']]) {
+  test(`a 0.1 log ending in a ${kind} record migrates with it kept as a line, not an event`, (t) => {
+    const h = setup(t);
+    const before = log(h);
+    const encoded = JSON.stringify({ ...before.at(-1), id: 'Epending' });
+    StateFiles.toFileLayout(h.state);
+    const file = path.join(h.state, 'events.jsonl');
+    fs.appendFileSync(file, tail(encoded));
+    const size = fs.statSync(file).size;
+    h.ok(['task', 'show', 'T1']);
+    assert.deepEqual(log(h), before, 'the line is no event');
+    h.ok(['task', 'note', 'T1', 'after the line']);
+    const after = StateFiles.readEvents(h.state, { offsets: true }).at(-1);
+    assert.equal(after.detail.text, 'after the line');
+    // A line without its newline is ended as the next 0.1 append would end it.
+    assert.equal(after.offset, size + (kind === 'torn' ? 1 : 0) + Buffer.byteLength(JSON.stringify((({ offset: _, ...e }) => e)(after))) + 1);
   });
-  for (const suffix of [encoded.slice(0, -1), encoded]) {
-    tail = suffix;
-    assert.deepEqual(log(h), before, 'an append is unread until its newline arrives');
-  }
-  tail = `${encoded}\n`;
-  assert.deepEqual(log(h), [...before, appended]);
-  tail = '{"broken":}\n';
-  assert.throws(() => log(h), SyntaxError, 'completed records still have to be valid JSON');
-});
+}
 
 test('readiness observes a CLI marker without directory watch notifications', async (t) => {
   const h = setup(t);
@@ -415,26 +416,18 @@ test('exit observers include attempts for spawns recorded without an attempt fie
   h.ok(['brief', 'set', 'T1', '-'], { input: 'stand-in\n' });
   commandWorker(h, [process.execPath, '-e', 'process.exit(0)', '{prompt}']);
   h.json(['spawn', '--task', 'T1', '--wait']);
-  const cursor = fs.statSync(path.join(h.state, 'events.jsonl')).size;
-  const hook = path.join(h.base, 'older-spawn.js');
-  fs.writeFileSync(hook, `
-const fs = require('node:fs');
-const read = fs.readFileSync;
-fs.readFileSync = function(file, ...args) {
-  const value = read.call(this, file, ...args);
-  if (!String(file).endsWith('events.jsonl') || typeof value !== 'string') return value;
-  return value.split('\\n').map((line) => {
-    if (!line) return line;
-    const event = JSON.parse(line);
-    if (event.cmd === 'spawn') delete event.detail.attempt;
-    return JSON.stringify(event);
-  }).join('\\n');
-};
-`);
-  const opts = { env: { NODE_OPTIONS: `--require "${hook.replace(/\\/g, '/')}"` } };
+  const cursor = StateFiles.logEnd(h.state);
+  // Spawn events as a tool before attempts logged them.
+  const older = () => StateFiles.editEvents(h.state, (e) => {
+    if (e.cmd !== 'spawn' || !('attempt' in e.detail)) return null;
+    delete e.detail.attempt;
+    return e;
+  });
   h.ok(['release', 'T1', '--agent', h.json(['task', 'show', 'T1']).claim.agent, '--reason', 'worker exited']);
-  const started = h.json(['spawn', '--task', 'T1', '--wait'], opts);
-  const observed = h.json(['wait', '--agent', 'orchestrator', '--after', String(cursor), '--types', 'worker-exited', '--timeout', '300'], opts);
+  older();
+  const started = h.json(['spawn', '--task', 'T1', '--wait']);
+  older();
+  const observed = h.json(['wait', '--agent', 'orchestrator', '--after', String(cursor), '--types', 'worker-exited', '--timeout', '300']);
   assert.equal(observed.detail.pid, started.pid);
   assert.equal(observed.detail.attempt, 2);
   assert.equal(observed.detail.attempt, started.attempt);
@@ -558,7 +551,7 @@ test('startup reconciliation with an active PR does not hold a timeout behind th
 
 // A timeout at the log's end, with no cut recorded.
 function timeoutAt(h) {
-  const size = fs.statSync(path.join(h.state, 'events.jsonl')).size;
+  const size = StateFiles.logEnd(h.state);
   return { type: 'timeout', offset: size, cursor: `${size}:0` };
 }
 
@@ -581,7 +574,7 @@ test('startup takes a current cursor before reading state and retains events dur
   assert.equal(snapshot.code, 2, snapshot.stderr);
   const cursor = JSON.parse(snapshot.stdout);
   assert.equal(cursor.type, 'timeout');
-  assert.equal(cursor.offset, fs.statSync(path.join(h.state, 'events.jsonl')).size);
+  assert.equal(cursor.offset, StateFiles.logEnd(h.state));
   h.json(['status']);
   h.ok(['task', 'note', 'T1', 'during state reconciliation']);
   const r = h.run(['wait', '--agent', 'orchestrator', '--after', String(cursor.offset), '--timeout', '0.1']); // wait-allow: verify the CLI observation, filtering or timeout contract with already-published state
@@ -596,19 +589,19 @@ test('startup snapshots leave stale leases for the subsequent blocking wait to o
   fs.writeFileSync(clock, String(start));
   h.ok(['claim', 'T1', '--lease', '1', '--agent', 'worker'], { hooks });
   fs.writeFileSync(clock, String(start + 60001));
-  const before = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
+  const before = StateFiles.logText(h.state);
   const snapshot = h.run(['wait', '--agent', 'orchestrator', '--timeout', '0'], { hooks });
   assert.equal(snapshot.code, 2, snapshot.stderr || snapshot.stdout);
   const cursor = JSON.parse(snapshot.stdout);
   assert.equal(cursor.type, 'timeout');
-  assert.equal(fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8'), before);
+  assert.equal(StateFiles.logText(h.state), before);
   const r = h.run(['wait', '--agent', 'orchestrator', '--after', String(cursor.offset), '--types', 'stall', '--timeout', '0.1'], { hooks }); // wait-allow: verify the CLI observation, filtering or timeout contract with already-published state
   assert.equal((await event(Promise.resolve(r), 'stall')).agent, 'orchestrator');
 });
 
 test('wait skips its own writes and advances timeout cursors past filtered events', async (t) => {
   const h = setup(t);
-  const after = fs.statSync(path.join(h.state, 'events.jsonl')).size;
+  const after = StateFiles.logEnd(h.state);
   h.ok(['task', 'note', 'T1', 'own progress', '--agent', 'orchestrator']);
   h.ok(['msg', '--to', 'orchestrator', 'own message', '--agent', 'orchestrator']);
   h.ok(['msg', '--to', 'someone-else', 'other recipient', '--agent', 'worker']);
@@ -616,7 +609,7 @@ test('wait skips its own writes and advances timeout cursors past filtered event
   assert.equal(r.code, 2, r.stdout || r.stderr);
   const cursor = JSON.parse(r.stdout);
   assert.equal(cursor.type, 'timeout');
-  assert.equal(cursor.offset, fs.statSync(path.join(h.state, 'events.jsonl')).size);
+  assert.equal(cursor.offset, StateFiles.logEnd(h.state));
   h.ok(['msg', '--to', 'orchestrator', '--task', 'T1', 'worker result', '--agent', 'worker']);
   const result = h.run(['wait', '--agent', 'orchestrator', '--after', String(cursor.offset), '--timeout', '0.1']); // wait-allow: verify the CLI observation, filtering or timeout contract with already-published state
   assert.equal((await event(Promise.resolve(result), 'worker-message')).detail.text, 'worker result');
@@ -668,7 +661,7 @@ test('non-owner serve hides owner forms and refuses all owner write routes', asy
   const page = await (await fetch(url)).text();
   const token = /<meta name="tower-crane-token" content="([0-9a-f]{48})?">/.exec(page)[1] || '';
   assert.doesNotMatch(page, /data-api="\/api\/(?:tasks|decisions)\//);
-  const before = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
+  const before = StateFiles.logText(h.state);
   for (const [route, body] of [
     ['tasks/T1/comments', { text: 'forged task comment' }],
     ['decisions/D1/comments', { text: 'forged decision comment' }],
@@ -684,7 +677,7 @@ test('non-owner serve hides owner forms and refuses all owner write routes', asy
   }
   assert.equal(h.readState('tasks.json').tasks[0].needs_owner, 'access');
   assert.equal(h.readState('decisions.json').decisions[0].status, 'open');
-  assert.equal(fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8'), before);
+  assert.equal(StateFiles.logText(h.state), before);
 });
 
 for (const agent of ['orchestrator', 'owner']) {

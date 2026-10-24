@@ -1,5 +1,7 @@
 'use strict';
 
+const StateFiles = require('./state-files');
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -26,7 +28,8 @@ const gate = (task, sha, ok) => ({ type: 'tests', ok, sha, agent: 'checker', rev
   gate_policy: { tests_map: { source: Array(1000).fill('test/example.test.js') } },
   test_failure: ok ? null : { tail: 'failure detail\n'.repeat(1000) } });
 
-const stateFile = (h, name) => path.join(h.state, name);
+// The bytes the task documents take as the database stores them.
+const tasksBytes = (h) => Buffer.byteLength(StateFiles.fileText(h.state, 'tasks.json'));
 const artifact = (h, task, ref) => path.join(h.state, 'evidence', task, `${ref.sha256}.json`);
 
 test('the first write moves settled evidence out, keeps current evidence inline and reads artifacts back checked', (t) => {
@@ -40,9 +43,9 @@ test('the first write moves settled evidence out, keeps current evidence inline 
   task.evidence.push(old, opaque, current);
   h.writeState('tasks.json', doc);
   const audit = (detail) => ({ at: new Date().toISOString(), cmd: 'check tests', task: 'T1', agent: 'checker', detail });
-  fs.appendFileSync(stateFile(h, 'events.jsonl'), JSON.stringify(audit(old)) + '\n' + JSON.stringify(audit(current)) + '\n');
-  const log = fs.readFileSync(stateFile(h, 'events.jsonl'));
-  const before = fs.statSync(stateFile(h, 'tasks.json')).size;
+  StateFiles.appendLog(h.state, JSON.stringify(audit(old)) + '\n' + JSON.stringify(audit(current)) + '\n');
+  const log = StateFiles.logText(h.state);
+  const before = tasksBytes(h);
   h.ok(['task', 'note', 'T1', 'migrate through a normal write']);
   const raw = h.readState('tasks.json').tasks[0].evidence;
   assert.deepEqual(Object.keys(raw[0].evidence_refs).sort(), ['commands', 'gate_policy', 'summary', 'test_failure']);
@@ -54,8 +57,8 @@ test('the first write moves settled evidence out, keeps current evidence inline 
   // Gate decisions of a pinned older tool read the current head, which stays whole.
   assert.deepEqual(raw[2], current);
   assert.ok(T.eligibleGateEvidence(task, raw[2], [audit(current)]));
-  assert.ok(fs.statSync(stateFile(h, 'tasks.json')).size < before * 0.6);
-  assert.ok(fs.readFileSync(stateFile(h, 'events.jsonl')).subarray(0, log.length).equals(log), 'the event log is never rewritten');
+  assert.ok(tasksBytes(h) < before * 0.6);
+  assert.ok(StateFiles.logText(h.state).startsWith(log), 'the event log is never rewritten');
   assert.deepEqual(h.json(['task', 'show', 'T1']).evidence[0], old, 'readers see the entry as recorded');
   const st = S.loadState(h.state);
   assert.equal(T.eligibleGateEvidence(st.tasks.tasks[0], st.tasks.tasks[0].evidence[0], st.events), true);
@@ -95,7 +98,7 @@ test('evidence settles when the head moves, its file is written once and an olde
   assert.equal(replaced.evidence_refs, undefined);
 });
 
-test('tasks.json grows by a small fixed amount per settled receipt, whatever its output size', (t) => {
+test('the task documents grow by a small fixed amount per settled receipt, whatever its output size', (t) => {
   const h = setup(t);
   const doc = h.readState('tasks.json');
   const sizes = [];
@@ -105,7 +108,7 @@ test('tasks.json grows by a small fixed amount per settled receipt, whatever its
     doc.tasks[0].evidence.push(entry);
     h.writeState('tasks.json', doc);
     h.ok(['task', 'note', 'T1', `settle ${lines}`]);
-    sizes.push(fs.statSync(stateFile(h, 'tasks.json')).size);
+    sizes.push(tasksBytes(h));
   }
   const steps = sizes.slice(1).map((size, i) => size - sizes[i]);
   for (const step of steps) assert.ok(step < 2048, `one settled receipt added ${step} bytes`);
@@ -121,7 +124,7 @@ test('UserPromptSubmit and tool hooks proceed while another process holds the st
   const bridge = (event) => cp.spawnSync(process.execPath, [BRIDGE, 'hook'], {
     cwd: h.repo, env, input: JSON.stringify({ hook_event_name: event, tool_name: 'Read' }), encoding: 'utf8', timeout: 300000,
   });
-  const files = () => ['tasks.json', 'events.jsonl'].map((name) => fs.readFileSync(stateFile(h, name), 'utf8'));
+  const files = () => ['tasks.json', 'events.jsonl'].map((name) => StateFiles.fileText(h.state, name));
   const lock = S.acquireLock(h.state);
   try {
     // Nothing pending: the poll reads the log and never asks for the lock.
@@ -156,13 +159,17 @@ test('UserPromptSubmit and tool hooks proceed while another process holds the st
   assert.equal(bridge('UserPromptSubmit').stdout, '', 'a delivered message is acknowledged once');
 });
 
+// A 0.1 log held tool progress among its events; migration keeps it as a line.
 test('historical progress in the event log keeps its bytes but leaves state snapshots', (t) => {
   const h = setup(t);
   const line = JSON.stringify({ id: 'Eold', at: new Date().toISOString(), agent: 'worker', cmd: 'hook progress', task: 'T1', detail: { tool: 'Read' } });
   const nested = JSON.stringify({ id: 'Enested', at: new Date().toISOString(), agent: 'worker', cmd: 'task note', task: 'T1', detail: { cmd: 'hook progress' } });
-  fs.appendFileSync(stateFile(h, 'events.jsonl'), line + '\n' + nested + '\n');
+  StateFiles.toFileLayout(h.state);
+  fs.appendFileSync(path.join(h.state, 'events.jsonl'), line + '\n' + nested + '\n');
   h.ok(['task', 'note', 'T1', 'note quoting "cmd":"hook progress" stays an event']);
-  assert.match(fs.readFileSync(stateFile(h, 'events.jsonl'), 'utf8'), new RegExp(line.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  const exported = path.join(h.base, 'exported');
+  StateFiles.withDb(h.state, () => S.exportState(h.state, exported));
+  assert.match(fs.readFileSync(path.join(exported, 'events.jsonl'), 'utf8'), new RegExp(line.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   const events = S.readEvents(h.state);
   assert.equal(events.some((e) => e.id === 'Eold'), false);
   assert.ok(events.some((e) => e.id === 'Enested'), 'a detail naming hook progress is still an event');

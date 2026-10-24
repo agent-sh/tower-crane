@@ -5,6 +5,7 @@
 // writes use the same check, and every change is audited the same way.
 
 const test = require('node:test');
+const StateFiles = require('./state-files');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -14,7 +15,7 @@ const { gateFixture } = require('./gate-helpers');
 const { COMMANDS } = require('../bin/tower-crane');
 const Authority = require('../lib/authority');
 
-const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+const events = (h) => StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
 const audits = (h) => events(h).filter((e) => e.cmd === 'setting');
 const as = (agent) => ({ env: { TOWER_CRANE_AGENT: agent } });
 const decisions = (h) => h.readState('decisions.json').decisions;

@@ -1,6 +1,7 @@
 'use strict';
 
 const test = require('node:test');
+const StateFiles = require('./state-files');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -34,7 +35,7 @@ test('project set stores, replaces and clears test paths and ignored CI apps', (
   assert.deepEqual(set, { ...original, tests: { paths }, ci: { ignore_apps: apps } });
   assert.deepEqual(h.json(['project', 'show']), set);
   assert.deepEqual(h.readState('project.json'), set);
-  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const events = StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
   assert.equal(events.at(-1).cmd, 'project set');
   assert.equal(events.at(-1).agent, 'owner');
   assert.deepEqual(events.at(-1).detail, { 'tests-paths': JSON.stringify(paths), 'ci-ignore-apps': JSON.stringify(apps) });
@@ -61,8 +62,7 @@ for (const flag of ['--tests-paths', '--tests-keep', '--ci-ignore-apps', '--ci-r
   test(`project set validates ${flag} and writes nothing on invalid input`, (t) => {
     const h = makeRepo(t);
     h.init();
-    const files = ['project.json', 'tasks.json', 'decisions.json', 'events.jsonl', 'sketch.md', 'sketch.html'];
-    const snapshot = () => files.map((f) => fs.readFileSync(path.join(h.state, f), 'utf8'));
+    const snapshot = () => StateFiles.stateText(h.state, ['sketch.md', 'sketch.html']);
     const before = snapshot();
     const invalid = ['[', '{}', '"test/**"', '1', 'true', '[null]', '[1]', '[""]', '[" \\t"]', '["valid", false]'];
     if (flag === '--tests-paths') invalid.push('[]');
@@ -86,7 +86,7 @@ test('init accepts and validates test paths and ignored CI apps as shared settin
   const bad = h.run(['init', '--name', 'demo', '--goal', 'prove the engine', '--tests-paths', '[]']);
   assert.equal(bad.code, 2);
   assert.match(bad.stderr, /--tests-paths.*non-empty JSON array/);
-  for (const f of ['project.json', 'tasks.json', 'decisions.json', 'events.jsonl']) {
+  for (const f of ['project.json', 'state.db']) {
     assert.ok(!fs.existsSync(path.join(h.state, f)), `${f} not written`);
   }
   h.init(['--tests-paths', '["qa/"]', '--ci-ignore-apps', '["claude"]']);
@@ -124,7 +124,7 @@ test('required CI names and prefixes are stored, printed, replaced and cleared t
   const set = h.json(['project', 'set', '--ci-required', '["test (windows-latest, node 24)"]']);
   assert.deepEqual(set.ci, { required: ['test (windows-latest, node 24)'], ignore_apps: ['claude'] });
   assert.deepEqual(h.readState('project.json'), set);
-  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const events = StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
   assert.deepEqual(events.at(-1).detail, { 'ci-required': '["test (windows-latest, node 24)"]' });
   assert.deepEqual(h.json(['project', 'set', '--ci-required', '[]']).ci, { required: [], ignore_apps: ['claude'] });
   assert.deepEqual(h.json(['project', 'set', '--ci-required', 'null']).ci, { ignore_apps: ['claude'] });
@@ -141,7 +141,7 @@ test('tests.keep is configured through init and project set without replacing te
   const set = h.json(['project', 'set', '--tests-keep', '["setup.py"]']);
   assert.deepEqual(set.tests, { paths: ['qa/'], keep: ['setup.py'] });
   assert.deepEqual(h.readState('project.json').tests, set.tests);
-  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const events = StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
   assert.deepEqual(events.at(-1).detail, { 'tests-keep': '["setup.py"]' });
   assert.deepEqual(h.json(['project', 'set', '--tests-paths', 'null']).tests, { keep: ['setup.py'] });
   assert.deepEqual(h.json(['project', 'set', '--tests-keep', '[]']).tests, { keep: [] });
@@ -221,13 +221,12 @@ test('decision delegation accepts only its supported project rules', (t) => {
 
   const h = makeRepo(t);
   h.init();
-  const files = ['project.json', 'events.jsonl'];
-  const before = files.map((file) => fs.readFileSync(path.join(h.state, file), 'utf8'));
+  const before = StateFiles.stateText(h.state);
   for (const value of ['[', '[]', 'true', '{"orchestrator_technical":1}', '{"orchestrator_escalated_questions":1}', '{"unexpected":true}']) {
     const result = h.run(['project', 'set', '--name', 'must not persist', '--decision-delegation', value, '--agent', 'owner']);
     assert.equal(result.code, 2, `${value}: ${result.stderr}`);
     assert.match(result.stderr, /--decision-delegation/);
-    assert.deepEqual(files.map((file) => fs.readFileSync(path.join(h.state, file), 'utf8')), before);
+    assert.deepEqual(StateFiles.stateText(h.state), before);
   }
 });
 
@@ -244,7 +243,7 @@ test('test modes, kind overrides and expensive suites can be set, replaced and c
   const set = h.json(['project', 'set', '--tests-mode', 'prove', '--tests-by-kind', '{"code":"run-only"}', '--tests-expensive', 'false']);
   assert.deepEqual(set.tests, { mode: 'prove', by_kind: { code: 'run-only' }, expensive: false, keep: ['Makefile'] });
   assert.deepEqual(h.readState('project.json'), set);
-  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const events = StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
   assert.deepEqual(events.at(-1).detail, {
     'tests-mode': 'prove', 'tests-by-kind': '{"code":"run-only"}', 'tests-expensive': 'false',
   });
@@ -271,8 +270,7 @@ for (const [flag, value] of [
     assert.match(init.stderr, allowed);
     assert.ok(!fs.existsSync(h.state), 'refused init creates no state directory');
     h.init();
-    const files = ['project.json', 'tasks.json', 'decisions.json', 'events.jsonl', 'sketch.md', 'sketch.html'];
-    const snapshot = () => files.map((f) => fs.readFileSync(path.join(h.state, f), 'utf8'));
+    const snapshot = () => StateFiles.stateText(h.state, ['sketch.md', 'sketch.html']);
     const before = snapshot();
     for (const input of [value, 'null']) {
       const denied = h.run(['project', 'set', '--name', 'must not persist', flag, input, '--agent', 'worker-T9-1']);
@@ -296,8 +294,7 @@ for (const [flag, invalid] of [
     assert.ok(bad.stderr.includes(flag), bad.stderr);
     assert.ok(!fs.existsSync(path.join(h.state, 'project.json')));
     h.init();
-    const files = ['project.json', 'events.jsonl', 'sketch.md', 'sketch.html'];
-    const snapshot = () => files.map((f) => fs.readFileSync(path.join(h.state, f), 'utf8'));
+    const snapshot = () => StateFiles.stateText(h.state, ['sketch.md', 'sketch.html']);
     const before = snapshot();
     for (const value of invalid) {
       const r = h.run(['project', 'set', '--name', 'must not persist', flag, value]);

@@ -7,6 +7,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { waitOnRepo } = require('./signals');
 const S = require('../lib/state');
+const StateFiles = require('./state-files');
 
 const leased = (h) => h.json(['status']).gate_executors.in_use.map((u) => u.task).sort();
 
@@ -43,11 +44,11 @@ poll();
   const setPRs = (restore) => S.withLock(h.state, () => {
     const tasks = h.readState('tasks.json');
     for (const task of tasks.tasks) if (saved.has(task.id)) task.pr = restore ? saved.get(task.id) : null;
-    h.writeState('tasks.json', tasks);
+    StateFiles.writeDoc(h.state, 'tasks.json', tasks, { locked: true });
   });
   if (saved.size) setPRs(false);
   fs.rmSync(release);
-  const offset = fs.statSync(path.join(h.state, 'events.jsonl')).size;
+  const offset = StateFiles.logEnd(h.state);
   for (const id of ['T5', 'T6', 'T7', 'T8']) {
     h.ok(['claim', id, '--agent', 'worker']);
     h.ok(['submit', id, '--sha', h.sha, '--agent', 'worker']);

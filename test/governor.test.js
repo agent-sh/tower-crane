@@ -1,5 +1,7 @@
 'use strict';
 
+const StateFiles = require('./state-files');
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -12,7 +14,7 @@ const { makeRepo, cachedFixture, BIN, TMP_ROOT } = require('./helpers');
 const { writeHost, GiB } = require('./host');
 const { waitOnRepo, waitUntil, killPid } = require('./signals');
 
-const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse); // read-published: the log is only appended
+const events = (h) => StateFiles.readEvents(h.state);
 const linuxOnly = process.platform !== 'linux' && 'the governor measures and signals by Linux process start times';
 
 // Readings and registries in memory: the budget arithmetic alone.
@@ -1174,6 +1176,24 @@ test('a finished agent gives up its place before its gate reactions run', { skip
   fs.writeFileSync(h.release, '');
   await waitOnRepo(h, () => !alive(started.monitor_pid), 'the supervisor ends', { poll: true });
   assert.ok(h.readState('tasks.json').tasks[0].evidence.some((e) => e.type === 'tests' && e.ok), 'the reaction finished');
+});
+
+// The supervisor's tick reads the project's governor settings from the
+// database; project.json is only its marker. The defaults would stop at 95%.
+test('a supervisor stops its worker at the stop line the project set', { skip: linuxOnly }, async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  supervised(h, ['T1']);
+  h.ok(['project', 'set', '--governor', '{"defer_at":0.4,"stop_at":0.5}']);
+  const host = h.env.TOWER_CRANE_HOST_ROOT;
+  writeHost(host, { limit: 10, used: 1 });
+  const spawned = h.json(['spawn', '--task', 'T1']);
+  await waitOnRepo(h, () => events(h).some((e) => e.cmd === 'claim' && e.task === 'T1'), 'the worker claims its task');
+  writeHost(host, { limit: 10, used: 6 });
+  const alive = (pid) => { try { killPid(pid, 0); return true; } catch { return false; } };
+  await waitOnRepo(h, () => !alive(spawned.monitor_pid), 'the supervisor stops');
+  await waitOnRepo(h, () => events(h).some((e) => e.task === 'T1' && e.cmd === 'spawn phase'
+    && /^supervisor stopped by the host governor: memory: .* at or past the 50% stop line/.test(e.detail.reason || '')), 'the supervisor records the project\'s stop line');
 });
 
 test('a unit in a scope of its own also counts its processes outside the scope, and each byte counts once', { skip: linuxOnly }, async (t) => {

@@ -1,13 +1,14 @@
 'use strict';
 
 const test = require('node:test');
+const StateFiles = require('./state-files');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { makeRepo, cachedFixture, runPty, PTY_AVAILABLE } = require('./helpers');
 
 function events(h) {
-  return fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  return StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
 }
 
 test('legacy budget breach questions retain spend authority across scopes and payload variants', () => {

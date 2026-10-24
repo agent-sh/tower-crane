@@ -12,6 +12,7 @@ const cp = require('node:child_process');
 const { BIN, HOOKS } = require('./helpers');
 const { CHROME, openBrowser, closeBrowser } = require('./browser');
 const { events, recordedSpend, liveEntries, fixtureState, until, viewClock, setup, exited } = require('./live-spend-helpers');
+const StateFiles = require('./state-files');
 
 test.after(closeBrowser);
 
@@ -331,7 +332,7 @@ test('an open board ages live telemetry without state writes or a page reload', 
     await b.until(`document.querySelector('.conn').dataset.conn === 'live'`, 'the live stream');
     assert.equal(await b.inPage(`document.querySelector('#spend tr[data-live-state]').dataset.liveState`), 'live');
     assert.equal(await b.inPage(`document.querySelector('[data-key="agent-T1"] [data-usage]').dataset.liveState`), 'live');
-    const log = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
+    const log = StateFiles.logText(h.state);
     await b.inPage(`window.boardNow += 60000; window.boardTimers.forEach((callback) => callback());`);
     // The server's clock stays at the reading, so only the page can age it.
     await b.until(`document.querySelector('#spend tr[data-live-state]').dataset.liveState === 'stale'`, 'the page to age the reading');
@@ -344,7 +345,7 @@ test('an open board ages live telemetry without state writes or a page reload', 
     assert.equal(shown.age, '61 s ago');
     assert.equal(shown.floor, 'stale');
     assert.match(shown.words, /stale, 61 s old/);
-    assert.equal(fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8'), log, 'time passing wrote no state');
+    assert.equal(StateFiles.logText(h.state), log, 'time passing wrote no state');
   } finally {
     server.kill();
     await closed;

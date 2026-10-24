@@ -9,10 +9,11 @@ const { setup, resubmit } = require('./stack-fixture');
 const { BIN, fakeAgentEnv } = require('./helpers');
 const { waitFor } = require('./canary');
 const { waitUntil, HUNG_TEST_MS } = require('./signals');
+const StateFiles = require('./state-files');
 
 function fixture(t) {
   const f = setup(null);
-  f.h.logs = () => fs.readFileSync(path.join(f.h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  f.h.logs = () => StateFiles.readEvents(f.h.state);
   t.after(async () => {
     const ids = f.h.readState('tasks.json').tasks.map((task) => task.id);
     for (const id of ids) fs.writeFileSync(path.join(f.h.base, `${id}.go`), '');
@@ -438,7 +439,7 @@ const A = require(${JSON.stringify(path.resolve(__dirname, '../lib/automation'))
 A.backlog = () => [];
 A.consume = async () => [];
 `);
-  const after = String(fs.statSync(path.join(f.h.state, 'events.jsonl')).size);
+  const after = String(StateFiles.logEnd(f.h.state));
   for (let pass = 0; pass < 2; pass++) {
     const result = f.h.run(['wait', '--after', after, '--task', 'T3', '--timeout', '0.1', '--agent', 'orchestrator'], // wait-allow: the probe must reach its deadline instead of waking on its own refusal
       { pre: ['--require', preload] });

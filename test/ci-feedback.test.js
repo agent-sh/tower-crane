@@ -14,6 +14,7 @@ const { stripEscapes } = require('../lib/ci-log-text');
 const { ghDenied } = require('../lib/shim');
 const { findingBody, revutoLines } = require('../lib/gates/ci');
 const { readEvents } = require('../lib/state');
+const StateFiles = require('./state-files');
 
 // GitHub stamps every line of a job log.
 const PLAIN = [
@@ -437,7 +438,7 @@ test('first and chained fallback routes keep inline ids in rework prompts', (t) 
     else for (const [id, file, line] of [[501, 'lib/a.js', 12], [502, 'lib/b.js', 40], [504, 'lib/c.js', 50]]) {
       assert.ok(log.includes(`${file}:${line} (comment ${id})`), `fallback ${count}: ${log}`);
     }
-    const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+    const events = h.events();
     assert.deepEqual(events.filter((e) => e.cmd === 'spawn fallback').map((e) => e.detail.route_index),
       Array.from({ length: count }, (_, index) => index + 1));
   }
@@ -921,7 +922,7 @@ test('repository dispatch capacity queues the third task, replaces its head and 
     else {
       const events = readEvents(h.state);
       for (const event of events) if (event.cmd === 'ci capacity') event.at = new Date(Date.now() - 61000).toISOString();
-      fs.writeFileSync(path.join(h.state, 'events.jsonl'), events.map((e) => JSON.stringify(e) + '\n').join(''));
+      StateFiles.replaceLog(h.state, events.map((e) => JSON.stringify(e) + '\n').join(''));
       const waited = h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0']);
       assert.equal(waited.code, 2, waited.stderr);
     }

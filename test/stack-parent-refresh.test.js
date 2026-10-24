@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { setup, upper, resubmit } = require('./stack-fixture');
 const { events, inspector, child, newerParent } = require('./stack-parent-helpers');
+const StateFiles = require('./state-files');
 
 // Child gates while the parent moves, rewritten parents and the refresh merge and push.
 
@@ -246,7 +247,7 @@ test('a tool behind the engine refuses before a parent refresh merges or pushes 
   newerParent(f, false);
   const remote = f.h.git(['rev-parse', `origin/${top.wt.branch}`]);
   // A newer engine's gate record makes this checkout's tool the stale one.
-  fs.appendFileSync(path.join(f.h.state, 'events.jsonl'), `${JSON.stringify({ at: new Date().toISOString(), agent: 'orchestrator',
+  StateFiles.appendLog(f.h.state, `${JSON.stringify({ at: new Date().toISOString(), agent: 'orchestrator',
     cmd: 'check tests', task: 'T1', detail: { tool: { sha: 'f'.repeat(40), version: '99.0.0', committed: null } } })}\n`);
   // A gate refuses at its parent refresh; a spawn refuses before it reaches one.
   for (const [what, args] of [['stack parent refresh', ['check', 'clean', 'T2']], ['spawn', ['spawn', '--role', 'review', '--task', 'T2']]]) {

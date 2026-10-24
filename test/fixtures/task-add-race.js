@@ -5,24 +5,19 @@ const path = require('node:path');
 const cp = require('node:child_process');
 const { writeAtomic } = require('../atomic-file');
 
-// TEST_ADD_FAIL=append fails the event append, before the commit point;
-// TEST_ADD_FAIL=rename fails the rename of tasks.json, after it.
+// TEST_ADD_FAIL=append fails the commit before it lands, which rolls it
+// back; TEST_ADD_FAIL=rename fails the command right after its commit.
 const state = process.env.TEST_ADD_STATE;
-const rename = fs.renameSync;
-const open = fs.openSync;
 let failed = false;
 const fail = (what) => {
   failed = true;
   throw Object.assign(new Error(`injected ${what} write failure`), { code: 'EIO' });
 };
-fs.renameSync = function failTaskWrite(source, target, ...args) {
-  if (!failed && process.env.TEST_ADD_FAIL === 'rename' && target === path.join(state, 'tasks.json')) fail('tasks.json');
-  return rename.call(this, source, target, ...args);
-};
-fs.openSync = function failEventAppend(file, flags, ...args) {
-  if (!failed && process.env.TEST_ADD_FAIL === 'append' && file === path.join(state, 'events.jsonl') && flags === 'a+') fail('events.jsonl');
-  return open.call(this, file, flags, ...args);
-};
+process.on('tower-crane:state-step', (step, dir) => {
+  if (failed || path.resolve(String(dir)) !== path.resolve(state)) return;
+  if (process.env.TEST_ADD_FAIL === 'append' && step === 'commit') fail('database');
+  if (process.env.TEST_ADD_FAIL === 'rename' && step === 'committed') fail('post-commit');
+});
 
 const rmdir = fs.rmdirSync;
 let replaced = false;

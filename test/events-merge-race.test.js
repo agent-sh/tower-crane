@@ -3,7 +3,8 @@
 // A manual merge racing the merge queue or an automatic merge: one merges and
 // the other confirms, over many rounds.
 
-const { eventAppended } = require('./signals');
+const { stateEventLogged } = require('./signals');
+const StateFiles = require('./state-files');
 const test = require('node:test');
 const { describe } = test;
 const assert = require('node:assert/strict');
@@ -37,12 +38,12 @@ for (let pass = 1; pass <= PASSES; pass++) test(`a manual merge racing the merge
       h.ok(['accept', id, '--agent', 'owner', '--reason', 'race fixture',
         ...['tests', 'clean', 'review', 'ci'].flatMap((type) => ['--waive', type])]);
     }
-    const after = String(fs.statSync(path.join(h.state, 'events.jsonl')).size);
+    const after = String(StateFiles.logEnd(h.state));
     // State call jitter spreads the two merges over each other's checks.
     const jitter = { HOOK_JITTER_MS: '15' };
     const automatic = child(t, h, ['wait', '--agent', 'orchestrator', '--after', after, '--task', upper, '--types', 'merged', '--timeout', '300'], jitter);
     // Start near the queue's move from the lower task to the upper one.
-    await eventAppended(path.join(h.state, 'events.jsonl'), (event) => event.type === 'merged' && event.task === lower, { signal: t.signal });
+    await stateEventLogged(h.state, (event) => event.type === 'merged' && event.task === lower, { signal: t.signal });
     await new Promise((resolve) => setTimeout(resolve, (((pass - 1) * rounds + i) % 5) * 120)); // wait-allow: stagger concurrent operations to exercise both race orderings
     const manual = await h.runAsync(['merge', upper], { hooks: jitter });
     assert.equal(manual.code, 0, `${upper}: ${manual.stderr}`);
@@ -82,7 +83,7 @@ for (const part of [1, 2, 3]) test(`a manual merge racing an automatic merge of 
     // keeps a manual merge that finishes before the waiter starts visible.
     // Odd rounds start together; even rounds stagger the manual merge, so
     // either side reaches GitHub first.
-    const after = String(fs.statSync(path.join(h.state, 'events.jsonl')).size);
+    const after = String(StateFiles.logEnd(h.state));
     const automatic = child(t, h, ['wait', '--agent', 'orchestrator', '--after', after, '--task', id, '--types', 'merged', '--timeout', '300']);
     await new Promise((resolve) => setTimeout(resolve, round % 2 ? 0 : (round % 10) * 20)); // wait-allow: stagger concurrent operations to exercise both race orderings
     const manual = await h.runAsync(['merge', id]);

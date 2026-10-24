@@ -1,6 +1,7 @@
 'use strict';
 
 const test = require('node:test');
+const StateFiles = require('./state-files');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -42,10 +43,8 @@ test('evidence metadata handles notes and manual, ordinary and body re-check rev
       if (dispatch !== 'none') {
         h.reviewer('T1', 'reviewer', h.sha);
         if (dispatch === 'body') {
-          const file = path.join(h.state, 'events.jsonl');
-          const events = fs.readFileSync(file, 'utf8').trim().split('\n').map(JSON.parse);
-          events.findLast((e) => e.cmd === 'spawn').detail.body_recheck = { sha: h.sha, revision: 1 };
-          fs.writeFileSync(file, events.map((e) => JSON.stringify(e) + '\n').join(''));
+          const spawn = StateFiles.readEvents(h.state).findLast((e) => e.cmd === 'spawn');
+          StateFiles.editEvents(h.state, (e) => (e.id === spawn.id ? { ...e, detail: { ...e.detail, body_recheck: { sha: h.sha, revision: 1 } } } : null));
         }
       }
       const row = `${dispatch}, ${type}, ${verdict}, ${explicitSha ? 'explicit' : 'default'} sha`;
@@ -70,8 +69,8 @@ test('evidence metadata handles notes and manual, ordinary and body re-check rev
 
 test('manual software evidence is refused for either verdict and every agent without writing state', (t) => {
   const h = setup(t);
-  const before = fs.readFileSync(path.join(h.state, 'tasks.json'), 'utf8');
-  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
+  const before = StateFiles.docText(h.state, 'tasks.json');
+  const events = StateFiles.logText(h.state);
   // Every type and agent, alternating the verdict and an explicit sha.
   for (const [i, type] of ['tests', 'clean', 'ci', 'merge'].entries()) {
     for (const [j, agent] of ['worker', 'reviewer', 'owner'].entries()) {
@@ -82,8 +81,8 @@ test('manual software evidence is refused for either verdict and every agent wit
       assert.match(r.stderr, /only tower-crane (check|merge)/);
     }
   }
-  assert.equal(fs.readFileSync(path.join(h.state, 'tasks.json'), 'utf8'), before);
-  assert.equal(fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8'), events);
+  assert.equal(StateFiles.docText(h.state, 'tasks.json'), before);
+  assert.equal(StateFiles.logText(h.state), events);
   h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'note', '--ok', '--agent', 'worker']);
 });
 
@@ -124,10 +123,18 @@ test('forged gate source without an audit event cannot satisfy accept', (t) => {
   }
 });
 
+// The state back in the file layout with `log` as its events.jsonl, as a 0.1
+// tool left it; the next command migrates it, lines that are not events and all.
+function layoutWithLog(h, log) {
+  StateFiles.toFileLayout(h.state);
+  fs.writeFileSync(path.join(h.state, 'events.jsonl'), log);
+}
+
+const logLines = (events) => events.map((e) => JSON.stringify(e) + '\n').join('');
+
 test('software receipts count only with a matching gate event', (t) => {
   const h = setup(t, ALL);
-  const eventsFile = path.join(h.state, 'events.jsonl');
-  const original = fs.readFileSync(eventsFile, 'utf8');
+  const original = StateFiles.logText(h.state);
   const events = original.trim().split('\n').map(JSON.parse);
   // The event match is the same for every gate: each field once on tests,
   // and a missing event for the other gates.
@@ -147,8 +154,8 @@ test('software receipts count only with a matching gate event', (t) => {
       else if (change === 'ok') event.detail.ok = false;
       else if (change === 'commands') event.detail.commands[0].status = 42;
       else event.detail.revision = 0;
-      // Alter only the audit file to prove the source marker alone is insufficient.
-      fs.writeFileSync(eventsFile, altered.map((e) => JSON.stringify(e) + '\n').join(''));
+      // Alter only the audit log to prove the source marker alone is insufficient.
+      StateFiles.replaceLog(h.state, logLines(altered));
       const r = h.run(['accept', 'T1']);
       assert.equal(r.code, 1, `${type} ${change}: ${r.stdout}`);
       assert.ok(r.stderr.includes(`${type}: no ${type} evidence`), `${change}: ${r.stderr}`);
@@ -156,22 +163,21 @@ test('software receipts count only with a matching gate event', (t) => {
       assert.ok(line.includes('(does not count)'), `${change}: ${line}`);
     }
   }
-  fs.writeFileSync(eventsFile, original + '{"torn":\n');
+  layoutWithLog(h, original + '{"torn":\n');
   h.ok(['accept', 'T1']);
 });
 
 test('an ok gate result with matching event but no commands cannot satisfy accept', (t) => {
   const h = setup(t, ALL);
   const original = h.readState('tasks.json');
-  const eventsFile = path.join(h.state, 'events.jsonl');
-  const events = fs.readFileSync(eventsFile, 'utf8').trim().split('\n').map(JSON.parse);
+  const events = StateFiles.readEvents(h.state);
   for (const type of ['tests', 'clean', 'ci']) {
     const doc = structuredClone(original);
     doc.tasks[0].evidence.find((e) => e.type === type).commands = [];
     const altered = structuredClone(events);
     altered.find((e) => e.cmd === `check ${type}`).detail.commands = [];
     h.writeState('tasks.json', doc);
-    fs.writeFileSync(eventsFile, altered.map((e) => JSON.stringify(e) + '\n').join(''));
+    StateFiles.replaceLog(h.state, logLines(altered));
     const r = h.run(['accept', 'T1']);
     assert.equal(r.code, 1, r.stdout);
     assert.ok(r.stderr.includes(`${type}: no ${type} evidence`), r.stderr);
@@ -183,21 +189,20 @@ test('an ok gate result with matching event but no commands cannot satisfy accep
 test('merge rechecks software events after acceptance', (t) => {
   const h = setup(t, ALL);
   h.ok(['accept', 'T1']);
-  const eventsFile = path.join(h.state, 'events.jsonl');
-  const events = fs.readFileSync(eventsFile, 'utf8').trim().split('\n').map(JSON.parse);
-  fs.writeFileSync(eventsFile, events.filter((e) => e.cmd !== 'check tests').map((e) => JSON.stringify(e) + '\n').join(''));
+  StateFiles.replaceLog(h.state, logLines(StateFiles.readEvents(h.state).filter((e) => e.cmd !== 'check tests')));
   const r = h.run(['merge', 'T1']);
   assert.equal(r.code, 1, r.stdout);
   assert.match(r.stderr, /its gates no longer pass: tests: no tests evidence/);
   assert.ok(!fs.existsSync(h.env.FIXTURE_MERGED), 'the merge command never ran');
 });
 
+// A 0.1 log that ends in a torn or unterminated line migrates with it kept as
+// a line, and gates recorded after it still count.
 test('a failed gate after an unterminated audit line still blocks accept and merge', (t) => {
   const h = setup(t, ALL);
-  const eventsFile = path.join(h.state, 'events.jsonl');
-  const original = fs.readFileSync(eventsFile, 'utf8');
+  const original = StateFiles.logText(h.state);
   for (const tail of [original + '{"torn":', original.trimEnd()]) {
-    fs.writeFileSync(eventsFile, tail);
+    layoutWithLog(h, tail);
     gateEvidence(h, 'tests', 'checker', false);
     const refused = h.run(['accept', 'T1']);
     assert.equal(refused.code, 1, refused.stdout);
@@ -207,7 +212,7 @@ test('a failed gate after an unterminated audit line still blocks accept and mer
     gateEvidence(h, 'tests', 'checker');
   }
   h.ok(['accept', 'T1']);
-  fs.appendFileSync(eventsFile, '{"torn":');
+  layoutWithLog(h, StateFiles.logText(h.state) + '{"torn":');
   gateEvidence(h, 'ci', 'checker', false);
   const refused = h.run(['merge', 'T1']);
   assert.equal(refused.code, 1, refused.stdout);
@@ -272,7 +277,7 @@ test('real gate commands record their source and executed commands, including me
   assert.ok(ci.some((c) => c.command === 'gh' && c.args[1].includes('/check-runs')));
   const merge = evidence.find((e) => e.type === 'merge').commands;
   assert.ok(merge.some((c) => c.command === 'gh' && c.args.includes('--match-head-commit') && c.args.includes(h.env.FIXTURE_SHA)));
-  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const events = StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
   for (const e of evidence.filter((e) => e.source)) {
     const event = events.find((event) => event.cmd === e.source);
     assert.equal(event.task, 'T1');

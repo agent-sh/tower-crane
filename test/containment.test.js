@@ -1,5 +1,7 @@
 'use strict';
 
+const StateFiles = require('./state-files');
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -149,7 +151,7 @@ test('reviewer spawns record the reviewer cap', async (t) => {
   h.env.TOWER_CRANE_TEST_CONTAINMENT = '1';
   const result = h.run(['spawn', '--task', 'T1', '--role', 'review', '--wait']);
   assert.equal(result.code, 0, result.stderr);
-  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const events = StateFiles.readEvents(h.state);
   const recorded = events.findLast((e) => e.detail?.role === 'reviewer' && e.detail.containment)?.detail.containment;
   assert.ok(recorded, result.stdout + result.stderr);
   // One agent share and one gate share, within the half both split.
@@ -294,7 +296,7 @@ test('CLI launches use the watchdog before registration for unsafe placement or 
     const files = fs.readdirSync(path.join(h.state, 'logs')).map(name => fs.readFileSync(path.join(h.state, 'logs', name), 'utf8'));
     const output = result.stdout + result.stderr + files.join('\n');
     assert.equal(result.code, 0, output);
-    const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+    const events = StateFiles.readEvents(h.state);
     const contained = events.find(e => e.detail?.containment)?.detail.containment;
     assert.equal(contained?.backend, 'watchdog', output);
     if (reason === 'logout') assert.match(output, /warning:.*outside user@.*linger.*logout.*watchdog/);
@@ -874,7 +876,7 @@ test('CLI spawn records cap failure in events and status', async (t) => {
     JSON.stringify([process.execPath, HARNESS, 'storm', 'unused', '{prompt}']), '--clear', 'profile', '--clear', 'effort']);
   const result = h.run(['spawn', '--task', 'T1', '--wait']);
   assert.notEqual(result.code, 0);
-  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const events = StateFiles.readEvents(h.state);
   const failed = events.findLast((e) => e.cmd === 'spawn phase' && e.detail.reason === 'resource-tasks-max');
   assert.ok(failed, result.stdout + result.stderr);
   assert.equal(failed.detail.phase, 'blocked');
@@ -900,7 +902,7 @@ test('CLI cleanup records a capped gate command and names its failure', (t) => {
   assert.equal(gate.ok, false);
   assert.match(gate.summary, /resource-tasks-max/);
   assert.equal(gate.resource_reason, 'resource-tasks-max');
-  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const events = StateFiles.readEvents(h.state);
   assert.ok(events.some((e) => e.detail.resource_reason === 'resource-tasks-max'));
   assert.match(h.ok(['inbox']), /resource-tasks-max/);
 });

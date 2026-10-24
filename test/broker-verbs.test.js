@@ -128,7 +128,7 @@ test('an approved verb runs through the broker on the host for a granted task an
   assert.equal(out.sha256, crypto.createHash('sha256').update(receipt).digest('hex'));
   assert.deepEqual(JSON.parse(receipt), { campaign: 'c1', rounds: '3', via: null }, 'the verb gets none of the broker\'s variables');
   assert.match(r.stdout, new RegExp(`receipt.json: ${out.path.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&')} sha256 ${out.sha256}`));
-  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const events = h.events();
   assert.ok(events.some((ev) => ev.cmd === 'verb' && ev.task === 'T1' && ev.detail.verb === 'rehearse' && ev.detail.outputs[0].sha256 === out.sha256));
   assert.equal(fs.readdirSync(path.join(h.state, 'verbs', 'runs')).length, 0, 'the private output directory is removed');
 });
@@ -266,7 +266,7 @@ test('ungranted, unclaimed and out-of-pattern requests are refused and run nothi
 test('the orchestrator grants delegated verbs; other grants and every verb change are the owner\'s', (t) => {
   const h = fixture(t);
   const orchestrator = { env: { TOWER_CRANE_AGENT: 'orchestrator' } };
-  const audit = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse).findLast((e) => e.cmd === 'setting');
+  const audit = () => h.events().findLast((e) => e.cmd === 'setting');
   h.ok(['task', 'update', 'T1', '--broker-verbs', 'rehearse,sleepy'], orchestrator);
   assert.deepEqual(audit().detail.settings, { 'task.broker_verbs': 'operational' });
   let r = h.run(['task', 'update', 'T1', '--broker-verbs', 'rehearse,private'], orchestrator);

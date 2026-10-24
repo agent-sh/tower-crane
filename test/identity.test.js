@@ -1,6 +1,7 @@
 'use strict';
 
 const { waitOnRepo } = require('./signals');
+const StateFiles = require('./state-files');
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -11,7 +12,7 @@ const { makeRepo, cachedFixture, runPty, PTY_AVAILABLE, BIN, HOOKS } = require('
 
 const noAgent = { TOWER_CRANE_AGENT: undefined };
 const message = 'tower-crane: no agent: pass --agent NAME or set TOWER_CRANE_AGENT\n';
-const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
+const events = (h) => StateFiles.logText(h.state);
 const withoutTowerCrane = (env) => Object.fromEntries(Object.entries(env).filter(([key]) => key === 'TOWER_CRANE_HOST_ROOT' || !key.startsWith('TOWER_CRANE_')));
 const terminal = (h, args, env = {}) => runPty([...args, '--state', h.state], { cwd: h.repo, env: { ...withoutTowerCrane(h.env), ...env } });
 
@@ -294,6 +295,20 @@ test('owner without a terminal needs the owner key', (t) => {
   assert.equal(h.readState('tasks.json').tasks[0].needs_owner, 'approve access');
   h.ok(['owner-done', 'T1']);
   assert.equal(h.readState('tasks.json').tasks[0].needs_owner, null);
+});
+
+// The owner's credential directory is all identity reads of the state: a
+// damaged decision or task document is for the owner to repair, so it must
+// not stop the owner being recognized.
+test('owner identity reads only the project document', (t) => {
+  const h = setup(t);
+  const Authority = require('../lib/authority');
+  const Db = require('../lib/db');
+  t.after(() => Db.closeAll());
+  const configDir = h.readState('project.json').owner_config_dir;
+  StateFiles.writeDoc(h.state, 'decisions.json', { version: 1, decisions: 'damaged' });
+  assert.equal(Authority.ownerProject(h.state).owner_config_dir, configDir);
+  assert.match(h.run(['status']).stderr, /decisions\.json/, 'reads that need the decisions still refuse them');
 });
 
 test('automatic state discovery never passes the owner key to a Git child', (t) => {

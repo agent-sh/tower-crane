@@ -12,6 +12,7 @@ const { waitFor } = require('./canary');
 const { shellQuote } = require('../lib/gates/common');
 const { readPublished } = require('./atomic-file');
 const { setup, attach } = require('./automation-helpers');
+const StateFiles = require('./state-files');
 const { waitUntil } = require('./signals');
 const { identity } = require('../lib/processes');
 const { randomUUID } = require('node:crypto');
@@ -289,10 +290,11 @@ fs.writeFileSync(file, JSON.stringify(gh));
 cli('claim', 'T1', '--agent', 'worker');
 cli('submit', 'T1', '--sha', ${JSON.stringify(replacement)}, '--pr', '7', '--agent', 'worker');
 for (const gate of ['tests', 'clean', 'ci']) cli('check', gate, 'T1', '--agent', 'owner');
-const events = ${JSON.stringify(path.join(h.state, 'events.jsonl'))};
-const revision = JSON.parse(fs.readFileSync(${JSON.stringify(path.join(h.state, 'tasks.json'))}, 'utf8')).tasks.find((x) => x.id === 'T1').revision;
+const StateFiles = require(${JSON.stringify(path.join(__dirname, 'state-files.js'))});
+const state = ${JSON.stringify(h.state)};
+const revision = StateFiles.readDoc(state, 'tasks.json').tasks.find((x) => x.id === 'T1').revision;
 const at = new Date().toISOString();
-fs.appendFileSync(events, [
+StateFiles.appendLog(state, [
   { at, agent: 'orchestrator', cmd: 'spawn', task: 'T1', detail: { agent: 'reviewer', role: 'reviewer', rung: 'review', sha: ${JSON.stringify(replacement)}, revision, pid: 999999, attempt: 1 } },
   { at, agent: 'orchestrator', cmd: 'spawn exit', task: 'T1', detail: { agent: 'reviewer', pid: 999999, attempt: 1, code: 0 } },
 ].map((e) => JSON.stringify(e) + '\\n').join(''));
@@ -389,7 +391,7 @@ if (fs.readFileSync('README.md', 'utf8').includes('Independent base update.')) {
     cmd: 'ci completed', agent: 'orchestrator', task: 'T1',
     detail: { sha: h.sha, revision: Number(h.revision('T1')) },
   }));
-  fs.appendFileSync(path.join(h.state, 'events.jsonl'), queued.map((e) => JSON.stringify(e) + '\n').join(''));
+  StateFiles.appendEvents(h.state, queued);
   const before = h.suites().length;
   h.consume();
   assert.equal(h.suites().length - before, 1, 'six queued reactions run the suite only once more');
@@ -540,7 +542,7 @@ for (const [name, t1] of [['T1 is passed over', 'OPEN'], ['T1 merges', 'MERGED']
     // T2's accept reaction already ran while T1's supervisor held the queue and
     // ended deferred, so no receipt or marker of its own keeps it owed.
     const accept = h.logs().findLast((e) => e.cmd === 'accept' && e.task === 'T2');
-    fs.appendFileSync(path.join(h.state, 'events.jsonl'), `${JSON.stringify({ at: new Date().toISOString(), agent: 'orchestrator',
+    StateFiles.appendLog(h.state, `${JSON.stringify({ at: new Date().toISOString(), agent: 'orchestrator',
       cmd: 'automation', task: 'T2', detail: { source: accept.id, phase: 'deferred', error: null } })}\n`);
     const script = path.join(h.base, 'supervisor.js');
     fs.writeFileSync(script, `const lib = ${JSON.stringify(path.join(path.dirname(BIN), '..', 'lib'))};
@@ -683,9 +685,8 @@ test('merge --accepted waits for a free gate executor before its head check', as
   h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha, '--ok', '--agent', 'reviewer']);
   h.ok(['accept', 'T1', '--agent', 'orchestrator']);
   // Another process's suite holds the only executor; this live pid stands in for it.
-  const events = path.join(h.state, 'events.jsonl');
-  const lease = (detail) => fs.appendFileSync(events, `${JSON.stringify({ id: `E${randomUUID()}`, at: new Date().toISOString(),
-    agent: 'orchestrator', cmd: 'executor', task: 'T2', detail: { lease: 'cpu:held', ...detail } })}\n`);
+  const lease = (detail) => StateFiles.appendEvents(h.state, [{ id: `E${randomUUID()}`, at: new Date().toISOString(),
+    agent: 'orchestrator', cmd: 'executor', task: 'T2', detail: { lease: 'cpu:held', ...detail } }]);
   lease({ phase: 'running', kind: 'tests', pid: process.pid, ...identity(process.pid) });
   const suites = h.suites().length;
   const start = h.logs().length;
@@ -815,7 +816,7 @@ for (const [why, end] of Object.entries(PAUSE_ENDS)) {
   });
 }
 
-test('an armed merge pause holds nothing until its task submits', (t) => {
+test('an armed merge pause holds nothing until its task submits', async (t) => {
   const h = queueFixture(t);
   h.ok(['rework', 'T2', '--reason', CONFLICT.replace('#7', '#8'), '--agent', 'orchestrator']);
   h.ok(['merge', 'pause', 'T2', '--minutes', '30', '--reason', 'lands docs first', '--agent', 'orchestrator']);
@@ -827,7 +828,9 @@ test('an armed merge pause holds nothing until its task submits', (t) => {
   h.ok(['accept', 'T1', '--agent', 'orchestrator']);
   h.consume();
   assert.equal(h.github().prs['7'].state, 'MERGED', 'an armed pause holds no merge');
-  // Refill gave the rework to a worker, which submits it.
+  // Refill gave the rework to a worker, which submits it. Its supervisor
+  // takes the lease after the dispatch returns.
+  await waitUntil(() => !!h.json(['task', 'show', 'T2']).claim, { paths: [h.state], what: 'the refilled worker takes T2' });
   const worker = h.json(['task', 'show', 'T2']).claim.agent;
   h.ok(['submit', 'T2', '--sha', h.second, '--pr', '8', '--agent', worker]);
   const holding = h.json(['status']).merge_pause;

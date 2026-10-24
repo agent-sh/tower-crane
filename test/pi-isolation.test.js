@@ -1,6 +1,7 @@
 'use strict';
 
 const test = require('node:test');
+const StateFiles = require('./state-files');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -83,7 +84,7 @@ test('pi ignores planted user memory, MCP extension and approved rules, links au
   assert.equal(dry.startup.instructions_file, path.join(dry.home.path, 'AGENTS.md'));
   assert.equal(dry.startup.sandbox, false);
   assert.equal(dry.startup.confinement, 'unconfined');
-  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n')
+  const events = StateFiles.logText(h.state).trim().split('\n')
     .map((line) => JSON.parse(line)).filter((e) => e.cmd === 'startup');
   assert.equal(events.length, 3);
   assert.deepEqual(events[0].detail.rules, dry.startup.rules);

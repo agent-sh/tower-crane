@@ -19,13 +19,13 @@ function submitted(t) {
     h.submit();
     return { sha: h.sha };
   });
-  h.logs = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  h.logs = () => h.events();
   h.consume = opts => h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator'], opts);
   const source = h.logs().findLast(e => e.cmd === 'submit').id;
-  fs.appendFileSync(path.join(h.state, 'events.jsonl'), JSON.stringify({
+  h.appendEvents([{
     id: `queued-${source}`, at: new Date().toISOString(), cmd: 'automation queued', agent: 'orchestrator',
     task: 'T1', detail: { source },
-  }) + '\n');
+  }]);
   return h;
 }
 
@@ -54,10 +54,10 @@ for (const force of [false, true]) {
     const ready = path.join(h.base, 'runtime-ready');
     const release = path.join(h.base, 'runtime-release');
     const releaseLauncher = Runtime.hold(root);
-    const sourceSpawn = pid => fs.appendFileSync(path.join(h.state, 'events.jsonl'), JSON.stringify({
+    const sourceSpawn = pid => h.appendEvents([{
       id: `source-${pid}`, at: new Date().toISOString(), cmd: 'spawn', agent: 'orchestrator', task: null,
       detail: { agent: 'worker-exited', role: 'small', pid, ...require('../lib/processes').identity(pid) },
-    }) + '\n');
+    }]);
     sourceSpawn(process.pid);
     pinRung(h, 'small', { harness: 'command', command: [process.execPath, '-e', 'process.exit(0)', '{prompt}'] });
     const pruneFinish = path.join(h.base, 'prune-finish');

@@ -13,6 +13,7 @@ const { makeRepo, cachedFixture, ROOT } = require('./helpers');
 const { shellQuote } = require('../lib/gates/common');
 const { gateFixture } = require('./gate-helpers');
 const { nativeCrashTest } = require('./gates/helpers');
+const StateFiles = require('./state-files');
 
 const runner = `node ${shellQuote(path.join(ROOT, 'test/run.js'))}`;
 const fullCommand = `${runner} test/*.test.js`;
@@ -82,7 +83,7 @@ test('with tests.crucial and a map pinned, a change runs crucial plus the suites
   // The evidence and its audit event time each step, so the gate's time can be read from receipts.
   assert.deepEqual(Object.keys(result.receipt.phases).sort(), ['head', 'proof', 'reverted', 'total']);
   // read-published: the check above has ended, so nothing appends to the event log.
-  const audited = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)
+  const audited = StateFiles.logText(h.state).trim().split('\n').map(JSON.parse)
     .findLast((e) => e.cmd === 'check tests').detail.receipt.phases;
   assert.deepEqual(audited, result.receipt.phases);
   assert.equal(counts(h), true);
@@ -493,7 +494,7 @@ fs.copyFileSync(${JSON.stringify(file)}, path.join(args[args.indexOf('-D') + 1],
     '**/*.md': [], 'docs/cli.md': ['test/other.test.js'],
     'lib/merge.js': ['test/cli.test.js'], 'tool/runner.js': ['test/cli.test.js'],
   });
-  const events = fs.readFileSync(path.join(p.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const events = StateFiles.logText(p.state).trim().split('\n').map(JSON.parse);
   assert.equal(events.filter((e) => e.cmd === 'tests map refresh').at(-1).detail.authority, 'orchestrator');
 });
 

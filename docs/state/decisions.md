@@ -171,6 +171,8 @@ The owner is the resolved name `owner`, supplied explicitly by `--agent owner` o
 
 ## decisions.json
 
+The `decisions` document of `state.db`, written back as `decisions.json` by an export.
+
 ```json
 {
   "version": 1,

@@ -269,10 +269,10 @@ for (const status of ['submitted', 'accepted']) {
     fs.writeFileSync(path.join(top.wt.path, 'pr-body.md'), 'pending edits\n');
     const parent = resubmit(f, false);
     // A prior pass may have recorded the receipt before submission completed.
-    fs.appendFileSync(path.join(f.h.state, 'events.jsonl'), JSON.stringify({
+    f.h.appendEvents([{
       at: new Date().toISOString(), agent: 'orchestrator', cmd: 'stack sync deferred', task: 'T2',
       detail: { parent: 'T1', parent_sha: parent, failure: 'dirty', reason: 'prior dirty deferral' },
-    }) + '\n');
+    }]);
     f.h.run(['check', 'clean', 'T2']);
     assert.equal(f.h.json(['task', 'show', 'T2']).status, 'rework');
     const deferred = events(f).filter((e) => e.task === 'T2' && e.cmd === 'stack sync deferred');

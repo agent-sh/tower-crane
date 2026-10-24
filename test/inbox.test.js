@@ -1,6 +1,7 @@
 'use strict';
 
 const { waitOnRepo, fileWritten } = require('./signals');
+const StateFiles = require('./state-files');
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -52,7 +53,7 @@ function setup(t) {
     if (refresh) h.refresh();
     return h.json(['inbox', '--agent', 'orchestrator']);
   };
-  h.logs = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  h.logs = () => StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
   return h;
 }
 
@@ -90,7 +91,7 @@ test('main push failures produce one item per current head and follow observes c
     fs.rmSync(cache, { force: true });
     return h.inbox().items.filter((i) => i.kind === 'main_ci_failed');
   };
-  const beforeRefresh = String(fs.statSync(path.join(h.state, 'events.jsonl')).size);
+  const beforeRefresh = String(StateFiles.logEnd(h.state));
   const first = failed().filter((i) => i.sha === h.sha);
   assert.equal(first.length, 1);
   assert.equal(first[0].id, `main_ci_failed:project:${h.sha}`);
@@ -177,7 +178,7 @@ test('push inbox retains older-head blockers and uses every green conclusion', (
 // starts. All task transitions and the resolving actions use the real CLI.
 function event(h, task, cmd, detail, agent = 'orchestrator', at = new Date().toISOString()) {
   const e = { id: `fixture-${h.logs().length}`, at, cmd, agent, task, detail };
-  fs.appendFileSync(path.join(h.state, 'events.jsonl'), `${JSON.stringify(e)}\n`);
+  StateFiles.appendLog(h.state, `${JSON.stringify(e)}\n`);
 }
 
 test('multi-item acknowledgements are atomic, deduplicated and retain single-item receipts', (t) => {
@@ -212,11 +213,11 @@ test('owner comment acknowledgements distinguish current and legacy events on on
       event(h, task, 'task note', { text: 'Same owner comment' }, 'owner', cutoff);
     }
     if (legacy) {
-      const logs = h.logs().map((e) => {
-        if (e.cmd === 'task note' && e.agent === 'owner') delete e.id;
+      StateFiles.editEvents(h.state, (e) => {
+        if (e.cmd !== 'task note' || e.agent !== 'owner') return null;
+        delete e.id;
         return e;
       });
-      fs.writeFileSync(path.join(h.state, 'events.jsonl'), logs.map((e) => JSON.stringify(e)).join('\n') + '\n');
     }
     const comments = () => h.inbox().items.filter((i) => i.kind === 'owner_comment');
     const first = comments();
@@ -500,11 +501,10 @@ test('ack-before includes the cutoff, filters kinds and leaves newer items and f
   h.ok(['answer', 'D1', '--choice', 'A']);
   h.ok(['ask', '--kind', 'technical', '--question', 'Which later API?', '--option', 'A', '--blocks', task]);
   h.ok(['answer', 'D2', '--choice', 'A']);
-  const file = path.join(h.state, 'decisions.json');
-  const decisions = JSON.parse(fs.readFileSync(file, 'utf8'));
+  const decisions = StateFiles.readDoc(h.state, 'decisions.json');
   decisions.decisions[0].answered_at = cutoff;
   decisions.decisions[1].answered_at = '2026-01-02T00:00:00.001Z';
-  fs.writeFileSync(file, JSON.stringify(decisions));
+  StateFiles.writeDoc(h.state, 'decisions.json', decisions);
   const items = h.inbox().items;
   let before = h.logs();
   for (const args of [
@@ -579,11 +579,10 @@ test('old closed-task inputs expire without changing history while main CI is ob
   h.ok(['ask', '--kind', 'technical', '--question', 'Recent merged input', '--option', 'A', '--blocks', merged]);
   h.ok(['answer', `D${cases.length + 1}`, '--choice', 'A']);
   event(h, merged, 'task note', { text: 'Retain owner input' }, 'owner', old);
-  const file = path.join(h.state, 'decisions.json');
-  const decisions = JSON.parse(fs.readFileSync(file, 'utf8'));
+  const decisions = StateFiles.readDoc(h.state, 'decisions.json');
   for (const decision of decisions.decisions) decision.answered_at = old;
   decisions.decisions.at(-1).answered_at = recent;
-  fs.writeFileSync(file, JSON.stringify(decisions));
+  StateFiles.writeDoc(h.state, 'decisions.json', decisions);
   for (const [index, conclusion] of [null, 'pending', 'success', 'failure', 'success'].entries()) {
     const github = h.github();
     github.main_head = (index + 1).toString(16).repeat(40);
@@ -819,14 +818,14 @@ test('MCP tools retain identity, expose actions and reject argument overrides', 
 test('new inbox items wake through wait and unchanged snapshots do not wake twice', (t) => {
   const h = setup(t);
   h.add('Ready');
-  const before = fs.statSync(path.join(h.state, 'events.jsonl')).size;
+  const before = StateFiles.logEnd(h.state);
   // Retain the follower's ready notification while warming its CI cache.
   h.inbox();
   const args = ['wait', '--inbox', '--observe', '--after', String(before), '--types', 'inbox item', '--timeout', '0.2', '--agent', 'orchestrator']; // wait-allow: verify the CLI observation, filtering or timeout contract with already-published state
   const wake = h.run(args);
   assert.equal(wake.code, 0, wake.stderr);
   assert.equal(JSON.parse(wake.stdout).detail.item, 'ready:T1');
-  const after = fs.statSync(path.join(h.state, 'events.jsonl')).size;
+  const after = StateFiles.logEnd(h.state);
   args[args.indexOf('--after') + 1] = String(after);
   assert.equal(h.run(args).code, 2);
 });
@@ -981,7 +980,7 @@ test('GitHub-only findings wake the watcher and endpoint failures retain other f
   const h = setup(t);
   const id = h.add('Remote review');
   h.submit(id, 8);
-  const after = () => String(fs.statSync(path.join(h.state, 'events.jsonl')).size);
+  const after = () => String(StateFiles.logEnd(h.state));
   // Async GitHub reads must finish within the wait, including a cold cache.
   // The wake returns as soon as the item lands, so its deadline only bounds a loaded host.
   const wait = (timeout = '2') => h.run(['wait', '--inbox', '--observe', '--after', after(), '--types', 'inbox item', '--timeout', timeout, '--agent', 'orchestrator']); // wait-allow: verify the CLI observation, filtering or timeout contract with already-published state

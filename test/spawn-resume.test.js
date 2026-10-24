@@ -3,6 +3,7 @@
 const { scopeEnv, harnessArgv } = require('./containment-plan');
 
 const { HUNG_TEST_MS, waitOnRepo, killPid } = require('./signals');
+const StateFiles = require('./state-files');
 const { readPublished } = require('./atomic-file');
 
 const { test, describe } = require('node:test');
@@ -14,7 +15,7 @@ const Sessions = require('../lib/spawn-session');
 // Independent cases run two at a time on every platform: most of each one waits on its child processes.
 const caseConcurrency = 2;
 
-const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+const events = (h) => StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
 
 describe('spawn resume integration cases', { concurrency: caseConcurrency }, () => {
 test('isolated Codex session lookup matches the recorded rollout id', (t) => {
@@ -160,7 +161,7 @@ for (const harness of ['codex', 'claude']) {
     await waitOnRepo(h, () => fs.readFileSync(first.log, 'utf8').includes('"usage"'));
     fs.writeFileSync(path.join(first.cwd, 'README.md'), '# native unfinished work\n');
     fs.writeFileSync(path.join(first.cwd, 'unfinished.txt'), 'keep native edits\n');
-    const after = String(fs.statSync(path.join(h.state, 'events.jsonl')).size);
+    const after = String(StateFiles.logEnd(h.state));
     // Model Windows startup consuming the session deadline before interruption.
     // The shutdown wait must use completion receipts independently of that clock.
     const clockBeforeInterrupt = Date.now();
@@ -226,11 +227,11 @@ for (const format of ['codex', 'claude']) {
     h.ok(['task', 'update', 'T1', '--acceptance', 'rework resumes with the revised acceptance']);
     h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736', '--revision', h.revision('T1'), '--agent', 'later-reviewer',
       '--summary', 'Unrelated later revision']);
-    const before = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
+    const before = StateFiles.logText(h.state);
     const dry = h.json(['spawn', '--task', 'T1', '--dry-run']);
     assert.equal(dry.resumed, true);
     assert.equal(dry.agent, first.agent);
-    assert.equal(fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8'), before);
+    assert.equal(StateFiles.logText(h.state), before);
     const next = h.json(['spawn', '--task', 'T1', '--wait']);
     assert.equal(next.agent, first.agent);
     assert.equal(next.cwd, first.cwd);
@@ -303,12 +304,12 @@ test('a changed harness or moved worktree starts fresh with the failed review no
       cwd = path.join(h.base, 'moved-worker');
       h.git(['worktree', 'move', first.cwd, cwd]);
     }
-    const before = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
+    const before = StateFiles.logText(h.state);
     const dry = h.json(['spawn', '--task', 'T1', '--dry-run']);
     assert.equal(dry.resumed, false);
     assert.equal(dry.session_id, null);
     assert.equal(dry.agent, 'worker-T1-2');
-    assert.equal(fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8'), before);
+    assert.equal(StateFiles.logText(h.state), before);
     const next = h.json(['spawn', '--task', 'T1', '--wait']);
     assert.equal(next.resumed, false);
     assert.equal(next.agent, 'worker-T1-2');
@@ -672,16 +673,14 @@ process.kill = function(pid, signal) {
 const read = fs.readFileSync;
 fs.readFileSync = function(file, ...args) {
   if (String(file) === '/proc/${first.pid}/stat') throw Object.assign(new Error('unavailable'), { code: 'EACCES' });
-  const value = read.call(this, file, ...args);
-  if (!String(file).endsWith('events.jsonl') || typeof value !== 'string') return value;
-  return value.split('\\n').map((line) => {
-    if (!line) return line;
-    const event = JSON.parse(line);
-    if (event.cmd === 'spawn exit' && event.detail.pid === ${first.pid}) delete event.detail.attempt;
-    return JSON.stringify(event);
-  }).join('\\n');
+  return read.call(this, file, ...args);
 };
 `);
+  StateFiles.editEvents(h.state, (e) => {
+    if (e.id !== receipt.id) return null;
+    delete e.detail.attempt;
+    return e;
+  });
   for (const args of [
     ['spawn', '--task', 'T1', '--dry-run'],
     ['spend', 'T1', '--from-spawn', first.agent],
@@ -695,24 +694,12 @@ test('the shared eligibility check compares route values independent of key orde
   const { h } = setup(t);
   h.json(['spawn', '--task', 'T1', '--wait']);
   sendBack(h);
-  const hook = path.join(h.base, 'route-order.js');
-  fs.writeFileSync(hook, `
-const fs = require('node:fs');
-const read = fs.readFileSync;
-fs.readFileSync = function(file, ...args) {
-  const value = read.call(this, file, ...args);
-  if (!String(file).endsWith('events.jsonl') || typeof value !== 'string') return value;
-  return value.split('\\n').map((line) => {
-    if (!line) return line;
-    const event = JSON.parse(line);
-    if (event.cmd === 'spawn' && event.detail.route) event.detail.route = Object.fromEntries(Object.entries(event.detail.route).reverse());
-    return JSON.stringify(event);
-  }).join('\\n');
-};
-`);
-  const dry = h.json(['spawn', '--task', 'T1', '--dry-run'], {
-    env: { NODE_OPTIONS: `--require "${hook.replace(/\\/g, '/')}"` },
+  StateFiles.editEvents(h.state, (e) => {
+    if (e.cmd !== 'spawn' || !e.detail.route) return null;
+    e.detail.route = Object.fromEntries(Object.entries(e.detail.route).reverse());
+    return e;
   });
+  const dry = h.json(['spawn', '--task', 'T1', '--dry-run']);
   assert.equal(dry.resumed, true);
 });
 
@@ -728,32 +715,20 @@ test('an earlier attempt exit cannot collect or resume a live attempt with a reu
   h.ok(['project', 'set', '--owners', '0']);
   h.ok(['submit', 'T1', '--sha', 'cfed4d76efd3afe887bbbfc7f62c7d94158e3255', '--agent', live.agent]);
   h.ok(['rework', 'T1', '--reason', 'Finish next attempt']);
-  const hook = path.join(h.base, 'reused-spawn.js');
-  fs.writeFileSync(hook, `
-const fs = require('node:fs');
-const read = fs.readFileSync;
-fs.readFileSync = function(file, ...args) {
-  const value = read.call(this, file, ...args);
-  if (String(file).endsWith('events.jsonl') && typeof value === 'string') {
-    return value.split('\\n').map((line) => {
-      if (!line) return line;
-      const event = JSON.parse(line);
-      if (event.cmd === 'spawn exit' && event.detail.pid === ${first.pid}) {
-        event.detail.pid = ${live.pid};
-        if (process.env.OMIT_EXIT_ATTEMPT) delete event.detail.attempt;
-      }
-      return JSON.stringify(event);
-    }).join('\\n');
-  }
-  return value;
-};
-`);
-  for (const missing of ['', '1']) {
+  // The earlier attempt's exit receipt names the live attempt's pid, as a reused pid would.
+  const exit = events(h).find((e) => e.cmd === 'spawn exit' && e.detail.pid === first.pid);
+  for (const missing of [false, true]) {
+    StateFiles.editEvents(h.state, (e) => {
+      if (e.id !== exit.id) return null;
+      e.detail.pid = live.pid;
+      if (missing) delete e.detail.attempt;
+      return e;
+    });
     for (const args of [
       ['spend', 'T1', '--from-spawn', live.agent],
       ['spawn', '--task', 'T1', '--dry-run'],
     ]) {
-      const result = h.run(args, { env: { NODE_OPTIONS: `--require "${hook.replace(/\\/g, '/')}"`, OMIT_EXIT_ATTEMPT: missing } });
+      const result = h.run(args);
       assert.equal(result.code, 1, result.stderr);
       assert.match(result.stderr, /still running or its exit is unverified/);
     }
@@ -795,12 +770,16 @@ test('a resume moves an earlier start\'s attempt log aside only once no recorded
   const log = path.join(logs, `T1-${first.agent}-attempt-2.log`);
   fs.writeFileSync(log, 'an earlier start\n');
   const audit = events(h);
-  const file = path.join(h.state, 'events.jsonl');
-  const recorded = fs.readFileSync(file, 'utf8');
-  // The same length, so what the refused run appends follows the original records.
-  fs.writeFileSync(file, recorded.replaceAll('"active":false', '"active":true '));
+  // The recorded ends read as still active while the refused run looks, then
+  // go back as they were; what that run logs stays.
+  const flipped = new Set();
+  StateFiles.editEvents(h.state, (e) => {
+    if (e.detail?.active !== false) return null;
+    flipped.add(e.id);
+    return { ...e, detail: { ...e.detail, active: true } };
+  });
   const refused = h.run(['spawn', '--task', 'T1', '--wait'], { hooks: { HOOK_HOSTNAME: 'another-host' } });
-  fs.writeFileSync(file, recorded + fs.readFileSync(file, 'utf8').slice(recorded.length));
+  StateFiles.editEvents(h.state, (e) => (flipped.has(e.id) ? { ...e, detail: { ...e.detail, active: false } } : null));
   assert.equal(refused.code, 1, refused.stderr);
   assert.match(refused.stderr, /EEXIST: log already exists/);
   assert.equal(fs.readFileSync(log, 'utf8'), 'an earlier start\n');
@@ -830,20 +809,21 @@ test('a resume moves an earlier start\'s attempt log aside when the recorded spa
   const cp = require('node:child_process');
   const live = cp.spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore', windowsHide: true }); // wait-allow: a process group that runs until the test kills it
   t.after(() => killPid(live.pid, 'SIGKILL'));
-  const file = path.join(h.state, 'events.jsonl');
-  const recorded = fs.readFileSync(file, 'utf8');
+  // The records as the first attempt left them; each rewrite starts from them.
+  const recorded = new Map(StateFiles.readEvents(h.state).map((e) => [e.id, e]));
   const started = new Date().toISOString();
-  const rewrite = (ended) => fs.writeFileSync(file, recorded.split('\n').map((line) => {
-    if (!line) return line;
-    const event = JSON.parse(line);
+  const rewrite = (ended) => StateFiles.editEvents(h.state, (current) => {
+    const original = recorded.get(current.id);
+    if (!original) return null;
+    const event = structuredClone(original);
     const d = event.detail;
-    if (event.task !== 'T1' || d?.agent !== first.agent || d.attempt !== first.attempt) return line;
+    if (event.task !== 'T1' || d?.agent !== first.agent || d.attempt !== first.attempt) return null;
     if (event.cmd === 'spawn') event.at = started;
     for (const key of ['pid', 'monitor_pid']) if (key in d) d[key] = live.pid;
     for (const key of ['start_ticks', 'monitor_start_ticks', 'monitor_start_time', 'pgid']) delete d[key];
     if (!ended && d.active === false) d.active = true;
-    return JSON.stringify(event);
-  }).join('\n'));
+    return event;
+  });
   const logs = path.dirname(first.log);
   const log = path.join(logs, `T1-${first.agent}-attempt-2.log`);
   fs.writeFileSync(log, 'an earlier start\n');

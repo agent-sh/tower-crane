@@ -1,6 +1,7 @@
 'use strict';
 
 const { waitOnRepo, killPid } = require('./signals');
+const StateFiles = require('./state-files');
 const { readPublished } = require('./atomic-file');
 
 const test = require('node:test');
@@ -10,7 +11,7 @@ const path = require('node:path');
 const { makeRepo, BIN, detachedAlive } = require('./helpers');
 
 // Pollers can read while a writer is appending the final record.
-const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').split('\n').slice(0, -1).filter(Boolean).map(JSON.parse);
+const events = (h) => StateFiles.logText(h.state).split('\n').slice(0, -1).filter(Boolean).map(JSON.parse);
 
 function setup(t, retry = false, stubborn = false) {
   const h = makeRepo(t);
@@ -405,8 +406,8 @@ test('a supervisor killed after an interrupt does not wedge the claim or the nex
   assert.equal(held.code, 1, held.stderr);
   assert.match(held.stderr, /still stopping/);
   // Age the killed monitor's records past the default 60-minute lease.
-  const log = path.join(h.state, 'events.jsonl');
-  fs.writeFileSync(log, fs.readFileSync(log, 'utf8').trim().split('\n').map((line) => {
+  // Rewritten, so each event's slot reach follows its new time.
+  StateFiles.replaceLog(h.state, StateFiles.logText(h.state).trim().split('\n').map((line) => {
     const e = JSON.parse(line);
     if (e.task === 'T1' && e.detail?.agent === first.agent && ['interrupt', 'spawn phase'].includes(e.cmd)) {
       e.at = new Date(Date.parse(e.at) - 61 * 60000).toISOString();

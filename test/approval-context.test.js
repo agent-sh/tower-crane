@@ -1,6 +1,7 @@
 'use strict';
 
 const test = require('node:test');
+const StateFiles = require('./state-files');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -9,7 +10,7 @@ const Authority = require('../lib/authority');
 
 const as = agent => ({ env: { TOWER_CRANE_AGENT: agent } });
 const decisions = h => h.readState('decisions.json').decisions;
-const events = h => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+const events = h => StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
 const audits = h => events(h).filter(e => e.cmd === 'setting');
 
 function removeBinding(h, id, key) {
@@ -20,7 +21,7 @@ function removeBinding(h, id, key) {
   for (const event of log) {
     if (event.cmd === 'ask' && event.detail.decision === id) delete event.detail.escalation.change[key];
   }
-  fs.writeFileSync(path.join(h.state, 'events.jsonl'), log.map(e => JSON.stringify(e)).join('\n') + '\n');
+  StateFiles.replaceLog(h.state, log.map(e => JSON.stringify(e)).join('\n') + '\n');
 }
 
 function setup(t) {

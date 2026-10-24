@@ -10,7 +10,7 @@
 
 > Running open models for your company? [**Tiyuvta**](https://tiyuvta.ai/services/) helps with model choice, deployment and optimization, and fine-tuning on your hardware or cloud account.
 
-Tower Crane is a CLI and an agent plugin for delegating software work to coding agents. An orchestrator agent splits the work into tasks, spawns a worker per task in its own worktree and sandbox, gets each change reviewed by an agent that did not write it, and merges it once software gates pass. The plan and its progress live in plain JSON files that only the CLI writes. It is for people who want agents to carry a project end to end: you watch instead of steering, and answer the few questions only you can answer. It is part of the [agentsys](https://github.com/agent-sh/agentsys) ecosystem.
+Tower Crane is a CLI and an agent plugin for delegating software work to coding agents. An orchestrator agent splits the work into tasks, spawns a worker per task in its own worktree and sandbox, gets each change reviewed by an agent that did not write it, and merges it once software gates pass. The plan and its progress live in a SQLite database that only the CLI writes. It is for people who want agents to carry a project end to end: you watch instead of steering, and answer the few questions only you can answer. It is part of the [agentsys](https://github.com/agent-sh/agentsys) ecosystem.
 
 ## Why
 
@@ -52,7 +52,7 @@ tower-crane merge T1
 
 What each step does:
 
-1. `init` writes `.tower-crane/project.json` with the default ladder and adds the directory to `.git/info/exclude`.
+1. `init` creates `.tower-crane/state.db` with the default ladder and adds the directory to `.git/info/exclude`.
 2. `task add` prints `T1`. Its kind defaults to `code`, so it runs on the `medium` rung even at size `S`. Only an `S` `docs` task goes to `easy`.
 3. `brief set` stores the context the worker gets.
 4. `spawn --dry-run` prints the agent file, the house rules and the exact command it would run. `spawn` runs it: a worker in a new worktree, which claims the task, commits, opens a PR and submits its head.
@@ -76,7 +76,7 @@ The CLI has no npm dependencies. The plugin adds the orchestrator, work and revi
 
 ## How it works
 
-**State files.** The state directory is `.tower-crane/` in the main checkout, shared by every worktree. `project.json` holds the settings and the ladder, `tasks.json` the tasks with their evidence and spend, `decisions.json` the owner's questions, `briefs/` the task context and `events.jsonl` every change with its time and agent. The CLI rewrites `sketch.md` and `sketch.html` after every write. See [docs/state.md](docs/state.md#files).
+**State files.** The state directory is `.tower-crane/` in the main checkout, shared by every worktree. `state.db`, one SQLite database, holds the settings and the ladder, the tasks with their evidence and spend, the owner's questions and every change with its time and agent; `briefs/` holds the task context. A renderer process redraws `sketch.md` and `sketch.html` after every write. `tower-crane state export DIR` writes the state back as the files of 0.1. See [docs/state.md](docs/state.md#files).
 
 **Task lifecycle.** A task is ready when its dependencies are accepted and no open decision blocks it.
 
@@ -172,7 +172,7 @@ Not covered yet:
 
 ## Configuration
 
-`project.json` holds the project: name, goal, repository, base branch, default harness and ladder, worker and lease limits, budgets, pinned gate commands, tests and CI policy, merge options and review policy. Change it with `tower-crane project set` and `tower-crane ladder set`; read it with `tower-crane project show`.
+The project settings in `state.db` hold its name, goal, repository, base branch, default harness and ladder, worker and lease limits, budgets, pinned gate commands, tests and CI policy, merge options and review policy. Change it with `tower-crane project set` and `tower-crane ladder set`; read it with `tower-crane project show`.
 
 `~/.config/tower-crane/config.json` (or `TOWER_CRANE_CONFIG`) is yours across projects: the ladder new projects start from (`tower-crane ladder save-user`), personal fallback routes, and the browser kit for UI tasks. The full shape and precedence are in [docs/state.md](docs/state.md#projectjson).
 

@@ -8,6 +8,7 @@ const { cachedFixture, BIN } = require('./helpers');
 const { setup, configureHarness } = require('./automation-helpers');
 const { waitOnRepo } = require('./signals');
 const S = require('../lib/state');
+const StateFiles = require('./state-files');
 const T = require('../lib/tasks');
 const G = require('../lib/github-broker');
 const B = require('../lib/broker');
@@ -319,13 +320,12 @@ test('status hides closed or day-old live spend while retaining totals', (t) => 
     assert.equal(T.liveSpend(sample, now).length, 1, 'raw readings remain available to monitoring and task inspection');
     assert.equal(sample.spend.tokens, 123);
   }
-  const file = path.join(h.state, 'tasks.json');
   const state = h.readState('tasks.json');
   state.tasks[0].spend = { ...task.spend, tokens: 123, entries: [{ agent: 'stale-worker', source: 'fixture-live', minutes: 0,
     input: null, cached: null, output: null, rung: null, model: null, profile: null,
     at: new Date(now - 90000000).toISOString(), tokens: 123, harness: 'command',
     live: { state: 'live', interval_ms: 1000 } }] };
-  fs.writeFileSync(file, JSON.stringify(state));
+  h.writeState('tasks.json', state);
   assert.doesNotMatch(h.ok(['status']), /live spend:/);
   assert.equal(h.json(['status']).spend.tokens, 123);
 });

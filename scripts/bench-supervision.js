@@ -54,7 +54,9 @@ function alive(pid) {
 // Event lines in the proportions and sizes of the measured log: progress
 // lines that readers skip, live usage, hook reports, reaction receipts,
 // messages, notes, spawns and their exits, and large test gate records.
-function padding(tasks) {
+// Without `progress` the progress lines are left out, as migration keeps an
+// older tool's progress lines out of state.db's events.
+function padding(tasks, progress = true) {
   const filler = (n) => 'x'.repeat(n);
   const kinds = [
     [27, (t, i) => ({ agent: `worker-${t}-1`, cmd: 'hook progress', task: t, detail: { tool: 'Bash', text: filler(160) } })],
@@ -74,6 +76,7 @@ function padding(tasks) {
   for (let i = 0; lines.length < LOG_LINES; i++) {
     let pick = i % weights;
     const [, make] = kinds.find(([w]) => (pick -= w) < 0);
+    if (!progress && make === kinds[0][1]) continue;
     const task = tasks[i % tasks.length];
     const line = JSON.stringify({ at: new Date(at + i * 10).toISOString(), ...make(task, i), id: `Ebench-${i}` }) + '\n';
     lines.push(line);
@@ -84,6 +87,27 @@ function padding(tasks) {
   const summary = filler(Math.max(0, Math.round((LOG_BYTES - bytes) / checks)));
   return lines.map((line) => (line.includes('"cmd":"check tests"') ? line.replace('"summary":""', `"summary":"${summary}"`) : line));
 }
+
+// A state in state.db, or in a file layout's events.jsonl: --compare runs
+// this script on a tree from before the database too.
+const inDb = (h) => fs.existsSync(path.join(h.state, 'state.db'));
+const stateFiles = () => require(path.join(ROOT, 'test', 'state-files'));
+
+function appendLines(h, lines) {
+  if (inDb(h)) {
+    for (let i = 0; i < lines.length; i += 1000) stateFiles().appendLog(h.state, lines.slice(i, i + 1000).join(''));
+    return;
+  }
+  const fd = fs.openSync(path.join(h.state, 'events.jsonl'), 'a');
+  try {
+    for (let i = 0; i < lines.length; i += 1000) fs.writeSync(fd, lines.slice(i, i + 1000).join(''));
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+// The log's length: its end cursor, which counts bytes as events.jsonl did.
+const logBytes = (h) => (inDb(h) ? stateFiles().logEnd(h.state) : fs.statSync(path.join(h.state, 'events.jsonl')).size);
 
 function fill(h) {
   const doc = h.readState('tasks.json');
@@ -98,14 +122,8 @@ function fill(h) {
         minutes: 0, tokens: 1, input: 1, cached: 0, output: 0, rung: null, harness: null, model: null, profile: null, source: 'manual', cost_usd: null })) } });
   }
   doc.next = FILLER_TASKS + 2;
-  const lines = padding(ids);
-  const file = path.join(h.state, 'events.jsonl');
-  const fd = fs.openSync(file, 'a');
-  try {
-    for (let i = 0; i < lines.length; i += 1000) fs.writeSync(fd, lines.slice(i, i + 1000).join(''));
-  } finally {
-    fs.closeSync(fd);
-  }
+  const lines = padding(ids, !inDb(h));
+  appendLines(h, lines);
   doc.last_event = `Ebench-${lines.length - 1}`;
   h.writeState('tasks.json', doc);
 }
@@ -148,10 +166,9 @@ async function measure() {
       await pause(200);
     }
     await pause(WARMUP_MS);
-    const log = path.join(h.state, 'events.jsonl');
     const windows = [];
     for (let w = 0; w < WINDOWS; w++) {
-      const size = fs.statSync(log).size;
+      const size = logBytes(h);
       const profiled = profile && w === 0;
       if (profiled) for (const pid of [monitor, host.pid]) process.kill(pid, 'SIGUSR2');
       const before = [sample(monitor), sample(host.pid)];
@@ -161,7 +178,7 @@ async function measure() {
       const minutes = (performance.now() - start) / 60000;
       const after = [sample(monitor), sample(host.pid)];
       windows.push({
-        appended: fs.statSync(log).size - size,
+        appended: logBytes(h) - size,
         monitor: { cpu_s_per_min: (after[0].ticks - before[0].ticks) / hz / minutes, rss_mb: after[0].rss / 2 ** 20 },
         follow: { cpu_s_per_min: (after[1].ticks - before[1].ticks) / hz / minutes, rss_mb: after[1].rss / 2 ** 20 },
       });
@@ -173,7 +190,7 @@ async function measure() {
     const monitorExitS = alive(monitor) ? null : (performance.now() - exitStart) / 1000;
     // The governor's measuring tick reads every process on the host, so its cost scales with this count.
     const hostProcs = fs.readdirSync('/proc').filter((name) => /^\d+$/.test(name)).length;
-    return { windows, monitor_exit_s: monitorExitS, log_bytes: fs.statSync(log).size, host_procs: hostProcs, stderr: stderr.trim().slice(-2000) };
+    return { windows, monitor_exit_s: monitorExitS, log_bytes: logBytes(h), host_procs: hostProcs, stderr: stderr.trim().slice(-2000) };
   } finally {
     if (host && host.exitCode === null) { host.kill('SIGINT'); await closed; }
     fs.writeFileSync(finish, '');

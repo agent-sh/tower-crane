@@ -7,6 +7,7 @@ const path = require('node:path');
 const { readPublished } = require('./atomic-file');
 const { cachedFixture } = require('./helpers');
 const { gateFixture } = require('./gate-helpers');
+const StateFiles = require('./state-files');
 
 // T1 is the task whose PR the orchestrator merged on GitHub; T2 depends on it;
 // T3 is unrelated. gh answers `pr view` from pr.json and logs every call, so a
@@ -37,7 +38,7 @@ if (args[0] === 'pr' && args[1] === 'view') {
 }
 
 const task = (h, id = 'T1') => h.readState('tasks.json').tasks.find((t) => t.id === id);
-const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+const events = (h) => StateFiles.readEvents(h.state);
 const ghCalls = (h) => (fs.existsSync(h.env.FIXTURE_GH_LOG) ? readPublished(h.env.FIXTURE_GH_LOG, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : []);
 const landed = (h, args, opts) => h.run(['task', 'landed', 'T1', '--pr', '42', '--reason', 'native clean-context review passed; PR checks green', ...args], opts);
 const patch = (fields) => ({ env: { FIXTURE_PR_PATCH: JSON.stringify(fields) } });
@@ -247,7 +248,7 @@ test('a landing at a later revision whose PR head moved past the task sha stays 
   const at = new Date().toISOString();
   t1.evidence.push({ ...detail, agent: 'orchestrator', at, summary: `PR #42 already merged at ${merge}` });
   h.writeState('tasks.json', doc);
-  fs.appendFileSync(path.join(h.state, 'events.jsonl'), `${JSON.stringify({ at, agent: 'orchestrator', via: 'automation', cmd: 'merge', task: 'T1', detail })}\n`);
+  StateFiles.appendLog(h.state, `${JSON.stringify({ at, agent: 'orchestrator', via: 'automation', cmd: 'merge', task: 'T1', detail })}\n`);
 
   assert.match(h.ok(['task', 'list']), /T1 +accepted \(native\)/);
   assert.equal(h.json(['status']).counts.accepted_native, 1);

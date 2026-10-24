@@ -6,6 +6,7 @@
 // has gate failures, reviewers and the range ceiling.
 
 const test = require('node:test');
+const StateFiles = require('./state-files');
 const assert = require('node:assert/strict');
 const cp = require('node:child_process');
 const fs = require('node:fs');
@@ -147,7 +148,7 @@ for (const row of [
       assert.equal(events(h).filter((e) => e.cmd === 'escalate').length, 0);
       h.ok(['evidence', 'T1', '--type', 'review', '--revision', h.revision(), '--fail', '--sha', h.git(['rev-parse', 'HEAD']),
         '--agent', 'reviewer', '--summary', 'incorrect boundary']);
-      const cursor = String(fs.statSync(path.join(h.state, 'events.jsonl')).size);
+      const cursor = String(StateFiles.logEnd(h.state));
       const host = await h.runAsync(['wait', '--after', cursor, '--types', 'submitted', '--task', 'T1',
         '--timeout', '300', '--agent', 'orchestrator']);
       assert.equal(host.code, 0, host.stderr || host.stdout);

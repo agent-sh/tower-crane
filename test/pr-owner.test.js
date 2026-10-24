@@ -27,14 +27,14 @@ function ownerFixture(t, env = {}) {
   h.ok(['project', 'set', '--tests-cmd', `node ${shellQuote(suite)}`, '--tests-mode', 'run-only', '--rework-hold-min', '0']);
   for (const rung of ['easy', 'review']) h.ok(['ladder', 'set', rung, '--command', JSON.stringify([process.execPath, OWNER, BIN, '{prompt}'])]);
   Object.assign(h.env, { OWNER_HEADS: JSON.stringify([h.sha, h.fix]), OWNER_LOG: path.join(h.base, 'owner.jsonl'), ...env });
-  // The engine and the worker append while the test reads: only complete lines count.
+  // The owner fixture appends while the test reads: only complete lines count.
   const lines = (file) => {
     let text = '';
     // read-published: appended only; the slice below drops a partial last line.
     try { text = fs.readFileSync(file, 'utf8'); } catch (e) { if (e.code !== 'ENOENT') throw e; }
     return text.slice(0, text.lastIndexOf('\n') + 1).split('\n').filter(Boolean).map(JSON.parse);
   };
-  h.logs = () => lines(path.join(h.state, 'events.jsonl'));
+  h.logs = () => h.events();
   h.outcomes = () => lines(h.env.OWNER_LOG);
   h.task = () => h.readState('tasks.json').tasks[0];
   h.workers = () => h.logs().filter((e) => e.cmd === 'spawn' && e.detail.role === 'worker');

@@ -1,6 +1,7 @@
 'use strict';
 
 const { waitOnRepo } = require('./signals');
+const StateFiles = require('./state-files');
 
 const { test, describe } = require('node:test');
 const assert = require('node:assert/strict');

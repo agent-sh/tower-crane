@@ -1,6 +1,7 @@
 'use strict';
 
 const test = require('node:test');
+const StateFiles = require('./state-files');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -25,7 +26,7 @@ function fixture(t) {
 
 const latest = (h) => h.readState('tasks.json').tasks[0].evidence.findLast((e) => e.type === 'ci');
 const ciGate = (h) => h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'ci');
-const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+const events = (h) => StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
 const EMPTY = { required: [], ignore_apps: [], capped_review: [] };
 
 test('accept refreshes a hosted pass after required jobs change', (t) => {
@@ -109,7 +110,7 @@ test('old hosted evidence without a recorded policy is stale even with a matchin
   delete doc.tasks[0].evidence.at(-1).ci_policy;
   delete audit.findLast((e) => e.cmd === 'check ci').detail.ci_policy;
   h.writeState('tasks.json', doc);
-  fs.writeFileSync(path.join(h.state, 'events.jsonl'), audit.map((e) => JSON.stringify(e)).join('\n') + '\n');
+  StateFiles.replaceLog(h.state, audit.map((e) => JSON.stringify(e)).join('\n') + '\n');
   assert.equal(ciGate(h).ok, false);
   assert.match(ciGate(h).reason, /hosted CI.*policy.*(missing|unrecorded)/);
   h.ok(['accept', 'T1']);

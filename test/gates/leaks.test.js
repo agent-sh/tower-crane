@@ -14,6 +14,7 @@ const Reaper = require('../../lib/reaper');
 const { scratch, isolateGit, isolateUserFile, commit, initRepo, worktrees, quote } = require('./helpers');
 const { makeRepo, detachedAlive } = require('../helpers');
 const { shellQuote, treeExec } = require('../../lib/gates/common');
+const StateFiles = require('../state-files');
 const { waitUntil, killPid } = require('../signals');
 
 const skip = !['linux'].includes(process.platform)
@@ -101,7 +102,7 @@ while (Date.now() < end) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 
   // Without a cgroup, as here, the evidence says the process group was the boundary.
   assert.deepEqual(JSON.parse(r.stdout).commands.find((c) => c.command !== 'git').cleanup, { backend: 'process-group', empty: true });
   assert.equal(detachedAlive({ pid: orphan.pid }), false);
-  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const events = StateFiles.readEvents(h.state);
   const reap = events.find((e) => e.cmd === 'gate reap');
   assert.equal(reap.task, 'T1');
   assert.equal(reap.detail.gate, 'tests');

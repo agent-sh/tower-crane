@@ -12,6 +12,7 @@ const { waitOnRepo } = require('./signals');
 const { readPublished } = require('./atomic-file');
 const C = require('../lib/containment');
 const G = require('../lib/gates/common');
+const StateFiles = require('./state-files');
 
 test('scope warnings have the same JSON contract for init, project and ladder', t => {
   const h = cachedFixture(t, 'warning-json', h => h.init());
@@ -99,7 +100,7 @@ fs.statSync=(file,...args)=>{
   assert.equal(result.code, 0, result.stderr);
   assert.ok(result.stderr.includes(fence), result.stderr);
   assert.match(result.stderr, /owner.*scope properties were not applied/);
-  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const events = StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
   const detail = events.find(e => e.cmd === 'spawn').detail.containment;
   assert.equal(detail.backend, 'watchdog');
   assert.equal(detail.fence, fence);

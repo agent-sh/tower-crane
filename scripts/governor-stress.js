@@ -222,7 +222,7 @@ async function governed() {
   fs.writeFileSync(stop, '');
   for (const w of waits) w.kill('SIGTERM');
   await new Promise((r) => setTimeout(r, 4000));
-  const events = projects.map((h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse));
+  const events = projects.map((h) => require('../lib/state').readEvents(h.state));
   const registry = require('../lib/governor').read(projects[0].env);
   const result = {
     gates,

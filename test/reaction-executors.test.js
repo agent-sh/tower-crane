@@ -8,11 +8,12 @@ const { refillFixture, setup } = require('./automation-helpers');
 const { fileWritten } = require('./signals');
 const { waitOnRepo } = require('./signals');
 const S = require('../lib/state');
+const StateFiles = require('./state-files');
 const { leased, busyExecutors } = require('./reaction-executors-helpers');
 const leasedBy = (h, id) => h.logs().some((e) => e.cmd === 'executor' && e.task === id && e.detail.phase === 'running');
 
 async function watchQueued(h) {
-  const after = fs.statSync(path.join(h.state, 'events.jsonl')).size;
+  const after = StateFiles.logEnd(h.state);
   const result = await h.runAsync(['wait', '--after', String(after), '--types', 'never',
     '--timeout', '3', '--agent', 'orchestrator']); // wait-allow: observe watcher retries while every fake gate remains held
   assert.equal(result.code, 2, result.stderr);
@@ -159,10 +160,10 @@ for (const reaction of ['review dispatch', 'body findings', 'accepted merge', 'm
         S.withLock(h.state, () => {
           const at = new Date().toISOString();
           const detail = { role: 'worker', agent: 'worker', pid: 99999999 };
-          fs.appendFileSync(path.join(h.state, 'events.jsonl'), [
+          StateFiles.appendLog(h.state, [
             { at, agent: 'orchestrator', cmd: 'spawn', task: 'T1', detail },
             { at, agent: 'orchestrator', cmd: 'spawn exit', task: 'T1', detail: { ...detail, code: 0 } },
-          ].map((e) => `${JSON.stringify(e)}\n`).join(''));
+          ].map((e) => `${JSON.stringify(e)}\n`).join(''), { locked: true });
         });
       }
       const before = h.logs().filter((e) => e.cmd === 'check tests').length;

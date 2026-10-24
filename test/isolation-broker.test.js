@@ -14,6 +14,7 @@ const { makeRepo, ROOT, BIN, detachedAlive } = require('./helpers');
 const A = require('../lib/agents');
 const TOML = require('../lib/toml');
 const { NO_STUBS, SECRET, setup, noSecretsCopied, releaseExited, spawn, ALLOW, decide, isolated, commandsRead, commandsWrite } = require('./isolation-helpers');
+const StateFiles = require('./state-files');
 
 test('a sandboxed agent changes the state only through its spawn\'s broker: as itself, on its own task, with its role\'s commands', { skip: NO_STUBS }, (t) => {
   const { h, u } = setup(t);
@@ -82,7 +83,7 @@ require("child_process").execFileSync(process.execPath, [${JSON.stringify(BIN)},
   assert.deepEqual(t1.evidence, []);
   assert.deepEqual(t2.notes, []);
   assert.deepEqual(h.readState('project.json').tests, tests);
-  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  const events = StateFiles.logText(h.state).trim().split('\n').map((l) => JSON.parse(l));
   assert.deepEqual(events.filter((e) => e.via === 'broker').map((e) => [e.cmd, e.agent, e.task]),
     [...noted.flatMap((a) => [['task note', a, 'T1'], ['hook report', a, 'T1'], ['task note', a, 'T1']]), ['claim', worker, 'T1']], 'only brokered changes, each as its agent');
   assert.deepEqual(events.filter((e) => e.via === 'automation' && ['hook stop', 'msg'].includes(e.cmd))

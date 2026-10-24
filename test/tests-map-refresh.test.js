@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { cachedFixture, useFixtureUserFile } = require('./helpers');
 const Refresh = require('../lib/tests-map-refresh');
+const StateFiles = require('./state-files');
 
 const A = 'test/a.test.js';
 const B = 'test/b.test.js';
@@ -202,7 +203,7 @@ test('automatic refresh selects the newest completed full base run with an artif
       assert.equal(await Refresh.automatic(ctx, st), true);
       assert.deepEqual(h.readState('project.json').tests.map['shared.js'], [A, B]);
       assert.deepEqual(h.readState('project.json').tests.map['manual.js'], [A]);
-      const event = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)
+      const event = StateFiles.readEvents(h.state)
         .findLast((e) => e.cmd === 'tests map refresh');
       assert.equal(event.detail.run, 50);
       assert.equal(event.detail.conclusion, conclusion);
