@@ -142,7 +142,7 @@ test('metrics reports merges, causes, the Tower Crane share, tokens and phases f
 
   assert.deepEqual(cohort.cohort, { claimed_after: '2026-10-20T00:00:00.000Z', excluded_merged_tasks: 1, excluded_reworks_raised: 1 });
   assert.deepEqual([cohort.merges.tasks, cohort.merges.total], [3, 3]);
-  assert.deepEqual(cohort.by_day, [{ day: '2026-10-20', merges: 3, reworks: 7, tc_caused: 4, unattributed: 1, tokens_known: 10000 }]);
+  assert.deepEqual(cohort.by_day, [{ day: '2026-10-20', merges: 3, native_landed: 0, reworks: 7, tc_caused: 4, unattributed: 1, tokens_known: 10000 }]);
   const m = cohort.reworks.merged_tasks;
   assert.deepEqual([m.total, m.tc_caused, m.unattributed, m.task_caused, m.by_cause.conflict_parent, m.per_task.p50, m.per_task.p90], [6, 4, 1, 1, 0, 1, 4]);
   assert.deepEqual([cohort.reworks.raised_in_window.total, cohort.reworks.raised_in_window.tc_caused], [7, 4]);
@@ -272,6 +272,48 @@ test('CI no check saw complete waits until the task leaves that head, since unch
     const p = r.lead_time.phases;
     assert.deepEqual([p.ci_waiting.sum, p.waiting_for_gates.sum], [22 * MIN, 1 * MIN]);
     assert.deepEqual(r.lead_time.ci_timing, { tasks_timed: 1, tasks_without_timing: 0 });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a native landing counts as a merge, apart from Tower Crane merges, and stays out of the per-task numbers unless included', () => {
+  const dir = fs.mkdtempSync(path.join(TMP_ROOT, 'metrics-'));
+  try {
+    const landing = (min, task, sha, mergedAt) => ev(min, 'task landed', task, { pr: 7, merge_sha: sha, sha: 'h', revision: 1, merged_at: mergedAt, reason: 'native review' });
+    writeLog(path.join(dir, 'events.jsonl'), [
+      ev(0, 'task add', 'T1'), ev(1, 'claim', 'T1', {}, 'worker-T1-1'), ev(2, 'submit', 'T1', { sha: 's1' }, 'worker-T1-1'),
+      ev(3, 'check tests', 'T1', { type: 'tests', ok: true, sha: 's1' }), ev(4, 'accept', 'T1'), ev(5, 'merge', 'T1', { ok: true, sha: 's1' }),
+      // T2 failed a gate in Tower Crane, then merged on GitHub; its landing is recorded later than it merged.
+      ev(0, 'task add', 'T2'), ev(1, 'claim', 'T2', {}, 'worker-T2-1'), ev(2, 'submit', 'T2', { sha: 'h' }, 'worker-T2-1'),
+      ev(3, 'check tests', 'T2', { type: 'tests', ok: false, sha: 'h' }),
+      ev(4, 'rework', 'T2', { reason: 'tests failed at h: Failing tests:\n- x', sha: 'h', gate: 'tests' }),
+      landing(50, 'T2', 'm2', at(10)), landing(51, 'T2', 'm2', at(10)),
+      // T3 merged before the window; only its record falls inside.
+      ev(0, 'task add', 'T3'), landing(52, 'T3', 'm3', at(-30)),
+    ]);
+    const r = M.report(dir, { since: B, until: B + 60 * MIN });
+    assert.deepEqual([r.merges.total, r.merges.tower_crane, r.merges.native_landed, r.merges.tasks], [2, 1, 1, 2]);
+    assert.equal(r.merges.native_in_task_stats, false);
+    assert.equal(r.gate_runs.per_task.tests.n, 1);
+    assert.equal(r.gate_runs.per_task.tests.sum, 1);
+    assert.equal(r.reworks.merged_tasks.total, 0);
+    assert.equal(r.reworks.raised_in_window.total, 1, 'a rework raised in the window still counts');
+    assert.equal(r.lead_time.total.n, 1);
+    assert.equal(r.submits.per_task.n, 1);
+    assert.deepEqual(r.merges.per_day, [{ day: r.merges.per_day[0].day, merges: 2, native_landed: 1 }]);
+    assert.match(M.metrics({ stateDir: dir, flags: { since: at(0), until: at(60) } }).text,
+      /merged: 2 tasks, 2 merges \(1 Tower Crane, 1 native landed\)[\s\S]*left out of the per-task numbers/);
+
+    const all = M.report(dir, { since: B, until: B + 60 * MIN, includeNative: true });
+    assert.deepEqual([all.merges.total, all.merges.tower_crane, all.merges.native_landed], [2, 1, 1]);
+    assert.equal(all.gate_runs.per_task.tests.n, 2);
+    assert.equal(all.reworks.merged_tasks.total, 1);
+    assert.equal(all.lead_time.total.n, 2);
+    assert.equal(all.lead_time.total.sum, 5 * MIN + 10 * MIN, 'a landing ends lead time at merged_at');
+
+    const cohort = M.report(dir, { since: B, until: B + 60 * MIN, claimedAfter: B + 60 * MIN });
+    assert.deepEqual([cohort.merges.total, cohort.cohort.excluded_merged_tasks], [0, 2]);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

@@ -383,6 +383,32 @@ and only while every failing name also fails at the first parent; the waived
 evidence and the `accept` event record it as `base_failure: {base_sha, names}`. An accepted hotfix cannot be sent back with `rework`. See
 [state.md](state.md#already-merged-hotfixes) for fields and counts.
 
+## Native landings
+
+When the orchestrator merged a task's PR on GitHub itself, after a
+clean-context native review and green PR checks, `task landed` records it
+without a gate cycle:
+
+```sh
+tower-crane task landed T512 --pr 530 --reason 'native clean-context review passed; PR checks green' --agent orchestrator
+```
+
+It reads the PR once and checks that it merged into the project base and is
+the task's recorded PR or comes from the task's branch. `--sha MERGE_SHA`,
+when given, must be the PR's merge commit. The task becomes `accepted
+(native)` with the PR head as its sha, merge evidence that names the landing,
+and a `landed` record of the PR, merge commit, merge time and author, the
+check conclusions at the head (CodeQL, the shared-files job, revuto and the
+rest) and the reason. Dependents unblock, a claim is released and the
+worktree is retired, saving local work. No gate reruns and no review is
+dispatched. An accepted, cancelled or hotfix task, one with an owner ask and
+one with a running worker are refused, as is a PR merged elsewhere or
+recorded on another task. Repeating the same landing is a no-op, so a loop
+over many tasks can be rerun; after a `rework`, the PR or merge commit an
+earlier landing of the task used is refused, since the fix needs a new PR. Use `hotfix` instead when the merged change
+still needs Tower Crane's gates and an independent review. See
+[state.md](state.md#native-landings) for fields.
+
 ## Run
 
 Dependent tasks can start while a single dependency chain is submitted or accepted but unmerged. `worktree` and `spawn` check the GitHub stacks endpoint, verify the dependency PR's current head and repository, fetch its branch, and create the upper branch at that head. The worker prompt names the dependency branch as the PR base. `ready` and `claim` allow submitted dependencies when they form one chain with a PR, branch and sha; dispatch still verifies availability. Claim readiness checks task status, dependencies, stack state, decisions, locks and worker slots. Worker spawn runs the same check before any worktree work and refuses with the claim reason. When an existing stacked PR affects readiness, spawn re-reads its membership from `gh api repos/OWNER/REPO/stacks` before dispatch. A claim of the task a spawn dispatched, by the agent it dispatched, reads that recorded result; any other claim re-reads it. A chain with fewer than two unmerged PRs is not read. Transient API errors require retry and do not mark stacks disabled. Independent dependency chains and forks wait for the ordinary accepted-dependency flow. A worktree made before its dependency was submitted is revalidated at dispatch: a clean branch with no commits of its own moves onto the dependency head, and one holding its own work is refused until the worktree is removed or the dependency merges. A branch that already contains the dependency head is used as it is. A rework whose branch is gone starts from its own pushed head, never from its dependency. Two siblings prepared at once on the same dependency cannot both record it as their stack parent; the second dispatch is refused under the lock and waits as a fork.
@@ -565,6 +591,8 @@ Before constructing an agent home, spawn also sweeps orphan `brokers/<agent>/` d
 | `spend ID [--minutes N] [--tokens N] [--input N] [--cached N] [--cache-write N] [--output N] [--rung R] [--harness H] [--model M] [--from-spawn AGENT]` | add spend, with optional native-agent usage breakdown and metadata; rung defaults the harness, model and profile from the current ladder. Model IDs are trimmed and case-folded; provider prefixes remain distinct. Collect an exited spawn's captured usage once per route and fresh retry invocation; resumed retries share their session's cumulative usage. Retry a failed monitor or enrich an unknown/partial entry when telemetry arrives. Refuses a live process or an unknown spawn; cannot be mixed with manual spend |
 | | |
 | `submit ID --sha S [--branch B] [--pr N] [--summary T] [--precheck R] [--host-probe CMD] [--disputes JSON]` | mark submitted as the claimant or replace a submitted head as its submitter. When `gates.presubmit` is set, run its argv in the worker worktree and environment before recording the head; nonzero exit, timeout or a missing command refuses with bounded redacted output and a refusal event. Three equivalent consecutive failures, ignoring known reporter timing fields, or a missing or inaccessible hook executable, pause retries and open an orchestrator inbox item; `presubmit retry` resumes and `presubmit override` records a reason to bypass once. A pass records the command and duration on the submit event. `S` is 7 to 64 hex characters. Repeat `--host-probe CMD` for measurements or kernel checks the sandbox cannot run. Each submission replaces `host_probes` (omitting it clears them); changing the list at the same commit advances the revision, invalidating old gate leases and verdicts, including failures. Commands run from the scratch worktree root at `S`, with no input, gate resource caps, `tests.host_env`, and `gates.host_probe_timeout_min` (default 10 minutes each). Normal nonzero exits and timeouts fail the tests gate and return output through rework. Signal and resource-cap interruptions get one automation retry before rework. A wait-shutdown interruption is a void: it reruns without using that retry and never reworks. Declare pending host results in the PR body and leave cleanup to the clean gate. For a task with a recorded PR (`--pr`, or the one already recorded), the PR's checks at `S` are read: a failing check refuses with the failing jobs and the first failing lines of their logs and points to `ci checks ID` for check output, annotations and current code-scanning alerts. Checks still running do not refuse: the head is recorded, the output names them, a task note records them, and `check ci` waits for them on the host; a failure there returns as rework with the same job names and log lines. Revuto's open inline findings are printed either way; a `[P1]`/`[P2]` finding already on the PR with no change at its path since the comment and no `[resolved]` reply refuses, as review ok would, and submit does not wait for findings still to come. Capped reviews (`ci.capped_review`) do not block. Where the agent's gh policy refuses `gh api`, submit prints that the head was not checked and goes ahead. Local CI (`ci.local`) and a project without a repo skip the check. For a task with a recorded PR, an open PR blocks changing its PR number or head branch. After it is closed or merged, a new PR supplies its head branch unless `--branch` is given and matches it. `--precheck` records the submitter's own review result at this head on the `submit` event; it never refuses or gates the submission. A submitter whose worker spawn is live takes ownership of the PR while fewer than `limits.owners` other owners wait (`own: true` on the event), and waits on the task with `wait --own`; past the limit the output tells it to exit. A head whose commits add an empty file named like a claude sandbox placeholder (`.bashrc`, `.claude/settings.json` and the other protected names it binds over) refuses; a real file by that name needs content |
+| | |
+| `task landed ID --pr N [--sha MERGE_SHA] --reason R` | orchestrator or owner only: read PR N once through gh and record the task as accepted, displayed `accepted (native)`, with no gate run and no review dispatch. The PR must be merged into the project base, and be the task's recorded PR or come from its branch; a PR or branch recorded on another live task is refused. `--sha` must equal the PR's merge commit. The task gets the PR head as its sha, `landed` with the PR, merge commit, `merged_at`, `merged_by`, the check conclusions at the head and the reason, and merge evidence that counts only with the matching `task landed` event, so dependents unblock and nothing redispatches it. A claim is released and the worktree is retired as for a cancelled task, saving local work. Refused for an accepted (repeating the same record changes nothing), cancelled or hotfix task, one with an owner ask, and one with a running worker (stop it with `interrupt` first). `metrics` counts it as a merge and reports it apart as `native_landed` |
 | | |
 | `verb NAME [--param KEY=VALUE]... [--task ID]` | run broker verb `NAME` from `broker.verbs` for a task whose `broker_verbs` grants it, as the task's claimant (or the orchestrator or owner). A sandboxed worker's call goes through its state broker, which runs it on the host. Every declared parameter is required, matches its type and whole-value pattern, and is substituted into its own argv element; there is no shell. The program runs in the pinned source: the copy of the approved base branch commit in the state directory, whose files are checked against their recorded SHA-256 first, or the owner's `source.path`. It runs in a contained scope with the verb's `resources` (default: the gate caps) and `timeout_sec`, with `{out}` and `TOWER_CRANE_VERB_OUT` naming a directory no sandbox writes. Each declared output it wrote is copied to the task scratch as `verb-NAME-STAMP-OUTPUT` with an exclusive create. Prints the verb's stdout, then its exit and each output's path and SHA-256; stderr goes to stderr. Exits with the verb's exit code, or 1 for a timeout, signal or cap. Every run appends `verb` evidence: params, exit code, signal, timeout, resource cap, duration, output digests and the pinned source ([Broker verbs](state.md#broker-verbs)) |
 | | |
@@ -1161,7 +1189,7 @@ The token protects against foreign web origins and against local processes that 
 | | |
 | `inbox [--ack ITEM]... [--ack-before TIME [--kind KIND]] [--json]` | orchestrator or owner: read state once for current failed software gates and inspect PR heads, mergeability, uncapped revuto failures and inline comments, and open CodeQL alerts on the submitted head or its verified current PR merge commit. The host follower refreshes GitHub observations, including CI runs on the project base, at most once a minute; foreground inbox reads use the cache and summarize unread data in one `github_pending` item: a failed or cancelled push, schedule or dispatch run that no later run of its workflow turned green is a `main_ci_failed` item with its failing jobs and test names, and a test that fails again after a green run is a `main_ci_flaky` item; both resolve by opening a task or naming the open one, and clear on a green run. A ready or rework task without a brief gets a `brief_missing` item, resolved by `brief set`, in place of its `ready` or `rework_ready` item. Work the host governor deferred or stopped is a `governor_deferred` or `governor_stopped` item with its reason; both clear on their own. Returns typed `items` with `action.command` and `action.argv`, plus live gate `executors`, the `gate_queue` in drain order, and `owner` with the closing owner line (`owner: nothing needed` unless a crisis is open or a decision or hold waits on the owner). Failed reviews include the full latest Tower Crane comment at the submitted SHA and `finding_count`; fetch errors remain explicit. Failed gates include their summary and test diagnostics; audited confirmed code failures resolve through rework, while pending checks and observation failures offer a gate rerun. Remotely merged accepted heads remain actionable with `merge --accepted` until their audited local merge receipt exists. Stale software gates on an open mergeable accepted PR resolve with `check GATE ID` before merge. GitHub failures are explicit items. `--ack ITEM` acknowledges a handled message, stall, decision answer, owner comment, missing review exit or informational review dispute; repeat it to acknowledge several items in one locked write and one event. `--ack-before TIME` acknowledges every matching item at or before the timestamp, optionally filtered by `--kind`, in one locked write and one event with the count and cutoff. Task messages and decision answers older than 24 h disappear when their tasks are cancelled or accepted and merged; their history remains. Task and GitHub findings clear only when their condition clears |
 | | |
-| `metrics [--since 7d\|ISO] [--until ISO] [--by day] [--claimed-after ISO]` | efficiency of the tasks merged in the window (an ok `merge` event at or after `--since` and before `--until`), each with its whole history: merges per day; gate runs per merged task by gate (tests, clean, review, ci, head check) with governor deferrals and tests-gate wall time; reworks per merged task and reworks raised in the window by cause, with the share Tower Crane caused; tokens per merged task (p50, p90, sum) by role, rung and harness, with the spend entries that have no tokens counted apart, never as zero; lead-time phases (queued, working, waiting for gates, gating, reviewing, rework waiting, accepted to merged) and the waiting share; submits per merged task and first-pass time. `--claimed-after` keeps only tasks first claimed at or after that time and reports how many it excluded. Read-only and lock-free: it streams `events.jsonl` up to its size at start, leaves out a torn last line and writes nothing. `--json` names every definition |
+| `metrics [--since 7d\|ISO] [--until ISO] [--by day] [--claimed-after ISO] [--include-native]` | efficiency of the tasks merged in the window (an ok `merge` event at or after `--since` and before `--until`), each with its whole history: merges per day, with native landings (`task landed`, merged on GitHub outside Tower Crane) counted as merges and reported apart as `native_landed`; gate runs per merged task by gate (tests, clean, review, ci, head check) with governor deferrals and tests-gate wall time; reworks per merged task and reworks raised in the window by cause, with the share Tower Crane caused; tokens per merged task (p50, p90, sum) by role, rung and harness, with the spend entries that have no tokens counted apart, never as zero; lead-time phases (queued, working, waiting for gates, gating, reviewing, rework waiting, accepted to merged) and the waiting share; submits per merged task and first-pass time. `--claimed-after` keeps only tasks first claimed at or after that time and reports how many it excluded. Native landings stay out of the per-task numbers unless `--include-native`. Read-only and lock-free: it streams `events.jsonl` up to its size at start, leaves out a torn last line and writes nothing. `--json` names every definition |
 | | |
 | `render` | write `sketch.md` (Mermaid graph plus tables) and `sketch.html`, the board as a read-only snapshot, from the state as it stands when the command starts; a sketch another process already published from later state is kept (`--json` `published: false`) |
 | | |
@@ -1194,14 +1222,14 @@ The bench commands only read state; docs/bench.md holds the labeling rules and t
 
 The window holds the tasks with an ok `merge` event at or after `--since` (default `7d`; also `12h`, `30m` or an ISO time) and before `--until` (default now). Each counts with its whole history, also from before `--since`. `--claimed-after ISO` narrows every number to the cohort of tasks first claimed at or after that time; the output names the cohort and how many merged tasks and window reworks it left out. Days are local days of the process time zone (`TZ`), named in the output. Percentiles are nearest rank: the value at position `ceil(p * n)` in ascending order.
 
-- Merges: ok `merge` events, one per task and sha.
+- Merges: ok `merge` events, one per task and sha.- Merges: ok `merge` events, one per task and sha, plus native landings (`task landed`, a PR the orchestrator merged on GitHub outside Tower Crane), one per task and merge commit, dated by the PR's `merged_at`. The total counts both; `tower_crane` and `native_landed` count each, by day too. A task with only a native landing is in the window but stays out of every per-task number below (gate runs, reworks of merged tasks, tokens, lead time, submits), so the scorecard measures Tower Crane's own merges; `--include-native` counts native landings there too, with lead time ending at `merged_at`. Reworks raised in the window count either way.
 - Gate runs per merged task: tests, clean and ci count `check` events with a verdict (a ci poll still pending is not one), review counts review evidence and head_check counts `head check` events. Governor deferrals count gate runs the host governor deferred or stopped and deferred review dispatches. Tests wall time sums the tests gate runs from `running` to `done`. No receipt records CPU time yet, so `tests_cpu_ms` is null with its coverage.
 - Reworks per merged task, and every rework raised in the window, by cause (see [Rework causes](state/tasks.md#rework-causes)). An event without `cause` is classified from its reason and the failed check of the same head. A tests or head_check rework whose every failing test failed in another task, not its stack parent or child, within 24 hours is `cross_task`. A head check rework has a culprit when a failing test file it names is one the task changed (from its latest tests gate receipt). Each rework counts in one of three buckets, each with its count and share of the reworks: tc_caused (conflict_base, conflict_parent, stack_sync, coverage_gap, base_failure, timeout and infrastructure), unattributed (cross_task and head_check without a culprit) and task_caused (every other cause, and head_check with a culprit). The per-cause table marks each cause `(tc)` or `(unattributed)`.
 - Tokens per merged task: the final entry of each spawn source (the last `spend` or `spend live` event) and every manual entry, split by worker, reviewer and other (agent name prefix), rung and harness. Percentiles cover tasks with no live entry and no entry of unknown tokens; `known_lower_bound` sums the known entries of every merged task. Entries without tokens are counted apart (live, spawn, manual), never as zero; a manual report of minutes alone claims no tokens and leaves a task complete.
 - Lead time from the first `task add` to the first ok merge in the window, in phases that add up to it: queued (until a claim, before any submit), working (claim to submit, release or rework), waiting for gates (submitted, not covered by a gate run, reviewer session or timed GitHub CI: the gate queue, governor deferrals and the pending CI of untimed heads), ci waiting (submitted or accepted time while GitHub CI ran at a head, from the `ci_started_at` to the `ci_completed_at` that `check ci` events record, and not gating or reviewing; CI no check saw complete lasts until the first submit, rework, release, accept or merge after its latest pending check, since a recheck that reads the same pending result records no event), gating (tests, clean and final-review gate runs, and head checks that record `started_at`), reviewing (reviewer sessions not already gating), rework waiting (after a rework or a release that follows a submit, until the next claim) and accepted to merged (accepted, not gating or ci waiting). The waiting share is queued, waiting for gates, ci waiting, rework waiting and accepted to merged over the lead time, followed by each of them; `--json` gives each in `waiting_parts`. `check ci` events written before CI timing existed carry none, so their CI wait stays in waiting for gates; `ci_timing` counts the merged tasks with GitHub CI checks that are timed and those without timing, and the text names both.
 - Submits per merged task, and first-pass time from the first claim to the first submit.
 
-`--by day` adds a row per day with merges, reworks raised, how many Tower Crane caused, how many are unattributed and the known tokens of the tasks merged that day. `--json` returns the same numbers with a `definitions` object naming each one, and the log read (`bytes`, `lines`, `parsed`, `unreadable`, `torn_last_line`).
+`--by day` adds a row per day with merges, native landings among them, reworks raised, how many Tower Crane caused, how many are unattributed and the known tokens of the tasks merged that day. `--json` returns the same numbers with a `definitions` object naming each one, and the log read (`bytes`, `lines`, `parsed`, `unreadable`, `torn_last_line`).
 
 The board is one HTML document with five rooms (Now, Review, Plan, Spend, History) and a sheet per task; docs/design.md is its design. serve gives each room a path (`/`, `/review`, `/plan`, `/spend`, `/history`) and the snapshot a fragment (`#now`, `#review`, ...); a task sheet is `#T7` over whichever room is open. The URL decides the room: nothing remembered in the browser overrides it, and a room fragment on a served page (`/#plan`) opens that room and becomes its path. `sketch.html` loads nothing from the network: no fonts, scripts, styles or images outside the file, and its inline script makes no request. Every room and task sheet opens by its link with scripts disabled. Links in evidence (`--ref`) open only when clicked. The snapshot has no token and no forms; where serve would offer a write, it shows the CLI command. The script adds local times, keyboard keys (`n`, `r`, `p`, `s`, `h`, Escape), copy buttons, a theme switch (follow the system, light, dark; kept in the browser) and a digest of what changed since the browser last showed the board, kept in the browser's local storage and never in the state directory. The snapshot embeds the newest 400 events for History.
 
@@ -1631,6 +1659,7 @@ Run:
   rework           send back; the reason goes into the brief's rework notes
   spend            record usage or collect an exited spawn once
   submit           mark submitted as the claimant or replace a submitted head as its submitter
+  task landed      orchestrator or owner: accept a task whose PR was merged on GitHub outside Tower Crane, without gates or review
   verb             run a broker verb granted to the task on the host: the owner's pinned program with typed parameters, caps and a timeout; records verb evidence
   wait             block until one matching event; print one JSON line (timeout exits 2); a message to a non-orchestrator waiter, such as a worker or reviewer, bypasses its event wait filters without --own; --follow streams wakes with complete decision answers until interrupted; --own waits as the PR owner of the task you submitted
 
@@ -1900,6 +1929,7 @@ usage: tower-crane task <subcommand> ...
 
   task add         add a task; prints its id
   task archive     list the archive accept or cancel kept of a task's scratch, or copy files from it into another task's scratch
+  task landed      orchestrator or owner: accept a task whose PR was merged on GitHub outside Tower Crane, without gates or review
   task list        list tasks (S: a status, ready or blocked)
   task note        append a note
   task show        show one task with its gates, evidence and notes
@@ -2985,7 +3015,7 @@ global options:
 <summary>tower-crane metrics --help</summary>
 
 ```text
-usage: tower-crane metrics [--since 7d|ISO] [--until ISO] [--by day] [--claimed-after ISO]
+usage: tower-crane metrics [--since 7d|ISO] [--until ISO] [--by day] [--claimed-after ISO] [--include-native]
 
 efficiency of merged tasks: merges, gate runs, rework causes, tokens, lead-time phases and submits, from the event log
 
@@ -2994,6 +3024,7 @@ options:
   --until ISO              window end (default now)
   --by day                 add a row per local day: merges, reworks raised, how many Tower Crane caused, how many are unattributed, tokens
   --claimed-after ISO      cohort: count only tasks whose first claim is at or after this time, in every metric
+  --include-native         count native landings (task landed) in the per-task numbers too, not only in the merge totals
 
 global options:
   --state DIR              state directory (default: TOWER_CRANE_STATE, then .tower-crane/ in the main checkout)
@@ -3595,6 +3626,28 @@ options:
   --path P                 a file or directory in the archive; repeatable; default all (repeatable)
   --into T                 copy into T's scratch and record archive evidence on T
   --grant T                operational (orchestrator or owner): let T's worker copy from this archive
+
+global options:
+  --state DIR              state directory (default: TOWER_CRANE_STATE, then .tower-crane/ in the main checkout)
+  --agent NAME             who is acting (default: TOWER_CRANE_AGENT; task processes cannot use owner; fallback needs an interactive terminal outside a task)
+  --json                   machine output on stdout
+  --help                   show help
+```
+
+</details>
+
+<details>
+<summary>tower-crane task landed --help</summary>
+
+```text
+usage: tower-crane task landed ID --pr N [--sha MERGE_SHA] --reason R
+
+orchestrator or owner: accept a task whose PR was merged on GitHub outside Tower Crane, without gates or review
+
+options:
+  --pr N                   the task's merged PR
+  --sha MERGE_SHA          the PR's merge commit (default: read from the PR)
+  --reason R               how the change was reviewed and checked before it merged
 
 global options:
   --state DIR              state directory (default: TOWER_CRANE_STATE, then .tower-crane/ in the main checkout)
