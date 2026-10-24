@@ -713,9 +713,10 @@ test('slow suites stop when their fixture is removed before they are released', 
 test('a killed executor releases its gate executor slot', (t) => {
   const h = setup(t);
   const runs = slowSuite(h, { executors: 1, crash: true });
-  assert.notEqual(h.consume().code, 2, 'the suite kills the first executor');
-  h.consume();
-  assert.equal(runs().starts, 4, 'the killed run is retried and the other two run');
+  const killed = h.consume();
+  assert.notEqual(killed.code, 2, 'the suite kills the first executor');
+  const retried = h.consume();
+  assert.equal(runs().starts, 4, JSON.stringify({ killed, retried, events: h.logs() }));
   for (const task of h.readState('tasks.json').tasks) {
     assert.deepEqual(task.evidence.map((e) => e.type), ['tests', 'clean'], task.id);
   }

@@ -189,6 +189,7 @@ for (const retry of ['unchanged', 'override', 'head', 'revision']) {
       '--findings', JSON.stringify([{ kind: 'defect', path: 'value.md', claim: 'missing behavior' }])]);
     const failed = h.run(['accept', 'T1', '--agent', 'orchestrator', '--json']);
     assert.equal(failed.code, 1, failed.stderr);
+    assert.ok(failed.stdout.trim(), JSON.stringify(failed));
     const result = JSON.parse(failed.stdout);
     assert.equal(result.review_failed, true);
     assert.equal(result.status, 'submitted');
