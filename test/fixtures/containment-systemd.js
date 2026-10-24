@@ -7,8 +7,11 @@ const C = require('../../lib/containment');
 const { writeAtomic } = require('../atomic-file');
 const group = process.env.TC_FAKE_CGROUP;
 const log = process.env.TC_FAKE_SYSTEMD_LOG;
+const version = Number(process.env.TC_FAKE_SYSTEMD_VERSION || 259);
 const types = { PIDs: 'au', Slice: 's', TasksMax: 't', MemoryMax: 't', MemorySwapMax: 't',
-  OOMPolicy: 's', Delegate: 'b' };
+  OOMPolicy: 's', Delegate: 'b', CPUWeight: 't' };
+// The fence's slice, or a project's slice directly below it.
+const FENCE = /^test-fence(?:-towercrane_[0-9a-f]{12})?\.slice$/;
 
 function apply(properties) {
   if (properties.OOMPolicy !== 'continue') throw new Error('OOMPolicy must be continue');
@@ -30,34 +33,19 @@ if (require.main !== module) {
   const spawnSync = cp.spawnSync;
   cp.spawnSync = (file, args, opts) => {
     if (process.env.TC_FAKE_NO_MANAGER && file === 'systemctl') return { status: 1, stdout: '', stderr: 'no user manager' };
-    if (file !== 'busctl') return spawnSync(file, args, opts);
-    try {
-      let at = args.indexOf('ssa(sv)a(sa(sv))');
-      if (at < 0) throw new Error('invalid StartTransientUnit signature');
-      at += 3;
-      const count = Number(args[at++]);
-      const properties = {};
-      for (let n = 0; n < count; n++) {
-        const name = args[at++];
-        const type = args[at++];
-        if (!types[name] || type !== types[name]) throw new Error(`Cannot set property ${name}, or unknown property`);
-        if (type === 'au') {
-          const length = Number(args[at++]);
-          properties[name] = args.slice(at, at + length);
-          at += length;
-        } else properties[name] = args[at++];
-      }
-      if (properties.Slice !== 'test-fence.slice' || properties.PIDs?.[0] !== String(process.pid)) {
-        throw new Error('wrong slice or scope pid');
-      }
-      apply(properties);
-      return { status: 0, stdout: '', stderr: '' };
-    } catch (error) { return { status: 1, stdout: '', stderr: error.message }; }
+    return spawnSync(file, args, opts);
   };
+} else if (process.argv[2] === '--version') {
+  console.log(`systemd ${version} (${version}-fixture)`);
 } else {
   try {
+    // Like systemd-run, an absent runtime directory leaves only the session bus.
+    if (!process.env.XDG_RUNTIME_DIR) throw new Error('systemd-run could not reach the private socket; runtime directory is unset');
     const args = process.argv.slice(2);
     const separator = args.indexOf('--');
+    const literal = args.slice(0, separator).includes('--expand-environment=no');
+    // systemd-run before 254 has no --expand-environment and never expands --scope argv.
+    if (version < 254 && literal) throw new Error("systemd-run: unrecognized option '--expand-environment=no'");
     const properties = {};
     for (let n = 0; n < separator; n++) {
       if (args[n] !== '-p') continue;
@@ -70,10 +58,12 @@ if (require.main !== module) {
       properties[name] = assignment.slice(equal + 1);
     }
     const slice = properties.Slice || args.find((arg) => arg.startsWith('--slice='))?.slice('--slice='.length);
-    if (slice !== 'test-fence.slice') throw new Error('wrong scope slice');
-    apply(properties);
-    const command = args.slice(separator + 1);
-    const result = cp.spawnSync(command[0], ['--require', __filename, ...command.slice(1)], { stdio: 'inherit' });
-    process.exitCode = result.status ?? 1;
+    if (!FENCE.test(slice)) throw new Error('wrong scope slice');
+    apply({ ...properties, Slice: slice });
+    let command = args.slice(separator + 1);
+    if (version >= 254 && !literal) {
+      command = command.map((arg) => arg.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (_, name) => process.env[name] || ''));
+    }
+    process.execve(command[0], [command[0], '--require', __filename, ...command.slice(1)], process.env);
   } catch (error) { console.error(error.message); process.exitCode = 1; }
 }

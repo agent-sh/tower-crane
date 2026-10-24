@@ -48,11 +48,37 @@ function check(h) {
   return JSON.parse(result.stdout);
 }
 
+test('the checked-in import seed has valid paths and supplies CLI map entries', async (t) => {
+  const seed = JSON.parse(fs.readFileSync(path.join(ROOT, 'tools/tests-map.json'), 'utf8'));
+  assert.ok(seed && typeof seed === 'object' && !Array.isArray(seed));
+  const rows = [
+    ['checked-in seed', seed, true],
+    ['array instead of map', [], false],
+    ['escaping source', { ...seed, '../outside.js': [] }, false],
+    ['escaping suite', { ...seed, 'bin/tower-crane.js': ['../outside.test.js'] }, false],
+    ['suite glob', { ...seed, 'bin/tower-crane.js': ['test/*.test.js'] }, false],
+    ['scalar suite', { ...seed, 'bin/tower-crane.js': 'test/commands.test.js' }, false],
+  ];
+  for (const [name, value, valid] of rows) {
+    await t.test(name, () => {
+      assert.equal(require('../lib/tests-map').settingError(value) === null, valid);
+    });
+  }
+  assert.ok(Array.isArray(seed['bin/tower-crane.js']));
+  // A representative entry keeps the CLI argument within Windows' command-line limit.
+  const selected = { 'bin/tower-crane.js': seed['bin/tower-crane.js'] };
+  const h = makeRepo(t);
+  h.init(['--tests-map', JSON.stringify(selected)]);
+  assert.deepEqual(h.json(['project', 'show']).tests.map, selected);
+});
+
 test('mapped head suites preserve scoped proof and policy-bound evidence through the CLI', (t) => {
   const h = fixture(t);
   assert.deepEqual(h.json(['project', 'show']).tests.map, map);
   assert.match(h.ok(['project', 'show']), /tests.map:/);
   const receipt = check(h);
+  assert.deepEqual(receipt.receipt.tests_unselected, ['test/value.test.js']);
+  assert.match(receipt.summary, /Unselected tests: test\/value\.test\.js/);
   const runs = receipt.commands.filter((c) => c.command !== 'git');
   assert.equal(receipt.receipt.head_mode, 'mapped');
   assert.deepEqual(receipt.receipt.head_tests, ['test/mapped.test.js', 'test/value.test.js']);
@@ -77,6 +103,20 @@ test('mapped head suites preserve scoped proof and policy-bound evidence through
   assert.equal(h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'tests').ok, false);
 });
 
+test('mapped selection overlays declarations at submitted head and keeps policy-bound evidence', (t) => {
+  const h = fixture(t, { '**/*.md': [] });
+  const before = h.readState('project.json');
+  fs.writeFileSync(path.join(h.repo, 'tests-map.declared.json'), '{"value.js":["test/value.test.js"]}\n');
+  h.git(['add', '.']);
+  h.git(['commit', '-qm', 'declare new source']);
+  h.ok(['submit', 'T1', '--sha', h.git(['rev-parse', 'HEAD']), '--agent', 'worker']);
+  const result = check(h);
+  assert.equal(result.receipt.head_mode, 'mapped', result.summary);
+  assert.deepEqual(result.receipt.head_tests, ['test/value.test.js']);
+  assert.deepEqual(h.readState('project.json'), before);
+  assert.equal(h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'tests').ok, true);
+});
+
 for (const [reason, settings, flags] of [
   ['missing mapped test', { 'value.js': ['test/missing.test.js'], '**/*.md': [] }, []],
   ['outside tests.paths', { 'value.js': ['value.js'], '**/*.md': [] }, []],
@@ -91,6 +131,23 @@ for (const [reason, settings, flags] of [
     const result = check(h);
     assert.equal(result.receipt.head_mode, 'full');
     assert.match(result.receipt.head_reason, new RegExp(reason.replaceAll('.', '\\.')));
+  });
+}
+
+const ciLocal = { command: ['node', '-e', 'process.exit(0)'], timeout: 60 };
+for (const [setting, extra, ok] of [
+  ['inputs', { inputs: ['package.json'] }, true],
+  ['receipts', { receipts: ['out/*.json'] }, true],
+  ['artifacts', { artifacts: ['out/*.json'] }, true],
+  ['artifact_pattern', { artifact_pattern: '^Receipt: (.+)$' }, true],
+  ['timeout', { timeout: 61 }, false],
+]) {
+  test(`ci.local ${setting} ${ok ? 'keeps' : 'invalidates'} mapped tests evidence`, (t) => {
+    const h = fixture(t);
+    h.ok(['project', 'set', '--ci-local', JSON.stringify(ciLocal)]);
+    check(h);
+    h.ok(['project', 'set', '--ci-local', JSON.stringify({ ...ciLocal, ...extra })]);
+    assert.equal(h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'tests').ok, ok);
   });
 }
 
@@ -432,13 +489,14 @@ test('incremental proof scope preserves acceptable receipts across policy varian
     ['default-expense prove', ['--tests-expensive', 'null'], false, 'full'],
     ['scoped prove', [], false, 'incremental'],
     ['non-expensive run-only', ['--tests-expensive', 'false', '--tests-mode', 'run-only'], false, 'incremental'],
-    ['non-expensive kept-only', ['--tests-expensive', 'false', '--tests-keep', '["docs/**"]'], true, 'full'],
-    ['scoped kept-only', ['--tests-keep', '["docs/**"]'], true, 'incremental'],
+    ['non-expensive kept-only', ['--tests-expensive', 'false', '--tests-keep', '["data/**"]'], true, 'full'],
+    ['scoped kept-only', ['--tests-keep', '["data/**"]'], true, 'incremental'],
     ['non-expensive without template', ['--tests-expensive', 'false', '--tests-proof-cmd', 'null'], false, 'full'],
   ]) {
-    const h = incrementalFixture(t, undefined, flags);
+    // A kept path outside the docs paths: a docs-only diff skips the tests gate's suites altogether.
+    const h = incrementalFixture(t, { 'docs/**': ['test/mapped.test.js'], 'data/**': ['test/mapped.test.js'], '**/*.md': [] }, flags);
     if (kept) h.git(['branch', '-f', 'main', 'HEAD']);
-    resubmit(h, 'docs/state.md');
+    resubmit(h, kept ? 'data/state.json' : 'docs/state.md', kept ? '{}\n' : undefined);
     const result = check(h);
     assert.equal(h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'tests').ok, true, name);
     assert.equal(result.receipt.head_mode, expected, name);
@@ -763,13 +821,34 @@ test('repository seed maps docs contract checks from docs and CLI source paths',
   }
 });
 
+test('runner helpers and unknown helpers retain full coverage', () => {
+  const { select } = require('../lib/tests-incremental');
+  const { globToRegExp, testMatcher } = require('../lib/gates/tests');
+  const isTestFile = testMatcher({ tests: { paths: ['test/*.test.js', 'test/gates/*.test.js'] } }).match;
+  const seed = require('../tools/tests-map.json');
+  const available = new Set(['test', 'test/gates'].flatMap(dir => fs.readdirSync(path.join(ROOT, dir))
+    .map(file => `${dir}/${file}`)).filter(isTestFile));
+  for (const [file, mode] of [
+    ['test/shard-watchdog.js', 'full'],
+    ['test/file-progress.js', 'full'],
+    ['test/unmapped-runner-helper.js', 'full'],
+    ['test/gates/unmapped-helper.js', 'full'],
+    ['test/helpers/unmapped-helper.js', 'full'],
+  ]) for (const status of ['A', 'M', 'D']) {
+    const result = select(seed, [{ path: file, status }], isTestFile, available,
+      globToRegExp, 'node test/run.js {tests}', '', ['test/shared-files.test.js', 'test/atomic-file.test.js']);
+    assert.equal(result.mode, mode, `${file}: ${status}`);
+    if (mode === 'incremental') assert.ok(result.tests.includes('test/shard.test.js'), `${file}: ${status}`);
+  }
+});
+
 test('incremental seed selects directory readers for every delta status and nested path', () => {
   const { select } = require('../lib/tests-incremental');
   const { globToRegExp, isTestFile, isSupportFile } = require('../lib/gates/tests');
   const seed = require('../tools/tests-map.json');
   const isTest = file => isTestFile(file) && !isSupportFile(file);
   const available = new Set(['test/shared-files.test.js', 'test/package.test.js', 'test/model-config.test.js',
-    'test/epipe.test.js', 'test/new.test.js', 'test/gates/new.test.js']);
+    'test/epipe.test.js', 'test/new.test.js', 'test/gates/new.test.js', 'test/atomic-file.test.js', 'test/shard.test.js']);
   const uncovered = [];
   for (const [changes, reader] of [
     [[['changelog.d/T427.md', 'M']], 'test/shared-files.test.js'],
@@ -786,31 +865,82 @@ test('incremental seed selects directory readers for every delta status and nest
     [[['test/fixtures/nested/input.json', 'M']], 'test/model-config.test.js'],
     [[['test/fixtures/npm-pack/string.json', 'M']], 'test/package.test.js'],
     [[['research/new.json', 'A']], 'test/model-config.test.js'],
+    ...['A', 'M', 'D'].flatMap(status => [
+      [[['test/fixtures/clock.js', status]], 'test/atomic-file.test.js'],
+      [[['test/fixtures/nested/input.js', status]], 'test/atomic-file.test.js'],
+      [[['test/new.test.js', status]], 'test/atomic-file.test.js'],
+      [[['test/gates/new.test.js', status]], 'test/atomic-file.test.js'],
+      [[['test/fixtures/shard/a.test.js', status]], 'test/shard.test.js'],
+    ]),
   ]) {
-    const result = select(seed, changes.map(([path, status]) => ({ path, status })), isTest, available,
+    const suites = new Set([...available, ...Object.values(seed).flat()]);
+    const result = select(seed, changes.map(([path, status]) => ({ path, status })), isTest, suites,
       globToRegExp, 'node test/run.js {tests}');
     if (result.mode !== 'incremental' || !result.tests.includes(reader)) uncovered.push({ changes, reader, result });
   }
   assert.deepEqual(uncovered, []);
 });
 
-test('incremental CLI rejects fragment-only and test-only defects through directory readers', async (t) => {
-  const seed = require('../tools/tests-map.json');
-  for (const [file, content, error] of [
-    ['changelog.d/probe.md', '- Broken fragment ' + String.fromCodePoint(0x2014) + '.\n', /nonempty Markdown bullet without em dashes/],
+test('incremental CLI rejects fragment, suite and fixture defects through their readers, and runner defects through a full run', async (t) => {
+  const seed = Object.fromEntries(Object.entries(require('../tools/tests-map.json'))
+    .filter(([source]) => source.includes('*') || ['test/shard-watchdog.js', 'test/file-progress.js'].includes(source)));
+  const atomic = fs.readFileSync(path.join(ROOT, 'test/atomic-file.test.js'), 'utf8');
+  assert.ok(atomic.includes("test('fixtures publish the files they write through writeAtomic'"),
+    'the CLI regression must use the repository publication reader');
+  assert.ok(atomic.includes('function secondArgument('),
+    'the CLI regression must use the repository write-call parser');
+  const producer = atomic.match(/test\('fixtures publish the files they write through writeAtomic',[\s\S]*?\n\}\);/)[0];
+  const argument = atomic.match(/function secondArgument\([\s\S]*?\n\}/)[0];
+  for (const [file, content, error, reader] of [
+    ['changelog.d/probe.md', '- Broken fragment ' + String.fromCodePoint(0x2014) + '.\n',
+      /nonempty Markdown bullet without em dashes/, 'test/shared-files.test.js'],
     ['test/probe.test.js', [
       "require('node:test')('probe wait', async () => {",
       '  await new Promise((resolve) => setTimeout(resolve, 5));', // wait-allow: generate an unannotated timer for the mapped lint reader to reject
       '});\n',
-    ].join('\n'), /timer wait needs a signal or a wait-allow reason/],
+    ].join('\n'), /timer wait needs a signal or a wait-allow reason/, 'test/shared-files.test.js'],
+    ['test/fixtures/clock.js', "module.exports = () => require('node:fs').writeFileSync('unobserved', 'tick');\n",
+      /use writeAtomic/, 'test/atomic-file.test.js'],
+    ...['test/shard-watchdog.js', 'test/file-progress.js'].map(file =>
+      [file, "process.exit(0);\nconsole.log('runner active');\n", /runner helper contracts/, 'test/shard.test.js']),
   ]) {
     await t.test(file, () => {
       const h = incrementalFixture(t, seed, [], h => {
+        h.ok(['project', 'set', '--tests-paths', '["test/*.test.js","test/gates/*.test.js"]']);
         h.git(['switch', 'main']);
         fs.mkdirSync(path.join(h.repo, 'changelog.d'), { recursive: true });
         fs.writeFileSync(path.join(h.repo, 'changelog.d/probe.md'), '- Valid fragment.\n');
         fs.writeFileSync(path.join(h.repo, 'test/probe.test.js'), "require('node:test')('probe', () => {});\n");
         fs.writeFileSync(path.join(h.repo, 'test/package.test.js'), "console.log('package suite');\n");
+        for (const suite of ['ci-required', 'test-tools']) {
+          fs.writeFileSync(path.join(h.repo, 'test', `${suite}.test.js`), "console.log('runner consumer suite');\n");
+        }
+        fs.mkdirSync(path.join(h.repo, 'test/fixtures'), { recursive: true });
+        fs.writeFileSync(path.join(h.repo, 'test/fixtures/clock.js'), 'module.exports = 0;\n');
+        fs.writeFileSync(path.join(h.repo, 'test/atomic-file.test.js'), `const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const FIXTURES = path.join(__dirname, 'fixtures');
+${producer}
+${argument}
+`);
+        for (const helper of ['shard-watchdog.js', 'file-progress.js']) {
+          fs.writeFileSync(path.join(h.repo, 'test', helper), "console.log('runner active');\n");
+        }
+        fs.writeFileSync(path.join(h.repo, 'test/shard.test.js'), `const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const cp = require('node:child_process');
+test('runner helper contracts', () => {
+  for (const name of fs.readdirSync(__dirname).filter(name => /-(watchdog|progress)\\.js$/.test(name))) {
+    const result = cp.spawnSync(process.execPath, [path.join(__dirname, name)], { encoding: 'utf8', timeout: 300000 });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /runner active/);
+  }
+});
+`);
         fs.writeFileSync(path.join(h.repo, 'test/shared-files.test.js'), `const { test } = require('node:test');
 const { fragments } = require(${JSON.stringify(path.join(ROOT, 'scripts/changelog.js'))});
 const { checkTestWaits } = require(${JSON.stringify(path.join(ROOT, 'scripts/test-waits.js'))});
@@ -828,9 +958,13 @@ test('directory reader contracts', () => {
       const run = h.run(['check', 'tests', 'T1', '--agent', 'worker', '--json']);
       const result = JSON.parse(run.stdout);
       assert.equal(run.code, 1, `${file}: ${run.stderr}\n${run.stdout}`);
-      assert.equal(result.receipt.head_mode, 'incremental');
-      assert.equal(result.receipt.incremental_from, h.fullSha);
-      assert.ok(result.receipt.head_tests.includes('test/shared-files.test.js'), file);
+      // No suite names a runner helper, so a change to one runs the full command.
+      if (reader === 'test/shard.test.js') assert.equal(result.receipt.head_mode, 'full', file);
+      else {
+        assert.equal(result.receipt.head_mode, 'incremental');
+        assert.equal(result.receipt.incremental_from, h.fullSha);
+        assert.ok(result.receipt.head_tests.includes(reader), file);
+      }
       assert.match(result.summary, error);
     });
   }
@@ -901,15 +1035,16 @@ test('run-only incremental resubmission uses the pinned map without hosted full-
   assert.equal(h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'tests').ok, true);
 });
 
-test('a kept docs-only diff can use incremental selection without a new proof', (t) => {
-  const h = incrementalFixture(t, { 'docs/**': ['test/mapped.test.js'] }, ['--tests-keep', '["docs/**"]']);
+test('a kept-only diff can use incremental selection without a new proof', (t) => {
+  // Kept data, not docs: a docs-only diff skips the tests gate's suites altogether.
+  const h = incrementalFixture(t, { 'data/**': ['test/mapped.test.js'] }, ['--tests-keep', '["data/**"]']);
   h.git(['branch', '-f', 'main', 'HEAD']);
-  resubmit(h, 'docs/state.md');
+  resubmit(h, 'data/state.json', '{}\n');
   const result = check(h);
   assert.equal(result.receipt.mode, 'run-only (test-only diff)');
   assert.equal(result.receipt.head_mode, 'incremental');
   assert.equal(result.receipt.incremental_from, h.fullSha);
-  assert.deepEqual(result.receipt.changed_files, ['docs/state.md']);
+  assert.deepEqual(result.receipt.changed_files, ['data/state.json']);
   assert.deepEqual(result.receipt.head_tests, ['test/mapped.test.js']);
   assert.equal(result.commands.filter((c) => c.command !== 'git').length, 1);
   assert.equal(h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'tests').ok, true);

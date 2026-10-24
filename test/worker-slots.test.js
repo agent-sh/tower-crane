@@ -214,6 +214,10 @@ test('readers of a spawn detail recorded in another pid namespace never judge it
     fs.writeFileSync(file, JSON.stringify({ pid: dead, start: '1', host, ...ns, command: 'wait', role: 'orchestrator' }));
     C.recorded(state);
     assert.equal(fs.existsSync(file), !gone, `${label}: controller record`);
+    // A supervisor hands its reactions only to a wait host whose process it can see.
+    const live = path.join(state, 'controllers', `${process.ppid}-fedcba9876543210.json`);
+    fs.writeFileSync(live, JSON.stringify({ pid: process.ppid, host, ...ns, command: 'wait', role: 'orchestrator', reactions: true }));
+    assert.equal(C.reactionHost(state)?.pid ?? null, gone ? process.ppid : null, `${label}: reaction host`);
   }
 });
 
