@@ -5,10 +5,11 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { cachedFixture, TMP_ROOT } = require('./helpers');
+const cp = require('node:child_process');
+const { cachedFixture, makeRepo, TMP_ROOT } = require('./helpers');
 const { readPublished } = require('./atomic-file');
 const { gateFixture } = require('./gate-helpers');
-const { waitUntil } = require('./signals');
+const { waitUntil, HUNG_TEST_MS } = require('./signals');
 const { harnessArgv } = require('./containment-plan');
 const C = require('../lib/containment');
 const G = require('../lib/gates/common');
@@ -20,6 +21,32 @@ const LIMITS = { tasks_max: 64, memory_max_bytes: 512 * 1024 * 1024 };
 const UNIT = 'tower-crane-123-0123456789abcdef.scope';
 
 const digest = (dir) => crypto.createHash('sha256').update(fs.realpathSync(dir)).digest('hex').slice(0, 12);
+
+test('CPU measurement scratch keeps explicit gate identity and uses cache defaults', () => {
+  const { measurementRoot } = require('../scripts/measure-cpu-weight');
+  const cache = path.join(TMP_ROOT, 'measurement-cache');
+  const gate = path.join(TMP_ROOT, 'measurement-gate');
+  const override = path.join(TMP_ROOT, 'measurement-override');
+  for (const [settings, expected] of [
+    [{}, path.join(cache, 'tower-crane')],
+    [{ TOWER_CRANE_TMP: override }, override],
+    [{ TMPDIR: gate }, gate],
+    [{ TOWER_CRANE_TEST_TMP: override, TMPDIR: gate }, override],
+    [{ TOWER_CRANE_SANDBOX: '1', TMP: gate }, gate],
+    [{ TOWER_CRANE_SANDBOX: '1', TEMP: gate }, gate],
+  ]) {
+    assert.equal(measurementRoot({ XDG_CACHE_HOME: cache, LOCALAPPDATA: cache, ...settings }), expected);
+  }
+});
+
+test('the CPU measurement CLI validates its mode without starting host work', (t) => {
+  const h = makeRepo(t);
+  const result = cp.spawnSync(process.execPath, [require.resolve('../scripts/measure-cpu-weight'), 'invalid-mode'], {
+    cwd: h.repo, env: h.env, encoding: 'utf8', timeout: HUNG_TEST_MS,
+  });
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stderr, /usage: measure-cpu-weight\.js fairness \| gate WEIGHT/);
+});
 
 function scratch(t, name) {
   const dir = fs.mkdtempSync(path.join(TMP_ROOT, `${name}-`));
@@ -170,7 +197,11 @@ function project(t) {
     fs.writeFileSync(hold, `const fs = require('node:fs');
 const path = require('node:path');
 const release = process.env.TC_HOLD_RELEASE;
-const done = () => { console.log(JSON.stringify({ scope: 'diff', items: [] })); process.exit(0); };
+const done = () => {
+  if (process.env.TC_PRIORITY_FILE) fs.writeFileSync(process.env.TC_PRIORITY_FILE, String(require('node:os').getPriority()));
+  console.log(JSON.stringify({ scope: 'diff', items: [] }));
+  process.exit(0);
+};
 if (!release) done();
 fs.writeFileSync(release + '.started', '');
 fs.watch(path.dirname(release), () => { if (fs.existsSync(release)) done(); });
@@ -236,7 +267,20 @@ test('the CLI starts each project\'s gates and agents in its own slice, gates at
   assert.deepEqual(evidence().cpu, { weight: 700, slice: sliceOf(a) });
 
   // Without systemd scopes the gate still runs, and its receipt says the weight was not applied.
-  const plain = a.run(['check', 'clean', 'T1', '--json'], { pre, env: { TC_FAKE_NO_MANAGER: '1' } });
+  // It yields through nice instead: weight 700 is about 9 nice steps over the agents' 100 at nice 10,
+  // so nice 1 unless the launch already runs at a higher one, at the lowest best-effort I/O priority.
+  const priority = path.join(a.base, 'priority');
+  const plain = a.run(['check', 'clean', 'T1', '--json'], { pre, env: { TC_FAKE_NO_MANAGER: '1', TC_PRIORITY_FILE: priority } });
   assert.equal(plain.code, 0, plain.stderr);
-  assert.deepEqual(evidence().cpu, { weight: 700, applied: false, reason: 'no cgroup v2 or systemd user manager' });
+  const nice = Math.max(require('node:os').getPriority(), 1);
+  assert.deepEqual(evidence().cpu, { weight: 700, applied: false, reason: 'no cgroup v2 or systemd user manager', nice, ionice: 'best-effort 7' });
+  assert.equal(Number(fs.readFileSync(priority, 'utf8')), nice, 'the gate command runs at that nice value');
+  assert.equal(C.describeCpu(evidence().cpu), `not applied (no cgroup v2 or systemd user manager); nice ${nice}, I/O best-effort 7`);
+  assert.deepEqual([C.niceFor(C.AGENT_WEIGHT), C.niceFor(C.GATE_WEIGHT), C.niceFor(1), C.niceFor(10000)], [10, 4, 19, 0]);
+  // The lowest weight lands past any nice a test runner starts at, so the command shows the wrapper took effect.
+  a.ok(['project', 'set', '--gates-cpu-weight', '1', '--agent', 'orchestrator']);
+  const lowest = a.run(['check', 'clean', 'T1', '--json'], { pre, env: { TC_FAKE_NO_MANAGER: '1', TC_PRIORITY_FILE: priority } });
+  assert.equal(lowest.code, 0, lowest.stderr);
+  assert.equal(Number(fs.readFileSync(priority, 'utf8')), 19);
+  assert.equal(evidence().cpu.nice, 19);
 });

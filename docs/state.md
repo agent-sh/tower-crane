@@ -103,6 +103,8 @@ Existing links use these anchors. Follow the link to the contract in its area.
 
 <a id="publish-policy"></a>[publish-policy](state/decisions.md#publish-policy)
 
+<a id="sandbox-policy"></a>[sandbox-policy](state/decisions.md#sandbox-policy)
+
 <a id="fallback-route-grants"></a>[fallback-route-grants](state/decisions.md#fallback-route-grants)
 
 <a id="native-crashes"></a>[native-crashes](state/tasks.md#native-crashes)
@@ -130,5 +132,11 @@ Existing links use these anchors. Follow the link to the contract in its area.
 <a id="scratch-archive"></a>[scratch-archive](state/storage.md#scratch-archive)
 
 <a id="docs-and-small-fix-rounds"></a>[docs and small fix rounds](state/review.md#docs-and-small-fix-rounds)
+
+<a id="runaway-cost"></a>[runaway-cost](state/review.md#runaway-cost)
+
+<a id="conflict-hotspots"></a>[conflict-hotspots](state/review.md#conflict-hotspots)
+
+<a id="merge-pause"></a>[merge-pause](state/gates.md#merge-pause)
 
 <a id="base-only-heads"></a>[base-only-heads](state/gates.md#base-only-heads)

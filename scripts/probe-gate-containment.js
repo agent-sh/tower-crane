@@ -11,7 +11,6 @@
 // before the change ("before"), and prints one JSON line per run. It exits 1 when an "after" run
 // leaves a process or reports anything but an empty cgroup; "before" runs are evidence only.
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 const cp = require('node:child_process');
 const Module = require('node:module');
@@ -44,7 +43,9 @@ const SPIN = 'const end = Date.now() + 60000; while (Date.now() < end) Math.sqrt
 // Runs the chosen cases and returns their lines and whether any "after" run failed. The planted
 // processes are killed and the scratch directory removed before it returns, pass or fail.
 async function probe({ versions = ['before', 'after'], leaks: leakNames = null, ends: endNames = null, write = () => {} } = {}) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-gate-containment-'));
+  const root = require('../lib/scratch-root').commandRoot();
+  fs.mkdirSync(root, { recursive: true });
+  const dir = fs.mkdtempSync(path.join(root, 'tc-gate-containment-'));
   const resources = require('../lib/containment').resolveGate({});
   const setsid = ['/usr/bin/setsid', '/bin/setsid'].find((file) => fs.existsSync(file));
   const leaks = {

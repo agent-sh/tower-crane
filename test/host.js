@@ -14,8 +14,10 @@ const SLICE = 'tests.slice';
 // used that the governor does not count.
 // cores, when given, writes a /proc/stat listing that many CPUs whose times
 // never move, so the test-thread budget reads its cores there and its other
-// work from the load.
-function writeHost(dir, { limit = 64, used = 1, cache = 0, high = null, memorySome = 0, memoryFull = 0, cpuSome = 0, load = 0, oomKill = 0, cores = null } = {}) {
+// work from the load. weights lists the cpu controller in the slice, so
+// Tower Crane's work there runs under CPU weights and pressure, not load,
+// defers it below the saturated line.
+function writeHost(dir, { limit = 64, used = 1, cache = 0, high = null, memorySome = 0, memoryFull = 0, cpuSome = 0, load = 0, oomKill = 0, cores = null, weights = false } = {}) {
   const write = (rel, text) => {
     const file = path.join(dir, rel);
     fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -37,6 +39,8 @@ function writeHost(dir, { limit = 64, used = 1, cache = 0, high = null, memorySo
   write(`${slice}/memory.max`, `${bytes(limit)}\n`);
   write(`${slice}/memory.high`, high == null ? 'max\n' : `${bytes(high)}\n`);
   write(`${slice}/memory.stat`, `anon ${bytes(used - cache)}\nactive_file 0\ninactive_file ${bytes(cache)}\n`);
+  if (weights) write(`${slice}/cgroup.controllers`, 'cpu memory pids\n');
+  else fs.rmSync(path.join(dir, slice, 'cgroup.controllers'), { force: true });
   write(`${slice}/memory.events`, `low 0\nhigh 0\nmax 0\noom 0\noom_kill ${oomKill}\n`);
   write(`${slice}/run.scope/memory.current`, `${bytes(used)}\n`);
   write(`${slice}/run.scope/memory.max`, 'max\n');

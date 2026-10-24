@@ -12,6 +12,34 @@ const { waitUntil, killPid } = require('../signals');
 const NODE = quote(process.execPath);
 const CMD = `${NODE} run-tests.js`;
 
+test('coverage scratch uses the gate private directory or cache overrides and never falls back on failure', (t) => {
+  const base = scratch('coverage-root-table');
+  t.after(() => fs.rmSync(base, { recursive: true, force: true }));
+  const cache = path.join(base, 'cache');
+  const override = path.join(base, 'override');
+  const privateTmp = path.join(base, 'private');
+  const sentinel = path.join(base, 'sentinel');
+  fs.mkdirSync(sentinel);
+  for (const [settings, expected] of [
+    [{ TMPDIR: privateTmp, TOWER_CRANE_TMP: override }, privateTmp],
+    [{ TOWER_CRANE_TMP: override }, override],
+    [{}, path.join(cache, 'tower-crane')],
+    [{ TOWER_CRANE_SANDBOX: '1', TMP: privateTmp }, privateTmp],
+    [{ TOWER_CRANE_SANDBOX: '1', TMP: '', TEMP: privateTmp }, privateTmp],
+  ]) {
+    const env = { XDG_CACHE_HOME: cache, LOCALAPPDATA: cache, TMP: sentinel, TEMP: sentinel, ...settings };
+    const dir = gate.coverageScratch(env);
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+    assert.equal(path.dirname(dir), expected);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  const file = path.join(base, 'not-a-directory');
+  fs.writeFileSync(file, 'unchanged');
+  assert.throws(() => gate.coverageScratch({ TMPDIR: file }), /EEXIST|ENOTDIR/);
+  assert.equal(fs.readFileSync(file, 'utf8'), 'unchanged');
+  assert.deepEqual(fs.readdirSync(sentinel), []);
+});
+
 // A tiny project whose runner requires every test/*.test.js and exits 1 if any throws.
 const BASE = {
   'run-tests.js': `const fs = require('fs');
@@ -640,11 +668,15 @@ test('a skipped changed host-only test cannot prove code, and host_env reaches i
 
 test('a test that fails without the change and passes with it: ok', async () => {
   const sha = task({ 'lib/add.js': FIX, 'test/add.test.js': ADD_TEST });
-  const r = await gate.run(ctx(sha));
+  const context = { ...ctx(sha), stateDir: path.join(tmp, 'state') };
+  const r = await gate.run(context);
   assert.equal(r.ok, true, r.summary);
   assert.equal(r.sha, sha);
   assert.match(r.summary, /run-tests\.js` at [0-9a-f]+: exit 0/);
   assert.match(r.summary, /1 non-test file reverted .*lib\/add\.js.*: exit 1/);
+  assert.deepEqual(r.receipt.test_logs.map((r) => r.phase), ['head', 'reverted']);
+  assert.match(fs.readFileSync(path.join(context.stateDir, r.receipt.test_logs[0].log), 'utf8'), /ok add.test.js/);
+  assert.match(fs.readFileSync(path.join(context.stateDir, r.receipt.test_logs[1].log), 'utf8'), /not ok add.test.js/);
   assertCleanedUp();
 });
 
@@ -1268,9 +1300,12 @@ test('expensive prove needs a pinned scoped command that passes at head, fails a
     assert.equal(r.ok, false);
     assert.match(r.summary, message);
   }
-  const r = await gate.run(ctx(sha, { project: expensive(`${NODE} proof.js {tests}`) }));
+  const context = { ...ctx(sha, { project: expensive(`${NODE} proof.js {tests}`) }), stateDir: path.join(tmp, 'scoped-state') };
+  const r = await gate.run(context);
   assert.equal(r.ok, true, r.summary);
   assert.match(r.summary, /kept a scoped proof/);
+  assert.deepEqual(r.receipt.test_logs.map((r) => r.phase), ['head', 'scoped', 'reverted']);
+  assert.match(fs.readFileSync(path.join(context.stateDir, r.receipt.test_logs[2].log), 'utf8'), /AssertionError/);
   assertCleanedUp();
 });
 

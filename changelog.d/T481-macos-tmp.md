@@ -1,0 +1,1 @@
+- On macOS a sandboxed codex agent's profile again hides `/private/tmp`, which `/tmp` resolves to and codex otherwise reads through `/private`.
