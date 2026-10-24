@@ -1,1 +1,0 @@
-- Publish coverage-map fixture clocks, receipts and artifacts atomically, and lock shared GitHub mock updates so concurrent calls retain their history.

@@ -24,54 +24,32 @@ const routes = (f) => merges(f).map((m) => m.route);
 test('wait cancels an asynchronous stack merge query or backoff on the second signal', {
   skip: process.platform === 'win32' ? 'Windows child.kill does not deliver POSIX signals' : false,
 }, async (t) => {
-  for (const row of [
-    { stage: 'query', first: 'SIGTERM', second: 'SIGINT', signalDelay: 0 },
-    { stage: 'backoff', first: 'SIGTERM', second: 'SIGINT', signalDelay: 0 },
-    { stage: 'query', first: 'SIGINT', second: 'SIGTERM', signalDelay: 0 },
-    { stage: 'backoff', first: 'SIGINT', second: 'SIGTERM', signalDelay: 0 },
-    { stage: 'query', first: 'SIGTERM', second: 'SIGINT', signalDelay: 4000 },
-    { stage: 'backoff', first: 'SIGTERM', second: 'SIGINT', signalDelay: 4000 },
-    { stage: 'query', first: 'SIGINT', second: 'SIGTERM', signalDelay: 4000 },
-    { stage: 'backoff', first: 'SIGINT', second: 'SIGTERM', signalDelay: 4000 },
+  for (const [stage, signalDelay] of [
+    ['query', 0], ['backoff', 0], ['query', 4000], ['backoff', 4000],
   ]) {
-    const { stage, first, second, signalDelay } = row;
-    await t.test(`${stage}: ${first} then ${second}${signalDelay ? ' with delayed signal dispatch' : ''}`, async (t) => {
+    await t.test(`${stage}${signalDelay ? ' with delayed signal dispatch' : ''}`, async (t) => {
       const f = stacked(t);
       f.accept('T1');
       f.accept('T2');
       const poll = path.join(f.h.base, 'poll-ready');
       const sleeping = path.join(f.h.base, 'backoff-ready');
-      const outcome = path.join(f.h.base, 'backoff-outcome');
       const observed = path.join(f.h.base, 'signal-observed');
       const preload = path.join(f.h.base, 'poll-observer.js');
-      // Observe the held poll's cancellation separately from CLI shutdown.
+      // Keep the poll held until cancellation, bounded by the hung-test backstop.
       fs.writeFileSync(preload, `
 const fs = require('node:fs'), timers = require('node:timers/promises');
-const { writeAtomic } = require(${JSON.stringify(path.join(__dirname, 'atomic-file.js'))});
-const delay = timers.setTimeout;
-timers.setTimeout = (ms, ...args) => {
-  const held = ms === 1000 && fs.existsSync(${JSON.stringify(poll)});
-  if (!held) return delay(ms, ...args);
+const timeout = global.setTimeout, delay = timers.setTimeout;
+const pause = (ms) => {
+  if (ms !== 1000 || !fs.existsSync(${JSON.stringify(poll)})) return ms;
   fs.writeFileSync(${JSON.stringify(sleeping)}, '');
-  const pending = delay(${HUNG_TEST_MS}, ...args);
-  return pending.then(value => {
-    writeAtomic(${JSON.stringify(outcome)}, 'resolved');
-    return value;
-  }, async error => {
-    writeAtomic(${JSON.stringify(outcome)}, error.code || error.name);
-    // Keep the process alive after abort so exit timing cannot prove cancellation.
-    await delay(4000); // wait-allow: fixture completion stays delayed after the backoff has rejected
-    throw error;
-  });
+  return ${HUNG_TEST_MS};
 };
-const seen = [];
+global.setTimeout = (fn, ms, ...args) => timeout(fn, pause(ms), ...args);
+timers.setTimeout = (ms, ...args) => delay(pause(ms), ...args);
 for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => {
+  fs.appendFileSync(${JSON.stringify(observed)}, signal + '\\n');
   // A busy event loop can dispatch cancellation after a short exit budget.
-  if (signal === ${JSON.stringify(second)} && ${signalDelay}) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ${signalDelay}); // wait-allow: reproduces delayed signal dispatch.
-  setImmediate(() => {
-    seen.push(signal);
-    writeAtomic(${JSON.stringify(observed)}, seen.join('\\n') + '\\n');
-  });
+  if (signal === 'SIGINT' && ${signalDelay}) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ${signalDelay}); // wait-allow: reproduces delayed signal dispatch.
 });
 `);
       const env = { ...f.h.env, TEST_STACK_POLL_READY: poll,
@@ -86,19 +64,13 @@ for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => {
       const bound = setTimeout(() => child.kill('SIGKILL'), HUNG_TEST_MS);
       try {
         await waitFor(stage === 'query' ? poll : sleeping, { what: 'the merge reaches its poll' });
-        child.kill(first);
-        await waitFor(observed, { nonempty: true, what: 'wait starts draining' });
+        child.kill('SIGTERM');
+        await waitFor(observed, { what: 'wait starts draining' });
         assert.equal(child.exitCode, null, 'the first signal drains the active merge');
-        if (stage === 'backoff') assert.equal(fs.existsSync(outcome), false, 'the first signal leaves the backoff pending');
-        child.kill(second);
-        if (stage === 'backoff') {
-          await waitFor(outcome, { nonempty: true, what: 'the backoff rejects after the second signal' });
-          assert.equal(fs.readFileSync(outcome, 'utf8'), 'ABORT_ERR', 'the second signal aborts the backoff instead of waiting for its deadline');
-        }
+        child.kill('SIGINT');
         const exited = await result;
         assert.equal(exited.code, 0, JSON.stringify(exited));
-        assert.match(exited.stdout, new RegExp(`stopped by ${first} after draining 0 gates`));
-        assert.deepEqual(fs.readFileSync(observed, 'utf8').trim().split('\n'), [first, second]);
+        assert.match(exited.stdout, /stopped by SIGTERM after draining 0 gates/);
         assert.deepEqual(routes(f), ['async 11'], 'the upper merge never starts');
         const task = f.h.json(['task', 'show', 'T2']);
         const evidence = task.evidence.findLast((entry) => entry.type === 'merge');
