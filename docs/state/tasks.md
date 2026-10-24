@@ -618,9 +618,25 @@ The gate rejects duplicate URLs (fragments do not distinguish pages), duplicate 
 
 ### Ready and blocked
 
-A task is ready when its status is `todo` or `rework`, every dependency is `accepted`, `needs_owner` is null, and no open decision lists it in `blocks`. Otherwise `tower-crane ready --all` says what blocks it.
+A task is ready when its status is `todo` or `rework`, every dependency is `accepted` or eligible for stacking, `needs_owner` is null, no open decision lists it in `blocks`, and no resource lock or hot path blocks it. Otherwise `tower-crane ready --all` says what blocks it.
 
 Ready tasks come in priority order: urgent first, then most outstanding dependents (direct or transitive, not yet accepted or cancelled), then by id.
+
+`project.json` may contain `hot_paths`, an array of repository-relative globs using the `tests.paths` syntax (`*`, `**`, `?`, and brace alternatives). `init --hot-paths JSON` and `project set --hot-paths JSON` set the list; `[]` disables it and `null` removes the field. It is operational, so the orchestrator or owner can change it. `project show` prints the list; an absent list has no hot-path waits.
+
+A task touches a hot glob when a repository path or glob in its brief's `## Scope` section overlaps it, or its local diff changes a matching file. Directory scopes include their descendants. New paths count before they are tracked. Diffs include committed changes against the merge base of the task's effective base, staged and unstaged worktree changes, and untracked files. Stacked task diffs use the dependency branch while it is unmerged. Paths mentioned in other brief sections do not acquire a hot path.
+
+Tasks in `in_progress`, `submitted`, `rework`, and accepted tasks awaiting merge hold their hot paths. A live unclaimed worker reservation also holds them. Lease expiry frees a worker slot but does not release an in-progress task's hot paths against new todo work. A new todo task waits with `waits on hot path <glob> held by T<n>`, shown by `status`, `ready --all`, and the blocked views. Claims, expired-lease renewals, and worker dispatch enforce hot-path waits under the state lock, using git snapshots prepared before taking it. An eligible dependent stack may share its parent chain's hot paths; holders outside that chain still block new work.
+
+Readiness snapshots are prepared only for transactions that check readiness: new claims, expired renewals, worker dispatch, and rework owner handoffs. Notes, spend, evidence and live lease renewals do not prepare them before the mutation. Rendering after a commit uses the read-only cached index. Snapshots read refs together, index one base tree, and reuse each task's parsed Scope within a view. Base selection uses origin when it contains the local base; a local base that is ahead or diverged is retained. Explicit `origin/` refs use that remote ref. Committed diffs are cached by base/head SHA pairs, while staged, unstaged and untracked worktree paths are read freshly for each snapshot. A newly loaded state cannot run git while a mutation holds the lock.
+
+Recovery of a `rework` task or expired claim waits only on overlapping live worker leases and unclaimed worker reservations. Submitted, accepted, rework, and expired-lease peers without a live worker slot do not block recovery, including stacked descendants. This prevents two waiting tasks from blocking each other's recovery or a submitted child from blocking its stack parent's rework. Once one recovery candidate claims a live lease, it blocks overlapping recovery claims and renewals until its worker slot is freed. Active stacked descendants also block parent recovery while they are editing.
+
+A dispatched worker claiming its own unclaimed reservation also resumes work past passive holders. Overlapping unclaimed reservations are consumed in their recorded dispatch order: an earlier reservation blocks a later claimant, and a granted live lease blocks every overlapping claimant. This lets pending dispatches claim without creating a cycle with passive rework tasks or with each other.
+
+Merge evidence or cancellation releases the holder. Automatic refill skips waiting tasks and dispatches other ready work; later passes reconsider the waiting task after release.
+
+After merge, the orchestrator seeds Tower Crane's own project with the measured hot paths `["docs/state.md", "docs/state/*", "docs/cli.md", "bin/tower-crane.js", "lib/automation.js"]`. The two state-document patterns cover the current file and a future split. The orchestrator can replace this list through `project set`.
 
 ### Release for a decision
 

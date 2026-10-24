@@ -216,6 +216,18 @@ The list settings also work with `init`. Omitted options leave their fields unch
 
 Harness sandbox support comes from `CAPABILITIES` in [lib/agents.js](../lib/agents.js). Its `sandbox` flag selects the ladder authority rule: moving a role that requests confinement to a harness with `sandbox: false` is owner-required. The separate `osSandbox` flag controls the OS-isolated state broker and nested browser setup; it does not classify ladder reach. Opencode keeps its private home and native file-tool permissions, with both sandbox capabilities false; those rules do not constrain Bash writes.
 
+Set `hot_paths` with `init --hot-paths JSON` or `project set --hot-paths JSON`. It is operational: the orchestrator or owner may replace it, `[]` disables waits, and `null` removes the field. `project show` prints the configured list.
+
+```sh
+tower-crane project set --hot-paths '["docs/state.md","docs/state/*","docs/cli.md","bin/tower-crane.js","lib/automation.js"]' --agent orchestrator
+```
+
+This is the measured seed for Tower Crane's own project. Globs use the `tests.paths` syntax and must be repository-relative without parent components. A new todo task whose brief's `## Scope` paths or local diff overlap a configured glob waits while an in-progress, submitted, rework, accepted but unmerged task, or live worker reservation holds it. Local diffs include committed, staged, unstaged, and untracked changes. `status` and `ready --all` name the holder: `waits on hot path <glob> held by T<n>`. Eligible dependent stacks share their parent chain's hot paths. Merge or cancellation ends the wait, and automatic refill starts unrelated ready tasks meanwhile. Rework and expired-claim recovery wait only on overlapping live worker leases or reservations, so passive peers and submitted stack descendants cannot deadlock recovery. Each granted recovery lease blocks other overlapping recoveries until its worker slot is freed. [State contract](../docs/state/tasks.md#ready-and-blocked).
+
+Dispatched workers claiming their own reservation resume past passive holders too. Overlapping reservations claim in their recorded dispatch order; a granted live lease blocks every overlapping claim.
+
+Hot-path snapshots are prepared for readiness transactions, including expired renewals and rework handoffs, rather than before note, spend, evidence or live-renewal mutations. Rendering after a commit uses the read-only cached index. Views reuse parsed scopes and a CLI-managed committed diff cache keyed by base/head SHA; dirty worktree paths are read freshly. Base selection follows the local/origin ancestry rule, so an outdated local base cannot attribute upstream changes to every task.
+
 ## Already-merged hotfixes
 
 The orchestrator records a merged PR, then uses the normal acceptance path:

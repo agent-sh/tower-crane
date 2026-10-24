@@ -72,6 +72,7 @@ Workers, reviewers and every other identity are refused both. For an operational
 | `ci.dispatch` | operational | `project set --ci-dispatch` |
 | `ci.max_dispatches` | operational | `project set --ci-max-dispatches` |
 | `tests.paths`, `tests.keep`, `tests.host_only`, `tests.host_env`, `tests.mode`, `tests.by_kind`, `tests.expensive`, `tests.map`, `tests.crucial` | operational | `project set --tests-*`; `tests map refresh` also pins `tests.map` |
+| `hot_paths` | operational | `project set --hot-paths JSON`: serialize overlapping task scopes and diffs on repository-relative globs |
 | `limits.workers`, `limits.lease_minutes`, `limits.paused` | operational | `project set --workers`, `--lease-minutes`, `--paused REASON` (empty resumes) |
 | `limits.owners`, `limits.owner_idle_minutes` | operational | `project set --owners`, `--owner-idle-minutes` |
 | `resources.tasks_max`, `resources.memory_max_bytes` | operational | `project set --tasks-max N --memory-max-bytes N`; positive integers, per agent or gate including descendants |
