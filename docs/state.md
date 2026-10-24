@@ -129,4 +129,6 @@ Existing links use these anchors. Follow the link to the contract in its area.
 
 <a id="scratch-archive"></a>[scratch-archive](state/storage.md#scratch-archive)
 
+<a id="docs-and-small-fix-rounds"></a>[docs and small fix rounds](state/review.md#docs-and-small-fix-rounds)
+
 <a id="base-only-heads"></a>[base-only-heads](state/gates.md#base-only-heads)
