@@ -71,9 +71,12 @@ fs.writeFileSync(marker, '');
 const poll = () => fs.existsSync(marker + '.go') ? fs.writeFileSync(marker + '.exited', '') : setTimeout(poll, 25); // wait-allow: the finish file releases the worker
 poll();
 `);
-  f.h.ok(['ladder', 'set', 'medium', '--harness', 'command', '--clear', 'model', '--clear', 'profile', '--clear', 'effort',
-    '--env', JSON.stringify(fakeAgentEnv({ NODE_OPTIONS: f.h.env.NODE_OPTIONS })),
-    '--command', JSON.stringify([process.execPath, script, '{prompt}'])]);
+  // An urgent task climbs to hard, so both rungs a fixture task can take run the holder.
+  for (const rung of ['medium', 'hard']) {
+    f.h.ok(['ladder', 'set', rung, '--harness', 'command', '--clear', 'model', '--clear', 'profile', '--clear', 'effort',
+      '--env', JSON.stringify(fakeAgentEnv({ NODE_OPTIONS: f.h.env.NODE_OPTIONS })),
+      '--command', JSON.stringify([process.execPath, script, '{prompt}'])]);
+  }
 }
 
 for (const dispatch of ['refill', 'spawn --ready']) {
@@ -138,7 +141,8 @@ for (const [name, changes, same] of [
   ['task spend', s => s.tasks.tasks[1].spend.minutes++, true],
   ['parent notes', s => s.tasks.tasks[0].notes.push({ text: 'progress' }), true],
   ['parent spend', s => s.tasks.tasks[0].spend.minutes++, true],
-  ['task tier', s => s.tasks.tasks[1].tier = 'hard', false],
+  // An urgent task already climbed to hard, so the change names another rung.
+  ['task tier', s => s.tasks.tasks[1].tier = s.tasks.tasks[1].tier === 'hard' ? 'medium' : 'hard', false],
   ['task revision', s => s.tasks.tasks[1].revision++, false],
   ['parent head', s => s.tasks.tasks[0].sha = 'f'.repeat(40), false],
   ['parent status', s => s.tasks.tasks[0].status = 'accepted', false],
