@@ -43,7 +43,8 @@ not admission control across activities, sessions or projects.
 
 On Linux with cgroup v2, a reachable systemd user manager and safe placement, a launch uses a
 named transient user scope through `systemd-run --user --scope`
-in the caller's slice with `TasksMax`, `MemoryMax`,
+in its project's slice below the caller's slice ([CPU shares](#cpu-shares))
+with `TasksMax`, `MemoryMax`,
 `MemorySwapMax=0`, `OOMPolicy=continue` and delegated memory/pids controllers.
 The availability probe uses `systemctl --user show-environment`, and every
 outer scope uses `systemd-run --user --scope`. Both receive the same resolved
@@ -81,14 +82,14 @@ Crane launch creates a delegated child cgroup within the inherited scope. Its
 own cap and every ancestor's aggregate cap remain enforced by the kernel.
 Optional owner `scope` properties apply to the outer scope; mandatory resource
 properties take precedence, and `scope: {}` only clears optional properties.
-An optional `Slice` property cannot override the caller's slice. New user scopes
+An optional `Slice` property cannot override the project's slice. New user scopes
 are allowed only when the caller's cgroup is below its own `user@<uid>.service`,
 or `loginctl show-user <uid> -p Linger --value` succeeds and reports `yes`.
 A caller outside its user manager, such as a login session or hosted CI runner's
 system service, without confirmed linger uses the watchdog. A warning names
 the caller's placement, linger and the risk of the user manager stopping at
-logout. With linger, an outside caller's scope goes into the user manager's
-slice of the same name and keeps its own caps. Setting
+logout. With linger, an outside caller's scope goes into the project's slice
+below the user manager's slice of the same name and keeps its own caps. Setting
 `TasksMax`, `MemoryMax`, `MemorySwapMax`, `OOMPolicy`, `Delegate` or `Slice`
 through `init`, `project set` or `ladder set` prints a `warning:` line naming
 the replaced keys; each command's JSON reply includes the same `warnings`
@@ -184,6 +185,57 @@ environment markers, grant no retention.
 Containment metadata retains sampled `pids_peak`, `memory_peak_bytes` and
 `refused_forks` from the scope's peak and local event files. Refused forks
 count that scope's cap violations where local events are available.
+
+#### CPU shares
+
+Each project's Tower Crane scopes, its workers', reviewers', small agents' and
+orchestrator's as well as its gate and merge-queue suite commands', go in one
+slice of the caller's slice: `<caller>-towercrane_<digest>.slice`, where
+`<digest>` is the first 12 hex digits of the SHA-256 of the real state
+directory path, the same digest that names the project's task scratch
+(`agents-towercrane_9b27247cfd0b.slice` under `agents.slice`). systemd nests a
+slice one level per dash, so it sits directly below the caller's slice; a
+caller already inside a project's slice places its scope in its own project's
+slice beside that one. The slice has systemd's default weight, 100, the same as
+every other scope in the caller's slice, such as a terminal session. Under
+contention one project's scopes together get one such share, whatever their
+number, so one project's gates never take CPU from another project or from
+other sessions. Inside the slice, gate scopes get `CPUWeight=gates.cpu_weight`
+and agent scopes keep the default unless `agents.cpu_weight` is set
+([project.json](storage.md#projectjson)). A gate command run without a state
+directory has no project slice, so it stays in the caller's slice without the
+gate weight. An agents weight other than 100 replaces a
+`CPUWeight` in the owner's `scope` properties. A nested launch stays in the
+scope it inherits and so in that scope's slice; a gate there writes its weight
+to its delegated child cgroup's `cpu.weight`, enabling the inherited scope's
+`cpu` controller first, so it is weighed against that scope's other attempts.
+When the inherited scope has no delegated `cpu` controller the command runs
+under its caps without the weight. A launch without systemd scopes (macOS,
+Windows, Linux without cgroup v2 or a user manager, Linux outside the user
+manager without confirmed linger, a non-delegated fence)
+runs as before and records the weight as not applied, with no failure.
+
+Gate evidence and its event record `cpu`, the weight its contained commands ran
+at: `{weight, slice}` for a scope, `{weight, nested}` with the inherited group
+for a nested child, or `{weight, applied: false, reason}`. The merge queue's
+`head check` records the same `cpu` for its suite. While a gate or suite runs,
+its host governor unit keeps that `cpu`, and `status` prints
+`gate cpu weight: T3 tests gate 400 in agents-towercrane_9b27247cfd0b.slice`,
+or `400 nested in GROUP` or `not applied (REASON)`, for each of this project's running gates (JSON
+`governor.units[].cpu`).
+
+`node scripts/measure-cpu-weight.js fairness` and
+`node scripts/measure-cpu-weight.js gate WEIGHT [--run N] [--summary]` measure both on a
+host with a user manager. They start the scopes with `scopeArguments` in the
+slices `projectSlice` names and pin every busy process to the same four CPUs.
+`fairness` runs a Tower Crane project's gate and agent, another project's agent
+and a session scope outside Tower Crane side by side, flat in the caller's
+slice and then in project slices, and prints each group's CPU-seconds and
+share. `gate` runs the pinned tests command on `test/ladder.test.js`,
+`test/authority.test.js` and `test/state-compatibility.test.js` in a project's
+slice at WEIGHT next to three busy agent scopes of the same project, and prints
+its wall time and CPU-seconds; `--summary` adds the median of each weight's
+runs in the same gate run.
 
 On macOS, Windows, Linux without cgroup v2, Linux without a reachable
 user manager, Linux outside the user manager without confirmed linger,
@@ -397,7 +449,7 @@ Memory admits a tests gate; CPU decides how many test files it runs at once. No 
 
 The budget is the cores less the cores other work uses now, and never more than `cores - 1`: the core kept back covers up to one core of other work (the runner, the gate's own CLI, processes tests detach from their trees), and other work past that comes off the budget. On Linux that is the busy cores among the CPUs the run may use (`Cpus_allowed_list`), from `/proc/stat` between samples at least a second apart, less the CPU the runs' own process trees used over the same interval: each lease holder and its descendants, with the time of children they reaped. Measuring the runs, rather than counting their grants as busy, keeps a change of grant out of the figure, since runs that grow raise the busy cores and their own use together. Each new figure is averaged with the last. Before the first interval (the first lease after a quiet minute) the 1-minute load stands in whole; a host without `/proc/stat` has only the load, less the threads the runs hold. CPU `some` avg10 at or over `psi_cpu_defer`, or load at or over `load_defer` times the cores, the lines that defer new units, stop growth and step the budget down by the overshoot: the threads the runs hold times line / reading (the larger cut of the two), at most once every 30 seconds so the averages can follow, and never below one thread per run. The runs' own load counts as much as other work's. Each run gets one thread whatever the budget, so every run makes progress; past that, the budget goes one thread at a time to each run still under its request, oldest first. Every recheck by any run recomputes every run's grant under the registry lock, and each run reads its own at its next recheck. Other work that wants every core, such as a CPU-bound load on all of them, takes CPU from the runs, so their measured share falls, other work's rises, and the runs shrink to one thread each.
 
-`test/run.js` runs each test file in a `node --test` runner of its own, through a pool it sizes itself: longest measured file first (`test/durations.json`), with the hung-test timeout, the guards, the private runtime directory and the exit codes it had. Inside Tower Crane the pool's size is the grant, rechecked every `test_grant` interval (3 s, `TOWER_CRANE_INTERVALS`). A grant that falls starts no new file until fewer run than the grant; one that rises starts more at once. The runner logs the grant to stderr when it starts and once per change: `tower-crane: test threads: granted G of N (host budget B of CAP on C cores, T granted to R runs)`, then `grew to` or `shrank to`. Each file's output is printed whole when it ends, so files that ran side by side never mix their lines; the run's totals (`ℹ tests`, `ℹ pass`, `ℹ fail` and the rest, or `#` under TAP) and every failing file's `✖ failing tests:` details come again at the end. A reporter destination other than stdout or stderr is refused, since every file's runner would rewrite the file. Outside Tower Crane (plain `npm test`, CI) the pool's size is the request, capped at one below the cores, as before.
+`test/run.js` runs each test file in a `node --test` runner of its own, through a pool it sizes itself: unmeasured files first, then measured files longest first (`test/durations.json`), with the hung-test timeout, the guards, the private runtime directory and the exit codes it had. Inside Tower Crane the pool's size is the grant, rechecked every `test_grant` interval (3 s, `TOWER_CRANE_INTERVALS`). A grant that falls starts no new file until fewer run than the grant; one that rises starts more at once. The runner logs the grant to stderr when it starts and once per change: `tower-crane: test threads: granted G of N (host budget B of CAP on C cores, T granted to R runs)`, then `grew to` or `shrank to`. Each file's output is printed whole when it ends, so files that ran side by side never mix their lines; the run's totals (`ℹ tests`, `ℹ pass`, `ℹ fail` and the rest, or `#` under TAP) and every failing file's `✖ failing tests:` details come again at the end. A reporter destination other than stdout or stderr is refused, since every file's runner would rewrite the file. Outside Tower Crane (plain `npm test`, CI) the pool's size is the request, capped at one below the cores, as before.
 
 Tower Crane marks the runs it governs with `TOWER_CRANE_TEST_GRANT`, a JSON label of the state directory (`project`), `task`, `agent` and `kind`: every gate command's scratch environment carries one (`kind` `gate`, or `suite` for the merge queue's head check), and so does every spawned agent (`kind` its job). A runner removes the label from its test files' environment, so a run a test starts asks for nothing unless the test labels it. A run on the host holds its lease in the registry itself. A sandboxed agent cannot write the registry, so its run sends `{"tests": {"request": N}}` to its state broker (`TOWER_CRANE_BROKER`) and keeps the connection open: the spawn monitor holds the lease, as the agent's task and name, answers recheck lines with the grant then, and releases the lease when the connection closes, so a run that dies frees its threads at once. The agent controls that connection, so the monitor holds one lease per agent at a time (a second run beside the first is refused with `held: true` and runs one thread), refreshes the registry at most once per `test_grant` interval (rechecks that come sooner share the next answer), and ends a connection whose unfinished line outgrows a request (1 MiB). A run that cannot get a grant (a busy registry, a monitor from before test-thread leases, a copy of the runner without `lib/`) prints `no grant from the host governor (REASON); running N at once` and keeps its request.
 
