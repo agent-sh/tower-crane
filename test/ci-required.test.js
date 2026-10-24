@@ -173,6 +173,36 @@ test('focused dispatch selects its runners and skips every other job, including 
   }
 });
 
+test('the testing guide and worker skill document a focused command that agrees with the workflow', () => {
+  const root = path.resolve(__dirname, '..');
+  const workflow = readWorkflow(root);
+  const focused = jobBlock(workflow, 'focused');
+  const matrix = /^ {8}os: \$\{\{ (.+) \}\}$/m.exec(focused)[1];
+  for (const [file, diagnostic] of [
+    ['docs/testing.md', false],
+    ['skills/tower-crane-work/SKILL.md', true],
+  ]) {
+    const text = fs.readFileSync(path.join(root, file), 'utf8').replace(/\r\n/g, '\n');
+    const command = /gh workflow run ci\.yml --ref BRANCH -f tests='([^']+)' -f os=(ubuntu-latest|windows-latest|both)\b/.exec(text);
+    assert.ok(command, `${file} gives the focused dispatch command with both inputs`);
+    const [, tests, os] = command;
+    for (const name of tests.split(/\s+/)) {
+      assert.ok(name.startsWith('test/') && name.endsWith('.test.js'), `${file}: ${name} is a test file`);
+      assert.ok(fs.statSync(path.join(root, name)).isFile(), `${file}: the example file exists`);
+    }
+    const systems = Function('inputs', 'fromJSON', `return (${matrix});`)({ tests, os }, JSON.parse);
+    assert.deepEqual(systems, os === 'both' ? ['ubuntu-latest', 'windows-latest'] : [os], `${file}: selected runners`);
+    const instructions = diagnostic ? text.split('\n').find((line) => line.includes(command[0]))
+      : text.split('## Focused CI dispatch\n')[1]?.split(/\n## /)[0];
+    assert.ok(instructions, `${file}: focused instructions`);
+    assert.match(instructions, /space-separated/, `${file}: file-list syntax`);
+    assert.match(instructions, /Node 26/, `${file}: focused Node version`);
+    assert.match(instructions, /all other jobs are skipped|skips every other job/, `${file}: focused-only execution`);
+    assert.match(instructions, /progress(?: and watchdog)? logs?/, `${file}: diagnostic artifact`);
+    if (diagnostic) assert.match(instructions, /does not replace PR CI or the tests gate/, `${file}: diagnostic scope`);
+  }
+});
+
 test('focused dispatch validates every path before starting exactly the named files as literal arguments', () => {
   const focused = jobBlock(readWorkflow(path.resolve(__dirname, '..')), 'focused');
   const script = /node <<'NODE'\n([\s\S]*?)\n {10}NODE/.exec(focused)?.[1]?.replace(/^ {10}/gm, '');
