@@ -62,6 +62,7 @@ test('a merge sends another conflicting PR to rework with real filenames and pre
   const task = h.readState('tasks.json').tasks[1];
   assert.equal(task.status, 'rework');
   assert.match(task.notes.at(-1).text, /conflicts with main: value\.js/);
+  assert.equal(h.logs().findLast((e) => e.task === 'T2' && e.cmd === 'rework').detail.cause, 'conflict_base');
   assert.match(fs.readFileSync(path.join(h.state, 'briefs', 'T2.md'), 'utf8'), /value\.js/);
   assert.equal(h.git(['status', '--porcelain']), before);
   assert.equal(h.git(['rev-parse', 'HEAD']), other);
@@ -824,6 +825,39 @@ poll();
   h.ok(['submit', 'T3', '--sha', h.sha, '--agent', 'worker']);
   h.run(['wait', '--after', String(offset), '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
   assert.deepEqual(executorStarts(h), ['T1', 'T1', 'T2', 'T3'], 'queued T1 and T2 run before the newer T3');
+  for (const task of h.readState('tasks.json').tasks) {
+    assert.deepEqual(task.evidence.map((e) => [e.type, e.ok]), [['tests', true], ['clean', true]], task.id);
+  }
+});
+
+// A watcher's drain that reaches a task while that task's own reaction runs
+// queues the source with no executor. The reaction then finds every executor
+// busy, and the queue must still record the executor it waits for: watchers
+// that raced this way left no such record (T565).
+test('a source queued behind its own reaction still records the executor it then waits for', async (t) => {
+  const h = setup(t);
+  const { stalled, release } = holdSuite(h);
+  h.ok(['task', 'add', '--title', 'Change T2', '--acceptance', 'it works', '--kind', 'code']);
+  h.ok(['claim', 'T1', '--agent', 'worker']);
+  h.ok(['submit', 'T1', '--sha', h.sha, '--agent', 'worker']);
+  const holder = h.runAsync(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
+  try {
+    await waitFor(stalled, { what: 'the first executor starts' });
+    h.ok(['claim', 'T2', '--agent', 'worker']);
+    h.ok(['submit', 'T2', '--sha', h.sha, '--agent', 'worker']);
+    const source = h.logs().findLast((e) => e.cmd === 'submit' && e.task === 'T2').id;
+    fs.appendFileSync(path.join(h.state, 'events.jsonl'), JSON.stringify({
+      at: new Date().toISOString(), agent: 'orchestrator', cmd: 'automation queued', task: 'T2', detail: { source },
+    }) + '\n');
+    h.consume();
+    assert.equal(h.logs().findLast((e) => e.cmd === 'automation' && e.task === 'T2').detail.phase, 'executor');
+    assert.deepEqual(h.logs().filter((e) => e.cmd === 'automation queued' && e.task === 'T2').map((e) => e.detail),
+      [{ source }, { source, executors: 1 }]);
+  } finally {
+    fs.writeFileSync(release, '');
+    await holder;
+  }
+  assert.deepEqual(executorStarts(h), ['T1', 'T2'], 'the queued reaction takes the freed executor');
   for (const task of h.readState('tasks.json').tasks) {
     assert.deepEqual(task.evidence.map((e) => [e.type, e.ok]), [['tests', true], ['clean', true]], task.id);
   }
