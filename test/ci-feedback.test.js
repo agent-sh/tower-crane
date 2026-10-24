@@ -981,6 +981,8 @@ test('CI workflow dispatch concurrency replaces runs on the branch, keeps profil
   const group = yaml.match(/^  group: (.+)$/m)[1];
   const cancel = yaml.match(/^  cancel-in-progress: (.+)$/m)[1];
   assert.match(group, /github.event_name == 'workflow_dispatch' && format\('ci-dispatch-\{0\}\{1\}', github.ref, inputs.profile && '-profile' \|\| inputs.hang && '-hang' \|\| ''\)/);
+  // A focused dispatch (inputs.tests) has a group of its own, so it never cancels the branch's routine run, nor another focused run.
+  assert.match(group, /\|\| github.event_name == 'workflow_dispatch' && inputs.tests && format\('ci-focused-\{0\}', github.run_id\) \|\| github.event_name == 'workflow_dispatch' && format\('ci-dispatch-/);
   assert.match(group, /github.event_name == 'push' && 'ci-main-push'/);
   assert.match(group, /format\('ci-run-\{0\}', github.run_id\)/);
   assert.match(cancel, /github.event_name == 'pull_request' \|\| github.event_name == 'workflow_dispatch'/);

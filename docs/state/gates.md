@@ -203,7 +203,12 @@ cap. An ordinary reaction that finds the cap full, or an older waiter ahead
 of it, still runs its hosted CI read, so a CI failure sends the task back
 before its suite runs, then ends with `phase: "executor"` and stays owed. A
 hotfix reaction runs its gates through `accept` in order, tests, clean, then
-CI, so a full cap queues it whole: it reads no CI until a slot frees. One such waiter keeps a task's place: a later notification for
+CI, so a full cap queues it whole: it reads no CI until a slot frees. A CI completion or reconciliation for a task whose latest
+review failed with code findings reads no CI at all: the reaction reworks
+the task at once, so a failed review never waits behind a busy executor for
+local CI. After a review that failed only on the PR body, the task stays at its
+head, so a CI completion still records CI there and reconciliation still
+rechecks pending CI, and `accept` refuses a red or pending head. One such waiter keeps a task's place: a later notification for
 the same task that reaches the same CPU work ends `done`, since the waiting
 reaction advances the task from its current state. A waiter is retried only
 once a slot is free and no older waiter ranks ahead, so retries read nothing
