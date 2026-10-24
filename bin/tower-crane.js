@@ -218,7 +218,12 @@ async function main(argv) {
     automationCredential = AutomationKey.take(process.env);
     resolved = resolveCommand(argv);
     if (resolved.version) {
-      out(require('../package.json').version);
+      const fs = require('node:fs');
+      const file = require('node:path').join(__dirname, '..', 'tool.json');
+      let pinned = null;
+      // Only a pinned snapshot has tool.json; an unreadable one still leaves the version.
+      try { pinned = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : null; } catch { pinned = { sha: null }; }
+      out(`${require('../package.json').version}${pinned ? ` (commit ${pinned.sha || 'unknown'})` : ''}`);
       return 0;
     }
     if (resolved.help) {

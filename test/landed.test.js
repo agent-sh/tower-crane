@@ -4,6 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const { readPublished } = require('./atomic-file');
 const { cachedFixture } = require('./helpers');
 const { gateFixture } = require('./gate-helpers');
 const StateFiles = require('./state-files');
@@ -38,7 +39,7 @@ if (args[0] === 'pr' && args[1] === 'view') {
 
 const task = (h, id = 'T1') => h.readState('tasks.json').tasks.find((t) => t.id === id);
 const events = (h) => StateFiles.readEvents(h.state);
-const ghCalls = (h) => (fs.existsSync(h.env.FIXTURE_GH_LOG) ? fs.readFileSync(h.env.FIXTURE_GH_LOG, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : []);
+const ghCalls = (h) => (fs.existsSync(h.env.FIXTURE_GH_LOG) ? readPublished(h.env.FIXTURE_GH_LOG, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : []);
 const landed = (h, args, opts) => h.run(['task', 'landed', 'T1', '--pr', '42', '--reason', 'native clean-context review passed; PR checks green', ...args], opts);
 const patch = (fields) => ({ env: { FIXTURE_PR_PATCH: JSON.stringify(fields) } });
 
