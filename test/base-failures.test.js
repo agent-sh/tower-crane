@@ -464,7 +464,7 @@ test('old base runs cannot excuse a current failure and the API query is bounded
     const result = h.run(['check', 'tests', 'T1', '--agent', 'orchestrator', '--json']);
     assert.equal(result.code, 1, event);
     assert.equal(JSON.parse(result.stdout).base_failure, undefined, event);
-    const query = h.github().calls.find((args) => args[0] === 'api' && args[1].includes('actions/runs?branch='));
+    const query = h.github().calls.find((args) => args[0] === 'api' && args[1].includes('actions/runs?branch=main&'));
     assert.match(query[1], /&created=%3E%3D/);
     assert.match(query[query.indexOf('--jq') + 1], /workflow_id.*created_at.*html_url/);
   }
@@ -498,5 +498,75 @@ process.exit(${second.exit});\n`);
     if (second.exit === 0) assert.match(entry.summary, /exit 1, then exit 0 on its rerun/, label);
     else if (passed) assert.match(entry.summary, /exit 1 \(base failures excluded\)/, label);
     else assert.equal(entry.ok, false, label);
+  }
+});
+
+// Two files with a test of the same name, as node --test prints them with each reporter.
+const twoFileSpec = (a, b) => `✖ works (1ms)\n✖ works (1ms)\n\n✖ failing tests:\n\ntest at a.test.js:2:1\n✖ works (1ms)\n  ${a}\n\ntest at b.test.js:2:1\n✖ works (1ms)\n  ${b}\n`;
+const tapFailure = (n, file, error) => `# Subtest: works\nnot ok ${n} - works\n  ---\n  location: '/runner/${file}:2:1'\n  error: '${error}'\n  ...\n`;
+const twoFileTap = (a, b) => `TAP version 13\n${tapFailure(1, 'a.test.js', a)}${b ? tapFailure(2, 'b.test.js', b) : ''}`;
+
+test('same-name failures are compared per file and occurrence, and differing errors without a file stay unexplained', () => {
+  const NEW = 'Error: a new regression in b';
+  const baseRun = (tests) => ({ ...run(2, 'schedule', '11'), jobs: [{ name: 'test', tests }] });
+  const fromLog = (log) => baseRun(CI.failureEntries(log));
+  for (const [label, head, base, explained] of [
+    ['TAP, new error in another file', twoFileTap(ERROR, NEW), fromLog(twoFileTap(ERROR)), false],
+    ['TAP, base error in both files', twoFileTap(ERROR, ERROR), fromLog(twoFileTap(ERROR)), true],
+    ['spec, new error in another file', twoFileSpec(ERROR, NEW), fromLog(twoFileSpec(ERROR, ERROR).replace(/test at b[^]*$/, '')), false],
+    ['spec, base log without files', twoFileSpec(ERROR, NEW), fromLog(twoFileTap(ERROR)), false],
+    ['spec, base error copied into another file', twoFileSpec(ERROR, ERROR), baseRun([{ name: 'works', file: 'a.test.js', error: ERROR }]), false],
+    ['spec, both files fail on the base', twoFileSpec(ERROR, NEW), baseRun([{ name: 'works', file: 'a.test.js', error: ERROR }, { name: 'works', file: 'b.test.js', error: NEW }]), true],
+    ['go, one name in two packages', `--- FAIL: TestParse (0.00s)\n    parse_test.go:9: ${ERROR}\nFAIL\tacme/a\n--- FAIL: TestParse (0.00s)\n    parse_test.go:9: ${NEW}\nFAIL\tacme/b\n`,
+      baseRun([{ name: 'TestParse', error: `parse_test.go:9: ${ERROR}` }]), false],
+  ]) {
+    const entries = CI.failureEntries(head);
+    assert.equal(CI.explainedBy(entries, [base]).all, explained, `${label}: ${JSON.stringify(entries)}`);
+  }
+  assert.deepEqual(CI.failureEntries(twoFileTap(ERROR, NEW)), [{ name: 'works', error: null }]);
+  assert.deepEqual(CI.failureEntries(twoFileSpec(ERROR, NEW)).map((f) => [f.file, f.error]), [['a.test.js', ERROR], ['b.test.js', NEW]]);
+});
+
+test('a new failure sharing a base failure name in another file reworks in the tests gate and hosted CI', (t) => {
+  const { execFileSync } = require('node:child_process');
+  const real = (dir, files) => {
+    // node --test exits 1 here; its TAP output is what a job log and the gate see. Inside a test
+    // run, NODE_TEST_CONTEXT would make it report to this runner instead of printing.
+    const env = { ...process.env };
+    delete env.NODE_TEST_CONTEXT;
+    try { return execFileSync(process.execPath, ['--test', '--test-reporter=tap', '--test-concurrency=1', ...files], { cwd: dir, env, encoding: 'utf8' }); }
+    catch (e) { return e.stdout; }
+  };
+  for (const gate of ['tests', 'ci']) {
+    const h = fixture(t);
+    const dir = path.join(h.base, 'two-files');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'a.test.js'), "require('node:test')('works', () => { throw new Error('shared fixture is missing'); });\n");
+    fs.writeFileSync(path.join(dir, 'b.test.js'), "require('node:test')('works', () => { throw new Error('a new regression in b'); });\n");
+    const files = ['a.test.js', 'b.test.js'].map((f) => path.join(dir, f));
+    baseState(h);
+    const state = h.github();
+    state.jobLogs[201] = real(dir, [files[0]]);
+    h.saveGithub(state);
+    if (gate === 'tests') h.ok(['project', 'set', '--tests-cmd', `node --test --test-reporter=tap --test-concurrency=1 ${files.map(shellQuote).join(' ')}`]);
+    h.submit();
+    if (gate === 'ci') {
+      const state = h.github();
+      state.checks = [{ id: 300, name: 'test', app: 'github-actions', suite: 3, status: 'completed', conclusion: 'failure',
+        url: 'https://github.com/acme/demo/actions/runs/300/job/301' }];
+      state.suites = [{ id: 3, app: 'github-actions', status: 'completed', conclusion: 'failure', runs: 1 }];
+      state.workflows = [{ ...run(300, 'pull_request', '12'), head_sha: h.sha, check_suite_id: 3 }];
+      state.jobLogs[301] = stampedLog(real(dir, files));
+      h.saveGithub(state);
+    }
+    const result = h.run(['check', gate, 'T1', '--agent', 'orchestrator', '--json']);
+    assert.equal(result.code, 1, `${gate}: ${result.stdout} ${result.stderr}`);
+    const entry = JSON.parse(result.stdout);
+    assert.equal(entry.ok, false, gate);
+    // Without a file in TAP output, one name with two errors explains nothing.
+    assert.equal(entry.base_failure, undefined, gate);
+    assert.equal(entry.receipt?.base_exclusions, undefined, gate);
+    // The tests gate's own base rerun still matches by name, as it did before base exclusions.
+    if (gate === 'ci') assert.equal(entry.confirmed_failure, true, gate);
   }
 });
