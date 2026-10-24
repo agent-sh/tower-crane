@@ -9,6 +9,7 @@ const { setup, resubmit } = require('./stack-fixture');
 const { BIN, fakeAgentEnv } = require('./helpers');
 const { waitFor } = require('./canary');
 const { waitUntil, HUNG_TEST_MS } = require('./signals');
+const StateFiles = require('./state-files');
 
 function fixture(t) {
   const f = setup(null);
@@ -49,7 +50,6 @@ const S = require(${JSON.stringify(path.resolve(__dirname, '../lib/state'))});
 const A = require(${JSON.stringify(path.resolve(__dirname, '../lib/automation'))});
 const Actions = require(${JSON.stringify(path.resolve(__dirname, '../lib/actions'))});
 const Spawn = require(${JSON.stringify(path.resolve(__dirname, '../lib/spawn'))});
-const StateFiles = require('./state-files');
 const ctx = { stateDir: ${JSON.stringify(f.h.state)}, cwd: ${JSON.stringify(f.h.repo)},
   env: process.env, agent: 'orchestrator', agentExplicit: true, flags: {}, pos: [] };
 (async () => { ${body} })().catch(e => { console.error(e); process.exitCode = 1; });

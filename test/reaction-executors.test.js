@@ -8,6 +8,7 @@ const { refillFixture, setup } = require('./automation-helpers');
 const { fileWritten } = require('./signals');
 const { waitOnRepo } = require('./signals');
 const S = require('../lib/state');
+const StateFiles = require('./state-files');
 
 const leased = (h) => h.json(['status']).gate_executors.in_use.map((u) => u.task).sort();
 const leasedBy = (h, id) => h.logs().some((e) => e.cmd === 'executor' && e.task === id && e.detail.phase === 'running');
@@ -20,7 +21,6 @@ async function busyExecutors(h, prepare = () => {}) {
   fs.writeFileSync(release, '');
   fs.writeFileSync(suite, `
 const fs = require('node:fs'), path = require('node:path');
-const StateFiles = require('./state-files');
 if (fs.existsSync(${JSON.stringify(release)})) process.exit(0);
 fs.writeFileSync(path.join(${JSON.stringify(started)}, String(process.pid)), '');
 const until = Date.now() + 60000; // wait-allow: the release file ends held gates; this bounds a failed test

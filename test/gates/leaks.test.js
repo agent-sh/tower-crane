@@ -14,6 +14,7 @@ const Reaper = require('../../lib/reaper');
 const { scratch, isolateGit, isolateUserFile, commit, initRepo, worktrees, quote } = require('./helpers');
 const { makeRepo, detachedAlive } = require('../helpers');
 const { shellQuote, treeExec } = require('../../lib/gates/common');
+const StateFiles = require('../state-files');
 const { waitUntil, killPid } = require('../signals');
 
 const skip = !['linux'].includes(process.platform)
@@ -23,7 +24,6 @@ const skip = !['linux'].includes(process.platform)
 // deadline, whose parent then exits, fails or hangs as MODE says.
 const LEAK = `const fs = require('fs');
 const cp = require('child_process');
-const StateFiles = require('../state-files');
 const [pids, mode] = process.argv.slice(2);
 const spin = \`const end = Date.now() + 300000;
 while (Date.now() < end) Math.sqrt(Math.random()); // spin-allow: the leak this test plants; only the gate may end it sooner
