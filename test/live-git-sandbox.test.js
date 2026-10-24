@@ -63,7 +63,8 @@ const marked = Object.fromEntries(Object.entries(process.env).filter(([k]) => /S
 fs.writeFileSync(out, JSON.stringify({ steps, marked, gc: git('config', 'gc.auto').stdout.trim() }));
 if (spec.wait) {
   const until = Date.now() + 300000;
-  while (!fs.existsSync(spec.wait) && Date.now() < until) cp.spawnSync('sleep', ['1']);
+  const parent = process.ppid;
+  while (!fs.existsSync(spec.wait) && Date.now() < until && process.ppid === parent) cp.spawnSync('sleep', ['1']);
 }
 `;
 
