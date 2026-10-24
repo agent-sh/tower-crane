@@ -97,15 +97,15 @@ test('a commit that fails keeps neither its change nor its event', (t) => {
   assertConsistent(h);
 });
 
-test('every connection runs WAL with synchronous=FULL and fullfsync, and a writer leaves the log files for readers', (t) => {
+test('every connection runs WAL with synchronous=NORMAL and fullfsync, and a writer leaves the log files for readers', (t) => {
   const h = migrated(t);
   h.ok(['task', 'note', 'T1', 'synced']);
   for (const suffix of ['-wal', '-shm']) assert.ok(fs.existsSync(path.join(h.state, `${Db.FILE}${suffix}`)), `${Db.FILE}${suffix} is left after the writer exits`);
   StateFiles.withDb(h.state, () => {
     const { db } = Db.handle(h.state);
     assert.equal(db.prepare('PRAGMA journal_mode').get().journal_mode, 'wal');
-    // 2 is FULL.
-    assert.equal(db.prepare('PRAGMA synchronous').get().synchronous, 2);
+    // 1 is NORMAL.
+    assert.equal(db.prepare('PRAGMA synchronous').get().synchronous, 1);
     assert.equal(db.prepare('PRAGMA fullfsync').get().fullfsync, 1);
   });
 });
@@ -164,9 +164,12 @@ test('kill -9 at any moment loses no acknowledged write, and leaves every task c
     return { kill: () => child?.kill('SIGKILL'), stop: () => { stopped = true; }, done };
   };
   const writers = [0, 1, 2, 3].map(writer);
-  const end = Date.now() + 8000; // wait-allow: the kill loop runs for a fixed span of random kills, not until a condition
+  // Kills for a fixed span, then on until enough writes were acknowledged
+  // between kills: a slow host (a Windows runner starts each CLI in about a
+  // second) acknowledges few in the span.
+  const end = Date.now() + 8000; // wait-allow: the kill loop runs for a fixed span of random kills, then until enough writes are acknowledged
   let kills = 0;
-  while (Date.now() < end) {
+  while (Date.now() < end || kills <= 10 || acked.size <= 10) {
     await new Promise((resolve) => setTimeout(resolve, 50 + Math.floor(Math.random() * 200))); // wait-allow: random gaps put the kills at random points of the writers' commits
     writers[Math.floor(Math.random() * writers.length)].kill();
     kills++;

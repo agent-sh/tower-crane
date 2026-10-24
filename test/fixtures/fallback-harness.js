@@ -79,12 +79,16 @@ if (process.env.TOWER_CRANE_TEST_CLAUDE_PROVIDER) {
     Object.defineProperty(require('node:perf_hooks').performance, 'now', { value: () => 0 });
     const schedule = global.setTimeout;
     // A wait is a timer that runs. A watchdog cleared before it expires, such
-    // as the output release deadline, delays nothing.
+    // as the output release deadline, delays nothing, and neither does an
+    // unreferenced timer, such as the one that closes a state read's view
+    // (lib/state.js VIEW_MS): nothing waits for it, and it fires only when a
+    // slow host keeps the monitor running past it.
     global.setTimeout = function providerDelay(fn, ms, ...args) {
-      return schedule((...values) => {
-        profile.delays.push(ms);
+      const timer = schedule((...values) => {
+        if (timer.hasRef()) profile.delays.push(ms);
         return fn(...values);
       }, ms, ...args);
+      return timer;
     };
     const ladder = require(path.join(path.dirname(process.argv[1]), 'ladder.js'));
     const supervision = ladder.supervision;

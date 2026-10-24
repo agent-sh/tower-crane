@@ -145,6 +145,9 @@ function backup(dir, file) {
 // replaces. `rename` replaces it at once; `remove` takes it away and returns
 // once `between` has run, so a reader sees the state gone first.
 async function restore(dir, file, { how = 'rename', between = async () => {} } = {}) {
+  // Windows removes no file a connection holds open, so an owner restores
+  // there with every Tower Crane process stopped; this process closes its own.
+  if (process.platform === 'win32') Db.closeAll();
   const target = path.join(dir, Db.FILE);
   fs.copyFileSync(file, `${target}.restore`);
   if (how === 'remove') {
