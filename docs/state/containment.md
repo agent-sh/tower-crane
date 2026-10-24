@@ -200,7 +200,9 @@ contention one project's scopes together get one such share, whatever their
 number, so one project's gates never take CPU from another project or from
 other sessions. Inside the slice, gate scopes get `CPUWeight=gates.cpu_weight`
 and agent scopes keep the default unless `agents.cpu_weight` is set
-([project.json](storage.md#projectjson)). An agents weight other than 100 replaces a
+([project.json](storage.md#projectjson)). A gate command run without a state
+directory has no project slice, so it stays in the caller's slice without the
+gate weight. An agents weight other than 100 replaces a
 `CPUWeight` in the owner's `scope` properties. A nested launch stays in the
 scope it inherits and so in that scope's slice; a gate there writes its weight
 to its delegated child cgroup's `cpu.weight`, enabling the inherited scope's
