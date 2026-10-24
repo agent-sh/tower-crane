@@ -72,7 +72,7 @@ const hookCommands = (settings) => Object.values(settings.hooks || {}).flat().fl
 module.exports = function stub(harness) {
   const args = process.argv.slice(2);
   const after = (flag) => (args.includes(flag) ? args[args.indexOf(flag) + 1] : null);
-  const report = { harness, args, ghToken: process.env.GH_TOKEN || null,
+  const report = { harness, args, socketDir: process.env.TOWER_CRANE_SOCKET_DIR || null, ghToken: process.env.GH_TOKEN || null,
     tokens: ['GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN'].filter((k) => process.env[k] !== undefined), home: os.homedir(), memory: [], skills: [], hooks: [], mcp: {}, rules: [], auth: null, env: null, ran: [] };
   const skillsIn = (dir) => {
     try {
@@ -97,6 +97,9 @@ module.exports = function stub(harness) {
     report.settings = settings;
     // claude makes its proxy bridge sockets in the TMPDIR it starts with.
     report.tmpdir = process.env.TMPDIR || null;
+    // Names only: what claude would hand its commands, before its sandbox.
+    report.envNames = Object.keys(process.env).sort();
+    report.flagSettings = after('--settings') ? JSON.parse(after('--settings')) : null;
     if (!args.includes('--strict-mcp-config')) Object.assign(report.mcp, json(global).mcpServers || {});
     if (after('--mcp-config')) Object.assign(report.mcp, json(after('--mcp-config')).mcpServers || {});
     report.auth = read(path.join(dir, '.credentials.json'));
@@ -113,6 +116,13 @@ module.exports = function stub(harness) {
       }
       const status = cp.spawnSync('git', ['status', '--short', '--untracked-files=all'], { encoding: 'utf8' });
       report.placeholderGitStatus = { code: status.status, stdout: status.stdout || '', stderr: status.stderr || '' };
+      // A command in claude's sandbox: it marks the command and sets
+      // GIT_CONFIG_PARAMETERS to its proxy entries, whatever the harness had.
+      const env = { ...process.env, SANDBOX_RUNTIME: '1', GIT_CONFIG_PARAMETERS: '\'http.proxyAuthMethod=basic\'' };
+      const command = (args) => cp.spawnSync('git', args, { encoding: 'utf8', env });
+      const commandStatus = command(['status', '--short', '--untracked-files=all']);
+      report.commandGit = { status: commandStatus.stdout || '', code: commandStatus.status,
+        gc: command(['config', 'gc.auto']).stdout.trim(), maintenance: command(['config', 'maintenance.auto']).stdout.trim() };
     }
     // claude's Read, Grep and Glob tools answer to permission rules, not to
     // the sandbox: STUB_READ files are read the way those tools would, after
@@ -139,10 +149,16 @@ module.exports = function stub(harness) {
     const disabled = args.filter((a, i) => args[i - 1] === '--disable');
     const config = toml(path.join(dir, 'config.toml'));
     const profile = after('-p') ? toml(path.join(dir, `${after('-p')}.config.toml`)) : {};
-    // codex refuses to start on Bedrock without a region.
+    // codex refuses to start on Bedrock bearer auth from the environment
+    // without a region; an auth command with a base_url needs none (observed
+    // on codex-cli 0.163.0), and an aws table beside auth is refused.
     const providerId = profile.model_provider || config.model_provider;
     const provider = { ...(config.model_providers || {}), ...(profile.model_providers || {}) }[providerId] || {};
-    if (providerId === 'amazon-bedrock' && !(provider.aws && provider.aws.region) && !process.env.AWS_REGION && !process.env.AWS_DEFAULT_REGION) {
+    if (provider.aws && provider.auth) {
+      process.stderr.write(`Error loading config.toml: model_providers.${providerId}: provider aws cannot be combined with auth\n`);
+      process.exit(1);
+    }
+    if (providerId === 'amazon-bedrock' && !provider.auth && !(provider.aws && provider.aws.region) && !process.env.AWS_REGION && !process.env.AWS_DEFAULT_REGION) {
       process.stderr.write('Fatal error: Amazon Bedrock bearer token auth requires `model_providers.amazon-bedrock.aws.region`, `AWS_REGION`, or `AWS_DEFAULT_REGION`\n');
       process.exit(1);
     }
@@ -163,6 +179,8 @@ module.exports = function stub(harness) {
     report.mcp = Object.fromEntries(Object.keys(config.mcp_servers || {}).map((k) => [k, true]));
     report.auth = read(path.join(dir, 'auth.json'));
     report.env = read(path.join(dir, '.env'));
+    // Names only: what codex would hand its commands, before its policy.
+    report.envNames = Object.keys(process.env).sort();
     // codex resolves :tmpdir from the TMPDIR it starts with.
     report.tmpdir = process.env.TMPDIR || null;
     report.tmpEnv = { TMP: process.env.TMP || null, TEMP: process.env.TEMP || null, JAVA_TOOL_OPTIONS: process.env.JAVA_TOOL_OPTIONS || null };

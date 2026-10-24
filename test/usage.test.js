@@ -579,12 +579,15 @@ test('late session detail enriches a partial total without counting it twice', (
 
 test('detached accounting retries a lock held across the first collection attempt', async (t) => {
   const h = setup(t);
+  // A short lock wait (lib/intervals.js) times the first collection out within seconds.
+  const lockWait = 1500;
+  h.env.TOWER_CRANE_INTERVALS = JSON.stringify({ lock_wait: lockWait });
   h.json(['spawn', '--task', 'T1'], { env: { ...h.usageEnv, USAGE_DELAY: '1000' }, hooks: h.usageHooks });
   // The worker takes its lease before the lock is held; the lock then delays only its collection.
   await waitOnRepo(h, () => events(h).some((e) => e.cmd === 'claim'), 'worker did not take its lease');
   const S = require('../lib/state');
   const lock = S.acquireLock(h.state);
-  const timer = setTimeout(() => S.releaseLock(lock), S.LOCK_WAIT_MS + 3000); // wait-allow: hold the state lock beyond the production accounting timeout
+  const timer = setTimeout(() => S.releaseLock(lock), lockWait + 3000); // wait-allow: hold the state lock beyond the accounting lock wait
   t.after(() => { clearTimeout(timer); S.releaseLock(lock); });
   const s = await collected(h, 1);
   assert.equal(s.tokens, 24816);
@@ -683,7 +686,7 @@ test('test teardown stops a surviving detached monitor and waits for its exit', 
   const monitors = h.detached().filter((c) => c.kind === 'monitor');
   assert.equal(monitors.length, 1);
   if (process.platform === 'win32') await h.cleanup();
-  else await assert.rejects(h.cleanup({ monitorGraceMs: 10000 }), /detached usage monitors outlived test teardown/); // wait-allow: the intentionally unobservable monitor must require forced cleanup
+  else await assert.rejects(h.cleanup({ monitorGraceMs: 1000 }), /detached usage monitors outlived test teardown/); // wait-allow: the intentionally unobservable monitor outlives any grace, so a short one proves the forced cleanup
   assert.ok(monitors.every((c) => !detachedAlive(c)));
 });
 

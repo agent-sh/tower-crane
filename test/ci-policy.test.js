@@ -28,7 +28,7 @@ const ciGate = (h) => h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.t
 const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
 const EMPTY = { required: [], ignore_apps: [], capped_review: [] };
 
-test('accept reruns a hosted pass after required jobs change', (t) => {
+test('accept refreshes a hosted pass after required jobs change', (t) => {
   const h = fixture(t);
   gateEvidence(h, 'ci', 'checker');
   assert.equal(ciGate(h).ok, true);
@@ -36,7 +36,8 @@ test('accept reruns a hosted pass after required jobs change', (t) => {
   h.ok(['project', 'set', '--ci-required', '["fixture"]']);
   assert.equal(ciGate(h).ok, false);
   h.ok(['accept', 'T1']);
-  assert.equal(h.readState('tasks.json').tasks[0].evidence.length, before + 1, 'accept replaces stale CI evidence');
+  assert.equal(h.readState('tasks.json').tasks[0].evidence.length, before + 1, 'accept records a fresh CI check');
+  assert.equal(ciGate(h).ok, true);
   assert.deepEqual(latest(h).ci_policy, { ...EMPTY, required: ['fixture'] });
 });
 
@@ -72,17 +73,21 @@ test('hosted evidence and its audit event record the effective required, ignored
   assert.deepEqual(latest(h).ci_policy, expected, 'failures also record the policy used');
 });
 
-test('accept reruns hosted CI after ignored apps or capped review changes', (t) => {
-  const h = fixture(t);
-  gateEvidence(h, 'ci', 'checker');
-  h.ok(['project', 'set', '--ci-ignore-apps', '["claude"]']);
-  assert.equal(ciGate(h).ok, false);
-  gateEvidence(h, 'ci', 'checker');
-  const project = h.readState('project.json');
-  h.writeState('project.json', { ...project, ci: { ...project.ci, capped_review: [{ app: 'revuto-review', pattern: 'review limit' }] } });
-  h.ok(['accept', 'T1']);
-  assert.deepEqual(latest(h).ci_policy, { ...EMPTY, ignore_apps: ['claude'],
-    capped_review: [{ app: 'revuto-review', pattern: 'review limit' }] });
+test('accept refreshes hosted passes after ignored apps or capped review policy changes', (t) => {
+  for (const setting of ['ignored apps', 'capped review']) {
+    const h = fixture(t);
+    gateEvidence(h, 'ci', 'checker');
+    if (setting === 'ignored apps') h.ok(['project', 'set', '--ci-ignore-apps', '["claude"]']);
+    else {
+      const project = h.readState('project.json');
+      h.writeState('project.json', { ...project, ci: { ...project.ci, capped_review: [{ app: 'revuto-review', pattern: 'review limit' }] } });
+    }
+    const before = h.readState('tasks.json').tasks[0].evidence.length;
+    assert.equal(ciGate(h).ok, false);
+    h.ok(['accept', 'T1']);
+    assert.equal(h.readState('tasks.json').tasks[0].evidence.length, before + 1, setting);
+    assert.equal(ciGate(h).ok, true);
+  }
 });
 
 test('empty lists and omitted policies have the same defaults, and unrelated fields do not invalidate a pass', (t) => {
@@ -105,6 +110,7 @@ test('old hosted evidence without a recorded policy is stale even with a matchin
   delete audit.findLast((e) => e.cmd === 'check ci').detail.ci_policy;
   h.writeState('tasks.json', doc);
   fs.writeFileSync(path.join(h.state, 'events.jsonl'), audit.map((e) => JSON.stringify(e)).join('\n') + '\n');
+  assert.equal(ciGate(h).ok, false);
   assert.match(ciGate(h).reason, /hosted CI.*policy.*(missing|unrecorded)/);
   h.ok(['accept', 'T1']);
   assert.deepEqual(latest(h).ci_policy, EMPTY);

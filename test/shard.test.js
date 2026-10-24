@@ -2,11 +2,12 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
 const { ROOT, makeRepo } = require('./helpers');
-const { HUNG_TEST_MS } = require('./signals');
-const { testFiles, shardFiles, fileDurations } = require('./run');
+const { HUNG_TEST_MS, killPid } = require('./signals');
+const { testFiles, shardFiles, longestFirst, startOrder, fileDurations } = require('./run');
 const { declarations, fileTimes, mergeTable } = require('../scripts/test-durations');
 
 const FIXTURES = ['a', 'b', 'c', 'd'].map((name) => path.join('test', 'fixtures', 'shard', `${name}.test.js`));
@@ -34,6 +35,69 @@ test('shardFiles gives each shard an equal share of the measured time', () => {
   assert.deepEqual(shardFiles(['x', 'y'], 1, 2, {}), ['x'], 'an empty table splits like equal times');
 });
 
+test('longestFirst starts the longest measured files first and keeps sorted order among equal times', () => {
+  const durations = { a: 1, b: 9, c: 1, d: 5 };
+  const files = ['d', 'c', 'b', 'a', 'new'];
+  // The new file counts as the median, 5 s here, and ties keep the sorted order.
+  assert.deepEqual(longestFirst(files, durations), ['b', 'd', 'new', 'a', 'c']);
+  assert.deepEqual(files, ['d', 'c', 'b', 'a', 'new'], 'the input is not reordered');
+  assert.deepEqual(longestFirst(['y', 'x'], {}), ['x', 'y'], 'an empty table keeps the sorted order');
+});
+
+test('startOrder puts unmeasured files before measured files without changing shard costs', () => {
+  for (const [name, files, durations, expected] of [
+    ['one unlisted file', ['b', 'new', 'a', 'c'], { a: 9, b: 1, c: 2 }, ['new', 'a', 'c', 'b']],
+    ['several unlisted files', ['z', 'b', 'a', 'new'], { a: 9, b: 1 }, ['new', 'z', 'a', 'b']],
+    ['one worker and two files', ['a', 'new'], { a: 9 }, ['new', 'a']],
+    ['zero is measured', ['a', 'z', 'b'], { a: 0, b: 9 }, ['z', 'b', 'a']],
+    ['invalid costs are unmeasured', ['e', 'a', 'd', 'c', 'b'],
+      { a: 9, b: NaN, c: -1, d: Infinity, e: '1' }, ['b', 'c', 'd', 'e', 'a']],
+    ['measured ties', ['c', 'a', 'b'], { a: 2, b: 9, c: 2 }, ['b', 'a', 'c']],
+    ['no table', ['z', 'a', 'b'], {}, ['a', 'b', 'z']],
+    ['no files', [], { a: 9 }, []],
+  ]) {
+    const original = [...files];
+    assert.deepEqual(startOrder(files, durations), expected, name);
+    assert.deepEqual(files, original, `${name}: input order is preserved`);
+    const shards = [1, 2].map((i) => shardFiles(files, i, 2, durations));
+    assert.deepEqual([1, 2].map((i) => shardFiles(startOrder(files, durations), i, 2, durations)),
+      shards, `${name}: launch order does not change shard allocation`);
+  }
+});
+
+test('the runner starts an unmeasured file first with one worker, sharded or unsharded', (t) => {
+  const h = makeRepo(t);
+  const durations = { [FIXTURES[0]]: 100, [FIXTURES[1]]: 1, [FIXTURES[2]]: 10 };
+  for (const name of ['file-durations.cjs', 'file durations.cjs', 'nested\\file-durations.cjs']) {
+    const hook = path.join(h.base, name);
+    fs.mkdirSync(path.dirname(hook), { recursive: true });
+    fs.writeFileSync(hook, `
+const fs = require('node:fs');
+const read = fs.readFileSync;
+fs.readFileSync = function (file, ...args) {
+  if (String(file) === ${JSON.stringify(path.join(ROOT, 'test', 'durations.json'))}) {
+    return JSON.stringify({ [process.platform]: ${JSON.stringify(durations)} });
+  }
+  return read.call(this, file, ...args);
+};
+`);
+    for (const shard of ['', '1/1']) {
+      // An argv path keeps backslashes that NODE_OPTIONS treats as escapes.
+      const result = cp.spawnSync(process.execPath, ['--require', hook, path.join(ROOT, 'test', 'run.js'),
+        '--test-concurrency=1', '--test-reporter=tap', ...FIXTURES], {
+        cwd: ROOT, env: { ...h.env, TOWER_CRANE_TEST_GRANT: '', TC_TEST_SHARD: shard },
+        encoding: 'utf8', timeout: HUNG_TEST_MS,
+      });
+      const variant = `${name}: ${shard || 'unsharded'}`;
+      assert.equal(result.status, 0, `${variant}: ${result.stderr}${result.stdout}`);
+      const expected = [FIXTURES[3], FIXTURES[0], FIXTURES[2], FIXTURES[1]];
+      const titles = [...result.stdout.matchAll(/^# Subtest: (.+)$/gm)].map(([, name]) => name);
+      assert.deepEqual(titles, ['shard d', 'shard a', 'shard c', 'shard b'], variant);
+      if (shard) assert.deepEqual([...result.stdout.matchAll(/^file started: (.+)$/gm)].map(([, file]) => file), expected, variant);
+    }
+  }
+});
+
 test('every shard count covers the real suite with each file in exactly one shard', () => {
   const files = testFiles();
   for (const platform of ['linux', 'win32', 'darwin']) {
@@ -41,6 +105,47 @@ test('every shard count covers the real suite with each file in exactly one shar
       const shards = Array.from({ length: total }, (_, i) => shardFiles(files, i + 1, total, fileDurations(platform)));
       assert.deepEqual(shards.flat().sort(), files, `${platform}: ${total} shards run every file once`);
       for (const shard of shards) assert.ok(shard.length > 0, `${platform}: ${total} shards leave none empty`);
+    }
+  }
+});
+
+test('the long files that hit the shard deadline have timing entries on both CI platforms', () => {
+  for (const platform of ['linux', 'win32']) {
+    const durations = fileDurations(platform);
+    for (const file of ['test/reviewer-refill.test.js', 'test/stack-parent.test.js']) {
+      assert.ok(Number.isFinite(durations[file]) && durations[file] > 0,
+        `${platform}: ${file} must have a cost instead of the unknown-file median`);
+    }
+  }
+});
+
+test('cgroup keeper guard cases run in the shard proof on host and non-Linux platforms', (t) => {
+  const h = makeRepo(t);
+  const hook = path.join(h.base, 'cgroup-platform.cjs');
+  fs.writeFileSync(hook, `
+if (process.env.T503_CGROUP_PLATFORM) {
+  Object.defineProperty(process, 'platform', { value: process.env.T503_CGROUP_PLATFORM });
+}
+`);
+  const titles = [
+    'cgroup keepers read only cgroup membership, including nested groups',
+    'cgroup keeper ticks use population without any host process scan',
+  ];
+  // A cheap platform guard must be checked even when its standalone file is queued last.
+  for (const platform of [process.platform, 'win32', 'darwin'].filter((value, index, values) => values.indexOf(value) === index)) {
+    const result = cp.spawnSync(process.execPath, [
+      '--require', hook, '--test', '--test-reporter=tap',
+      `--test-name-pattern=${titles.join('|')}`, path.join(ROOT, 'test', 'containment-sampling.test.js'),
+    ], {
+      cwd: ROOT, env: { ...h.env, T503_CGROUP_PLATFORM: platform },
+      encoding: 'utf8', timeout: HUNG_TEST_MS,
+    });
+    assert.equal(result.status, 0, `${platform}: ${result.stderr}${result.stdout}`);
+    for (const title of titles) {
+      const line = result.stdout.split('\n').find((value) => /^ok \d+ - /.test(value) && value.includes(title));
+      assert.ok(line, `${platform}: ${title} was reported`);
+      assert.equal(line.includes('# SKIP Linux cgroups'), platform !== 'linux', `${platform}: ${title}`);
+      t.diagnostic(`${platform}: ${line}`);
     }
   }
 });
@@ -58,6 +163,15 @@ test('the checked-in durations split Linux into three CI shards and Windows into
   }
 });
 
+// The tests of a file run in turn, so one long file sets its shard's floor: test/stack-parent.test.js,
+// 1839 s on Windows in run 39897049976, outlived its shard's deadline when it started late.
+test('no checked-in file takes more than 15 minutes of test time on any platform', () => {
+  for (const platform of ['linux', 'win32']) {
+    const long = Object.entries(fileDurations(platform)).filter(([, seconds]) => seconds > 15 * 60);
+    assert.deepEqual(long, [], `${platform}: split these files`);
+  }
+});
+
 test('the durations refresh maps each logged title to the file that declares it', () => {
   const declared = [
     ...declarations('test/a.test.js', "test('plain title', () => {});\nfor (const n of [1, 2]) test(`case ${n} of a`, () => {});\n"
@@ -65,27 +179,30 @@ test('the durations refresh maps each logged title to the file that declares it'
     ...declarations('test/b.test.js', "test(failing ? 'b fails' : `b passes on ${platform}`, { skip: false }, () => {});\n"
       + "test(`case ${n} of ${'a'}`, () => {});\n"),
   ];
-  const log = [
-    '2026-10-15T09:41:54.3802186Z ##[group]Run npm run check:shared',
-    '2026-10-15T09:41:54.4802186Z ✔ plain title (9000ms)',
-    '2026-10-15T09:41:54.5802186Z ##[group]Run npm test',
-    '2026-10-15T09:41:55.0000000Z ✔ plain title (1000ms)',
-    '2026-10-15T09:41:55.0000000Z ✔ case 1 of a (2000ms)',
-    '2026-10-15T09:41:55.0000000Z ✖ case 2 of a (3000ms)',
-    '2026-10-15T09:41:55.0000000Z   ✔ inner (500ms)',
-    '2026-10-15T09:41:55.0000000Z ✔ suite of a (4000ms)',
-    '2026-10-15T09:41:55.0000000Z ✔ b passes on win32 (5000ms)',
-    '2026-10-15T09:41:55.0000000Z ﹣ b fails (1ms) # SKIP',
-    '2026-10-15T09:41:55.0000000Z ✔ a title no file declares (7000ms)',
-    '2026-10-15T09:41:56.0000000Z ✖ failing tests:',
-    '2026-10-15T09:41:56.0000000Z ✖ case 2 of a (3000ms)',
-    '2026-10-15T09:41:57.0000000Z ##[group]Run foreach ($attempt in 1..10) {',
-    '2026-10-15T09:41:57.0000000Z ✔ plain title (9000ms)',
-  ].join('\r\n');
-  const { times, unmatched } = fileTimes(log, declared);
-  // `case ${n} of a` in a.test.js has more literal text than b.test.js's `case ${n} of ${'a'}`.
-  assert.deepEqual(times, { 'test/a.test.js': 10, 'test/b.test.js': 5.001 });
-  assert.equal(unmatched, 7);
+  // Linux and macOS run the step bare; Windows runs it under its shard guard.
+  for (const step of ['npm test', 'pwsh -NoProfile -File scripts/shard-guard.ps1 npm test']) {
+    const log = [
+      '2026-10-15T09:41:54.3802186Z ##[group]Run npm run check:shared',
+      '2026-10-15T09:41:54.4802186Z ✔ plain title (9000ms)',
+      `2026-10-15T09:41:54.5802186Z ##[group]Run ${step}`,
+      '2026-10-15T09:41:55.0000000Z ✔ plain title (1000ms)',
+      '2026-10-15T09:41:55.0000000Z ✔ case 1 of a (2000ms)',
+      '2026-10-15T09:41:55.0000000Z ✖ case 2 of a (3000ms)',
+      '2026-10-15T09:41:55.0000000Z   ✔ inner (500ms)',
+      '2026-10-15T09:41:55.0000000Z ✔ suite of a (4000ms)',
+      '2026-10-15T09:41:55.0000000Z ✔ b passes on win32 (5000ms)',
+      '2026-10-15T09:41:55.0000000Z ﹣ b fails (1ms) # SKIP',
+      '2026-10-15T09:41:55.0000000Z ✔ a title no file declares (7000ms)',
+      '2026-10-15T09:41:56.0000000Z ✖ failing tests:',
+      '2026-10-15T09:41:56.0000000Z ✖ case 2 of a (3000ms)',
+      '2026-10-15T09:41:57.0000000Z ##[group]Run foreach ($attempt in 1..10) {',
+      '2026-10-15T09:41:57.0000000Z ✔ plain title (9000ms)',
+    ].join('\r\n');
+    const { times, unmatched } = fileTimes(log, declared);
+    // `case ${n} of a` in a.test.js has more literal text than b.test.js's `case ${n} of ${'a'}`.
+    assert.deepEqual(times, { 'test/a.test.js': 10, 'test/b.test.js': 5.001 }, step);
+    assert.equal(unmatched, 7, step);
+  }
 });
 
 test('TC_TEST_SHARD makes the runner run only the files of the shard it names', () => {
@@ -108,7 +225,7 @@ test('TC_TEST_SHARD makes the runner run only the files of the shard it names', 
   assert.match(invalid.stderr, /TC_TEST_SHARD requires INDEX\/TOTAL/);
 });
 
-test('a shard logs each file as it starts and ends, and past its deadline prints what still runs, stops it and fails', (t) => {
+test('a shard logs each file as it starts and ends, and past its deadline its watchdog prints what still runs, stops it and fails', (t) => {
   // The deadline stops the nested run before its global teardown, so its seed lives in this test's fixture.
   const h = makeRepo(t);
   const run = (files, extra) => cp.spawnSync(process.execPath, [path.join(ROOT, 'test', 'run.js'), ...files], {
@@ -122,12 +239,105 @@ test('a shard logs each file as it starts and ends, and past its deadline prints
   assert.match(done.stdout, /✔ shard a/, 'the spec reporter still prints each test');
 
   const hang = path.join('test', 'fixtures', 'shard', 'hang.test.js');
-  const late = run([FIXTURES[0], hang], { TC_TEST_SHARD_DEADLINE_MIN: '0.1' });
-  assert.equal(late.status, 1, late.stdout + late.stderr);
-  assert.match(late.stdout, /^file started: .*hang\.test\.js$/m);
-  assert.doesNotMatch(late.stdout, /^file ended: .*hang\.test\.js$/m);
-  assert.match(late.stderr, /shard deadline of 0\.1 min reached; processes still running/);
-  assert.match(late.stderr, /^ {2}\d+ \d+ .*hang\.test\.js/m, 'the dump names the hung file\'s process');
+  // TC_TEST_SHARD_HANG blocks the runner's own event loop, so only a process of its own can stop the shard.
+  for (const blocked of [false, true]) {
+    const logDir = path.join(h.base, `shard-log-${blocked}`);
+    const late = run([FIXTURES[0], hang], { TC_TEST_SHARD_DEADLINE_MIN: '0.1', TC_TEST_SHARD_LOG_DIR: logDir, TC_TEST_SHARD_HANG: blocked ? '1' : '' });
+    const what = `blocked runner ${blocked}`;
+    assert.equal(late.error, undefined, `${what}: the watchdog, not this test's timeout, stops the run`);
+    assert.ok(late.status !== 0, `${what}: the shard fails\n${late.stdout}${late.stderr}`);
+    assert.match(late.stdout, /^file started: .*hang\.test\.js$/m, what);
+    assert.doesNotMatch(late.stdout, /^file ended: .*hang\.test\.js$/m, what);
+    assert.match(late.stderr, /shard deadline of 0\.1 min reached; free memory/, what);
+    // The files CI uploads keep the same record when the job log is lost.
+    const progress = fs.readFileSync(path.join(logDir, 'progress.log'), 'utf8');
+    assert.match(progress, /^file started: .*hang\.test\.js$/m, what);
+    assert.match(progress, /^file ended: .*a\.test\.js$/m, what);
+    assert.doesNotMatch(progress, /^file ended: .*hang\.test\.js$/m, what);
+    const watchdog = fs.readFileSync(path.join(logDir, 'watchdog.log'), 'utf8');
+    assert.match(watchdog, /shard deadline of 0\.1 min reached[\s\S]*processes still running/, what);
+    assert.match(watchdog, /^\S+ {3}\d+ \d+ .*hang\.test\.js/m, `${what}: the dump names the hung file's process`);
+    assert.match(watchdog, /stopped the shard$/m, what);
+  }
+});
+
+// scripts/shard-guard.ps1 as CI runs it: PROGRAM and ARGS become the command it runs in its job object.
+function guard(h, args, env) {
+  const child = cp.spawn('pwsh', ['-NoProfile', '-File', path.join(ROOT, 'scripts', 'shard-guard.ps1'), ...args], {
+    cwd: ROOT, windowsHide: true,
+    env: { ...process.env, TOWER_CRANE_TEST_TMP: h.base, PATH: `${path.dirname(process.execPath)}${path.delimiter}${process.env.PATH}`, ...env },
+  });
+  let stdout = '';
+  child.stdout.on('data', (chunk) => { stdout += chunk; });
+  child.stderr.on('data', (chunk) => { stdout += chunk; });
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { child.kill(); reject(new Error(`the guard still ran after 3 minutes:\n${stdout}`)); }, 180000); // wait-allow: bounds a guard whose own deadline is 30 seconds
+    child.on('exit', (status) => { clearTimeout(timer); resolve({ status, stdout }); });
+  });
+}
+
+test('the Windows shard guard posts progress from outside node, and at its deadline dumps the job and stops it, orphans included', { skip: process.platform !== 'win32' && 'the guard runs the tests in a Windows job object' }, async (t) => {
+  const h = makeRepo(t);
+  const posts = [];
+  const server = require('node:http').createServer((req, res) => {
+    let body = '';
+    req.on('data', (chunk) => { body += chunk; });
+    req.on('end', () => {
+      posts.push({ method: req.method, url: req.url, auth: req.headers.authorization, body: JSON.parse(body || '{}') });
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ url: `http://127.0.0.1:${server.address().port}/check-runs/7`, html_url: 'https://github.invalid/checks/7' }));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => server.close());
+  const logDir = path.join(h.base, 'shard-log');
+  const orphanFile = path.join(h.base, 'orphan.json');
+  // The runner's event loop is blocked and its own watchdog waits past the guard's deadline, as when node is stuck.
+  const hung = await guard(h, ['node', path.join('test', 'run.js'), FIXTURES[0], path.join('test', 'fixtures', 'shard', 'orphan.test.js')], {
+    TC_TEST_SHARD: '1/1', TC_TEST_SHARD_HANG: '1', TC_TEST_SHARD_DEADLINE_MIN: '10', TC_TEST_SHARD_LOG_DIR: logDir,
+    TC_SHARD_GUARD_DEADLINE_MIN: '0.5', TC_ORPHAN_FILE: orphanFile,
+    TC_SHARD_PROGRESS_CHECK: 'shard progress (test)', TC_SHARD_PROGRESS_SHA: 'a'.repeat(40), TC_SHARD_PROGRESS_TOKEN: 'guard-token',
+    GITHUB_REPOSITORY: 'owner/repo', GITHUB_API_URL: `http://127.0.0.1:${server.address().port}`,
+  });
+  assert.equal(hung.status, 1, hung.stdout);
+  const log = fs.readFileSync(path.join(logDir, 'guard.log'), 'utf8');
+  assert.match(log, /deadline of 0\.5 min reached; free memory \d+ MiB/);
+  assert.match(log, /^\S+ guard: files still running: test\/fixtures\/shard\/orphan\.test\.js$/m, 'the guard names the hung file');
+  assert.match(hung.stdout, /guard: files still running: test\/fixtures\/shard\/orphan\.test\.js\r?$/m, 'the job log has it too');
+  assert.match(log, /^\S+ guard: {3}\d+ node handles \d+ threads \d+ committed \d+ MiB ws \d+ MiB started /m, 'the dump has handle and memory counts');
+  assert.match(log, /^\S+ guard: {3}\d+ \d+ .*orphan\.test\.js/m, "the dump names the hung file's process");
+  assert.match(log, /taskkill: SUCCESS/);
+  assert.match(log, /every job process stopped[\s\S]*stopped the shard$/m);
+  const orphan = JSON.parse(fs.readFileSync(orphanFile, 'utf8'));
+  assert.equal(orphan.token, null, 'the tests never see the progress token');
+  assert.throws(() => killPid(orphan.pid, 0), { code: 'ESRCH' }, 'the job stopped the process whose parent had exited');
+  // The progress left the process while it ran: a completed neutral check run, then updates to it.
+  assert.deepEqual(posts[0].body, { name: 'shard progress (test)', head_sha: 'a'.repeat(40), status: 'completed', conclusion: 'neutral', output: posts[0].body.output });
+  assert.equal(posts[0].method, 'POST');
+  assert.equal(posts[0].url, '/repos/owner/repo/check-runs');
+  assert.equal(posts[0].auth, 'Bearer guard-token');
+  assert.ok(posts.slice(1).length && posts.slice(1).every((post) => post.method === 'PATCH' && post.url === '/check-runs/7'), JSON.stringify(posts));
+  const last = posts.at(-1).body.output;
+  assert.match(last.title, /^stopped at the deadline at [\d.]+ min: 1\/2 files ended; running: test\/fixtures\/shard\/orphan\.test\.js$/);
+  assert.match(last.summary, /- job \d+ processes, .* handles, .*MiB committed; peaks \d+ processes/);
+  assert.match(last.summary, /file started: .*orphan\.test\.js/);
+
+  // A command that ends on its own keeps its exit status, and the job's limits refuse what is past them.
+  const script = (name, text) => { const file = path.join(h.base, name); fs.writeFileSync(file, text); return file; };
+  const spawns = script('spawns.js', `const cp = require('node:child_process'); let refused = 0;
+for (let i = 0; i < 10; i++) {
+  try { cp.spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { stdio: 'ignore' }).on('error', () => refused++); } catch { refused++; } // wait-allow: held until the guard stops the job
+}
+setTimeout(() => { console.log('refused ' + refused); process.exit(3); }, 2000); // wait-allow: lets every refused spawn report`);
+  const counted = await guard(h, ['node', spawns], { TC_SHARD_GUARD_MAX_PROCESSES: '4', TC_TEST_SHARD_LOG_DIR: path.join(h.base, 'spawns-log') });
+  assert.equal(counted.status, 3, counted.stdout);
+  assert.match(counted.stdout, /limits 4 processes/);
+  assert.ok(Number(/^refused (\d+)$/m.exec(counted.stdout)?.[1]) >= 6, `the process limit refuses spawns past it\n${counted.stdout}`);
+  assert.match(fs.readFileSync(path.join(h.base, 'spawns-log', 'guard.log'), 'utf8'), /exited 3 at [\d.]+ min/);
+  const allocates = script('allocates.js', `try { Buffer.alloc(400 * 2 ** 20, 1); console.log('allocated'); } catch (error) { console.log('refused ' + error.message); }`);
+  const bounded = await guard(h, ['node', allocates], { TC_SHARD_GUARD_MAX_MEMORY_MB: '200' });
+  assert.equal(bounded.status, 0, bounded.stdout);
+  assert.match(bounded.stdout, /^refused /m, 'the memory limit refuses a commit past it');
 });
 
 test('a durations refresh from a run with a failed shard keeps the old times of the files it did not measure', () => {

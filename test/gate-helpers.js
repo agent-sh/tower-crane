@@ -108,6 +108,11 @@ if (args[0] === 'pr' && args[1] === 'merge') {
   console.log(JSON.stringify({id: 1, status: 'completed'}));
 } else if (args[0] === 'api' && /\\/merge-async\\/\\d+$/.test(args[1])) {
   console.log(JSON.stringify({id: 1, status: 'completed'}));
+} else if (args[0] === 'api' && args[1].includes('/actions/runs?branch=fixture-change')) {
+  // The current head is published before its first workflow starts.
+} else if (args[0] === 'api' && process.env.FIXTURE_PR_COMMENTS && /\\/pulls\\/\\d+\\/comments/.test(args[1])) {
+  // Inline review comments on the PR, as gh prints them one per line.
+  for (const c of JSON.parse(process.env.FIXTURE_PR_COMMENTS)) console.log(JSON.stringify(c));
 } else if (args[0] === 'pr') {
   const pr = args[2];
   console.log(JSON.stringify({
@@ -119,6 +124,7 @@ if (args[0] === 'pr' && args[1] === 'merge') {
     isCrossRepository: false,
     state: process.env['FIXTURE_PR_STATE_' + pr] || process.env.FIXTURE_PR_STATE || (fs.existsSync(merged) ? 'MERGED' : 'OPEN'),
     mergeCommit: {oid: process.env.FIXTURE_SHA},
+    ...(process.env.FIXTURE_PR_BODY ? {body: process.env.FIXTURE_PR_BODY} : {}),
   }));
 } else {
   const ok = process.env.FIXTURE_GATE_OK !== '0';
@@ -127,6 +133,8 @@ if (args[0] === 'pr' && args[1] === 'merge') {
   if (process.env.FIXTURE_CAPPED && args.some((a) => a.includes('/check-runs'))) {
     console.log(JSON.stringify({name: 'bot-review', app: 'reviewbot', status: 'completed', conclusion: 'failure', suite: 9, output: {title: 'usage limit reached'}}));
   }
+  // A review app's own check run with the output it reported.
+  if (process.env.FIXTURE_REVIEW_RUN && args.some((a) => a.includes('/check-runs'))) console.log(process.env.FIXTURE_REVIEW_RUN);
 }
 `);
   fs.chmodSync(gh, 0o755);

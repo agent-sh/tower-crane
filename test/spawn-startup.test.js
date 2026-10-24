@@ -19,8 +19,9 @@ function setup(t) {
   });
 }
 
-// The dispatch's startup window (lib/spawn.js STARTUP_MS).
-const STARTUP_MS = 10000;
+// The production startup window (lib/intervals.js), which these tests run on
+// the real clock; other files shorten it through TOWER_CRANE_INTERVALS.
+const STARTUP_MS = require('../lib/intervals').DEFAULTS.startup;
 
 const commandRung = (h) => pinRung(h, 'small', { harness: 'command', command: [process.execPath, '-e', 'process.exit(0)', '{prompt}'] });
 
@@ -301,7 +302,7 @@ test('a harness the supervisor cannot find is reported as a PATH problem, with n
 const cp = require('node:child_process');
 const spawn = cp.spawn;
 cp.spawn = function (file, args, opts) {
-  return spawn.call(this, ${JSON.stringify(path.join(h.base, 'missing-harness'))}, args, opts);
+  return spawn.call(this, file === process.execPath ? ${JSON.stringify(path.join(h.base, 'missing-harness'))} : file, args, opts);
 };`);
   const failed = h.run(['spawn', '--role', 'small', '--task', 'T1'], { env });
   assert.equal(failed.code, 1, failed.stderr);

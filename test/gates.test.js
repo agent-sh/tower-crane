@@ -10,6 +10,7 @@ const { makeRepo, cachedFixture, ROOT, real, HOOKS } = require('./helpers');
 const { waitFor } = require('./canary');
 const { gateFixture, gateEvidence } = require('./gate-helpers');
 const { shellQuote } = require('../lib/gates/common');
+const { nativeCrashTest } = require('./gates/helpers');
 
 // The gate variants run in process in test/gates/tests.test.js; these tests
 // cover what the CLI adds: audited evidence, policy at accept and merge, and
@@ -229,6 +230,103 @@ test('named regression failure', () => {
       .trim().split('\n').map(JSON.parse);
     assert.deepEqual(events.at(-1).detail.test_failure, evidence.test_failure);
   }
+});
+
+test('a one-off native child crash records native_crash in the evidence and its event, the recovered evidence counts, and status counts the crash', { skip: process.platform === 'win32' && 'POSIX signals' }, (t) => {
+  const h = makeRepo(t);
+  const marker = path.join(h.base, 'crash-runs');
+  const sha = manifestTask(h, { submitted: { 'test/crash.test.js': nativeCrashTest({ marker }) } });
+  submitTestsFixture(h, sha);
+  for (const key of Object.keys(h.env)) {
+    if (key.startsWith('NODE_TEST_')) delete h.env[key];
+  }
+  const spec = `${shellQuote(process.execPath)} --test --test-reporter=spec`;
+  h.ok(['project', 'set', '--tests-mode', 'run-only', '--tests-cmd', `${spec} test/crash.test.js test/value.test.js`, '--tests-proof-cmd', `${spec} {tests}`]);
+  assert.doesNotMatch(h.ok(['status']), /native crashes/);
+  const result = h.run(['check', 'tests', 'T1', '--agent', 'checker']);
+  assert.equal(result.code, 0, result.stdout + result.stderr);
+  assert.equal(fs.readFileSync(marker, 'utf8'), 'xx');
+  const evidence = h.readState('tasks.json').tasks[0].evidence.at(-1);
+  assert.equal(evidence.ok, true);
+  assert.deepEqual(evidence.native_crash.map((c) => [c.test, c.signal, Number.isInteger(c.pid)]), [['child crashes natively', 'SIGSEGV', true]]);
+  // A run-only head is the pinned tests_cmd, not the file selector, so it reruns whole.
+  assert.match(evidence.summary, /Native crash: child crashes natively \(SIGSEGV, pid \d+\)\..*Rerun: reran the whole command \(the command is not gates\.tests_proof_cmd/);
+  assert.deepEqual(evidence.receipt.reruns, [{ step: 'head', files: [], ok: true }]);
+  assert.deepEqual(evidence.commands.filter((c) => c.command !== 'git').map((c) => [c.command, c.status]),
+    [[`${spec} test/crash.test.js test/value.test.js`, 1], [`${spec} test/crash.test.js test/value.test.js`, 0]]);
+  const testsGate = h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'tests');
+  assert.equal(testsGate.ok, true, testsGate.reason);
+  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const event = events.findLast((e) => e.cmd === 'check tests');
+  assert.deepEqual(event.detail.native_crash, evidence.native_crash);
+  assert.match(h.ok(['status']), new RegExp(`native crashes: 1 in the last 7 days, last T1 at ${event.at}`));
+  assert.deepEqual(h.json(['status']).native_crashes, { days: 7, count: 1, last: { at: event.at, task: 'T1' } });
+});
+
+test('a test flaky in two tasks within 7 days opens one task to fix it, and a third flaky pass opens no other', (t) => {
+  const h = makeRepo(t);
+  const marker = path.join(h.base, 'flaky-runs');
+  // Each gate's first run of the test fails and its rerun passes: the runs alternate.
+  const flaky = `const { test } = require('node:test');
+const assert = require('node:assert');
+const fs = require('node:fs');
+test('sometimes fails', () => {
+  // read-published: only this test writes the marker, and gates run one at a time.
+  const runs = fs.existsSync(${JSON.stringify(marker)}) ? fs.readFileSync(${JSON.stringify(marker)}, 'utf8').length : 0;
+  fs.appendFileSync(${JSON.stringify(marker)}, 'x');
+  assert.ok(runs % 2 !== 0, 'flaked on run ' + runs);
+});
+`;
+  const first = manifestTask(h, { submitted: { 'test/flaky.test.js': flaky } });
+  submitTestsFixture(h, first);
+  for (const key of Object.keys(h.env)) {
+    if (key.startsWith('NODE_TEST_')) delete h.env[key];
+  }
+  const spec = `${shellQuote(process.execPath)} --test --test-reporter=spec`;
+  h.ok(['project', 'set', '--tests-mode', 'run-only', '--tests-cmd', `${spec} test/flaky.test.js test/value.test.js`, '--tests-proof-cmd', `${spec} {tests}`]);
+  const shas = { T1: first };
+  for (const id of ['T2', 'T3']) {
+    h.git(['switch', '-qc', `fixture-${id}`, 'fixture-change']);
+    writeFiles(h.repo, { [`${id}.txt`]: `${id}\n` });
+    h.git(['add', '-A']);
+    h.git(['commit', '-qm', id]);
+    shas[id] = h.git(['rev-parse', 'HEAD']);
+    h.git(['switch', '-q', 'main']);
+    h.ok(['task', 'add', '--title', `Change ${id}`, '--acceptance', 'test the behavior']);
+    h.ok(['claim', id, '--agent', `w-${id}`]);
+    h.ok(['submit', id, '--sha', shas[id], '--branch', `fixture-${id}`, '--agent', `w-${id}`]);
+  }
+  const name = 'test/flaky.test.js > sometimes fails';
+  const events = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const flakeTasks = () => h.readState('tasks.json').tasks.filter((x) => x.title === `Fix flaky test ${name}`);
+  const check = (id) => {
+    const result = h.run(['check', 'tests', id, '--agent', 'checker']);
+    assert.equal(result.code, 0, result.stdout + result.stderr);
+    const evidence = h.readState('tasks.json').tasks.find((x) => x.id === id).evidence.at(-1);
+    assert.equal(evidence.ok, true, evidence.summary);
+    assert.deepEqual(evidence.flaky.map((f) => [f.test, f.step, f.first_failure.status, f.rerun.status]), [[name, 'head', 1, 0]], id);
+    assert.match(evidence.flaky[0].first_failure.excerpt, /flaked on run/, id);
+    const event = events().findLast((e) => e.cmd === 'check tests' && e.task === id);
+    assert.deepEqual(event.detail.flaky, evidence.flaky, id);
+    return evidence;
+  };
+  const one = check('T1');
+  assert.equal(flakeTasks().length, 0, 'one task flaky is not yet a pattern');
+  const two = check('T2');
+  const opened = flakeTasks();
+  assert.equal(opened.length, 1, 'flaky in two tasks opens a task');
+  const [flake] = opened;
+  assert.equal(flake.status, 'todo');
+  assert.match(flake.acceptance[0], /in T1 and T2 is named and fixed/);
+  const brief = h.ok(['brief', 'get', flake.id]);
+  for (const [id, evidence] of [['T1', one], ['T2', two]]) {
+    assert.ok(brief.includes(`### ${id}, tests gate at ${shas[id]}`), `${id} in the brief:\n${brief}`);
+    assert.ok(brief.includes(evidence.flaky[0].first_failure.excerpt), `${id} excerpt in the brief`);
+  }
+  const added = events().filter((e) => e.cmd === 'task add' && e.detail.flake === name);
+  assert.deepEqual(added.map((e) => [e.task, e.detail.seen.map((s) => [s.task, s.sha])]), [[flake.id, [['T1', shas.T1], ['T2', shas.T2]]]]);
+  check('T3');
+  assert.equal(flakeTasks().length, 1, 'a third flaky pass opens no other task');
 });
 
 test('failed tests evidence names the failing tests when the spec reporter is colored', (t) => {
@@ -482,10 +580,13 @@ test('tests evidence stores its mode in the audit event and stops counting when 
   assert.match(testsGate().reason, /mode.*none.*prove/);
   const refused = h.run(['accept', 'T1']);
   assert.equal(refused.code, 1);
-  assert.equal(testsGate().ok, true, 'accept refreshes the stale tests mode before later gates');
-  const proof = h.json(['check', 'tests', 'T1', '--cmd', `${shellQuote(process.execPath)} verify-build.js`]);
+  assert.match(refused.stderr, /clean:.*no cleanup command pinned/);
+  assert.doesNotMatch(refused.stderr, /tests:.*mode none.*prove/);
+  const proof = h.readState('tasks.json').tasks[0].evidence.findLast((e) => e.type === 'tests');
   assert.equal(proof.tests_mode, 'prove');
   assert.equal(testsGate().ok, true);
+  const refreshed = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  assert.equal(refreshed.findLast((e) => e.cmd === 'check tests').detail.tests_mode, 'prove');
   h.ok(['project', 'set', '--tests-by-kind', '{"code":"run-only"}']);
   assert.equal(testsGate().ok, false);
   const run = h.json(['check', 'tests', 'T1', '--cmd', `${shellQuote(process.execPath)} verify-build.js`]);
@@ -504,31 +605,48 @@ test('tests evidence stores its mode in the audit event and stops counting when 
   assert.match(testsGate().reason, /mode unrecorded/);
 });
 
-test('accept refreshes a changed tests mode while merge requires a fresh check', (t) => {
-  const h = makeRepo(t);
-  h.init();
-  const sha = gateFixture(h);
-  h.ok(['task', 'add', '--title', 'Change', '--acceptance', 'works']);
-  h.ok(['claim', 'T1', '--agent', 'w-1']);
-  h.ok(['submit', 'T1', '--sha', sha, '--agent', 'w-1']);
-  h.ok(['project', 'set', '--tests-mode', 'none']);
-  h.ok(['check', 'tests', 'T1', '--agent', 'checker']);
-  gateEvidence(h, 'clean', 'checker');
-  h.reviewer('T1', 'r-1', sha);
-  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--ok', '--sha', sha, '--agent', 'r-1']);
-  h.ok(['project', 'set', '--tests-mode', 'prove']);
-  h.ok(['accept', 'T1']);
-  assert.equal(h.readState('tasks.json').tasks[0].evidence.at(-1).tests_mode, 'prove');
-  h.ok(['project', 'set', '--tests-mode', 'none']);
-  const cli = cliCopy(h);
-  fs.mkdirSync(cli.gates, { recursive: true });
-  fs.writeFileSync(path.join(cli.gates, 'merge.js'), FAKE_GATE);
-  const out = path.join(h.base, 'gate.json');
-  const merge = cli.run(['merge', 'T1'], { GATE_OUT: out, GATE_OK: '1' });
-  assert.equal(merge.code, 1);
-  assert.match(merge.stderr, /its gates no longer pass: tests:.*mode prove.*none/);
-  assert.ok(!fs.existsSync(out), 'the merge gate did not run');
-});
+function modeFixture(t, mode) {
+  return cachedFixture(t, `audited-mode:${mode}`, (h) => {
+    h.init();
+    const sha = gateFixture(h);
+    h.ok(['task', 'add', '--title', 'Change', '--acceptance', 'works']);
+    h.ok(['claim', 'T1', '--agent', 'w-1']);
+    h.ok(['submit', 'T1', '--sha', sha, '--agent', 'w-1']);
+    h.ok(['project', 'set', '--tests-mode', mode, '--tests-cmd', 'node test/value.test.js']);
+    h.ok(['check', 'tests', 'T1', '--agent', 'checker']);
+    gateEvidence(h, 'clean', 'checker');
+    h.reviewer('T1', 'r-1', sha);
+    h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--ok', '--sha', sha, '--agent', 'r-1']);
+    return { sha };
+  });
+}
+
+for (const [before, after] of [
+  ['none', 'prove'], ['none', 'run-only'], ['prove', 'none'],
+  ['prove', 'run-only'], ['run-only', 'none'], ['run-only', 'prove'],
+]) {
+  test(`accept refreshes mode ${before} to ${after}, while a direct merge refuses stale mode`, (t) => {
+    const h = modeFixture(t, before);
+    const checks = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)
+      .filter((e) => e.cmd === 'check tests');
+    const count = checks().length;
+    h.ok(['project', 'set', '--tests-mode', after]);
+    assert.equal(h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'tests').ok, false);
+    h.ok(['accept', 'T1']);
+    assert.equal(checks().length, count + 1);
+    assert.equal(checks().at(-1).detail.tests_mode, after);
+    assert.equal(h.readState('tasks.json').tasks[0].status, 'accepted');
+    h.ok(['project', 'set', '--tests-mode', before]);
+    const cli = cliCopy(h);
+    fs.mkdirSync(cli.gates, { recursive: true });
+    fs.writeFileSync(path.join(cli.gates, 'merge.js'), FAKE_GATE);
+    const out = path.join(h.base, 'gate.json');
+    const merge = cli.run(['merge', 'T1'], { GATE_OUT: out, GATE_OK: '1' });
+    assert.equal(merge.code, 1);
+    assert.match(merge.stderr, new RegExp(`its gates no longer pass: tests:.*mode ${after}.*${before}`));
+    assert.ok(!fs.existsSync(out), 'the merge gate did not run');
+  });
+}
 
 test('gate commands exit 1 when the gate module is not installed', (t) => {
   const h = makeRepo(t);

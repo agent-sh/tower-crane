@@ -49,6 +49,21 @@ const linkedByObserver = (f) => {
 
 const RACE = [['task', 'note', 'T2', 'racing note from {pid}', '--agent', 'worker-T2'], ['project', 'set', '--goal', 'racing goal {nonce}']];
 
+// The race tests count attempts per observer, and observers link concurrently:
+// two link calls in flight at once run a once-only race once between them.
+test('two link calls in flight at once run a once-only race once', async (t) => {
+  const f = setup(t);
+  // The delay keeps the first call in flight while the second reads the race.
+  f.write((d) => { d.during = { 'stack link': [RACE[0]] }; d.delayMs = 1500; });
+  const call = () => new Promise((resolve) => {
+    const gh = "const r = require('node:child_process').spawnSync('gh', ['stack', 'link', '11', '12'], { cwd: process.cwd() }); process.exit(r.status)";
+    require('node:child_process').spawn(process.execPath, ['-e', gh], { env: f.h.env, cwd: f.h.repo, stdio: 'inherit' }).on('exit', resolve);
+  });
+  assert.deepEqual(await Promise.all([call(), call()]), [0, 0]);
+  assert.equal(f.read().calls.filter((c) => c.args[1] === 'link').length, 2);
+  assert.equal([...racingNotes(f).values()].reduce((a, b) => a + b, 0), 1, JSON.stringify([...racingNotes(f)]));
+});
+
 test('a settings change during the link\'s GitHub call is retried from fresh state and links the PR in the same pass', (t) => {
   const f = setup(t);
   worker(f);
@@ -65,12 +80,20 @@ test('a settings change during the link\'s GitHub call is retried from fresh sta
 test('a chain member\'s rework during the link\'s GitHub call refuses the first apply, and the retry links the PR', (t) => {
   const f = setup(t);
   worker(f);
-  f.write((d) => { d.during = { 'stack link': [['rework', 'T1', '--reason', 'racing rework {nonce}']] }; });
+  f.write((d) => { d.during = { 'stack link': [['rework', 'T1', '--reason', 'racing rework from {pid}']] }; });
   f.h.ok(['spawn', '--task', 'T2', '--wait']);
   assert.equal(linkedByObserver(f), true);
   assert.equal(f.h.json(['task', 'show', 'T1']).status, 'rework');
-  const links = f.read().calls.filter((c) => c.args[0] === 'stack' && c.args[1] === 'link');
-  assert.equal(links.length, 2, 'the refused first link is retried once');
+  // Another observer may link at the same time; the racing one's own calls show its retry.
+  const reworks = fs.readFileSync(path.join(f.h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)
+    .map((e) => e.cmd === 'rework' && /^racing rework from (\d+)$/.exec(e.detail?.reason)?.[1]).filter(Boolean);
+  assert.equal(reworks.length, 1, 'one link attempt raced the rework');
+  const calls = f.read().calls.filter((c) => c.args[0] === 'stack' && c.args[1] === 'link');
+  const links = calls.filter((c) => String(c.pid) === reworks[0]);
+  // The refused first link is retried once, unless another observer linked the PR after it
+  // (linkFresh then finds nothing left to link).
+  const linkedByOther = calls.slice(calls.indexOf(links[0]) + 1).some((c) => String(c.pid) !== reworks[0]);
+  assert.ok(links.length === 2 || (links.length === 1 && linkedByOther), `the refused first link is retried once: ${JSON.stringify(calls.map((c) => c.pid))}`);
   assert.deepEqual(linkFailures(f), []);
 });
 
@@ -193,11 +216,11 @@ test('worktree replaces a rewritten dependency head under an untouched prepared 
   assert.equal(f.h.json(['task', 'show', 'T2']).stack.parent_sha, sha);
 });
 
-test('a prepared dependent with its own work refuses a resubmitted dependency until it merges the new head', (t) => {
+test('dispatch merges a resubmitted dependency into a prepared dependent with its own work', (t) => {
   const f = setup(t);
   const wt = f.h.json(['worktree', 'T2']);
-  fs.writeFileSync(path.join(wt.path, 'T2.txt'), 'T2\n');
-  f.h.git(['add', 'T2.txt'], wt.path);
+  fs.writeFileSync(path.join(wt.path, 'early.txt'), 'T2\n');
+  f.h.git(['add', 'early.txt'], wt.path);
   f.h.git(['commit', '-qm', 'early T2'], wt.path);
   const head = f.h.git(['rev-parse', 'HEAD'], wt.path);
   const sha = resubmit(f, false);
@@ -206,11 +229,11 @@ test('a prepared dependent with its own work refuses a resubmitted dependency un
   assert.match(r.stderr, /holds its own changes on T1 .* resubmitted/);
   assert.equal(f.h.git(['rev-parse', 'HEAD'], wt.path), head);
   worker(f);
-  assert.notEqual(f.h.run(['spawn', '--task', 'T2', '--wait']).code, 0);
-  assert.equal(f.h.json(['task', 'show', 'T2']).status, 'todo');
-  f.h.git(['merge', '-q', '--no-edit', sha], wt.path);
-  f.h.json(['worktree', 'T2']);
-  assert.equal(f.h.git(['rev-parse', 'HEAD^2'], wt.path), sha);
+  f.h.ok(['spawn', '--task', 'T2', '--wait']);
+  const task = f.h.json(['task', 'show', 'T2']);
+  assert.equal(task.status, 'submitted');
+  assert.equal(task.stack.parent_sha, sha);
+  assert.equal(f.h.git(['rev-parse', 'HEAD^^2'], wt.path), sha);
 });
 
 test('concurrent sibling dispatch on one submitted dependency records a single stack child', async (t) => {
@@ -399,6 +422,9 @@ test('a spawned worker claims a task whose dependency merged while gh api is den
   assert.ok(claim, 'the worker claims the task after its dependency merged');
   assert.ok(submit, 'denied API access does not refuse the worker submission');
   assert.equal(submit.agent, claim.agent);
+  assert.equal(submit.detail.pushes_since_last_submit, null, 'denied history has no clean count');
+  assert.equal(submit.detail.push_history_error, undefined);
+  assert.match(submit.detail.push_history_note, /gh policy refuses PR head history/);
   // Both CI observations fail under this fixture's denied API, so rework follows the one retry.
   const rework = events.find((e) => e.task === 'T2' && e.cmd === 'rework');
   assert.ok(rework, 'the submitted task was sent back before refill could claim it');
@@ -411,22 +437,49 @@ test('a spawned worker claims a task whose dependency merged while gh api is den
   const inspections = apiCalls(f).slice(before);
   assert.equal(inspections.filter((c) => /\/pulls\/12\/comments\?/.test(c.args[1])).length, 1,
     'dispatch attempts the inline finding read once');
-  assert.ok(inspections.every((c) => /\/check-(runs|suites)\?|\/pulls\/12\/comments\?/.test(c.args[1])),
-    'only inline findings and CI inspections read gh api during dispatch');
+  const history = inspections.filter((c) => /\/actions\/runs\?branch=/.test(c.args[1]));
+  assert.equal(history.length, 1, 'submit attempts the head history read once');
+  const query = new URL(`https://github.test/${history[0].args[1]}`);
+  assert.equal(query.pathname, '/repos/acme/app/actions/runs');
+  assert.equal(query.searchParams.get('branch'), upperTask.branch);
+  assert.ok(history[0].args.includes('--paginate'));
+  for (const row of [
+    { name: 'inline findings', accepts: (endpoint) => /\/pulls\/12\/comments\?/.test(endpoint) },
+    { name: 'CI inspections', accepts: (endpoint) => /\/check-(runs|suites)\?/.test(endpoint) },
+    { name: 'head history', accepts: (endpoint) => endpoint === history[0].args[1] },
+  ]) {
+    assert.ok(inspections.some((c) => row.accepts(c.args[1])), `${row.name} is inspected`);
+  }
+  assert.ok(inspections.every((c) => /\/check-(runs|suites)\?|\/pulls\/12\/comments\?/.test(c.args[1])
+    || c.args[1] === history[0].args[1]), 'only inline findings, CI and this branch head history are inspected');
 });
 
-test('a spawned worker claim reads the recorded stack and makes no gh api call while its dependency is submitted', (t) => {
-  const f = setup(t);
-  upper(f);
-  f.h.ok(['rework', 'T2', '--reason', 'revise the stacked change']);
-  const before = apiCalls(f).length;
-  f.write((d) => { d.apiFailure = DENIED_API; });
-  const dispatch = { TOWER_CRANE_HOOK: path.join(f.h.base, 'hook.json'), TOWER_CRANE_TASK: 'T2', TOWER_CRANE_AGENT: 'worker-T2' };
-  const claim = f.h.run(['claim', 'T2', '--agent', 'worker-T2'], { env: dispatch });
-  assert.equal(claim.code, 0, claim.stderr);
-  assert.equal(f.h.json(['task', 'show', 'T2']).status, 'in_progress');
-  assert.equal(apiCalls(f).length, before);
-});
+for (const dependency of ['submitted', 'merged']) {
+  test(`a spawned worker claim reads the recorded stack and makes no gh api call while its dependency is ${dependency}`, (t) => {
+    const f = setup(t);
+    upper(f);
+    const previousStack = f.h.json(['task', 'show', 'T2']).stack;
+    if (dependency === 'merged') {
+      f.accept('T1');
+      f.h.ok(['merge', 'T1']);
+    }
+    f.h.ok(['rework', 'T2', '--reason', 'revise the stacked change']);
+    if (dependency === 'merged') {
+      const state = f.h.readState('tasks.json');
+      const task = state.tasks.find((item) => item.id === 'T2');
+      task.stack = { ...previousStack, linked: false };
+      task.stack_disabled = true;
+      f.h.writeState('tasks.json', state);
+    }
+    const before = apiCalls(f).length;
+    f.write((d) => { d.apiFailure = DENIED_API; });
+    const dispatch = { TOWER_CRANE_HOOK: path.join(f.h.base, 'hook.json'), TOWER_CRANE_TASK: 'T2', TOWER_CRANE_AGENT: 'worker-T2' };
+    const claim = f.h.run(['claim', 'T2', '--agent', 'worker-T2'], { env: dispatch });
+    assert.equal(claim.code, 0, claim.stderr);
+    assert.equal(f.h.json(['task', 'show', 'T2']).status, 'in_progress');
+    assert.equal(apiCalls(f).length, before);
+  });
+}
 
 test('a hooked claim on a task spawn did not dispatch reads GitHub and clears its stale stack record', (t) => {
   const f = setup(t);

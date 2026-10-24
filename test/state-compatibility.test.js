@@ -5,9 +5,12 @@ const { waitOnRepo, killPid } = require('./signals');
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const crypto = require('node:crypto');
 const path = require('node:path');
 const { makeTaskRepo, dispatch } = require('./helpers');
 const S = require('../lib/state');
+const Sharing = require('../lib/sharing');
+const { performance } = require('node:perf_hooks');
 
 const writeState = (h, file, value) => S.writeAtomic(path.join(h.state, file), S.json(value));
 
@@ -294,3 +297,252 @@ test(`${change} drains the supervisor without killing an edit`, async (t) => {
     'an incompatible supervisor does not write a final live-spend snapshot');
 });
 }
+
+// Windows refuses a file a scanner or the indexer holds open with EPERM,
+// EBUSY or EACCES. The table runs with those codes taken as Windows takes them.
+test('a sharing refusal is waited out with backoff and a lasting one fails at the bound', () => {
+  const busy = Sharing.SHARING_BUSY.splice(0);
+  Sharing.SHARING_BUSY.push('EPERM', 'EBUSY', 'EACCES');
+  const refusal = (code) => Object.assign(new Error(`${code}: refused, stat 'events.jsonl'`), { code });
+  try {
+    for (const row of [
+      { name: 'transient EPERM', code: 'EPERM', refusals: 3, calls: 4 },
+      { name: 'transient EBUSY', code: 'EBUSY', refusals: 3, calls: 4 },
+      { name: 'transient EACCES', code: 'EACCES', refusals: 1, calls: 2 },
+      { name: 'missing file', code: 'ENOENT', refusals: Infinity, calls: 1, fails: true },
+      { name: 'lasting EPERM', code: 'EPERM', refusals: Infinity, fails: true, bound: 200 },
+      { name: 'lasting EBUSY', code: 'EBUSY', refusals: Infinity, fails: true, bound: 200 },
+    ]) {
+      let calls = 0;
+      const started = performance.now();
+      const read = () => Sharing.sharingRetry(() => {
+        if (++calls <= row.refusals) throw refusal(row.code);
+        return 'read';
+      }, row.bound);
+      if (!row.fails) assert.equal(read(), 'read', row.name);
+      else assert.throws(read, (e) => e.code === row.code
+        && (!row.bound || e.message.includes(`still refused after ${row.bound} ms`)), row.name);
+      const elapsed = performance.now() - started;
+      if (row.calls) assert.equal(calls, row.calls, row.name);
+      if (row.bound) {
+        // Backoff spaces the attempts out instead of spinning, and the wait ends at the bound.
+        assert.ok(calls > 2 && calls < row.bound / 5, `${row.name}: ${calls} attempts`);
+        assert.ok(elapsed >= row.bound && elapsed < row.bound + 1000, `${row.name}: ${elapsed} ms`); // wait-allow: the retry's time bound is the contract under test
+      }
+    }
+  } finally {
+    Sharing.SHARING_BUSY.splice(0, Infinity, ...busy);
+  }
+  if (process.platform !== 'win32') {
+    // Elsewhere these codes are a permission failure, which no wait ends.
+    let calls = 0;
+    assert.throws(() => Sharing.sharingRetry(() => { calls++; throw refusal('EPERM'); }), { code: 'EPERM' });
+    assert.equal(calls, 1);
+  }
+});
+
+// Where a scanner's refusal starts within a read decides which part of the
+// read meets it first. Wherever that is, a read that meets a refusal lasting
+// past the bound fails after one wait; one that waited again from a later
+// read got through once the scanner let go, and the supervisor below never
+// failed. Each row opens the window at every state access of its operation in
+// turn, as the scanner hook does (test/fixtures/hooks.js HOOK_SHARING_WINDOW).
+// Each refusal moves a virtual clock on, so a wait is a few attempts.
+test('a lasting refusal fails a state read after one wait, wherever in the read it starts', (t) => {
+  const h = fixture(t);
+  // The scanner hook's files, and a commit's staged copies, which a scanner holds as well.
+  const STATE_FILE = /^((project|tasks|decisions)\.json(\.E[0-9a-f-]{36}\.commit)?|events(\.cuts)?\.jsonl|progress\/[^/]+\.jsonl)$/;
+  const WINDOW_MS = Sharing.SHARING_RETRY_MS + 1500;
+  const calls = ['statSync', 'lstatSync', 'openSync', 'readFileSync'];
+  const realFs = Object.fromEntries(calls.map((name) => [name, fs[name]]));
+  const realNow = performance.now;
+  const ownNow = Object.getOwnPropertyDescriptor(performance, 'now');
+  const busy = Sharing.SHARING_BUSY.splice(0, Infinity, 'EPERM');
+  let skew = 0;
+  let accesses = 0;
+  let from = Infinity;
+  let opened = null;
+  let closed = false;
+  // Every access to project.json while the lock is held is refused, for good.
+  let whileLocked = false;
+  // Reads of decisions.json still to be followed by a commit's append.
+  let appends = 0;
+  const append = () => {
+    const fd = realFs.openSync(path.join(h.state, 'events.jsonl'), 'a');
+    try {
+      fs.writeSync(fd, JSON.stringify({ id: `E${crypto.randomUUID()}`, at: new Date().toISOString(), cmd: 'appended', task: null, detail: {} }) + '\n');
+    } finally {
+      fs.closeSync(fd);
+    }
+  };
+  for (const name of calls) {
+    fs[name] = function (target, ...rest) {
+      const rel = typeof target === 'string' ? path.relative(h.state, path.resolve(target)).split(path.sep).join('/') : '';
+      if (STATE_FILE.test(rel) && (++accesses >= from && !closed || whileLocked && rel === 'project.json' && fs.existsSync(path.join(h.state, 'lock')))) {
+        opened ??= performance.now();
+        // The first refusal at or past the window's end still happens and closes it.
+        if (performance.now() - opened >= WINDOW_MS) closed = true; // wait-allow: the virtual clock the refusals move on
+        skew += 500;
+        throw Object.assign(new Error(`EPERM: operation not permitted, ${name} '${target}'`), { code: 'EPERM' });
+      }
+      const result = realFs[name].call(this, target, ...rest);
+      if (name === 'readFileSync' && rel === 'decisions.json' && appends > 0) {
+        appends--;
+        append();
+      }
+      return result;
+    };
+  }
+  Object.defineProperty(performance, 'now', { value: () => realNow.call(performance) + skew, configurable: true });
+  const ctx = { stateDir: h.state, agent: 'reader', env: {} };
+  // A commit past its commit point: its event ends the log and its file is still staged.
+  const staged = () => {
+    const id = `E${crypto.randomUUID()}`;
+    fs.writeFileSync(path.join(h.state, `tasks.json.${id}.commit`), fs.readFileSync(path.join(h.state, 'tasks.json')));
+    fs.appendFileSync(path.join(h.state, 'events.jsonl'), JSON.stringify({ id, at: new Date().toISOString(), cmd: 'staged', task: null, detail: {} }) + '\n');
+  };
+  let release = null;
+  try {
+    for (const row of [
+      { name: 'a read', run: () => S.loadState(h.state) },
+      { name: 'a read that keeps its snapshot', before: () => { release = S.retainEvents(h.state); S.loadState(h.state); }, run: () => S.loadState(h.state) },
+      { name: 'a write', run: () => S.mutate(ctx, 'read', () => {}) },
+      { name: 'a read while a logged commit is staged', before: staged, run: () => S.loadState(h.state) },
+      // Every lock-free read loses to an append, so the read ends under the lock.
+      { name: 'a read that falls back to the lock', before: () => { appends = 5; }, run: () => S.loadState(h.state) },
+    ]) {
+      const attempt = (start) => {
+        release?.();
+        release = null;
+        appends = 0;
+        row.before?.();
+        accesses = 0;
+        from = start;
+        opened = null;
+        closed = false;
+        try {
+          row.run();
+          return { opened };
+        } catch (error) {
+          return { opened, error, elapsed: performance.now() - opened };
+        } finally {
+          from = Infinity;
+        }
+      };
+      const clean = attempt(Infinity);
+      assert.ifError(clean.error);
+      assert.equal(appends, 0, `${row.name}: every append landed during the read`);
+      const total = accesses;
+      assert.ok(total > 3, `${row.name}: ${total} state accesses`);
+      for (let start = 1; start <= total; start++) {
+        const { opened: met, error, elapsed } = attempt(start);
+        // A path that took fewer accesses this time met no refusal.
+        if (met === null) continue;
+        const where = `${row.name}, refused from access ${start} of ${total}`;
+        assert.ok(error, `${where}: the read got through once the refusal ended`);
+        assert.equal(error.code, 'EPERM', `${where}: ${error.stack}`);
+        assert.match(error.message, new RegExp(`still refused after ${Sharing.SHARING_RETRY_MS} ms`), where);
+        assert.ok(elapsed < 2 * Sharing.SHARING_RETRY_MS, `${where}: failed ${elapsed} ms after the first refusal`); // wait-allow: the retry's time bound is the contract under test
+      }
+    }
+    // A reader that cannot write the state directory cannot take the lock
+    // either; that refusal is not the files', so it still returns its last read.
+    const mkdir = fs.mkdirSync;
+    fs.mkdirSync = (target, ...rest) => {
+      if (path.dirname(path.resolve(target)) === path.resolve(h.state) && path.basename(target).startsWith('lock')) {
+        throw Object.assign(new Error(`EPERM: operation not permitted, mkdir '${target}'`), { code: 'EPERM' });
+      }
+      return mkdir.call(fs, target, ...rest);
+    };
+    try {
+      appends = 5;
+      assert.ok(S.loadState(h.state).project, 'a read with an unwritable state directory returns its last read');
+      assert.equal(appends, 0);
+    } finally {
+      fs.mkdirSync = mkdir;
+    }
+    // A writer recovers a staged commit under the lock before it reads. A
+    // refusal there counts as a busy lock (docs/state/storage.md): the commit
+    // stays staged until recovery can read the schema, and the writer fails
+    // at the lock wait. One that read on finished the commit unchecked.
+    staged();
+    const commits = () => fs.readdirSync(h.state).filter((name) => name.endsWith('.commit')).length;
+    assert.equal(commits(), 1);
+    whileLocked = true;
+    assert.throws(() => S.mutate(ctx, 'read', () => {}), (error) => error.code === 3 && /holds an interrupted commit's file open/.test(error.message));
+    assert.equal(commits(), 1, 'the commit stays staged');
+    whileLocked = false;
+    S.mutate(ctx, 'read', () => {});
+    assert.equal(commits(), 0, 'the next writer finishes it');
+  } finally {
+    release?.();
+    Object.assign(fs, realFs);
+    if (ownNow) Object.defineProperty(performance, 'now', ownNow);
+    else delete performance.now;
+    Sharing.SHARING_BUSY.splice(0, Infinity, ...busy);
+  }
+});
+
+// A lease about to run out makes the supervisor read the state, and renew it
+// through the event log, while every state file is held.
+function holdStateFiles(h, scanner) {
+  S.withLock(h.state, () => {
+    fs.writeFileSync(scanner, '');
+    const tasks = h.readState('tasks.json');
+    assert.ok(tasks.tasks[0].claim, 'the supervisor holds the lease');
+    tasks.tasks[0].claim.until = new Date(Date.now() + 1000).toISOString();
+    writeState(h, 'tasks.json', tasks);
+    fs.appendFileSync(path.join(h.state, 'events.jsonl'), JSON.stringify({
+      at: new Date().toISOString(), cmd: 'scanner holds', task: 'T1', detail: {},
+    }) + '\n');
+  });
+}
+
+test('the supervisor waits out a scanner holding its state files and log', async (t) => {
+  const h = fixture(t);
+  const worker = heldWorker(h);
+  const scanner = path.join(h.base, 'scanner');
+  const { run: running, until, signal } = dispatch(t, h, { hooks: { HOOK_SHARING_WINDOW: scanner, HOOK_SHARING_IN: 'spawn-monitor.js' } });
+  try {
+    await signal(worker.ready);
+    holdStateFiles(h, scanner);
+    await until(() => S.readEvents(h.state).some((e) => e.cmd === 'renew'), 'the supervisor renews the lease through the refusals');
+  } finally {
+    fs.writeFileSync(worker.finish, '');
+  }
+  const result = await running;
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(fs.readFileSync(worker.edited, 'utf8'), 'edit finished');
+  assert.doesNotMatch(result.stderr, /supervisor failed|is gone/);
+  const refused = fs.readFileSync(scanner, 'utf8');
+  // The supervisor's task view opens tasks.json and reads it through the descriptor.
+  for (const call of ['statSync project.json', 'statSync events.jsonl', 'openSync events.jsonl', 'openSync tasks.json']) {
+    assert.ok(refused.includes(`${call}\n`), `the supervisor met a refused ${call}:\n${refused}`);
+  }
+});
+
+test('the supervisor fails at the bound, naming the refusal, when a scanner keeps its state', async (t) => {
+  const h = fixture(t);
+  const worker = heldWorker(h);
+  const scanner = path.join(h.base, 'scanner');
+  // The refusals end after the failure, so the supervisor still records its exit.
+  const hooks = { HOOK_SHARING_WINDOW: scanner, HOOK_SHARING_IN: 'spawn-monitor.js', HOOK_SHARING_REFUSALS: '0', HOOK_SHARING_WINDOW_MS: String(Sharing.SHARING_RETRY_MS + 1500) };
+  const { run: running, until, signal, output } = dispatch(t, h, { hooks });
+  let elapsed;
+  try {
+    await signal(worker.ready);
+    holdStateFiles(h, scanner);
+    await until(() => fs.readFileSync(scanner, 'utf8'), 'the first refusal');
+    const started = performance.now();
+    await until(() => /supervisor failed/.test(output()), 'the supervisor gives up');
+    elapsed = performance.now() - started;
+  } finally {
+    fs.writeFileSync(worker.finish, '');
+  }
+  const result = await running;
+  assert.notEqual(result.code, 0);
+  assert.match(result.stderr, new RegExp(`supervisor failed: EPERM: operation not permitted, \\w+ '[^']+' \\(still refused after ${Sharing.SHARING_RETRY_MS} ms`));
+  assert.doesNotMatch(result.stderr, /is gone/);
+  // One wait, not one per read that met the refusal.
+  assert.ok(elapsed < 2 * Sharing.SHARING_RETRY_MS, `the supervisor failed ${elapsed} ms after the first refusal`); // wait-allow: the retry's time bound is the contract under test
+});

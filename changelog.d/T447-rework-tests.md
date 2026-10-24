@@ -1,0 +1,1 @@
+- Update gate and queue regressions for automatic receipt refresh, every tests-mode transition, and pending CI versus failed CI.

@@ -5,6 +5,24 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { writeAtomic, readPublished, updateJson } = require('../atomic-file');
 
+if (path.basename(process.argv[1] || '') === 'spawn-monitor.js' && process.env.TC_CONTAINMENT_RELAUNCH_PROBE) {
+  const C = require(path.join(path.dirname(process.argv[1]), 'containment.js'));
+  const spawn = C.spawn;
+  let first;
+  let count = 0;
+  C.spawn = function (...args) {
+    if (++count === 2) {
+      if (process.env.TC_CONTAINMENT_RELAUNCH_PROBE === 'throw') {
+        throw Object.assign(new Error('scope setup failed synchronously'), { code: 'resource-scope-failed' });
+      }
+      process.nextTick(() => first.emit('resourceLimit', 'resource-memory-max'));
+    }
+    const child = spawn(...args);
+    first ||= child;
+    return child;
+  };
+}
+
 // Each harness's own record for an expired login, in the shape its CLI prints.
 function authRecord(harness, message) {
   if (harness === 'agy') return { status: 'ERROR', error: message };

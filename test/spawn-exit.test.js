@@ -409,15 +409,18 @@ test('a descendant that keeps the harness output open is stopped and spawn --wai
   }
 });
 
-test('a group member that ignores SIGTERM is not an output holder, and processes outside the group stay', {
+// The late row is a supervisor stalled 1.5 s right after its group SIGKILL, as
+// on a loaded machine; a kill held for a fixed time ran past its deadline there.
+for (const late of [0, 1500]) {
+test(`a group member that ignores SIGTERM is not an output holder, and processes outside the group stay${late ? ', with the supervisor late after SIGKILL' : ''}`, {
   skip: process.platform === 'win32' && 'POSIX process groups',
 }, async (t) => {
   const h = setup(t);
-  // The member outlives the harness by the five-second group grace and then a
-  // second more, so the group is still there when that grace ends.
-  const hook = path.join(__dirname, 'fixtures', 'slow-group-kill.js').replace(/\\/g, '/');
+  // The member outlives the five-second group grace, and the group SIGKILL
+  // lands only after the supervisor has seen the group still there.
+  const hooks = ['slow-group-kill.js', 'late-kill-probe.js'].map((name) => `--require "${path.join(__dirname, 'fixtures', name).replace(/\\/g, '/')}"`);
   const { result, files, pid, exit } = leaver(h, { member: true, bystander: true,
-    env: { NODE_OPTIONS: `--require "${hook}"`, TOWER_CRANE_TEST_SLOW_GROUP_KILL: '1000' } });
+    env: { NODE_OPTIONS: hooks.join(' '), TOWER_CRANE_TEST_SLOW_GROUP_KILL: '1', TOWER_CRANE_TEST_LATE_KILL_PROBE: String(late) } });
   assert.equal(result.code, 0, result.stderr);
   assert.equal(fs.existsSync(files.member + '.natural'), false, 'the group member ended on its own');
   assert.equal(detachedAlive({ pid: pid(files.member) }), false, 'SIGKILL did not reach the group member');
@@ -425,6 +428,7 @@ test('a group member that ignores SIGTERM is not an output holder, and processes
   assert.equal(exit.detail.output_held, undefined);
   assert.equal(detachedAlive({ pid: pid(files.bystander) }), true, 'a process that held no output was stopped');
 });
+}
 
 for (const nested of [true, 'wait']) {
 test(`a task an agent dispatches survives the output release of the agent that started it${nested === 'wait' ? ', with its dispatch left running' : ''}`, async (t) => {

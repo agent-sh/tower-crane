@@ -1,0 +1,1 @@
+- Verify the dedicated socket leaf alongside session-bus grants across runtime overrides and path lengths, while keeping runtime roots and other sockets denied.

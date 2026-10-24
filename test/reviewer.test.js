@@ -8,13 +8,15 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { makeRepo, makeProjectRepo, cachedFixture, pinRung, BIN, runPty, PTY_AVAILABLE } = require('./helpers');
 const { gateFixture, gateEvidence, changeKind } = require('./gate-helpers');
+const { harnessArgv, scopeEnv } = require('./containment-plan');
 
 const prices = {
   'fixture-light': { input: 0.10, cache_write: 0.125, cache_read: 0.01, output: 0.50 },
   'fixture-main': { input: 2, cache_write: 2.50, cache_read: 0.10, output: 10 },
   'fixture-large': { input: 4, cache_write: 5, cache_read: 0.20, output: 20 },
 };
-const windowsConcurrency = process.platform === 'win32' ? 2 : false;
+// Independent cases run two at a time on every platform: most of each one waits on its child processes.
+const caseConcurrency = 2;
 
 function rung(h, name, model) {
   pinRung(h, name, { harness: 'opencode', model });
@@ -101,8 +103,9 @@ function reviewPacket(h) {
 }
 
 function model(out) {
-  const flag = out.harness === 'claude' ? '--model' : out.argv.includes('-m') ? '-m' : out.argv.includes('-p') ? '-p' : '--model';
-  return out.argv[out.argv.indexOf(flag) + 1];
+  const argv = harnessArgv(out.argv);
+  const flag = out.harness === 'claude' ? '--model' : argv.includes('-m') ? '-m' : argv.includes('-p') ? '-p' : '--model';
+  return argv[argv.indexOf(flag) + 1];
 }
 
 function sample(h, name, input, cached, output, cacheWrite = 0) {
@@ -158,15 +161,55 @@ test('opencode reviewer Bash denies unlisted interpreter and absolute-path comma
   assert.throws(() => fs.readFileSync(canary, 'utf8'), { code: 'ENOENT' });
 });
 
-describe('reviewer integration cases', { concurrency: windowsConcurrency }, () => {
+test('review contract extraction covers split and legacy state layouts', (t) => {
+  const { staticContext } = require('../lib/reviewer');
+  const h = makeRepo(t);
+  const variants = [
+    { split: true, legacy: false, expected: 'SPLIT_CONTRACT' },
+    { split: false, legacy: true, expected: 'LEGACY_CONTRACT' },
+    { split: true, legacy: true, expected: 'SPLIT_CONTRACT' },
+    { split: 'no heading', legacy: true, expected: 'LEGACY_CONTRACT' },
+  ];
+  fs.mkdirSync(path.join(h.repo, 'docs', 'state'), { recursive: true });
+  for (const eol of ['\n', '\r\n']) {
+    const write = (file, text) => fs.writeFileSync(file, text.replace(/\n/g, eol));
+    write(path.join(h.repo, 'docs', 'cli.md'), '## Gates\nCLI_CONTRACT\n\n## Next\nOUTSIDE_CLI\n');
+    for (const variant of variants) {
+      const gates = path.join(h.repo, 'docs', 'state', 'gates.md');
+      if (!variant.split) fs.rmSync(gates, { force: true });
+      else write(gates, variant.split === true
+        ? '# Gates\n\n### Acceptance gates\nSPLIT_CONTRACT\n```md\n## FENCED_HEADING\n```\n\n### Next\nOUTSIDE_STATE\n'
+        : '# Gates\n');
+      write(path.join(h.repo, 'docs', 'state.md'), variant.legacy
+        ? '# State\n\n### Acceptance gates\nLEGACY_CONTRACT\n\n## Next\nOUTSIDE_STATE\n'
+        : '# State\n\n[Acceptance gates](state/gates.md#acceptance-gates)\n');
+      const context = staticContext(h.repo, [], 'default', 'ROLE', {});
+      assert.ok(context.includes(variant.expected), JSON.stringify({ ...variant, eol }));
+      assert.ok(context.includes('CLI_CONTRACT'));
+      assert.ok(!context.includes('OUTSIDE_STATE') && !context.includes('OUTSIDE_CLI'));
+      if (variant.split === true) {
+        assert.ok(context.includes('FENCED_HEADING'));
+        assert.ok(!context.includes('LEGACY_CONTRACT'));
+      }
+    }
+  }
+  const root = path.join(__dirname, '..');
+  const actual = staticContext(root, [], 'default', 'ROLE', {});
+  for (const text of ['## Review contract: docs/state/gates.md', '### Acceptance gates', 'An independent reviewer', '## Review contract: docs/cli.md']) {
+    assert.ok(actual.includes(text), text);
+  }
+});
+
+describe('reviewer integration cases', { concurrency: caseConcurrency }, () => {
 test('reviewers share static system instructions and receive audited gates in the user prompt', (t) => {
   const h = setup(t);
   h.ok(['submit', 'T1', '--agent', h.builder, '--sha', h.sha, '--pr', '42']);
   ready(h);
   gateEvidence(h, 'ci', 'gates');
   fs.writeFileSync(path.join(h.repo, 'AGENTS.md'), 'REPO_REVIEW_RULE\n');
-  fs.mkdirSync(path.join(h.repo, 'docs'));
-  fs.writeFileSync(path.join(h.repo, 'docs', 'state.md'), '### Acceptance gates\nSTATE_REVIEW_CONTRACT\n\n## Next\nUNNEEDED_STATE_DOC\n');
+  fs.mkdirSync(path.join(h.repo, 'docs', 'state'), { recursive: true });
+  fs.writeFileSync(path.join(h.repo, 'docs', 'state.md'), '# State\n\n[Acceptance gates](state/gates.md#acceptance-gates)\n');
+  fs.writeFileSync(path.join(h.repo, 'docs', 'state', 'gates.md'), '# Gates\n\n### Acceptance gates\nSTATE_REVIEW_CONTRACT\n\n## Next\nUNNEEDED_STATE_DOC\n');
   fs.writeFileSync(path.join(h.repo, 'docs', 'cli.md'), '## Gates\nCLI_REVIEW_CONTRACT\n\n## Next\nUNNEEDED_CLI_DOC\n');
   const standards = path.join(h.repo, 'review-standards.md');
   fs.writeFileSync(standards, 'REVIEW_STANDARDS\n');
@@ -217,6 +260,7 @@ test('reviewers share static system instructions and receive audited gates in th
       assert.ok(out.startup.system_bytes > 0);
       assert.ok(out.startup.rules.some((r) => r.path === path.join(h.repo, 'AGENTS.override.md')));
       assert.ok(!out.startup.rules.some((r) => r.path === path.join(h.repo, 'AGENTS.md')));
+      assert.match(out.system, /STATE_REVIEW_CONTRACT/);
     }
   }
 });
@@ -420,12 +464,13 @@ test('Codex profile builders share canonical identity with provider spend and pr
     ['medium', 'fixture-main', 'fixture-main', 'hard', 'fixture-large', 'fixture-large'],
   ]) {
     const h = setup(t, tier, provider, profile, { gated: true });
+    const scoped = scopeEnv(h);
     // A later self-reported model and ladder edit cannot rename the builder route.
     h.ok(['spend', 'T1', '--agent', h.builder, '--tokens', '1', '--rung', tier, '--model', 'wrong-model']);
-    assert.deepEqual([choice(h).review_rung, model(choice(h))], [tier, profile]);
+    assert.deepEqual([choice(h, scoped).review_rung, model(choice(h, scoped))], [tier, profile]);
     sample(h, provider, 1000000, 0, 0);
     sample(h, promotedProvider, 0, 0, 1);
-    const out = choice(h);
+    const out = choice(h, scoped);
     assert.deepEqual([out.review_rung, model(out)], [promotedTier, promotedModel]);
     const prompt = out.argv.find((arg) => arg.includes('## Task'));
     assert.ok(prompt.includes(`builder model ${provider}`), prompt);
@@ -491,9 +536,10 @@ test('Codex review pricing follows the user origin from a private caller home', 
   assert.equal(choice(h, userEnv).review_rung, 'hard');
   const privateEnv = { ...userEnv, HOME: privateHome, USERPROFILE: privateHome };
   assert.equal(choice(h, privateEnv).review_rung, 'hard');
-  const dispatch = h.json(['spawn', '--task', 'T1', '--dry-run'], { env: { ...h.reviewEnv, ...privateEnv } });
+  const dispatch = h.json(['spawn', '--task', 'T1', '--dry-run'], { env: { ...h.reviewEnv, ...privateEnv, ...scopeEnv(h) } });
   assert.equal(dispatch.harness, 'codex');
-  assert.equal(dispatch.argv[dispatch.argv.indexOf('-p') + 1], 'origin-review');
+  const argv = harnessArgv(dispatch.argv);
+  assert.equal(argv[argv.indexOf('-p') + 1], 'origin-review');
 });
 
 test('a stronger model wins only when its median priced review cost is no higher', (t) => {
@@ -1055,7 +1101,7 @@ test('accept runs tests, clean and CI before dispatch, then automation accepts a
   assert.ok(accepted.evidence.some((e) => e.type === 'review' && e.ok));
 });
 
-describe('remaining reviewer integration cases', { concurrency: windowsConcurrency }, () => {
+describe('remaining reviewer integration cases', { concurrency: caseConcurrency }, () => {
 test('a failed automatic gate never starts a reviewer', (t) => {
   const h = setup(t);
   const out = path.join(h.base, 'review-context.txt');

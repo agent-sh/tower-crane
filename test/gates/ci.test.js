@@ -13,17 +13,17 @@ const suite = (app, conclusion = 'success', status = 'completed', runs = 1) => (
 // gh --jq prints one JSON value per line, across all pages.
 const lines = (items) => items.map((i) => JSON.stringify(i)).join('\n') + (items.length ? '\n' : '');
 
-// `later` maps other commits on the base to their checks (`allRuns`: every check run, where the
-// default list keeps the latest of each name), `branch` lists the base's workflow runs since the
+// `later` maps other commits on the base to their checks (`allRuns`, here and there: every check
+// run, where the default list keeps the latest of each name), `branch` lists the base's workflow runs since the
 // merge commit, `compare` maps "from...to" to the compare status GitHub reports and `files` maps a
 // workflow path to its text at any commit. `history` lists the commits the merge commit contains,
 // newest first, `earlier` the base's runs of its workflow before it, `runJobs` maps a run id to its
 // jobs, `logs` a job id to its log text (null when it cannot be read) and `patches` are the hunks of
 // the merge commit's diff.
-function github({ runs = [], suites = [], workflows = [], head = SHA, apiError = null, view = {}, pr,
+function github({ runs = [], allRuns, suites = [], workflows = [], head = SHA, apiError = null, view = {}, pr,
   later = {}, branch = [], compare = {}, date = '2026-10-13T20:00:00Z', files = {},
   history = [], earlier = [], runJobs = {}, logs = {}, patches = [] } = {}) {
-  const commits = { ...later, [SHA]: { runs, suites, workflows } };
+  const commits = { ...later, [SHA]: { runs, allRuns, suites, workflows } };
   return fakeExec((args) => {
     if (args[0] === 'pr' && args[1] === 'view') return result(JSON.stringify(pr || { headRefOid: head, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', ...view }));
     if (args[0] !== 'api') return null;
@@ -910,4 +910,38 @@ test('workflow supersession cannot exclude a suite from another app', async () =
   })));
   assert.equal(r.ok, false, r.summary);
   assert.match(r.summary, /check suites not green: external-ci \(failure/);
+});
+
+test('a dispatched run at the PR head never counts for or against the PR checks', async () => {
+  const required = { ci: { required: ['checks (shared files)'] } };
+  const pull = { id: 100, check_suite_id: 1, path: '.github/workflows/ci.yml', event: 'pull_request', head_sha: SHA, created_at: '2026-10-11T10:00:00Z' };
+  const manual = { ...pull, id: 200, check_suite_id: 2, event: 'workflow_dispatch', created_at: '2026-10-11T11:00:00Z' };
+  // The dispatched run's PR-only job skips, after the PR's run of it; its full matrix fails and runs.
+  const dispatched = [
+    { ...run('checks (shared files)', 'skipped'), id: 21, started_at: '2026-10-11T11:00:00Z', suite: 2 },
+    { ...run('test (ubuntu-latest, node 26, shard 1/3)', 'failure'), id: 22, suite: 2 },
+    { ...run('repeat (windows-latest, node 26)', null, 'in_progress'), id: 23, suite: 2 },
+  ];
+  const cases = [
+    ['green PR run', [{ ...run('checks (shared files)'), id: 11, started_at: '2026-10-11T10:00:00Z', suite: 1 }], 'success', true, /CI green/],
+    ['failing PR run', [{ ...run('checks (shared files)', 'failure'), id: 11, started_at: '2026-10-11T10:00:00Z', suite: 1 }], 'failure', false, /required check runs not successful: checks \(shared files\) \(failure\)/],
+    ['PR run not started', [], null, false, /missing required check runs \(ci\.required\): checks \(shared files\)/],
+  ];
+  for (const [label, prRuns, prSuite, ok, summary] of cases) {
+    const suites = [...(prSuite ? [{ ...suite('github-actions', prSuite), id: 1 }] : []), { ...suite('github-actions', null, 'in_progress', 3), id: 2 }];
+    // The default list keeps only the newest run of each name: the dispatched skip, not the PR's run.
+    const allRuns = [...prRuns, ...dispatched];
+    const runs = allRuns.filter((c) => !allRuns.some((o) => o.name === c.name && o.started_at > c.started_at));
+    const gh = github({ runs, allRuns, suites, workflows: prSuite ? [pull, manual] : [manual] });
+    const r = await gate.run(ctx(gh, { pr: 42 }, required));
+    assert.equal(r.ok, ok, `${label}: ${r.summary}`);
+    assert.match(r.summary, summary, label);
+    assert.match(r.summary, /Not PR checks, set aside: \.github\/workflows\/ci\.yml \(workflow_dispatch, run 200\)/, label);
+    assert.doesNotMatch(r.summary, /shard 1\/3|repeat/, `${label}: the dispatched jobs are not judged`);
+    const exec = (cmd, args) => (args[1] === `repos/${REPO}/pulls/42/comments?per_page=100` ? result('') : gh.exec(cmd, args));
+    const report = await gate.submitReport({ ...ctx(gh), exec }, { repo: REPO, ...required }, { sha: SHA, pr: 42, taskId: 'T3' });
+    assert.equal(!!report.refusal, label === 'failing PR run', `${label}: ${report.refusal}`);
+    assert.equal(report.pending?.length ?? 0, label === 'PR run not started' ? 1 : 0, `${label}: ${report.report}`);
+    assert.match(report.report + (report.refusal || ''), /set aside|failing: checks \(shared files\)/, label);
+  }
 });

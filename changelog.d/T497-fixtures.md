@@ -1,0 +1,1 @@
+- Shared-check regression fixtures include files linked by their documentation, so mutant-anchor and timing-wait checks run after documentation link validation.

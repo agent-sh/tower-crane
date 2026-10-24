@@ -1,6 +1,6 @@
 'use strict';
 
-// The three automation suites share these fixtures; each suite file runs in its own process.
+// The automation suites share these fixtures; each suite file runs in its own process.
 
 const fs = require('node:fs');
 const path = require('node:path');
@@ -29,6 +29,8 @@ function setup(t, { kind = 'code', ci = 'success', repo } = {}) {
   // The offline GitHub settles at once; automation keeps its UNKNOWN re-reads without their pauses.
   h.env.NODE_OPTIONS = `--require=${JSON.stringify(MERGEABILITY_PAUSE)}`;
   h.env.HOOK_MERGEABILITY_PAUSE_MS = '10';
+  // Each fixture step is a fresh wait that rechecks CI within seconds.
+  h.env.HOOK_CI_POLL_MS = '0';
   if (process.platform === 'win32') {
     fs.writeFileSync(path.join(tools, 'gh.cmd'), `@"${process.execPath}" "${ghStub}" %*\r\n`);
     const preload = path.join(h.base, 'offline-gh.js');
@@ -57,8 +59,7 @@ cp.spawnSync=(cmd,args,opts)=>{
     h.env.NODE_OPTIONS += ` --require=${JSON.stringify(preload)}`;
   }
   h.env.AUTOMATION_GITHUB = path.join(h.base, 'github.json');
-  h.github = () => JSON.parse(fs.readFileSync(h.env.AUTOMATION_GITHUB, 'utf8'));
-  h.saveGithub = (state) => fs.writeFileSync(h.env.AUTOMATION_GITHUB, JSON.stringify(state));
+  attach(h);
   h.saveGithub({ root: h.repo, prs: { 7: {
     state: 'OPEN', headRefOid: h.sha, headRefName: 'fixture-change',
     headRepository: { nameWithOwner: 'acme/demo' }, url: 'https://github.com/acme/demo/pull/7',
@@ -66,6 +67,14 @@ cp.spawnSync=(cmd,args,opts)=>{
   } }, ci: { [h.sha]: ci } });
   h.ok(['task', 'add', '--title', 'Change', '--acceptance', 'it works', '--kind', kind]);
   h.ok(['brief', 'set', 'T1', '-'], { input: '# Change\n\nImplement the acceptance.\n' });
+  return h;
+}
+
+// The calls a setup() fixture's tests make, bound to h, so a copy of a cached
+// fixture gets its own.
+function attach(h) {
+  h.github = () => JSON.parse(fs.readFileSync(h.env.AUTOMATION_GITHUB, 'utf8'));
+  h.saveGithub = (state) => fs.writeFileSync(h.env.AUTOMATION_GITHUB, JSON.stringify(state));
   h.submit = (id = 'T1', sha = h.sha, pr = '7') => {
     h.ok(['claim', id, '--agent', 'worker']);
     // A worker's submit refuses failing CI (T149), so the head is submitted while its
@@ -192,4 +201,4 @@ poll();
   return h;
 }
 
-module.exports = { setup, holdSuite, configureHarness, refillFixture, ghStub, harness, MERGEABILITY_PAUSE };
+module.exports = { setup, attach, holdSuite, configureHarness, refillFixture, ghStub, harness, MERGEABILITY_PAUSE };
