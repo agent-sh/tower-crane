@@ -326,7 +326,7 @@ test('Bedrock env_file readiness is deferred without reading the file during a d
   // test root saw a preview read the file. Where no short root can be made, the
   // rest of the test still runs on the fixture's cache.
   const cache = process.platform === 'win32' ? null
-    : shortCacheRoot(t, require('../lib/gate-tmp').HARNESS_TMPDIR_MAX - Buffer.byteLength(path.join(path.sep, 'tc', '0'.repeat(12))));
+    : shortCacheRoot(t, require('../lib/gate-tmp').HARNESS_TMPDIR_MAX - Buffer.byteLength(path.join(path.sep, 'tower-crane', 'tc', '0'.repeat(12))));
   if (cache) h.env.XDG_CACHE_HOME = cache;
   else t.diagnostic('no cache root short enough for claudeTmp; the dry run skips claudeOwnTmp here');
   h.primary('bedrock');

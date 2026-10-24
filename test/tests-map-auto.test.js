@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { cachedFixture } = require('./helpers');
 const { gateFixture } = require('./gate-helpers');
+const { readPublished, writeAtomic } = require('./atomic-file');
 
 const HOUR = 3600000;
 const DAY = 24 * HOUR;
@@ -24,7 +25,7 @@ function setup(t) {
     const nextSha = seed.git(['rev-parse', 'HEAD']);
     seed.init(['--repo', 'acme/demo', '--base', 'main']);
     seed.env.HOOK_CLOCK_FILE = path.join(seed.base, 'clock');
-    fs.writeFileSync(seed.env.HOOK_CLOCK_FILE, String(Date.now()));
+    writeAtomic(seed.env.HOOK_CLOCK_FILE, String(Date.now()));
     seed.env.TC_MAP_GITHUB = path.join(seed.base, 'github.json');
     fs.writeFileSync(path.join(seed.base, 'tools', 'gh'),
       `#!${process.execPath}\nrequire(${JSON.stringify(path.join(__dirname, 'fixtures', 'tests-map-gh.js'))});\n`);
@@ -34,10 +35,10 @@ function setup(t) {
     seed.ok(['tests', 'map', 'refresh', '--file', file]);
     return { baseSha, headSha, nextSha };
   });
-  h.now = () => Number(fs.readFileSync(h.env.HOOK_CLOCK_FILE, 'utf8'));
-  h.advance = (ms) => fs.writeFileSync(h.env.HOOK_CLOCK_FILE, String(h.now() + ms));
-  h.github = () => JSON.parse(fs.readFileSync(h.env.TC_MAP_GITHUB, 'utf8'));
-  h.save = (data) => fs.writeFileSync(h.env.TC_MAP_GITHUB, JSON.stringify(data));
+  h.now = () => Number(readPublished(h.env.HOOK_CLOCK_FILE, 'utf8'));
+  h.advance = (ms) => writeAtomic(h.env.HOOK_CLOCK_FILE, String(h.now() + ms));
+  h.github = () => JSON.parse(readPublished(h.env.TC_MAP_GITHUB, 'utf8'));
+  h.save = (data) => writeAtomic(h.env.TC_MAP_GITHUB, JSON.stringify(data));
   h.logs = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   h.refreshes = () => h.logs().filter((e) => e.cmd === 'tests map refresh');
   h.pass = (inbox = false) => {
@@ -78,6 +79,19 @@ test('automation refreshes scheduled and manual coverage once, preserving declar
     assert.deepEqual(h.json(['status']).tests_map, { run: 42, sha: h.headSha,
       at: refresh.detail.built_at, age_ms: HOUR, stale: false });
   }
+});
+
+test('a wait host on a tool behind the engine leaves the coverage refresh to a current one', (t) => {
+  const h = setup(t);
+  fs.appendFileSync(path.join(h.state, 'events.jsonl'), `${JSON.stringify({ at: new Date().toISOString(), agent: 'orchestrator',
+    cmd: 'check tests', task: 'T1', detail: { tool: { sha: 'f'.repeat(40), version: '99.0.0', committed: null } } })}\n`);
+  const map = h.readState('project.json').tests.map;
+  const refreshes = h.refreshes().length;
+  const pass = h.pass();
+  assert.match(pass.stderr, /behind the project's engine \(99\.0\.0 ffffffff\)/);
+  assert.deepEqual(h.readState('project.json').tests.map, map);
+  assert.equal(h.refreshes().length, refreshes);
+  assert.deepEqual(h.github().calls, []);
 });
 
 // Coverage now measures data a test reads, so only a glob is out of its reach: a hand-set entry for
@@ -228,7 +242,7 @@ for (const [name, delay, reserved, polls] of [
     const receipt = h.readState('tests-map-cache.json');
     assert.equal(Date.parse(receipt.read_at), start + (polls ? delay : reserved));
     delete h.env.TC_MAP_POLL_DELAY;
-    fs.writeFileSync(h.env.HOOK_CLOCK_FILE, String(Date.parse(receipt.read_at) + HOUR - 1));
+    writeAtomic(h.env.HOOK_CLOCK_FILE, String(Date.parse(receipt.read_at) + HOUR - 1));
     h.pass();
     assert.equal(h.github().calls.length, polls, 'the locked reservation owns the full hourly interval');
   });

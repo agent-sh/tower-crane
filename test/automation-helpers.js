@@ -7,6 +7,7 @@ const path = require('node:path');
 const { waitUntil } = require('./signals');
 const { makeRepo, cachedFixture, stubRungs, BIN, detachedAlive } = require('./helpers');
 const { gateFixture } = require('./gate-helpers');
+const { readJsonLines } = require('./atomic-file');
 
 const ghStub = path.join(__dirname, 'fixtures', 'automation-gh.js');
 const harness = path.join(__dirname, 'fixtures', 'automation-harness.js');
@@ -89,7 +90,7 @@ function attach(h) {
     h.saveGithub(after);
   };
   h.consume = () => h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
-  h.logs = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  h.logs = () => readJsonLines(path.join(h.state, 'events.jsonl'));
   return h;
 }
 
@@ -111,6 +112,16 @@ poll();
   h.ok(['project', 'set', '--tests-cmd', `node ${JSON.stringify(suite)}`, '--tests-mode', 'run-only',
     '--executors', '1', '--agent', 'orchestrator']);
   return { stalled, release };
+}
+
+// Another task holds an executor on this host for as long as the test process
+// lives; the returned function releases it.
+function holdExecutor(h, task = 'T9') {
+  const file = path.join(h.state, 'events.jsonl');
+  const lease = 'cpu:held';
+  const write = (detail) => fs.appendFileSync(file, JSON.stringify({ at: new Date().toISOString(), agent: 'orchestrator', cmd: 'executor', task, detail }) + '\n');
+  write({ lease, phase: 'running', kind: 'tests', pid: process.pid });
+  return () => write({ lease, phase: 'done' });
 }
 
 function configureHarness(h, { rules = false } = {}) {
@@ -182,7 +193,7 @@ poll();
     after.ci[h.sha] = ciAtSubmit;
     h.saveGithub(after);
   };
-  h.logs = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  h.logs = () => readJsonLines(path.join(h.state, 'events.jsonl'));
   h.consume = () => h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
   h.marker = (id) => path.join(h.env.AUTOMATION_CONTEXT_DIR, id);
   t.after(async () => {
@@ -201,4 +212,4 @@ poll();
   return h;
 }
 
-module.exports = { setup, attach, holdSuite, configureHarness, refillFixture, ghStub, harness, MERGEABILITY_PAUSE };
+module.exports = { setup, attach, holdSuite, holdExecutor, configureHarness, refillFixture, ghStub, harness, MERGEABILITY_PAUSE };

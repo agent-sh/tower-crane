@@ -191,6 +191,11 @@
   },
   {
     "path": "tools/tests-map.json",
+    "text": "claude-sandbox-placeholders.js",
+    "reason": "Module filename in the generated test coverage map"
+  },
+  {
+    "path": "tools/tests-map.json",
     "text": "claude-print-result.json",
     "reason": "Module or fixture filename in the test coverage map"
   },
@@ -208,5 +213,10 @@
     "path": "lib/ladder.js",
     "text": "claude-provider",
     "reason": "Relative import of the Claude provider routing module"
+  },
+  {
+    "path": "lib/sandbox-policy.js",
+    "text": "claude-code",
+    "reason": "Claude Code config directory under ~/.config, a credential store the sandbox policy keeps owner-only"
   }
 ]
