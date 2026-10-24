@@ -224,6 +224,15 @@ another reaction of the same task. Queued notifications for accepted, unmerged P
 tasks run first, in the order of their current `accept` events. This includes
 older notifications that now run a merge and any merged-tree test the merge
 needs. Running reactions are never preempted.
+The merge line runs under whichever reaction drains it, often one for a task
+that already merged, so a head check ranks by the accepted task it checks,
+not by that reaction's own task: it takes a free executor ahead of every
+waiting gate run, and a reaction that stopped for a full cap at a head check
+records `merge` (the task it checks) on its `phase: "executor"` receipt and
+keeps that task's merge turn in the queue. A reaction the governor deferred
+at the head check's `suite` keeps the same turn: its receipt's `governor.task`
+names the task checked. When that task is no longer accepted, the receipt
+keeps its own event's turn.
 Submitted tasks follow in submission order, except that the queued
 notifications of a prioritized task run first among submitted work.
 Priority belongs to the task, so later notifications, rework and resubmission
@@ -283,6 +292,25 @@ global mode masked by the task's kind override queues nothing. Already merged ta
 `status` also lists `merge blocked: TASK REASON` for accepted, unmerged PRs.
 JSON carries `merge_blocked: [{id, reason}]`. It uses current gate evidence
 first, then the recorded merge queue refusal; it makes no GitHub request.
+A pass that ends at a head check deferred for a full executor cap or by the
+governor records that head as `blocked` with `deferred: {kind: "executor"}`
+or `deferred: {kind: "governor", reason}`. That is a wait, not a refusal.
+Every other accepted, unmerged PR task is a merge wait unless its entry's
+head check is running, listed in merge-line order as `merge waits: TASK since
+AT, behind WHAT`, with JSON `merge_waits: [{id, since, behind}]`. `since` is
+the task's own current `accept` event's time. A linked stack is one entry of
+the line, and each of its unblocked members is listed with what holds the
+entry. `behind` is the first that holds: a blocked member of the same entry
+(`T1 merge blocked: REASON`), a `suite` deferral
+of the host governor (`the host governor: REASON`), a head check waiting for
+an executor (`a gate executor: N of M in use: ...`, the leases held now),
+either one read from the reaction's receipt or from the queue's deferred
+record written after that `accept`, an earlier entry with no blocked member
+(`T3 ahead in the merge line`), else `the next merge queue pass`. Pending
+CI at an accepted head fails the ci gate, so that task is `merge blocked`,
+not a merge wait. A stacked task outside the line,
+whose lower task is not accepted or not linked to it, is listed after the
+line as behind its nearest unmerged lower task (`T1 under it in its stack`).
 Automatic state changes and evidence use `agent: orchestrator` and
 `via: automation`. Reactions establish an explicit authorization context
 only after verifying the caller's authority or entering from the trusted
