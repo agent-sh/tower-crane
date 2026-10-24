@@ -13,17 +13,19 @@ const { gateFixture } = require('./gate-helpers');
 const { log, setup, child, event } = require('./events-helpers');
 
 // Most of each race is waiting on the other side's jittered state calls, and
-// each test races in a fixture of its own, so the three run side by side.
-describe('merge races', { concurrency: true }, () => {
-// Ten rounds took 232 to 270 s on hosted Windows, at the 300 s hung-test timeout,
-// so they run as two tests of five; each covers every stagger once.
-for (const pass of [1, 2]) test(`a manual merge racing the merge queue under another task's reaction: one merges, the other confirms (pass ${pass} of 2)`, async (t) => {
+// each test races in a fixture of its own, so three run side by side.
+describe('merge races', { concurrency: 3 }, () => {
+// Five rounds took 235 to over 300 s on hosted Windows with three races side by
+// side, at the 300 s hung-test timeout (runs 40099757929 to 40114715070), so the
+// ten rounds run as five tests of two; the ten cover every stagger twice.
+const PASSES = 5;
+for (let pass = 1; pass <= PASSES; pass++) test(`a manual merge racing the merge queue under another task's reaction: one merges, the other confirms (pass ${pass} of ${PASSES})`, async (t) => {
   const h = setup(t);
   h.sha = gateFixture(h);
   h.ok(['project', 'set', '--repo', 'acme/demo']);
   h.env.FIXTURE_GH_LOG = path.join(h.base, 'gh.jsonl');
   h.env.FIXTURE_MERGED_PER_PR = '1';
-  const rounds = 5;
+  const rounds = 2;
   h.ok(['plan', 'import', '-'], { input: JSON.stringify(Array.from({ length: rounds * 2 - 1 }, (_, i) => ({ title: `Change ${i + 2}`, acceptance: ['works'] }))) });
   for (let i = 1; i <= rounds; i++) {
     // The lower task's reaction drains the line, so the queue merges the
@@ -41,7 +43,7 @@ for (const pass of [1, 2]) test(`a manual merge racing the merge queue under ano
     const automatic = child(t, h, ['wait', '--agent', 'orchestrator', '--after', after, '--task', upper, '--types', 'merged', '--timeout', '300'], jitter);
     // Start near the queue's move from the lower task to the upper one.
     await eventAppended(path.join(h.state, 'events.jsonl'), (event) => event.type === 'merged' && event.task === lower, { signal: t.signal });
-    await new Promise((resolve) => setTimeout(resolve, (i % 5) * 120)); // wait-allow: stagger concurrent operations to exercise both race orderings
+    await new Promise((resolve) => setTimeout(resolve, (((pass - 1) * rounds + i) % 5) * 120)); // wait-allow: stagger concurrent operations to exercise both race orderings
     const manual = await h.runAsync(['merge', upper], { hooks: jitter });
     assert.equal(manual.code, 0, `${upper}: ${manual.stderr}`);
     await event(automatic, 'merged', upper);
@@ -59,14 +61,16 @@ for (const pass of [1, 2]) test(`a manual merge racing the merge queue under ano
   }
 });
 
-test('a manual merge racing an automatic merge of the same task: one merges, the other confirms, 30 of 30', async (t) => {
+// Thirty rounds of the same race, as three tests of ten for the same reason; each covers every stagger.
+for (const part of [1, 2, 3]) test(`a manual merge racing an automatic merge of the same task: one merges, the other confirms, rounds ${part * 10 - 9} to ${part * 10} of 30`, async (t) => {
   const h = setup(t);
   h.sha = gateFixture(h);
   h.ok(['project', 'set', '--repo', 'acme/demo']);
   h.env.FIXTURE_GH_LOG = path.join(h.base, 'gh.jsonl');
   const winners = { automation: 0, manual: 0 };
-  h.ok(['plan', 'import', '-'], { input: JSON.stringify(Array.from({ length: 29 }, (_, i) => ({ title: `Change ${i + 2}`, acceptance: ['works'] }))) });
-  for (let i = 1; i <= 30; i++) {
+  h.ok(['plan', 'import', '-'], { input: JSON.stringify(Array.from({ length: 9 }, (_, i) => ({ title: `Change ${i + 2}`, acceptance: ['works'] }))) });
+  for (let i = 1; i <= 10; i++) {
+    const round = (part - 1) * 10 + i;
     const id = `T${i}`;
     h.env.FIXTURE_MERGED = path.join(h.base, `merged-${i}`);
     h.ok(['claim', id, '--agent', 'worker']);
@@ -80,7 +84,7 @@ test('a manual merge racing an automatic merge of the same task: one merges, the
     // either side reaches GitHub first.
     const after = String(fs.statSync(path.join(h.state, 'events.jsonl')).size);
     const automatic = child(t, h, ['wait', '--agent', 'orchestrator', '--after', after, '--task', id, '--types', 'merged', '--timeout', '300']);
-    await new Promise((resolve) => setTimeout(resolve, i % 2 ? 0 : (i % 10) * 20)); // wait-allow: stagger concurrent operations to exercise both race orderings
+    await new Promise((resolve) => setTimeout(resolve, round % 2 ? 0 : (round % 10) * 20)); // wait-allow: stagger concurrent operations to exercise both race orderings
     const manual = await h.runAsync(['merge', id]);
     assert.equal(manual.code, 0, `${id}: ${manual.stderr}`);
     const woke = await event(automatic, 'merged', id);
