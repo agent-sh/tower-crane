@@ -11,6 +11,18 @@ on:
     - cron: '17 3 * * *'
   workflow_dispatch:
     inputs:
+      tests:
+        description: 'Space-separated test/*.test.js file paths; runs only these files on the selected OS'
+        type: string
+        default: ''
+      os:
+        description: 'Runners for a focused tests dispatch'
+        type: choice
+        default: both
+        options:
+          - both
+          - ubuntu-latest
+          - windows-latest
       hang:
         description: 'Test only: block every shard runner so its watchdog dumps and stops it after 2 minutes'
         type: boolean
@@ -29,10 +41,11 @@ permissions:
 
 # GitHub keeps one running and one pending run per group; a newer run replaces the pending one.
 # Main pushes share one group: the newest pending head covers every earlier commit, and a running
-# main run is never cancelled. Tag, scheduled and manual runs keep unique groups so none is replaced.
+# main run is never cancelled. Tag and scheduled runs keep unique groups; a manual run replaces an older
+# manual run on its branch, with profile and hang runs in groups of their own so a routine dispatch never cancels them.
 concurrency:
-  group: ${{ github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || github.ref == 'refs/heads/main' && github.event_name == 'push' && 'ci-main-push' || format('ci-run-{0}', github.run_id) }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ${{ github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || github.ref == 'refs/heads/main' && github.event_name == 'push' && 'ci-main-push' || github.event_name == 'workflow_dispatch' && inputs.tests && format('ci-focused-{0}', github.run_id) || github.event_name == 'workflow_dispatch' && format('ci-dispatch-{0}{1}', github.ref, inputs.profile && '-profile' || inputs.hang && '-hang' || '') || format('ci-run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' }}
 
 jobs:
   # Tasks pass their tests gate (crucial and mapped suites) before submit, so same-repository PRs
@@ -56,8 +69,8 @@ jobs:
 
   test:
     name: test (${{ matrix.os }}, node ${{ matrix.node }}, shard ${{ matrix.shard }})
-    # A profile dispatch runs only the profile and mutation jobs.
-    if: "!inputs.profile && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository))"
+    # Focused and profile dispatches each run only their own jobs.
+    if: "!inputs.tests && !inputs.profile && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository))"
     runs-on: ${{ matrix.os }}
     # test/run.js splits shards by measured file time (test/durations.json). Three Windows shards
     # took 28 to 36 minutes, against test/run.js's 36-minute shard deadline, so Windows runs four.
@@ -136,12 +149,12 @@ jobs:
           path: ${{ runner.temp }}/coverage/tests-coverage-map.json
           if-no-files-found: error
 
-  # Joins the three shard maps into tests-coverage-map.json, which `tower-crane tests map refresh
+  # Joins the available shard maps into tests-coverage-map.json, which `tower-crane tests map refresh
   # --from-run RUN_ID` pins as tests.map after each daily run.
   coverage-map:
     name: coverage map
     needs: test
-    if: ${{ !cancelled() && !inputs.profile && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+    if: ${{ always() && !inputs.tests && !inputs.profile && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -157,7 +170,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh run download "$GITHUB_RUN_ID" -R "$GITHUB_REPOSITORY" -p 'coverage-map-shard-*' -D "$RUNNER_TEMP/coverage-shards"
-          node scripts/tests-coverage-map.js merge --expect 3 --out "$RUNNER_TEMP/tests-coverage-map.json" "$RUNNER_TEMP"/coverage-shards/*/tests-coverage-map.json
+          node scripts/tests-coverage-map.js merge --out "$RUNNER_TEMP/tests-coverage-map.json" "$RUNNER_TEMP"/coverage-shards/*/tests-coverage-map.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: tests-coverage-map
@@ -168,7 +181,7 @@ jobs:
   # an even, measured share of the suite.
   repeats:
     name: repeat (windows-latest, node 26)
-    if: "!inputs.profile && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository))"
+    if: "!inputs.tests && !inputs.profile && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository))"
     runs-on: windows-latest
     # About 60 to 75 minutes: ten passes of the authority files take about 16, twenty of state
     # compatibility about 15, twenty of the interrupt backoff and origin read tests about 8 and
@@ -188,6 +201,18 @@ jobs:
           foreach ($attempt in 1..20) {
             Write-Host "Claude Code mod wakeup: pass $attempt/20"
             npm test -- test/wakeups.test.js --test-name-pattern="the Claude Code mod pushes a decision answer and a worker message into the session"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+        env:
+          TOWER_CRANE_TEST_TMP: ${{ runner.temp }}/tower-crane-tests
+      # A hung pass ends at the step limit, which leaves the job its log.
+      - name: Repeat finite nested fork storm ten times
+        timeout-minutes: 15
+        shell: pwsh
+        run: |
+          foreach ($attempt in 1..10) {
+            Write-Host "Finite nested fork storm: pass $attempt/10"
+            npm test -- test/containment.test.js --test-name-pattern="finite nested fork storm"
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
         env:
@@ -259,7 +284,7 @@ jobs:
   gate-scratch:
     name: complete gate scratch cleanup proof
     # Same-repository PRs and main pushes skip the proofs; fork PRs, release tags, daily and manual runs keep them.
-    if: "!inputs.profile && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository))"
+    if: "!inputs.tests && !inputs.profile && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository))"
     runs-on: ubuntu-latest
     # A failing head reruns the representative set on the base: two proof runs and setup.
     # check:shared holds this to scripts/suite-time.js.
@@ -286,7 +311,7 @@ jobs:
   model-swap:
     name: complete model swap proof
     # Same-repository PRs and main pushes skip the proofs; fork PRs, release tags, daily and manual runs keep them.
-    if: "!inputs.profile && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository))"
+    if: "!inputs.tests && !inputs.profile && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository))"
     runs-on: ubuntu-latest
     # Leave setup time outside the probe's software-gate deadline; check:shared holds this to
     # scripts/suite-time.js.
@@ -319,7 +344,7 @@ jobs:
   # three file workers (test/run.js caps the request at one below the four cores).
   profile:
     name: suite profile against the baseline
-    if: github.event_name == 'workflow_dispatch' && inputs.profile
+    if: github.event_name == 'workflow_dispatch' && !inputs.tests && inputs.profile
     runs-on: ubuntu-latest
     timeout-minutes: 340
     steps:
@@ -348,7 +373,7 @@ jobs:
   # Dispatch only (inputs.profile): every planted bug in scripts/mutants.js against the tests named for it.
   mutants:
     name: mutation sample
-    if: github.event_name == 'workflow_dispatch' && inputs.profile
+    if: github.event_name == 'workflow_dispatch' && !inputs.tests && inputs.profile
     runs-on: ubuntu-latest
     timeout-minutes: 300
     steps:
@@ -369,4 +394,59 @@ jobs:
         with:
           name: mutation-sample
           path: ${{ runner.temp }}/mutants.log
+          if-no-files-found: warn
+
+  focused:
+    name: 'focused tests (${{ matrix.os }}: ${{ inputs.tests }})'
+    if: github.event_name == 'workflow_dispatch' && inputs.tests
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ inputs.os == 'ubuntu-latest' && fromJSON('["ubuntu-latest"]') || inputs.os == 'windows-latest' && fromJSON('["windows-latest"]') || fromJSON('["ubuntu-latest","windows-latest"]') }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 26
+      - name: Run named test files
+        shell: bash
+        timeout-minutes: 40
+        env:
+          FOCUSED_TESTS: ${{ inputs.tests }}
+          TOWER_CRANE_TEST_TMP: ${{ runner.temp }}/tower-crane-tests
+          TC_TEST_SHARD_LOG_DIR: ${{ runner.temp }}/shard-log
+          # A single bucket keeps every named file and enables the runner's per-file progress log.
+          TC_TEST_SHARD: '1/1'
+          TC_TEST_SHARD_DEADLINE_MIN: 36
+          TC_SHARD_GUARD_DEADLINE_MIN: 38
+          TC_SHARD_GUARD_MAX_PROCESSES: 1000
+          TC_SHARD_GUARD_MAX_MEMORY_MB: 12288
+        run: |
+          node <<'NODE'
+          const { spawnSync } = require('node:child_process');
+          // A name given twice runs once: exactly the named files.
+          const files = [...new Set((process.env.FOCUSED_TESTS || '').trim().split(/\s+/))];
+          if (files.some((file) => !/^test\/(?:[\w.-]+\/)*[\w.-]+\.test\.js$/.test(file)
+            || file.split('/').some((part) => part === '.' || part === '..'))) {
+            console.error('Each path must be a literal test/*.test.js file without traversal, globs or flags');
+            process.exit(1);
+          }
+          const args = ['test/run.js', '--test-concurrency=3', ...files];
+          const windows = process.platform === 'win32';
+          const result = spawnSync(windows ? 'pwsh' : process.execPath,
+            windows ? ['-NoProfile', '-File', 'scripts/shard-guard.ps1', 'node', ...args] : args,
+            { stdio: 'inherit' });
+          if (result.error) console.error(result.error);
+          process.exit(result.status ?? 1);
+          NODE
+      - name: Save focused progress
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: focused-progress-${{ matrix.os }}
+          path: ${{ runner.temp }}/shard-log
           if-no-files-found: warn

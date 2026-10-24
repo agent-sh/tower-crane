@@ -62,6 +62,7 @@ test('a merge sends another conflicting PR to rework with real filenames and pre
   const task = h.readState('tasks.json').tasks[1];
   assert.equal(task.status, 'rework');
   assert.match(task.notes.at(-1).text, /conflicts with main: value\.js/);
+  assert.equal(h.logs().findLast((e) => e.task === 'T2' && e.cmd === 'rework').detail.cause, 'conflict_base');
   assert.match(fs.readFileSync(path.join(h.state, 'briefs', 'T2.md'), 'utf8'), /value\.js/);
   assert.equal(h.git(['status', '--porcelain']), before);
   assert.equal(h.git(['rev-parse', 'HEAD']), other);
@@ -711,14 +712,76 @@ test('slow suites stop when their fixture is removed before they are released', 
   });
 });
 
-test('a killed executor releases its gate executor slot', (t) => {
+test('a killed executor releases its gate executor slot', async (t) => {
   const h = setup(t);
   const runs = slowSuite(h, { executors: 1, crash: true });
-  assert.notEqual(h.consume().code, 2, 'the suite kills the first executor');
-  h.consume();
-  assert.equal(runs().starts, 4, 'the killed run is retried and the other two run');
+  const preload = path.join(h.base, 'executor-creation.js');
+  fs.writeFileSync(preload, `const P = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'processes'))});
+const identity = P.identity;
+P.identity = (pid, options) => {
+  const record = identity(pid, options);
+  // Linux can exercise the receipt wiring while Windows uses its real creation time.
+  return process.platform !== 'win32' && pid === process.pid && options?.created
+    ? { ...record, created: 100 } : record;
+};
+`);
+  const consume = () => h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator'],
+    { pre: ['--require', preload] });
+  const killed = consume();
+  assert.notEqual(killed.code, 2, 'the suite kills the first executor');
+  const retried = await h.runAsync(['wait', '--after', '0', '--types', 'evidence', '--task', 'T3',
+    '--timeout', '300', '--agent', 'orchestrator'], { pre: ['--require', preload] });
+  assert.equal(retried.code, 0, JSON.stringify(retried));
+  assert.equal(runs().starts, 4, JSON.stringify({ killed, retried, events: h.logs() }));
+  const receipts = h.logs().filter((e) => ['automation', 'executor', 'gate run'].includes(e.cmd) && e.detail.phase === 'running');
+  assert.deepEqual(new Set(receipts.map((e) => e.cmd)), new Set(['automation', 'executor', 'gate run']));
+  for (const receipt of receipts) {
+    assert.ok(Number.isFinite(receipt.detail.created) || Number.isFinite(receipt.detail.seen), receipt.cmd);
+  }
   for (const task of h.readState('tasks.json').tasks) {
     assert.deepEqual(task.evidence.map((e) => e.type), ['tests', 'clean'], task.id);
+  }
+});
+
+test('Windows executor leases distinguish a reused PID from the recorded process', (t) => {
+  const A = require('../lib/automation');
+  const S = require('../lib/state');
+  const os = require('node:os');
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform');
+  const holderCreated = S.holderCreated;
+  for (const row of [
+    { name: 'same process', created: 100, observed: 100, count: 1 },
+    { name: 'reused PID', created: 100, observed: 200, count: 0 },
+    { name: 'creation time unavailable', created: 100, observed: null, count: 1 },
+    { name: 'process exits during the creation query', created: 100, observed: null, exits: true, count: 0 },
+    { name: 'legacy receipt without creation time', observed: 200, count: 1 },
+    { name: 'finished lease', created: 100, observed: 100, phase: 'done', count: 0 },
+    { name: 'lease on another host', created: 100, observed: 200, host: 'another-host', count: 0 },
+  ]) {
+    let leases;
+    try {
+      let gone = false;
+      t.mock.method(process, 'kill', (pid, signal) => {
+        assert.equal(pid, process.pid);
+        assert.equal(signal, 0);
+        if (gone) throw Object.assign(new Error('process exited'), { code: 'ESRCH' });
+      });
+      Object.defineProperty(process, 'platform', { ...platform, value: 'win32' });
+      S.holderCreated = (_pid, created) => {
+        gone = !!row.exits;
+        return row.observed === null ? null : row.observed === created;
+      };
+      leases = A.cpuLeases({ events: [{ cmd: 'executor', task: 'T1', detail: {
+        lease: 'killed-lease', phase: row.phase || 'running', pid: process.pid,
+        host: row.host || os.hostname(), ...(row.created === undefined ? {} : { created: row.created }),
+      } }] });
+    } finally {
+      t.mock.restoreAll();
+      Object.defineProperty(process, 'platform', platform);
+      if (holderCreated === undefined) delete S.holderCreated;
+      else S.holderCreated = holderCreated;
+    }
+    assert.equal(leases.length, row.count, row.name);
   }
 });
 
@@ -762,6 +825,39 @@ poll();
   h.ok(['submit', 'T3', '--sha', h.sha, '--agent', 'worker']);
   h.run(['wait', '--after', String(offset), '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
   assert.deepEqual(executorStarts(h), ['T1', 'T1', 'T2', 'T3'], 'queued T1 and T2 run before the newer T3');
+  for (const task of h.readState('tasks.json').tasks) {
+    assert.deepEqual(task.evidence.map((e) => [e.type, e.ok]), [['tests', true], ['clean', true]], task.id);
+  }
+});
+
+// A watcher's drain that reaches a task while that task's own reaction runs
+// queues the source with no executor. The reaction then finds every executor
+// busy, and the queue must still record the executor it waits for: watchers
+// that raced this way left no such record (T565).
+test('a source queued behind its own reaction still records the executor it then waits for', async (t) => {
+  const h = setup(t);
+  const { stalled, release } = holdSuite(h);
+  h.ok(['task', 'add', '--title', 'Change T2', '--acceptance', 'it works', '--kind', 'code']);
+  h.ok(['claim', 'T1', '--agent', 'worker']);
+  h.ok(['submit', 'T1', '--sha', h.sha, '--agent', 'worker']);
+  const holder = h.runAsync(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
+  try {
+    await waitFor(stalled, { what: 'the first executor starts' });
+    h.ok(['claim', 'T2', '--agent', 'worker']);
+    h.ok(['submit', 'T2', '--sha', h.sha, '--agent', 'worker']);
+    const source = h.logs().findLast((e) => e.cmd === 'submit' && e.task === 'T2').id;
+    fs.appendFileSync(path.join(h.state, 'events.jsonl'), JSON.stringify({
+      at: new Date().toISOString(), agent: 'orchestrator', cmd: 'automation queued', task: 'T2', detail: { source },
+    }) + '\n');
+    h.consume();
+    assert.equal(h.logs().findLast((e) => e.cmd === 'automation' && e.task === 'T2').detail.phase, 'executor');
+    assert.deepEqual(h.logs().filter((e) => e.cmd === 'automation queued' && e.task === 'T2').map((e) => e.detail),
+      [{ source }, { source, executors: 1 }]);
+  } finally {
+    fs.writeFileSync(release, '');
+    await holder;
+  }
+  assert.deepEqual(executorStarts(h), ['T1', 'T2'], 'the queued reaction takes the freed executor');
   for (const task of h.readState('tasks.json').tasks) {
     assert.deepEqual(task.evidence.map((e) => [e.type, e.ok]), [['tests', true], ['clean', true]], task.id);
   }
@@ -813,6 +909,8 @@ test('a head check ranks by the accepted task it checks, not by the reaction tha
   const waiter = receipt(submit, { phase: 'executor', kind: 'tests' });
   const running = receipt(merge, { phase: 'running', pid: process.pid, ...P.identity(process.pid) });
   const mergeWaiter = receipt(merge, { phase: 'executor', kind: 'head check', merge: 'T4' });
+  const suiteDeferred = receipt(merge, { phase: 'deferred', error: 'T4: merge-queue suite deferred by the host governor: memory',
+    governor: { task: 'T4', kind: 'suite', reason: 'memory', until: Date.now() - 1, since: at, at } });
   for (const [name, t4, events, check] of [
     ['the line running under the merged task asks for a slot', 'accepted', [running],
       (st, name) => {
@@ -825,6 +923,11 @@ test('a head check ranks by the accepted task it checks, not by the reaction tha
         assert.equal(A.outranked(st, merge), null, `${name}: the waiting head check is behind nothing`);
         assert.equal(A.outranked(st, later)?.task, 'T3', `${name}: a newer arrival waits behind the head check`);
         assert.deepEqual(A.gateQueue(st).queued.map((q) => q.id), ['T3', 'T2'], `${name}: the drain takes the head check first`);
+      }],
+    ['the governor deferred the suite of the line under the merged task', 'accepted', [suiteDeferred],
+      (st, name) => {
+        assert.equal(A.outranked(st, submit), null, `${name}: a governor deferral holds no executor turn`);
+        assert.deepEqual(A.gateQueue(st).queued.map((q) => q.id), ['T3', 'T2'], `${name}: the drain retries the head check first`);
       }],
     ['the task the line waited for went back to rework', 'rework', [mergeWaiter],
       (st, name) => assert.equal(A.outranked(st, merge)?.task, 'T2', `${name}: the waiter keeps the turn of its own event`)],
@@ -890,6 +993,66 @@ test('status names what each merge waits behind', (t) => {
   }
   assert.equal(A.describeMergeWaits([{ id: 'T4', since: at(2), behind: 'T5 ahead in the merge line' }]),
     `T4 since ${at(2)}, behind T5 ahead in the merge line`);
+});
+
+test('status lists each stacked merge wait with its own acceptance and its stack blocker', (t) => {
+  const A = require('../lib/automation');
+  const T = require('../lib/tasks');
+  const P = require('../lib/processes');
+  const sha = 'a'.repeat(40);
+  const at = (minute) => new Date(Date.UTC(2026, 9, 23, 8, minute)).toISOString();
+  const self = { pid: process.pid, ...P.identity(process.pid) };
+  const task = (id, pr, stack, status = 'accepted') => ({ id, status, sha, revision: 1, pr, evidence: [], ...(stack ? { stack } : {}) });
+  const accept = (id, minute) => ({ id: `accept-${id}`, task: id, cmd: 'accept', at: at(minute), detail: { sha, revision: 1 } });
+  const lease = (id, kind) => ({ cmd: 'executor', task: id, at: at(40), detail: { lease: `cpu:${id}`, phase: 'running', kind, ...self } });
+  const linked = { parent: 'T1', linked: true };
+  let failing = new Set();
+  t.mock.method(T, 'gateReport', (x) => ({ ok: !failing.has(x.id), gates: [], missing: failing.has(x.id) ? ['ci failed'] : [] }));
+  for (const [name, tasks, events, fails, want] of [
+    ['a linked stack whose bottom is blocked', [task('T1', 7), task('T2', 8, linked)], [], ['T1'],
+      [['T2', 'T1 merge blocked: ci failed']]],
+    ['a linked stack whose top is blocked', [task('T1', 7), task('T2', 8, linked)], [], ['T2'],
+      [['T1', 'T2 merge blocked: ci failed']]],
+    ['a linked stack that waits', [task('T1', 7), task('T2', 8, linked)], [], [],
+      [['T1', 'the next merge queue pass'], ['T2', 'the next merge queue pass']]],
+    ['a later entry behind a blocked stack', [task('T1', 7), task('T2', 8, linked), task('T5', 9)], [accept('T5', 35)], ['T1'],
+      [['T2', 'T1 merge blocked: ci failed'], ['T5', 'the next merge queue pass']]],
+    ['a later entry behind a waiting stack', [task('T1', 7), task('T2', 8, linked), task('T5', 9)], [accept('T5', 35)], [],
+      [['T1', 'the next merge queue pass'], ['T2', 'the next merge queue pass'], ['T5', 'T2 ahead in the merge line']]],
+    ['an unlinked task on an accepted task', [task('T1', 7), task('T2', 8, { parent: 'T1' })], [], [],
+      [['T1', 'the next merge queue pass'], ['T2', 'T1 under it in its stack']]],
+    ['a linked task on a task in review', [task('T1', 7, null, 'submitted'), task('T2', 8, linked)], [], [],
+      [['T2', 'T1 under it in its stack']]],
+    ['a stack whose head check runs', [task('T1', 7), task('T2', 8, linked)], [lease('T2', 'head check')], [], []],
+  ]) {
+    failing = new Set(fails);
+    const log = [...(tasks[0].status === 'accepted' ? [accept('T1', 1)] : []), accept('T2', 30), ...events];
+    const waits = A.mergeWaits({ project: {}, tasks: { tasks }, events: log });
+    assert.deepEqual(waits.map((w) => [w.id, w.behind]), want, name);
+    for (const w of waits) assert.equal(w.since, log.find((e) => e.cmd === 'accept' && e.task === w.id).at, `${name}: ${w.id} waits since its acceptance`);
+  }
+});
+
+test('pending CI at an accepted head is a merge blocker, not a merge wait', () => {
+  const A = require('../lib/automation');
+  const sha = 'a'.repeat(40);
+  const at = new Date(Date.UTC(2026, 9, 23, 8, 2)).toISOString();
+  const review = { type: 'review', source: 'review', agent: 'owner', sha, revision: 1, ok: true };
+  const gate = { type: 'ci', source: 'check ci', commands: [], sha, revision: 1 };
+  for (const [name, ci, blocked] of [
+    ['pending', { ok: false, pending: true, summary: 'CI not green: running' }, /^ci: latest ci at aaaaaaa pending: CI not green: running$/],
+    ['stalled', { ok: false, pending: true, stalled: true, summary: 'CI stalled' }, /^ci: latest ci at aaaaaaa stalled: CI stalled$/],
+  ]) {
+    const entry = { ...gate, agent: 'orchestrator', ...ci };
+    const task = { id: 'T4', status: 'accepted', kind: 'docs', size: 'S', tier: 'easy', sha, revision: 1, pr: 7, evidence: [review, entry] };
+    const events = [{ id: 'accept-T4', task: 'T4', cmd: 'accept', at, detail: { sha, revision: 1 } },
+      { task: 'T4', cmd: 'check ci', agent: 'orchestrator', at, detail: { ...gate, ...ci } }];
+    const st = { project: {}, tasks: { tasks: [task] }, events };
+    const blockers = A.mergeBlockers(st);
+    assert.deepEqual(blockers.map((b) => b.id), ['T4'], name);
+    assert.match(blockers[0].reason, blocked, name);
+    assert.deepEqual(A.mergeWaits(st, blockers), [], name);
+  }
 });
 
 test('accepted merges take the next executor in acceptance order before queued submitted gates', async (t) => {
