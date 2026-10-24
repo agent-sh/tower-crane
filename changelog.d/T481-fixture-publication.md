@@ -1,0 +1,1 @@
+- Tooling and coverage-map fixtures publish reports, clocks and artifacts atomically. GitHub fixture call logs use a locked JSON update to preserve concurrent calls.
