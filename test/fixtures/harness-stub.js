@@ -100,6 +100,12 @@ module.exports = function stub(harness) {
     report.ownTmpdir = process.env.CLAUDE_CODE_TMPDIR || null;
     // Names only: what claude would hand its commands, before its sandbox.
     report.envNames = Object.keys(process.env).sort();
+    report.claudeRoute = {
+      nonceUrl: /^http:\/\/127\.0\.0\.1:\d+\/[\w-]+$/.test(process.env.ANTHROPIC_BASE_URL || ''),
+      authPlaceholder: process.env.ANTHROPIC_AUTH_TOKEN === 'tower-crane-placeholder',
+      bedrock: process.env.CLAUDE_CODE_USE_BEDROCK,
+      model: process.env.ANTHROPIC_MODEL,
+    };
     report.flagSettings = after('--settings') ? JSON.parse(after('--settings')) : null;
     if (!args.includes('--strict-mcp-config')) Object.assign(report.mcp, json(global).mcpServers || {});
     if (after('--mcp-config')) Object.assign(report.mcp, json(after('--mcp-config')).mcpServers || {});
