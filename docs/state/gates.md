@@ -260,7 +260,8 @@ order a free executor takes them, then the tasks whose notification waits
 behind their own running reaction, marked as blocked. It lists apart the tasks
 that hold no executor while they wait: `waiting on GitHub checks: TASKS` for
 pending, unstalled CI at the head and revision, and `waiting on review: TASKS`
-for submitted tasks whose software gates pass and whose review is missing.
+for submitted tasks whose review is missing and whose software gates pass,
+leaving out a tests gate that waits for the review ([Gate order](#gate-order)).
 `--json` carries these as `gate_executors: {cap, in_use: [{task, kind}]}` and
 `waiting_on: {github, review}`. `--json` carries it as `gate_queue` with
 `running`, `queued`, `blocked` and `deferred`, each queued, blocked or deferred task with its
