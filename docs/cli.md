@@ -91,9 +91,9 @@ Lock attempts use private staging directories named with the process pid and a f
 | | |
 | `plan import FILE` | add tasks from a JSON array of task objects (ids may be local names, resolved in order; `-` reads stdin). Fields: `id`, `title`, `acceptance`, `kind`, `needs`, `size`, `tier`, `depends_on`, `needs_owner`, `locks`, `environment`; `needs_owner` is trimmed and blank values store null. A dependency names an earlier entry or an existing task. Any bad entry refuses the whole file |
 | | |
-| `project set [--name N] [--goal G] [--repo O/R] [--base B] [--workers N] [--lease-minutes MIN] [--owners N] [--owner-idle-minutes MIN] [--tasks-max N] [--memory-max-bytes N] [--paused REASON] [--budget-hours H\|null] [--budget-tokens N\|null] [--standards S] [--tests-cmd CMD] [--clean-cmd CMD] [--clean-paths JSON] [--tests-proof-cmd CMD] [--executors N] [--tests-timeout-min MIN] [--clean-timeout-min MIN] [--host-probe-timeout-min MIN] [--tmp-root DIR] [--rework-hold-min MIN] [--final-review JSON] [--gates-cpu-weight N] [--agents-cpu-weight N] [--tests-paths JSON] [--tests-keep JSON] [--tests-host-only JSON] [--tests-host-env JSON] [--tests-mode MODE] [--tests-by-kind JSON] [--tests-expensive JSON] [--tests-map JSON] [--tests-crucial JSON] [--ci-ignore-apps JSON] [--ci-required JSON] [--ci-capped-review JSON] [--ci-local JSON] [--ci-overlap JSON] [--ci-dispatch JSON] [--merge-keep-branch JSON] [--merge-admin JSON] [--publish-policy JSON] [--review-policy JSON] [--governor JSON] [--research-min-sources N] [--archive-retention-days DAYS] [--sandbox JSON] [--env JSON] [--env_file FILE] [--scope JSON] [--session-bus JSON] [--broker-verbs JSON]` | change settings, limits and budget; `--budget-hours null` and `--budget-tokens null` remove a limit through the owner-required budget-raise path |
+| `project set [--name N] [--goal G] [--repo O/R] [--base B] [--workers N] [--lease-minutes MIN] [--owners N] [--owner-idle-minutes MIN] [--tasks-max N] [--memory-max-bytes N] [--paused REASON] [--budget-hours H\|null] [--budget-tokens N\|null] [--standards S] [--tests-cmd CMD] [--clean-cmd CMD] [--clean-paths JSON] [--tests-proof-cmd CMD] [--executors N] [--tests-timeout-min MIN] [--clean-timeout-min MIN] [--host-probe-timeout-min MIN] [--tmp-root DIR] [--rework-hold-min MIN] [--final-review JSON] [--presubmit JSON] [--gates-cpu-weight N] [--agents-cpu-weight N] [--tests-paths JSON] [--tests-keep JSON] [--tests-host-only JSON] [--tests-host-env JSON] [--tests-mode MODE] [--tests-by-kind JSON] [--tests-expensive JSON] [--tests-map JSON] [--tests-crucial JSON] [--ci-ignore-apps JSON] [--ci-required JSON] [--ci-capped-review JSON] [--ci-local JSON] [--ci-overlap JSON] [--ci-dispatch JSON] [--merge-keep-branch JSON] [--merge-admin JSON] [--publish-policy JSON] [--review-policy JSON] [--governor JSON] [--research-min-sources N] [--archive-retention-days DAYS] [--sandbox JSON] [--env JSON] [--env_file FILE] [--scope JSON] [--session-bus JSON] [--broker-verbs JSON]` | change settings, limits and budget; `--budget-hours null` and `--budget-tokens null` remove a limit through the owner-required budget-raise path |
 | | |
-| `project show` | print settings, including resolved agent, reviewer, orchestrator and gate `resources.tasks_max` and `resources.memory_max_bytes`, `gates.tests_cmd`, `gates.clean_cmd`, `gates.clean_paths`, `gates.tests_proof_cmd`, `gates.executors`, `gates.tests_timeout_min`, `gates.clean_timeout_min`, `gates.host_probe_timeout_min`, `gates.tmp_root`, `gates.rework_hold_min`, `gates.final_review`, `gates.cpu_weight`, `agents.cpu_weight`, `tests.paths`, `tests.keep`, `tests.host_only`, `tests.host_env`, `tests.mode`, `tests.by_kind`, `tests.expensive`, `tests.map`, `tests.crucial`, `ci.ignore_apps`, `ci.required`, `ci.local`, `ci.overlap`, `ci.dispatch`, `merge.keep_branch`, `merge.admin`, `decision_delegation.orchestrator_technical`, `decision_delegation.orchestrator_escalated_questions`, `research.min_sources`, `archive.retention_days` and `governor`, one line per broker verb with its argv, pinned source and timeout, and the resolved ladder |
+| `project show` | print settings, including resolved agent, reviewer, orchestrator and gate `resources.tasks_max` and `resources.memory_max_bytes`, `gates.tests_cmd`, `gates.clean_cmd`, `gates.clean_paths`, `gates.tests_proof_cmd`, `gates.executors`, `gates.tests_timeout_min`, `gates.clean_timeout_min`, `gates.host_probe_timeout_min`, `gates.tmp_root`, `gates.rework_hold_min`, `gates.final_review`, `gates.presubmit`, `gates.cpu_weight`, `agents.cpu_weight`, `tests.paths`, `tests.keep`, `tests.host_only`, `tests.host_env`, `tests.mode`, `tests.by_kind`, `tests.expensive`, `tests.map`, `tests.crucial`, `ci.ignore_apps`, `ci.required`, `ci.local`, `ci.overlap`, `ci.dispatch`, `merge.keep_branch`, `merge.admin`, `decision_delegation.orchestrator_technical`, `decision_delegation.orchestrator_escalated_questions`, `research.min_sources`, `archive.retention_days` and `governor`, one line per broker verb with its argv, pinned source and timeout, and the resolved ladder |
 | | |
 | `task add --title T --acceptance A [--acceptance A2] [--kind K] [--needs JSON] [--size S] [--tier T] [--dep ID] [--lock NAME]... [--environment LABEL] [--needs-owner REASON] [--brief FILE]` | add a task; prints its id. `--brief FILE` writes the brief in the same command, so the task needs no `brief set` before spawn. A `needs_owner` reason is trimmed; a blank value stores null. `T` is `easy`, `medium`, `hard`, `research` or an ascending range such as `easy..medium`; without it the tier comes from kind and size (state.md). `--needs '["browser"]'` declares browser capability. Refused for an unknown dependency or capability. Repeat `--lock` for exclusive resources |
 | | |
@@ -472,6 +472,10 @@ Before constructing an agent home, spawn also sweeps orphan `brokers/<agent>/` d
 | | |
 | `owner-key` | the owner, explicitly and at a terminal or with the current key, creates the key under the project's recorded `owner_config_dir` and prints `created PATH` or `exists PATH`; never prints the key. An unbound project requires a terminal owner to record the directory first. `TOWER_CRANE_OWNER_KEY` with its contents stands in for a terminal ([Agent identity](state.md#agent-identity)) |
 | | |
+| `presubmit override ID --reason R` | record an override of the last presubmit refusal, with a reason, for one successful submit at that SHA, task revision and command configuration. The worker submits under its own identity; the orchestrator never runs the hook on the host. A new head, command, revision or successful submission retires the override |
+| | |
+| `presubmit retry ID --reason R` | clear the current presubmit escalation and reset the identical-failure count, with a recorded reason. The next submit runs the hook again in the worker sandbox; this grants no new tools or credentials |
+| | |
 | `ready [--all]` | ready tasks in priority order (urgent first, then the ones that unblock the most work, then task id), excluding tasks whose locks another task holds, plus claims whose spawned process exited without submit and their log tails; `--all` lists blocked ones with the reason. Ready JSON includes `priority`, `locks` and `environment` |
 | | |
 | `recover ID` | ranged quality recovery: climb after a failed latest review or confirmed tests, clean or CI gate failure; dispatch fresh, retry a pending climb, or open an owner decision at the range top; wait for verified worker process-group cleanup before dispatch |
@@ -484,7 +488,7 @@ Before constructing an agent home, spawn also sweeps orphan `brokers/<agent>/` d
 | | |
 | `spend ID [--minutes N] [--tokens N] [--input N] [--cached N] [--cache-write N] [--output N] [--rung R] [--harness H] [--model M] [--from-spawn AGENT]` | add spend, with optional native-agent usage breakdown and metadata; rung defaults the harness, model and profile from the current ladder. Model IDs are trimmed and case-folded; provider prefixes remain distinct. Collect an exited spawn's captured usage once per route and fresh retry invocation; resumed retries share their session's cumulative usage. Retry a failed monitor or enrich an unknown/partial entry when telemetry arrives. Refuses a live process or an unknown spawn; cannot be mixed with manual spend |
 | | |
-| `submit ID --sha S [--branch B] [--pr N] [--summary T] [--precheck R] [--host-probe CMD]` | mark submitted as the claimant or replace a submitted head as its submitter. `S` is 7 to 64 hex characters. Repeat `--host-probe CMD` for measurements or kernel checks the sandbox cannot run. Each submission replaces `host_probes` (omitting it clears them); changing the list at the same commit advances the revision, invalidating old gate leases and verdicts, including failures. Commands run from the scratch worktree root at `S`, with no input, gate resource caps, `tests.host_env`, and `gates.host_probe_timeout_min` (default 10 minutes each). Normal nonzero exits and timeouts fail the tests gate and return output through rework. Signal and resource-cap interruptions get one automation retry before rework. A wait-shutdown interruption is a void: it reruns without using that retry and never reworks. Declare pending host results in the PR body and leave cleanup to the clean gate. For a task with a recorded PR (`--pr`, or the one already recorded), the PR's checks at `S` are read: a failing check refuses with the failing jobs and the first failing lines of their logs and points to `ci checks ID` for check output, annotations and current code-scanning alerts. Checks still running do not refuse: the head is recorded, the output names them, a task note records them, and `check ci` waits for them on the host; a failure there returns as rework with the same job names and log lines. Revuto's open inline findings are printed either way; a `[P1]`/`[P2]` finding already on the PR with no change at its path since the comment and no `[resolved]` reply refuses, as review ok would, and submit does not wait for findings still to come. Capped reviews (`ci.capped_review`) do not block. Where the agent's gh policy refuses `gh api`, submit prints that the head was not checked and goes ahead. Local CI (`ci.local`) and a project without a repo skip the check. For a task with a recorded PR, an open PR blocks changing its PR number or head branch. After it is closed or merged, a new PR supplies its head branch unless `--branch` is given and matches it. `--precheck` records the submitter's own review result at this head on the `submit` event; it never refuses or gates the submission. A submitter whose worker spawn is live takes ownership of the PR while fewer than `limits.owners` other owners wait (`own: true` on the event), and waits on the task with `wait --own`; past the limit the output tells it to exit. A head whose commits add an empty file named like a claude sandbox placeholder (`.bashrc`, `.claude/settings.json` and the other protected names it binds over) refuses; a real file by that name needs content |
+| `submit ID --sha S [--branch B] [--pr N] [--summary T] [--precheck R] [--host-probe CMD]` | mark submitted as the claimant or replace a submitted head as its submitter. When `gates.presubmit` is set, run its argv in the worker worktree and environment before recording the head; nonzero exit, timeout or a missing command refuses with bounded redacted output and a refusal event. Three equivalent consecutive failures, ignoring known reporter timing fields, or a missing or inaccessible hook executable, pause retries and open an orchestrator inbox item; `presubmit retry` resumes and `presubmit override` records a reason to bypass once. A pass records the command and duration on the submit event. `S` is 7 to 64 hex characters. Repeat `--host-probe CMD` for measurements or kernel checks the sandbox cannot run. Each submission replaces `host_probes` (omitting it clears them); changing the list at the same commit advances the revision, invalidating old gate leases and verdicts, including failures. Commands run from the scratch worktree root at `S`, with no input, gate resource caps, `tests.host_env`, and `gates.host_probe_timeout_min` (default 10 minutes each). Normal nonzero exits and timeouts fail the tests gate and return output through rework. Signal and resource-cap interruptions get one automation retry before rework. A wait-shutdown interruption is a void: it reruns without using that retry and never reworks. Declare pending host results in the PR body and leave cleanup to the clean gate. For a task with a recorded PR (`--pr`, or the one already recorded), the PR's checks at `S` are read: a failing check refuses with the failing jobs and the first failing lines of their logs and points to `ci checks ID` for check output, annotations and current code-scanning alerts. Checks still running do not refuse: the head is recorded, the output names them, a task note records them, and `check ci` waits for them on the host; a failure there returns as rework with the same job names and log lines. Revuto's open inline findings are printed either way; a `[P1]`/`[P2]` finding already on the PR with no change at its path since the comment and no `[resolved]` reply refuses, as review ok would, and submit does not wait for findings still to come. Capped reviews (`ci.capped_review`) do not block. Where the agent's gh policy refuses `gh api`, submit prints that the head was not checked and goes ahead. Local CI (`ci.local`) and a project without a repo skip the check. For a task with a recorded PR, an open PR blocks changing its PR number or head branch. After it is closed or merged, a new PR supplies its head branch unless `--branch` is given and matches it. `--precheck` records the submitter's own review result at this head on the `submit` event; it never refuses or gates the submission. A submitter whose worker spawn is live takes ownership of the PR while fewer than `limits.owners` other owners wait (`own: true` on the event), and waits on the task with `wait --own`; past the limit the output tells it to exit. A head whose commits add an empty file named like a claude sandbox placeholder (`.bashrc`, `.claude/settings.json` and the other protected names it binds over) refuses; a real file by that name needs content |
 | | |
 | `verb NAME [--param KEY=VALUE]... [--task ID]` | run broker verb `NAME` from `broker.verbs` for a task whose `broker_verbs` grants it, as the task's claimant (or the orchestrator or owner). A sandboxed worker's call goes through its state broker, which runs it on the host. Every declared parameter is required, matches its type and whole-value pattern, and is substituted into its own argv element; there is no shell. The program runs in the pinned source: the copy of the approved base branch commit in the state directory, whose files are checked against their recorded SHA-256 first, or the owner's `source.path`. It runs in a contained scope with the verb's `resources` (default: the gate caps) and `timeout_sec`, with `{out}` and `TOWER_CRANE_VERB_OUT` naming a directory no sandbox writes. Each declared output it wrote is copied to the task scratch as `verb-NAME-STAMP-OUTPUT` with an exclusive create. Prints the verb's stdout, then its exit and each output's path and SHA-256; stderr goes to stderr. Exits with the verb's exit code, or 1 for a timeout, signal or cap. Every run appends `verb` evidence: params, exit code, signal, timeout, resource cap, duration, output digests and the pinned source ([Broker verbs](state.md#broker-verbs)) |
 | | |
@@ -874,6 +878,12 @@ Submitting ends lease renewal and retries; live usage collection and budget enfo
 A budget stop keeps a ranged task on its current rung and opens a `kind: "spend"` question about the budget. The spend kind keeps that question with the owner under escalation delegation unless the owner lifts it; the orchestrator cannot answer or withdraw another agent's unlifted spend question. Answering the question still grants no budget change. Legacy alerts without a kind keep that spend restriction when their `budget.raise` escalation has a budget breach payload (`scope`, hours/tokens `what`, finite non-negative numeric `limit`); they remain visible to the owner and are not answerable or withdrawable by the orchestrator unless the owner explicitly lifts them. Live and final spend use configured model prices in the task's per-rung cost breakdown.
 
 `supervision.usage_ms` defaults to 30000 ms and is clamped to a minimum of 1000 ms at runtime. State-file notifications cannot shorten that interval. Unchanged readings write no usage event and retain their age. Each completed attempt is also sampled before a retry or fallback, and the launch checks its budget under the state lock. An initial read failure appears as unavailable telemetry with an error class, without the message or session path.
+
+### Presubmit commands
+
+The orchestrator or owner can pin a quick check with `project set --presubmit '["node","scripts/check-shared-files.js"]'`, or include a timeout with `--presubmit '{"command":["node","scripts/check-shared-files.js"],"timeout_sec":10}'`. `null` clears it. Argv runs directly, so spaces and shell metacharacters are literal. The default timeout is 10 seconds, bounded to at most 60. The check runs in the worker's existing sandbox and environment at the submitted worktree HEAD. Tracked changes and non-ignored untracked files refuse before and after execution. Failure refuses submit, records bounded redacted diagnostics and keeps the same attempt and claim.
+
+Three equivalent failures, comparing redacted output without known runner timing fields, or an executable launch failure for a missing or inaccessible hook, open `presubmit_failed` in the orchestrator inbox and pause further hook runs. Compiler locations and import/file/permission messages printed by a running command stay on the local retry path because changed code may have caused them. Stop retrying. The orchestrator or owner can record `presubmit retry ID --reason R` after fixing the cause, or `presubmit override ID --reason R` to bypass once at that exact head and configuration. See [Presubmit](../docs/state/storage.md#presubmit) for receipt and escalation details.
 
 ## Decisions
 
@@ -1481,6 +1491,8 @@ Run:
   orchestrator takeover owner-only clear the orchestrator lease for a new session
   owner-done       the owner did what needs_owner asked; clears it
   owner-key        owner only: create the owner key that stands in for a terminal; prints its path, never the key
+  presubmit override orchestrator or owner: bypass the current presubmit refusal once at its head
+  presubmit retry  orchestrator or owner: resume a paused presubmit hook after fixing its cause
   ready            ready tasks, urgent first then those that unblock the most; --all adds blocked ones with the reason
   recover          recover a ranged task after quality failure; climb or ask the owner at the top
   release          give a claimed task back; it returns to todo or rework
@@ -1681,6 +1693,18 @@ usage: tower-crane orchestrator <subcommand> ...
 usage: tower-crane plan <subcommand> ...
 
   plan import      add tasks from a JSON array (ids may be local names, resolved in order; - reads stdin)
+```
+
+</details>
+
+<details>
+<summary>tower-crane presubmit --help</summary>
+
+```text
+usage: tower-crane presubmit <subcommand> ...
+
+  presubmit override orchestrator or owner: bypass the current presubmit refusal once at its head
+  presubmit retry  orchestrator or owner: resume a paused presubmit hook after fixing its cause
 ```
 
 </details>
@@ -2515,6 +2539,7 @@ usage: tower-crane init --name N --goal G [--repo O/R] [--base B] [settings]
 create the state directory and project.json with the default ladder
 
 options:
+  --presubmit JSON         operational (orchestrator or owner): argv or {command: argv, timeout_sec}; default 10 seconds, maximum 60; null clears
   --sandbox JSON           owner-required: {write: extra writable paths, read: extra readable paths under the home}; project set accepts null to clear
   --env JSON               owner-required: extra environment variables; use env_file for secrets; project set accepts null to clear
   --env_file FILE          owner-required: systemd-quoted env file read only at spawn; project set accepts null to clear
@@ -2862,14 +2887,55 @@ global options:
 </details>
 
 <details>
+<summary>tower-crane presubmit override --help</summary>
+
+```text
+usage: tower-crane presubmit override ID --reason R
+
+orchestrator or owner: bypass the current presubmit refusal once at its head
+
+options:
+  --reason R               why this refusal may be bypassed
+
+global options:
+  --state DIR              state directory (default: TOWER_CRANE_STATE, then .tower-crane/ in the main checkout)
+  --agent NAME             who is acting (default: TOWER_CRANE_AGENT; task processes cannot use owner; fallback needs an interactive terminal outside a task)
+  --json                   machine output on stdout
+  --help                   show help
+```
+
+</details>
+
+<details>
+<summary>tower-crane presubmit retry --help</summary>
+
+```text
+usage: tower-crane presubmit retry ID --reason R
+
+orchestrator or owner: resume a paused presubmit hook after fixing its cause
+
+options:
+  --reason R               what changed to make another attempt useful
+
+global options:
+  --state DIR              state directory (default: TOWER_CRANE_STATE, then .tower-crane/ in the main checkout)
+  --agent NAME             who is acting (default: TOWER_CRANE_AGENT; task processes cannot use owner; fallback needs an interactive terminal outside a task)
+  --json                   machine output on stdout
+  --help                   show help
+```
+
+</details>
+
+<details>
 <summary>tower-crane project set --help</summary>
 
 ```text
-usage: tower-crane project set [--name N] [--goal G] [--repo O/R] [--base B] [--workers N] [--lease-minutes MIN] [--owners N] [--owner-idle-minutes MIN] [--tasks-max N] [--memory-max-bytes N] [--paused REASON] [--budget-hours H|null] [--budget-tokens N|null] [--standards S] [--tests-cmd CMD] [--clean-cmd CMD] [--clean-paths JSON] [--tests-proof-cmd CMD] [--executors N] [--tests-timeout-min MIN] [--clean-timeout-min MIN] [--host-probe-timeout-min MIN] [--tmp-root DIR] [--rework-hold-min MIN] [--final-review JSON] [--gates-cpu-weight N] [--agents-cpu-weight N] [--tests-paths JSON] [--tests-keep JSON] [--tests-host-only JSON] [--tests-host-env JSON] [--tests-mode MODE] [--tests-by-kind JSON] [--tests-expensive JSON] [--tests-map JSON] [--tests-crucial JSON] [--ci-ignore-apps JSON] [--ci-required JSON] [--ci-capped-review JSON] [--ci-local JSON] [--ci-overlap JSON] [--ci-dispatch JSON] [--merge-keep-branch JSON] [--merge-admin JSON] [--publish-policy JSON] [--review-policy JSON] [--governor JSON] [--research-min-sources N] [--archive-retention-days DAYS] [--sandbox JSON] [--env JSON] [--env_file FILE] [--scope JSON] [--session-bus JSON] [--broker-verbs JSON]
+usage: tower-crane project set [--name N] [--goal G] [--repo O/R] [--base B] [--workers N] [--lease-minutes MIN] [--owners N] [--owner-idle-minutes MIN] [--tasks-max N] [--memory-max-bytes N] [--paused REASON] [--budget-hours H|null] [--budget-tokens N|null] [--standards S] [--tests-cmd CMD] [--clean-cmd CMD] [--clean-paths JSON] [--tests-proof-cmd CMD] [--executors N] [--tests-timeout-min MIN] [--clean-timeout-min MIN] [--host-probe-timeout-min MIN] [--tmp-root DIR] [--rework-hold-min MIN] [--final-review JSON] [--presubmit JSON] [--gates-cpu-weight N] [--agents-cpu-weight N] [--tests-paths JSON] [--tests-keep JSON] [--tests-host-only JSON] [--tests-host-env JSON] [--tests-mode MODE] [--tests-by-kind JSON] [--tests-expensive JSON] [--tests-map JSON] [--tests-crucial JSON] [--ci-ignore-apps JSON] [--ci-required JSON] [--ci-capped-review JSON] [--ci-local JSON] [--ci-overlap JSON] [--ci-dispatch JSON] [--merge-keep-branch JSON] [--merge-admin JSON] [--publish-policy JSON] [--review-policy JSON] [--governor JSON] [--research-min-sources N] [--archive-retention-days DAYS] [--sandbox JSON] [--env JSON] [--env_file FILE] [--scope JSON] [--session-bus JSON] [--broker-verbs JSON]
 
 change project settings, limits and budget
 
 options:
+  --presubmit JSON         operational (orchestrator or owner): argv or {command: argv, timeout_sec}; default 10 seconds, maximum 60; null clears
   --sandbox JSON           owner-required: {write: extra writable paths, read: extra readable paths under the home}; project set accepts null to clear
   --env JSON               owner-required: extra environment variables; use env_file for secrets; project set accepts null to clear
   --env_file FILE          owner-required: systemd-quoted env file read only at spawn; project set accepts null to clear

@@ -760,6 +760,12 @@ A budget stop keeps a ranged task on its current rung and opens a `kind: "spend"
 
 `supervision.usage_ms` defaults to 30000 ms and is clamped to a minimum of 1000 ms at runtime. State-file notifications cannot shorten that interval. Unchanged readings write no usage event and retain their age. Each completed attempt is also sampled before a retry or fallback, and the launch checks its budget under the state lock. An initial read failure appears as unavailable telemetry with an error class, without the message or session path.
 
+### Presubmit commands
+
+The orchestrator or owner can pin a quick check with `project set --presubmit '["node","scripts/check-shared-files.js"]'`, or include a timeout with `--presubmit '{"command":["node","scripts/check-shared-files.js"],"timeout_sec":10}'`. `null` clears it. Argv runs directly, so spaces and shell metacharacters are literal. The default timeout is 10 seconds, bounded to at most 60. The check runs in the worker's existing sandbox and environment at the submitted worktree HEAD. Tracked changes and non-ignored untracked files refuse before and after execution. Failure refuses submit, records bounded redacted diagnostics and keeps the same attempt and claim.
+
+Three equivalent failures, comparing redacted output without known runner timing fields, or an executable launch failure for a missing or inaccessible hook, open `presubmit_failed` in the orchestrator inbox and pause further hook runs. Compiler locations and import/file/permission messages printed by a running command stay on the local retry path because changed code may have caused them. Stop retrying. The orchestrator or owner can record `presubmit retry ID --reason R` after fixing the cause, or `presubmit override ID --reason R` to bypass once at that exact head and configuration. See [Presubmit](../docs/state/storage.md#presubmit) for receipt and escalation details.
+
 ## Decisions
 
 `--tier` accepts a single rung or an ascending range such as `easy..medium` in `task add`, `task update` and `plan import`. A range starts at its minimum and lets spawned workers climb after quality failure. A single tier does not climb; trusted `wait` still reworks its current failed reviews and releases verified dead claims before refilling worker slots. Setting a new range resets the current tier to its minimum, while a single tier clears the range.

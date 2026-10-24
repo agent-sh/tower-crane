@@ -41,6 +41,8 @@ Existing links use these anchors. Follow the link to the contract in its area.
 
 <a id="projectjson"></a>[projectjson](state/storage.md#projectjson)
 
+<a id="presubmit"></a>[presubmit](state/storage.md#presubmit)
+
 <a id="local-ci-output"></a>[local-ci-output](state/ci.md#local-ci-output)
 
 <a id="ladder"></a>[ladder](state/tasks.md#ladder)
