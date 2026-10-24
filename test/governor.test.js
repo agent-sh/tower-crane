@@ -9,7 +9,7 @@ const G = require('../lib/governor');
 const Processes = require('../lib/processes');
 const { makeRepo, cachedFixture, BIN, TMP_ROOT } = require('./helpers');
 const { writeHost, GiB } = require('./host');
-const { waitOnRepo, killPid } = require('./signals');
+const { waitOnRepo, waitUntil, killPid } = require('./signals');
 
 const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse); // read-published: the log is only appended
 const linuxOnly = process.platform !== 'linux' && 'the governor measures and signals by Linux process start times';
@@ -39,6 +39,12 @@ test('the budget admits work only under every defer line, counting growth, other
     ['other sessions may return to their recent peak', reading({ used: 4 }), registry([], [recent(8, 3)]), false, /other sessions 3\.6 GiB toward their peak of the last 30 minutes/],
     ['a peak\'s claim fades over the window', reading({ used: 4 }), registry([], [recent(8, 25)]), true],
     ['a peak past the window no longer counts', reading({ used: 4 }), registry([], [recent(9, 31)]), true],
+    // The other-sessions peak term. A minute ago the level held 6 GiB: a
+    // worker's 2 and other sessions' 4. They let go of 3 and the worker grew 3
+    // into it, so the level holds the same 6 GiB; they may take the 3 back
+    // while the worker still grows 1 toward its 6.
+    ['a peak the units grew into is still room', reading({ used: 6 }), registry([unit('worker', 1, { expected: 6 * GiB, measured: 5 * GiB })], [recent(4, 1)]), false, /grow 1\.0 GiB and other sessions 2\.9 GiB toward their peak/],
+    ['as is one the level gave back', reading({ used: 3 }), registry([unit('worker', 1, { expected: 6 * GiB, measured: 2 * GiB })], [recent(4, 1)]), false, /other sessions 2\.9 GiB toward their peak/],
     ['a sample from before samples named their level counts nowhere', reading({ used: 4 }), registry([], [{ ...recent(8, 3), level: undefined }]), true],
     // A host wait in another scope saw 14 GiB of other sessions on the host, which they still use.
     ['a sample of another level keeps no room in this one', scoped, registry([], [recent(14, 1, 'host')]), true],
@@ -57,7 +63,8 @@ test('the budget admits work only under every defer line, counting growth, other
   const budget = G.assess(reading({ used: 4 }), registry([unit('worker', 1, { expected: 2 * GiB, measured: GiB })], [recent(5, 1)]), s, 0, null, now).budget;
   const round = (b) => Object.fromEntries(Object.entries(b).map(([k, v]) => [k, typeof v === 'number' ? Math.round(v) : v]));
   assert.deepEqual(round(budget), round({ level: '/tests.slice', limit: 10 * GiB, used: 4 * GiB, defer_line: 8.5 * GiB, stop_line: 9.5 * GiB,
-    tower_crane: GiB, growth: GiB, growth_rule: 'sum', growth_sum: GiB, growth_largest: GiB, growth_ratio: 1, growth_raised_until: null, growth_samples: 0, growth_samples_min: 20,
+    tower_crane: GiB, growth: GiB, growth_rule: 'sum', growth_sum: GiB, growth_largest: GiB, growth_ratio: 1, growth_base_ratio: 1, growth_raised_sum: 0, growth_raised_until: null,
+    growth_samples: 0, growth_samples_min: 20,
     others: 3 * GiB, others_room: 2 * GiB * (1 - 1 / 30), need: 0, units: 1, projects: 1 }));
 });
 
@@ -75,20 +82,33 @@ test('running units reserve their summed room until enough windows exist, then t
     ['the 99th of 100', ratios(...Array.from({ length: 100 }, (_, i) => (i + 1) / 100)), null, 'measured', 3.96, 100],
     ['never below the largest unit\'s room', ratios(...many(20, 0.2)), null, 'measured', 2, 20],
     ['a ratio past 1 reserves more than the sum', ratios(...many(20, 1.5)), null, 'measured', 6, 20],
+    // A raise recorded before raises named their set covers every unit.
     ['a crossed window raises the ratio over the percentile', ratios(...many(20, 0.6)), raised(0.9, 30), 'raised', 3.6, 20],
     ['and over the sum before enough windows exist', ratios(...many(5, 0.6)), raised(1.3, 30), 'raised', 5.2, 5],
     ['a raise lower than the percentile leaves it', ratios(...many(20, 0.6)), raised(0.4, 30), 'measured', 2.4, 20],
     ['an expired raise no longer counts', ratios(...many(20, 0.6)), raised(0.9, -1), 'measured', 2.4, 20],
+    // The cross-project growth term: the raise covers the room of the set that crossed, and a unit
+    // admitted since, here worker-2 from another project, keeps the ratio in force before it.
+    ['a raise covers only the room of the set that crossed', ratios(...many(20, 0.6)), { ...raised(0.9, 30), units: ['worker-1', 'gone'] }, 'raised', 3, 20],
+    ['and before enough windows exist the rest keeps the sum', ratios(...many(5, 0.6)), { ...raised(1.3, 30), units: ['worker-2'] }, 'raised', 4.6, 5],
+    ['a raise whose set has all ended raises nothing', ratios(...many(20, 0.6)), { ...raised(0.9, 30), units: ['gone'] }, 'measured', 2.4, 20],
   ];
   for (const [name, growth, raise, rule, gib, samples] of cases) {
-    const reg = { ...registry([unit('worker', 1, { expected: 3 * GiB, measured: GiB }), unit('worker', 2, { expected: 3 * GiB, measured: GiB })]), growth, raised: raise };
+    const reg = { ...registry([unit('worker', 1, { expected: 3 * GiB, measured: GiB, project: '/p' }), unit('worker', 2, { expected: 3 * GiB, measured: GiB, project: '/other' })]), growth, raised: raise };
     const r = G.reserve(reg, s, now);
     assert.deepEqual([r.rule, Math.round(r.bytes / GiB * 100) / 100, r.samples, r.sum, r.largest], [rule, gib, samples, 4 * GiB, 2 * GiB], name);
     assert.equal(G.assess(reading({ limit: 100 }), reg, s, 0, null, now).budget.growth, r.bytes, `${name}: the budget reserves it`);
   }
+  // Status names the raised room and the rest apart.
+  const split = { ...registry([unit('worker', 1, { expected: 3 * GiB, measured: GiB }), unit('worker', 2, { expected: 3 * GiB, measured: GiB })]),
+    growth: ratios(...many(20, 0.6)), raised: { ...raised(0.9, 30), units: ['worker-1'] } };
+  const view = { state: 'open', reasons: [], budget: G.assess(reading({ limit: 100 }), split, s, 0, null, now).budget, settings: s,
+    reading: { pressure: {}, load: 0, cores: 8, degraded: [] }, deferred: [], stops: [] };
+  assert.match(G.lines(view)[0], /may grow 3\.0 GiB \(ratio 0\.90 after a crossed window, until \S+, times 2\.0 GiB of its units' room and ratio 0\.60 times 2\.0 GiB of the rest\);/);
   assert.equal(G.reserve({ ...registry([unit('worker', 1, { expected: 3 * GiB })]), growth: ratios(...many(20, 0.2)) }, s, now).bytes, 3 * GiB,
     'a unit admitted a moment ago and not yet measured keeps its whole room');
-  assert.deepEqual(G.reserve(registry(), s, now), { sum: 0, largest: 0, ratio: 1, samples: 0, min: 20, rule: 'sum', raised_until: null, bytes: 0 }, 'nothing running reserves nothing');
+  assert.deepEqual(G.reserve(registry(), s, now), { sum: 0, largest: 0, ratio: 1, base: 1, raised_sum: 0, samples: 0, min: 20, rule: 'sum', raised_until: null, bytes: 0 },
+    'nothing running reserves nothing');
 });
 
 test('a growth window follows its own units on its own level and samples the share of their room they grew into', () => {
@@ -147,9 +167,14 @@ test('a window whose set grew past its reservation raises the next reservation f
     ['measured, under 100 windows', ratios(0.5, 0.5, 0.5), 'measured', 2, 3, 3],
     // The new 1.125 joins 199 others; the percentile stays at 1 while the window's own ratio holds.
     ['measured, from 100 windows on', ratios(...Array.from({ length: 197 }, () => 0.5), 1, 1, 1), 'measured', 4, 4.5, 4.5],
-    ['a raise already in force', ratios(0.5, 0.5, 0.5), 'raised', 3, 3.5, 3.5, { ratio: 0.75, at, until: new Date(t0 + 30 * 60000).toISOString() }],
+    ['a raise already in force', ratios(0.5, 0.5, 0.5), 'raised', 3, 3.5, 3.5, { ratio: 0.75, at, until: new Date(t0 + 30 * 60000).toISOString(), units: ['worker-1', 'worker-2'] }],
+    // Still in force at the crossing, it names a unit that has ended since; the raise that extends it drops that id.
+    ['a raise extended while in force', ratios(0.5, 0.5, 0.5), 'raised', 3, 3.5, 3.5, { ratio: 0.75, at, until: new Date(t0 + 90 * 60000).toISOString(), units: ['worker-1', 'worker-2', 'worker-9'] }],
+    // A raise recorded before raises named their set covers every unit, and so does the raise that extends it.
+    ['a raise from before raises named their set, from 100 windows on', ratios(...Array.from({ length: 197 }, () => 0.5), 1, 1, 1), 'raised', 4.2, 4.5, 4.5,
+      { ratio: 1.05, at, until: new Date(t0 + 90 * 60000).toISOString() }, true],
   ];
-  for (const [name, growth, rule, reserved, grew, next, raised = null] of cases) {
+  for (const [name, growth, rule, reserved, grew, next, raised = null, every = false] of cases) {
     const a = unit('worker', 1, { expected: 3 * GiB, measured: GiB });
     const b = unit('worker', 2, { expected: 3 * GiB, measured: GiB });
     const reg = { ...registry([a, b]), windows: [], growth, raised };
@@ -159,11 +184,19 @@ test('a window whose set grew past its reservation raises the next reservation f
     b.measured = GiB + grew * GiB / 2;
     const [w] = G.observe(reg, reading({ limit: 36, used: 18 }), small, t0 + 60 * 60000);
     assert.deepEqual([w.grew / GiB, w.crossed], [grew, true], `${name}: the window crossed`);
-    const fresh = [unit('worker', 4, { expected: 3 * GiB, measured: GiB }), unit('worker', 5, { expected: 3 * GiB, measured: GiB })];
-    const after = G.reserve({ ...reg, units: fresh }, small, t0 + 60 * 60000 + 1000);
+    assert.deepEqual(reg.raised.units, every ? undefined : [a.id, b.id], `${name}: the raise names the set that crossed, or none when it covers every unit`);
+    // The set gives its growth back and has the same room again.
+    a.measured = GiB;
+    b.measured = GiB;
+    const after = G.reserve(reg, small, t0 + 60 * 60000 + 1000);
     assert.ok(after.bytes > reserved * GiB, `${name}: the next reservation is higher`);
     assert.equal(after.bytes / GiB, next, `${name}: at least what the set grew into`);
-    assert.equal(G.reserve({ ...reg, units: fresh }, small, t0 + 120 * 60000).rule === 'raised', false, `${name}: the raise lasts growth_window_min`);
+    // Units of another project admitted since, with the same room, keep the ratio the percentile gives,
+    // unless the raise covers every unit.
+    const fresh = [unit('worker', 4, { expected: 3 * GiB, measured: GiB, project: '/other' }), unit('worker', 5, { expected: 3 * GiB, measured: GiB, project: '/other' })];
+    assert.equal(G.reserve({ ...reg, units: fresh }, small, t0 + 60 * 60000 + 1000).bytes / GiB, every ? next : G.reserve({ ...reg, units: fresh, raised: null }, small, t0 + 60 * 60000 + 1000).bytes / GiB,
+      `${name}: the raise covers units outside its set only when it covers every unit`);
+    assert.equal(G.reserve(reg, small, t0 + 120 * 60000).rule === 'raised', false, `${name}: the raise lasts growth_window_min`);
   }
 });
 
@@ -776,6 +809,43 @@ test('a dispatch from an orchestrator\'s own scope is not deferred by room a wai
   assert.deepEqual(G.read(host.env).others.map((o) => [o.level, o.bytes]), [['host', 14 * GiB]], 'the sample names its level');
 });
 
+test('other sessions are sampled at the level\'s use once the units were measured', (t) => {
+  // The reading a tick takes before the registry lock, and the slice's use once
+  // the units were measured. A unit that ended in between is no longer in the
+  // registry, so the earlier use would sample its memory as another session's.
+  const cases = [
+    ['a unit ended since the reading', 8, 3, 3],
+    ['nothing changed', 5, 5, 5],
+    ['the level grew since: the next sample sees it', 3, 6, 3],
+  ];
+  for (const [name, before, after, others] of cases) {
+    const host = fakeHost(t, { limit: 36, used: after });
+    const reg = { ...registry(), windows: [], growth: [], raised: null };
+    const now = Date.now();
+    G.observeAll(reg, host.env, reading({ limit: 36, used: before }), s, now);
+    assert.deepEqual(reg.others.filter((o) => o.level === '/tests.slice').map((o) => o.bytes / GiB), [others], name);
+  }
+});
+
+test('room is kept for memory other sessions let go of while a unit grew into it', { skip: linuxOnly }, (t) => {
+  // A minute ago the slice held 6 GiB: a worker's scope 2 and other sessions
+  // 4. Now the sessions hold 1 and the worker 5 of its expected 6, so the slice
+  // still holds 6. They may take the 3 back while the worker grows 1 more:
+  // 11 GiB on a 10 GiB slice if a 1 GiB unit were admitted.
+  const host = fakeHost(t, { limit: 10, used: 6 });
+  const scope = (gib) => host.write('sys/fs/cgroup/tests.slice/w.scope/memory.current', `${gib * GiB}\n`);
+  const reg = { ...registry([unit('worker', 1, { expected: 6 * GiB, cgroup: '/tests.slice/w.scope', roots: [] })]), windows: [], growth: [], raised: null };
+  const now = Date.now();
+  scope(2);
+  G.observeAll(reg, host.env, reading({ used: 6 }), s, now - 60000);
+  scope(5);
+  G.observeAll(reg, host.env, reading({ used: 6 }), s, now);
+  assert.deepEqual(reg.others.filter((o) => o.level === '/tests.slice').map((o) => o.bytes / GiB), [4, 1]);
+  const verdict = G.assess(reading({ used: 6 }), reg, s, GiB, 'worker', now);
+  assert.equal(verdict.ok, false);
+  assert.match(verdict.reasons.join('; '), /grow 1\.0 GiB and other sessions 2\.9 GiB toward their peak/);
+});
+
 // A worker unit whose holder is a live stand-in supervisor, past the stop line.
 function stoppable(t, host, unit) {
   fs.mkdirSync(G.dir(host.env), { recursive: true });
@@ -947,4 +1017,39 @@ test('a finished agent gives up its place before its gate reactions run', { skip
   fs.writeFileSync(h.release, '');
   await waitOnRepo(h, () => !alive(started.monitor_pid), 'the supervisor ends', { poll: true });
   assert.ok(h.readState('tasks.json').tasks[0].evidence.some((e) => e.type === 'tests' && e.ok), 'the reaction finished');
+});
+
+test('a unit in a scope of its own also counts its processes outside the scope, and each byte counts once', { skip: linuxOnly }, async (t) => {
+  // An agent's supervisor runs its state broker and the agent's waits outside the harness scope.
+  const supervisor = idle(t);
+  const anon = () => Number(/^RssAnon:\s+(\d+)/m.exec(fs.readFileSync(`/proc/${supervisor.pid}/status`, 'utf8'))?.[1] || 0) * 1024;
+  await waitUntil(() => anon() >= 4 * 1024 * 1024, { poll: true, what: 'the stand-in supervisor starts' });
+  // The cgroup the supervisor really runs in, standing for a contained orchestrator's scope.
+  const own = fs.readFileSync(`/proc/${supervisor.pid}/cgroup`, 'utf8').split('\n').find((l) => l.startsWith('0::')).slice(3).trim();
+  const harness = '/tests.slice/harness.scope';
+  const root = [{ pid: supervisor.pid, ...Processes.identity(supervisor.pid) }];
+  // [name, scopes and their use in GiB, units as [id, cgroup, rooted at the supervisor], expected GiB or 'plus' for 1 GiB and the supervisor]
+  const cases = [
+    ['a supervisor outside every unit scope adds its memory', { [harness]: 1 }, [['worker', harness, true]], { worker: 'plus' }],
+    ['a process inside its own scope is in the scope\'s use already', { [own]: 1 }, [['worker', own, true]], { worker: 1 }],
+    ['a supervisor inside a contained orchestrator\'s scope counts there only', { [own]: 2, [harness]: 1 }, [['orchestrator', own, false], ['worker', harness, true]], { orchestrator: 2, worker: 1 }],
+    ['so does a process of a unit measured by its processes', { [own]: 2 }, [['orchestrator', own, false], ['gate', null, true]], { orchestrator: 2, gate: 0 }],
+    ['a scope nested in another unit\'s scope counts in the inner unit', { '/tests.slice/orch.scope': 3, '/tests.slice/orch.scope/worker.scope': 1 },
+      [['orchestrator', '/tests.slice/orch.scope', false], ['worker', '/tests.slice/orch.scope/worker.scope', false]], { orchestrator: 2, worker: 1 }],
+    ['units that share a scope count it once', { [harness]: 1 }, [['a', harness, false], ['b', harness, false]], { a: 1, b: 0 }],
+  ];
+  for (const [name, scopes, specs, expected] of cases) {
+    const host = fakeHost(t, { limit: 36, used: 8 });
+    for (const [scope, gib] of Object.entries(scopes)) {
+      host.write(`sys/fs/cgroup${scope}/memory.current`, `${gib * GiB}\n`);
+      host.write(`sys/fs/cgroup${scope}/memory.stat`, 'active_file 0\ninactive_file 0\n');
+    }
+    const units = specs.map(([id, cgroup, rooted]) => ({ ...unit('worker', 1, { holders: [], roots: rooted ? root : [], cgroup }), id }));
+    const reg = { ...registry(units), windows: [], growth: [], raised: null };
+    G.observeAll(reg, host.env, reading({ limit: 36, used: 8 }), s, Date.now());
+    for (const u of units) {
+      if (expected[u.id] === 'plus') assert.ok(u.measured > GiB && u.measured <= GiB + anon() * 2, `${name}: ${u.id} ${u.measured}`);
+      else assert.equal(u.measured, expected[u.id] * GiB, `${name}: ${u.id}`);
+    }
+  }
 });
