@@ -3,6 +3,7 @@
 Tower Crane keeps a project's plan and progress in one SQLite database, `state.db` in the state directory ([Storage](state/storage.md#database)). The CLI is the state writer.
 
 - [Tasks and lifecycle](state/tasks.md)
+- [Submission history](state/tasks.md#submission-history)
 - [Gates](state/gates.md)
 - [Review](state/review.md)
 - [CI](state/ci.md)

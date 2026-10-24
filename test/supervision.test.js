@@ -27,6 +27,8 @@ const caseConcurrency = 2;
 // Windows, whose supervisor starts slower, keeps the production window.
 const SHORT_STARTUP_MS = process.platform === 'win32' ? 10000 : 4000;
 const S = require('../lib/state');
+const Governor = require('../lib/governor');
+const { MIN_USAGE_MS } = require('../lib/ladder');
 
 const log = (h) => StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
 const sketches = (h) => ['sketch.md', 'sketch.html'].map((file) => ({
@@ -623,58 +625,68 @@ test('a permanent exit is blocked without retrying and submit clears its phase',
   assert.equal(h.json(['task', 'show', 'T1']).run, null);
 });
 
-test('progress paths and CPU detect a stalled process without dropping its live claim', { skip: process.platform !== 'linux' }, async (t) => {
-  const h = setup(t, { failures: 0, waitForFinish: true, config: { stall_ms: 250, progress_paths: ['progress.txt'] } });
-  const spawned = h.json(['spawn', '--task', 'T1'], { hooks: { HOOK_RENDER_DELAY_MS: '500' } });
-  try {
-    await waitOnRepo(h, () => h.readAttempts().length === 1, 'idle worker did not finish startup');
-    const blocked = await waitOnRepo(h, () => {
+for (const row of [
+  { name: 'normal observer', renderMs: 0, observerMs: 0 },
+  { name: 'delayed observer', renderMs: 500, observerMs: 3000 },
+]) {
+  test(`progress paths and CPU detect a stalled process without dropping its live claim: ${row.name}`, { skip: process.platform !== 'linux' }, async (t) => {
+    const h = setup(t, { failures: 0, waitForFinish: true, config: { stall_ms: 250, progress_paths: ['progress.txt'] } });
+    // Hold each sampled phase until the CLI and both saved boards have observed it.
+    const clock = controlledBackoff(h);
+    let time = 0;
+    const sample = () => clock.advance(time += 1000);
+    const spawned = h.json(['spawn', '--task', 'T1'], {
+      hooks: { HOOK_RENDER_DELAY_MS: String(row.renderMs) }, env: clock.env,
+    });
+    const phase = () => log(h).findLast((e) => e.cmd === 'spawn phase')?.detail.phase;
+    const observe = (check, what) => waitOnRepo(h, check, what, { signal: t.signal });
+    const blocked = () => observe(() => {
+      if (phase() !== 'blocked') sample();
       const shown = h.ok(['task', 'show', 'T1']);
       const views = sketches(h);
       return shown.includes('blocked: no progress paths or CPU activity')
         && views.every(({ text }) => text.includes('blocked: no progress paths or CPU activity')) && { shown, views };
     }, 'idle process and saved sketches did not show stall');
-    assert.match(blocked.shown, /blocked: no progress paths or CPU activity/);
-    for (const { file, text } of blocked.views) {
-      assert.match(text, /blocked: no progress paths or CPU activity/, `${file} shows the stalled phase`);
-    }
-    // Running lasts one sample past stall_ms once progress stops, shorter than a
-    // check on a loaded host takes, so a separate process keeps the path moving
-    // until the sketches have rendered the cleared phase.
-    const writer = cp.spawn(process.execPath, ['-e',
-      `const fs = require('node:fs'); setInterval(() => fs.appendFileSync(${JSON.stringify(path.join(spawned.cwd, 'progress.txt'))}, 'progress\\n'), 50);`,
-    ], { stdio: 'ignore' });
-    let cleared;
     try {
-      cleared = await waitOnRepo(h, () => {
-        const phase = log(h).findLast((e) => e.cmd === 'spawn phase');
-        const views = sketches(h);
-        return phase?.detail.phase === 'running'
-          && views.every(({ text }) => !text.includes('blocked: no progress paths or CPU activity')) && views;
-      }, 'path progress and saved sketches did not clear stall', { alive: writer });
+      await observe(() => h.readAttempts().length === 1, 'idle worker did not finish startup');
+      for (const source of [
+        { name: 'configured path', update: () => fs.writeFileSync(path.join(spawned.cwd, 'progress.txt'), 'progress\n') },
+        { name: 'tool hook', update: () => {
+          // Tool hooks write outside the event log; the agent's progress file counts too.
+          fs.mkdirSync(path.dirname(S.progressFile(h.state, spawned.agent)), { recursive: true });
+          fs.appendFileSync(S.progressFile(h.state, spawned.agent), '{}\n');
+        } },
+      ]) {
+        const stalled = await blocked();
+        assert.match(stalled.shown, /blocked: no progress paths or CPU activity/);
+        for (const { file, text } of stalled.views) {
+          assert.match(text, /blocked: no progress paths or CPU activity/, `${source.name}: ${file} shows the stalled phase`);
+        }
+        source.update();
+        sample();
+        // A sibling case can block this test process beyond the supervisor's next sample.
+        if (row.observerMs) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, row.observerMs); // wait-allow: delayed observation is the regression input
+        const cleared = await observe(() => {
+          if (phase() !== 'running') sample();
+          const shown = h.ok(['task', 'show', 'T1']);
+          const views = sketches(h);
+          return phase() === 'running' && !shown.includes('blocked: no progress paths or CPU activity')
+            && views.every(({ text }) => !text.includes('blocked: no progress paths or CPU activity')) && views;
+        }, `${source.name} progress and saved sketches did not clear stall`);
+        for (const { file, text } of cleared) {
+          assert.doesNotMatch(text, /blocked: no progress paths or CPU activity/, `${source.name}: ${file} clears the stalled phase`);
+        }
+      }
+      assert.equal(h.json(['task', 'show', 'T1']).claim.agent, spawned.agent);
+      assert.deepEqual(h.json(['status']).exited_claims, []);
     } finally {
-      writer.kill();
-      await childExit(writer);
+      // Keep the worker alive until both board transitions have been observed.
+      fs.writeFileSync(`${h.attempts}.finish`, '');
     }
-    for (const { file, text } of cleared) {
-      assert.doesNotMatch(text, /blocked: no progress paths or CPU activity/, `${file} clears the stalled phase`);
-    }
-    // Tool hooks write outside the event log; the agent's progress file counts too.
-    await waitOnRepo(h, () => h.json(['task', 'show', 'T1']).run?.phase === 'blocked', 'idle process did not stall again');
-    const stalled = log(h).length;
-    fs.mkdirSync(path.dirname(S.progressFile(h.state, spawned.agent)), { recursive: true });
-    fs.appendFileSync(S.progressFile(h.state, spawned.agent), '{}\n');
-    // The event stays after the phase stalls again; the phase itself may not last until a check reads it.
-    await waitOnRepo(h, () => log(h).slice(stalled).some((e) => e.cmd === 'spawn phase' && e.detail.phase === 'running'), 'tool progress did not clear stall');
-    assert.equal(h.json(['task', 'show', 'T1']).claim.agent, spawned.agent);
-    assert.deepEqual(h.json(['status']).exited_claims, []);
-  } finally {
-    // Keep the worker alive until both board transitions have been observed.
-    fs.writeFileSync(`${h.attempts}.finish`, '');
-  }
-  await waitOnRepo(h, () => !detachedAlive({ pid: spawned.monitor_pid }), 'supervisor did not finish');
-  assert.equal(h.json(['task', 'show', 'T1']).run.phase, 'waiting');
-});
+    await observe(() => !detachedAlive({ pid: spawned.monitor_pid }), 'supervisor did not finish');
+    assert.equal(h.json(['task', 'show', 'T1']).run.phase, 'waiting');
+  });
+}
 
 // Pauses the supervisor before its first read of the state, so the spawn's
 // reservation stays live until the test lets the supervisor take the lease.
@@ -1112,6 +1124,22 @@ test('quiet supervision samples state and progress paths on a seconds-scale inte
   }
 });
 
+test('with no wait leading the host governor, a supervisor measures as a follower', async (t) => {
+  const h = setup(t, { failures: 0, waitForFinish: true });
+  h.json(['spawn', '--task', 'T1']);
+  try {
+    await waitOnRepo(h, () => fs.existsSync(h.attempts), 'worker did not start');
+    const monitor = log(h).findLast((e) => e.cmd === 'spawn').detail.monitor_pid;
+    await waitOnRepo(h, () => {
+      try { return Governor.read(h.env)?.ticked_by?.pid === monitor; } catch { return false; }
+    }, 'the supervisor did not tick');
+    assert.equal(Governor.read(h.env).ticked_by.lead, false);
+  } finally {
+    fs.writeFileSync(h.attempts + '.finish', '');
+    await waitOnRepo(h, () => log(h).some((e) => e.cmd === 'spawn phase' && e.detail.phase === 'waiting'), 'worker did not finish');
+  }
+});
+
 describe('supervision completion cases', { concurrency: caseConcurrency }, () => {
 test('Windows natural exits do not send taskkill to an exited or reused pid', (t) => {
   const h = setup(t, { failures: 0 });
@@ -1383,7 +1411,9 @@ const [planted, result, named] = process.argv.slice(1, 4);
 const spin = (ms) => { const until = Date.now() + ms; while (Date.now() < until); }; // wait-allow: paces the planted writes like a worker fighting the removal
 // Windows refuses to open a file the supervisor is deleting (EPERM).
 const plant = () => { try { fs.writeFileSync(planted, named + '\\n'); } catch (e) { if (e.code !== 'EPERM') throw e; } };
+const started = Date.now();
 for (let i = 0; i < 300; i++) { plant(); spin(5); }
+fs.writeFileSync(result + '.ms', String(Date.now() - started));
 const end = Date.now() + 300000;
 const check = () => {
   if (!fs.existsSync(planted)) fs.writeFileSync(result, 'removed');
@@ -1399,8 +1429,11 @@ check();
   assert.equal(fs.existsSync(result) && readPublished(result, 'utf8'), 'removed', r.stderr);
   assert.equal(fs.existsSync(planted), false);
   const removed = log(h).filter((e) => e.cmd === 'commondir removed');
-  // About 1.5 s of writes: one event per sample interval and one at exit.
-  assert.ok(removed.length >= 1 && removed.length <= 4, `${removed.length} events`);
+  // About 1.5 s of writes, longer on a loaded host: the first removal, one
+  // event per sample interval after it, one interval late at most, and one at exit.
+  const wrote = Number(readPublished(`${result}.ms`, 'utf8'));
+  const most = Math.ceil(wrote / MIN_USAGE_MS) + 2;
+  assert.ok(removed.length >= 1 && removed.length <= most, `${removed.length} events in ${wrote} ms of writes, at most ${most}`);
   assert.ok(removed.every((e) => e.detail.count >= 1));
   assert.ok(removed.reduce((n, e) => n + e.detail.count, 0) > removed.length, 'removals are counted, not recorded one by one');
   assert.equal(removed[0].task, 'T1');

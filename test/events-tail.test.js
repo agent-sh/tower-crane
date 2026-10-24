@@ -720,3 +720,55 @@ test('a cut an older tool finished recovering is recorded late, and moves only a
   assert.equal(wait(String(after)), LONG);
   assert.equal(wait(String(older)), 'after the older tool');
 });
+
+// A spawn supervisor reads its task through S.taskView: that task's events,
+// read by the (task, pos) index past the last one it read, and its own task
+// row. After every change the database goes through, it must see what a full
+// read sees.
+const viewFixture = () => cachedFixture(null, 'task-view', (h) => {
+  h.init();
+  for (const title of ['Viewed', 'Other']) h.ok(['task', 'add', '--title', title, '--acceptance', 'done']);
+  h.ok(['task', 'note', 'T1', 'first note']);
+  h.ok(['task', 'note', 'T2', 'other note']);
+});
+
+test('the task view matches a full read after commits, a restored backup and a project budget', async (t) => {
+  const h = viewFixture();
+  t.after(h.cleanup);
+  const copy = path.join(h.base, 'view-backup.db');
+  const view = S.taskView(h.state, 'T1');
+  const steps = [
+    ['the first read', () => {}],
+    ['commits', () => {
+      h.ok(['task', 'note', 'T1', 'second note']);
+      h.ok(['task', 'note', 'T2', 'more of the other']);
+      h.ok(['msg', '--to', 'orchestrator', '--task', 'T1', 'about the viewed task']);
+      StateFiles.backup(h.state, copy);
+      h.ok(['task', 'note', 'T1', 'after the backup']);
+    }],
+    ['a restored backup, another database file', async () => {
+      await StateFiles.restore(h.state, copy);
+      h.ok(['task', 'note', 'T1', 'after the restore']);
+    }],
+    ['a project budget, which needs every task', () => h.ok(['project', 'set', '--budget-tokens', '1000000'])],
+    ['the budget removed', () => h.ok(['project', 'set', '--budget-tokens', 'null'])],
+  ];
+  try {
+    for (const [what, change] of steps) {
+      await change();
+      const st = view.read();
+      const full = S.loadState(h.state, { fresh: true });
+      const budget = full.project.budget;
+      const all = budget?.tokens != null || budget?.hours != null;
+      assert.deepEqual(st.events, full.events.filter((e) => e.task === 'T1'), `${what}: events`);
+      assert.deepEqual(st.tasks.tasks, full.tasks.tasks.filter((task) => all || task.id === 'T1'), `${what}: tasks`);
+      assert.deepEqual(st.project, full.project, `${what}: project`);
+      assert.deepEqual(st.decisions, full.decisions, `${what}: decisions`);
+    }
+    // Each change reached the view, and the restore dropped what the backup did not hold.
+    assert.deepEqual(view.read().events.map((e) => e.detail.text).filter(Boolean),
+      ['first note', 'second note', 'about the viewed task', 'after the restore']);
+  } finally {
+    Db.closeAll();
+  }
+});

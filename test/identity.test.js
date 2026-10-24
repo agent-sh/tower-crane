@@ -297,6 +297,20 @@ test('owner without a terminal needs the owner key', (t) => {
   assert.equal(h.readState('tasks.json').tasks[0].needs_owner, null);
 });
 
+// The owner's credential directory is all identity reads of the state: a
+// damaged decision or task document is for the owner to repair, so it must
+// not stop the owner being recognized.
+test('owner identity reads only the project document', (t) => {
+  const h = setup(t);
+  const Authority = require('../lib/authority');
+  const Db = require('../lib/db');
+  t.after(() => Db.closeAll());
+  const configDir = h.readState('project.json').owner_config_dir;
+  StateFiles.writeDoc(h.state, 'decisions.json', { version: 1, decisions: 'damaged' });
+  assert.equal(Authority.ownerProject(h.state).owner_config_dir, configDir);
+  assert.match(h.run(['status']).stderr, /decisions\.json/, 'reads that need the decisions still refuse them');
+});
+
 test('automatic state discovery never passes the owner key to a Git child', (t) => {
   const h = setup(t);
   const report = path.join(h.base, 'git-environment.jsonl');

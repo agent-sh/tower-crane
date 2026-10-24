@@ -138,18 +138,26 @@ for (const entry of ['accept', 'waived accept', 'review spawn']) {
       if (parentStatus === 'accepted') f.accept('T1');
       if (['rework', 'in_progress'].includes(parentStatus)) f.h.ok(['rework', 'T1', '--reason', 'parent continues']);
       if (parentStatus === 'in_progress') f.h.ok(['claim', 'T1', '--agent', 'worker-T1']);
+      const before = f.h.readState('tasks.json').tasks.find((task) => task.id === 'T2');
+      const offset = events(f).length;
       const result = reviewEntry(f, entry);
       assert.equal(result.code, 1, result.stdout + result.stderr);
       assert.match(result.stdout + result.stderr, /current review FAIL/);
       const task = f.h.json(['task', 'show', 'T2']);
       assertFailedReviewHandled(f, entry, task);
-      assert.equal(task.stack.parent_sha, f.sha, 'failed review is handled before parent synchronization');
+      if (entry !== 'review spawn') {
+        assert.deepEqual(f.h.readState('tasks.json').tasks.find((task) => task.id === 'T2'), before,
+          'accept holds the failed submission, including its verdict and revision');
+        assert.deepEqual(events(f).slice(offset).filter((event) => event.task === 'T2'), [],
+          'refusal neither refreshes the parent nor records a waiver or another review');
+      }
+      assert.equal(task.stack.parent_sha, f.sha, 'failed review takes precedence over parent synchronization');
       assert.equal(f.h.git(['rev-parse', 'HEAD'], top.wt.path), top.sha);
     });
   }
 }
 
-for (const entry of ['accept', 'review spawn']) {
+for (const entry of ['accept', 'waived accept', 'review spawn']) {
   for (const kind of ['changelog', 'missing']) {
     test(`current FAIL ${kind} findings are handled before refresh in ${entry}`, (t) => {
       const f = setup(t);
@@ -157,14 +165,24 @@ for (const entry of ['accept', 'review spawn']) {
       f.h.ok(['check', 'ci', 'T2']);
       failReview(f, top, kind);
       resubmit(f, false);
+      const before = f.h.readState('tasks.json').tasks.find((task) => task.id === 'T2');
+      const offset = events(f).length;
       const result = reviewEntry(f, entry);
       assert.equal(result.code, 1, result.stdout + result.stderr);
       const task = f.h.json(['task', 'show', 'T2']);
-      if (kind === 'missing') {
+      if (entry !== 'review spawn') {
+        assert.match(result.stdout + result.stderr, /current review FAIL/);
+        assertFailedReviewHandled(f, entry, task);
+        assert.deepEqual(f.h.readState('tasks.json').tasks.find((task) => task.id === 'T2'), before,
+          'accept retains failed findings without fetching them or refreshing the parent');
+        assert.deepEqual(events(f).slice(offset).filter((event) => event.task === 'T2'), []);
+      } else if (kind === 'missing') {
         assert.equal(task.status, 'submitted');
-        // Only the rework resolves the findings, so accept, which does not rework, cannot miss the comment.
-        assert.match(entry === 'accept' ? result.stdout : result.stderr, entry === 'accept' ? /current review FAIL/ : /linked review comment/);
-      } else assertFailedReviewHandled(f, entry, task);
+        assert.match(result.stderr, /linked review comment/);
+      } else {
+        assertFailedReviewHandled(f, entry, task);
+      }
+      assert.equal(task.stack.parent_sha, f.sha);
       assert.equal(f.h.git(['rev-parse', 'HEAD'], top.wt.path), top.sha);
     });
   }
