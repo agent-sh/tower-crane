@@ -80,6 +80,19 @@ test('automation refreshes scheduled and manual coverage once, preserving declar
   }
 });
 
+test('a wait host on a tool behind the engine leaves the coverage refresh to a current one', (t) => {
+  const h = setup(t);
+  fs.appendFileSync(path.join(h.state, 'events.jsonl'), `${JSON.stringify({ at: new Date().toISOString(), agent: 'orchestrator',
+    cmd: 'check tests', task: 'T1', detail: { tool: { sha: 'f'.repeat(40), version: '99.0.0', committed: null } } })}\n`);
+  const map = h.readState('project.json').tests.map;
+  const refreshes = h.refreshes().length;
+  const pass = h.pass();
+  assert.match(pass.stderr, /behind the project's engine \(99\.0\.0 ffffffff\)/);
+  assert.deepEqual(h.readState('project.json').tests.map, map);
+  assert.equal(h.refreshes().length, refreshes);
+  assert.deepEqual(h.github().calls, []);
+});
+
 // Coverage now measures data a test reads, so only a glob is out of its reach: a hand-set entry for
 // a data file the artifact measures takes the measured suites, and entries it does not measure stay.
 for (const [mode, event] of [

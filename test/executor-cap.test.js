@@ -8,7 +8,8 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { waitFor } = require('./canary');
-const { setup, holdSuite, ghStub } = require('./automation-helpers');
+const { setup, holdSuite, holdExecutor, ghStub } = require('./automation-helpers');
+const Automation = require('../lib/automation');
 
 // Each executor lease once, at its start; a lease that moves from tests to clean records its new kind.
 const leases = (h) => h.logs().filter((e, i, all) => e.cmd === 'executor' && e.detail.phase === 'running'
@@ -162,4 +163,45 @@ test('a recheck scheduled a minute after the last read reads, however late that 
   fs.writeFileSync(file, events.map((e) => JSON.stringify(e)).join('\n') + '\n');
   h.consume();
   assert.ok(reads() > first, 'the next minute\'s recheck reads');
+});
+
+test('only gates that run commands on this host take an executor', () => {
+  const st = (tests = {}, ci = {}) => ({ project: { tests, ci } });
+  const code = { id: 'T1', kind: 'code' };
+  const rows = [
+    ['tests in prove mode', st(), code, 'tests', true],
+    ['tests in mode none', st({ mode: 'none' }), code, 'tests', false],
+    ['tests in mode none with host probes', st({ mode: 'none' }), { ...code, host_probes: ['node probe.js'] }, 'tests', true],
+    ['tests in mode none with an empty probe list', st({ mode: 'none' }), { ...code, host_probes: [] }, 'tests', false],
+    ['tests in a kind override of none with host probes', st({ by_kind: { code: 'none' } }), { ...code, host_probes: ['node probe.js'] }, 'tests', true],
+    ['clean', st(), code, 'clean', true],
+    ['local CI', st({}, { local: { command: 'node ci.js' } }), code, 'ci', true],
+    ['local CI of a hotfix, which reads hosted CI', st({}, { local: { command: 'node ci.js' } }), { ...code, hotfix: {} }, 'ci', false],
+    ['hosted CI', st(), code, 'ci', false],
+    ['the final review', st(), code, 'final-review', false],
+    ['sources', st(), code, 'sources', false],
+  ];
+  for (const [name, state, task, type, expected] of rows) assert.equal(Automation.cpuGate(state, task, type), expected, name);
+});
+
+test('a tests gate in mode none runs its host probes under the executor cap', async (t) => {
+  const h = setup(t);
+  h.ok(['project', 'set', '--executors', '1', '--tests-mode', 'none', '--agent', 'orchestrator']);
+  const marker = path.join(h.base, 'probe-ran');
+  const probe = path.join(h.base, 'probe.js');
+  fs.writeFileSync(probe, `require('node:fs').writeFileSync(${JSON.stringify(marker)}, '');\n`);
+  const free = holdExecutor(h);
+  h.ok(['claim', 'T1', '--agent', 'worker']);
+  h.ok(['submit', 'T1', '--sha', h.sha, '--agent', 'worker', '--host-probe', `node ${JSON.stringify(probe)}`]);
+  h.consume();
+  const tests = () => h.readState('tasks.json').tasks[0].evidence.filter((e) => e.type === 'tests');
+  assert.equal(fs.existsSync(marker), false, 'the probe waits while another task holds the only executor');
+  assert.deepEqual(tests(), []);
+  assert.ok(h.logs().some((e) => e.cmd === 'automation queued' && e.task === 'T1' && e.detail.executors === 1));
+  free();
+  h.consume();
+  assert.equal(fs.existsSync(marker), true, 'the freed slot runs the probe');
+  assert.equal(tests().at(-1).receipt.host_probes.length, 1);
+  assert.deepEqual(h.logs().filter((e) => e.cmd === 'executor' && e.task === 'T1' && e.detail.phase === 'running')
+    .map((e) => e.detail.kind), ['tests', 'clean'], 'the probes ran under the lease T1 took');
 });
