@@ -813,6 +813,8 @@ test('a head check ranks by the accepted task it checks, not by the reaction tha
   const waiter = receipt(submit, { phase: 'executor', kind: 'tests' });
   const running = receipt(merge, { phase: 'running', pid: process.pid, ...P.identity(process.pid) });
   const mergeWaiter = receipt(merge, { phase: 'executor', kind: 'head check', merge: 'T4' });
+  const suiteDeferred = receipt(merge, { phase: 'deferred', error: 'T4: merge-queue suite deferred by the host governor: memory',
+    governor: { task: 'T4', kind: 'suite', reason: 'memory', until: Date.now() - 1, since: at, at } });
   for (const [name, t4, events, check] of [
     ['the line running under the merged task asks for a slot', 'accepted', [running],
       (st, name) => {
@@ -825,6 +827,11 @@ test('a head check ranks by the accepted task it checks, not by the reaction tha
         assert.equal(A.outranked(st, merge), null, `${name}: the waiting head check is behind nothing`);
         assert.equal(A.outranked(st, later)?.task, 'T3', `${name}: a newer arrival waits behind the head check`);
         assert.deepEqual(A.gateQueue(st).queued.map((q) => q.id), ['T3', 'T2'], `${name}: the drain takes the head check first`);
+      }],
+    ['the governor deferred the suite of the line under the merged task', 'accepted', [suiteDeferred],
+      (st, name) => {
+        assert.equal(A.outranked(st, submit), null, `${name}: a governor deferral holds no executor turn`);
+        assert.deepEqual(A.gateQueue(st).queued.map((q) => q.id), ['T3', 'T2'], `${name}: the drain retries the head check first`);
       }],
     ['the task the line waited for went back to rework', 'rework', [mergeWaiter],
       (st, name) => assert.equal(A.outranked(st, merge)?.task, 'T2', `${name}: the waiter keeps the turn of its own event`)],

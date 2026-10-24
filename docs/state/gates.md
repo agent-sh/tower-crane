@@ -229,8 +229,10 @@ that already merged, so a head check ranks by the accepted task it checks,
 not by that reaction's own task: it takes a free executor ahead of every
 waiting gate run, and a reaction that stopped for a full cap at a head check
 records `merge` (the task it checks) on its `phase: "executor"` receipt and
-keeps that task's merge turn in the queue. When that task is no longer
-accepted, the receipt keeps its own event's turn.
+keeps that task's merge turn in the queue. A reaction the governor deferred
+at the head check's `suite` keeps the same turn: its receipt's `governor.task`
+names the task checked. When that task is no longer accepted, the receipt
+keeps its own event's turn.
 Submitted tasks follow in submission order, except that the queued
 notifications of a prioritized task run first among submitted work.
 Priority belongs to the task, so later notifications, rework and resubmission
