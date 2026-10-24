@@ -108,7 +108,8 @@ test('in crucial mode a changed test that passes without the change does not pro
   const result = check(h, 1);
   assert.equal(result.ok, false);
   assert.match(result.summary, /tests pass without the change; they do not prove it\./);
-  assert.match(result.summary, /2\. `.*test\/value\.test\.js` with 2 non-test files reverted to \w+ .*: exit 0/);
+  // The command quotes its arguments for the platform's shell: double quotes on Windows.
+  assert.match(result.summary, /2\. `.*test\/value\.test\.js"?` with 2 non-test files reverted to \w+ .*: exit 0/);
   assert.equal(counts(h), false);
 });
 

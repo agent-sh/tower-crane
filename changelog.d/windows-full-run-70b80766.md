@@ -4,3 +4,4 @@
 - The held-task inbox test expects its commands quoted for the platform's shell. The scope reset and `tmpGrants` tests skip Windows, where systemd scopes and claude's /tmp grants do not exist, and the nested containment test expects the governor to measure the gate's job wrapper there, the harness's parent. The masked-merge scratch tests pass their preload path with forward slashes, which `NODE_OPTIONS` reads on Windows.
 - The board's controls page has merge pause forms, to set and to end one, so every authority table row has a control.
 - The merge-share executor test passes the CPU pressure line: since the governor defers on load only once load saturates the host, a merge suite never passes the load line it used.
+- The crucial-mode proof test accepts the Windows quoting of its scoped command. The model-literal allowlist names `claude-probe-cache.test.js` in `test/durations.json`, as it does in the coverage map.

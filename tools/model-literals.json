@@ -228,5 +228,10 @@
     "path": "tools/tests-map.json",
     "text": "claude-probe-cache.js",
     "reason": "Module filename in the generated test coverage map"
+  },
+  {
+    "path": "test/durations.json",
+    "text": "claude-probe-cache.test.js",
+    "reason": "Test filename in the measured per-file test times"
   }
 ]
