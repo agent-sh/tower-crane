@@ -156,7 +156,9 @@ original process-count/RSS bound after the launcher exits. A cap or monitoring
 failure still stops the whole retained attempt. With cgroups, fleet memory pressure retains
 the per-attempt boundary, including after a keeper takes over.
 Gate commands own everything
-they start, including nested supervisors, and retain their complete cleanup.
+they start, including nested supervisors, and retain their complete cleanup:
+the gate kills a command's whole cgroup after it ends and waits until it is
+empty ([gate containment](storage.md#gate-containment)).
 In cgroup mode the keeper polls `cgroup.events` for population and reads
 `cgroup.procs` in that group and its nested groups. It does not scan `/proc`
 on each tick.
@@ -531,9 +533,9 @@ The governor signals only processes the registry recorded when Tower Crane start
 
 `review dispatch deferred` events persist a governor-deferred reviewer dispatch
 with `sha`, `revision`, `reason`, `since` and the original `body_recheck` context
-when it is an automatic light check. Refill restores that context on the reviewer
-spawn, preserving the automatic marker in its evidence and the two-failure stop.
-If an automatic check replaces an outstanding explicit request, a
+for previously dispatched light checks. Refill restores that legacy context on
+the reviewer spawn. Verified metadata repair carries review and queues no new
+light check. If a retained check context replaces an outstanding explicit request, a
 `review dispatch context` event records its `sha`, `revision` and `body_recheck`
 without adding another debt. An unchanged context emits nothing, and a context
 event cannot revive debt a matching spawn has already settled.

@@ -128,3 +128,5 @@ Existing links use these anchors. Follow the link to the contract in its area.
 <a id="flake-ledger"></a>[flake-ledger](state/gates.md#flake-ledger)
 
 <a id="scratch-archive"></a>[scratch-archive](state/storage.md#scratch-archive)
+
+<a id="docs-and-small-fix-rounds"></a>[docs and small fix rounds](state/review.md#docs-and-small-fix-rounds)
