@@ -154,3 +154,21 @@ instruction edit refuses the attestation. `accept --metadata-fixed --reason R`
 has the same authority for corrected PR title or body findings at the submitted
 head. Other changes in that round must independently satisfy the named-fix checks. The automatic body fixer verifies its edit and unchanged checkout before
 using the same carry path. Neither path dispatches a new reviewer.
+
+## Runaway cost
+
+A `spend` flag also opens one orchestrator decision for its task, the first time the wait host's refill pass sees it ([decisions.json](decisions.md#decisionsjson)). The question carries the flag's text (task total, worker count and the median it compares with), the task's revision and the main cause of its reworks: conflict reworks (cause `conflict_base` or `conflict_parent`, including a stack parent's conflicts and a CI CONFLICTING state, [Conflict hotspots](#conflict-hotspots)), review rounds (cause `review`) or gate failures (a `gate` rework, or cause `tests`, `clean`, `ci`, `head_check`, `coverage_gap` or `base_failure`), with every count. A rework of none of these kinds counts as other and is never the main cause. The decision blocks the task: the running worker keeps its claim and can submit, but no new round is claimed or handed back until someone answers it. A task gets one cost decision; answering it does not reopen one when spend keeps growing, and the status line keeps showing the flag.
+
+## Conflict hotspots
+
+A conflict rework records the files automation found conflicting as `conflicts` on its `rework` event: the merge line's head check, the conflict sweep after a merge and a mixed generated-file repair (the hand-written files left). A rework is a conflict rework when its recorded `cause` is `conflict_base` or `conflict_parent` ([rework causes](tasks.md)); a `manual` rework, or one recorded before causes existed, is classified from its reason the way `tower-crane metrics` does it, since the orchestrator often relays a conflict by hand. Without `conflicts`, the files come from the reason text (`PR #N conflicts with BASE: FILES. Merge the base...`, `... The merge is prepared ...`, or a stack sync's `Merge T1's resubmitted head SHA into T2; resolve conflicts in: FILES. Preserve the child commits...`); a conflict that names no file, such as a CI CONFLICTING state, counts toward the main cause but toward no file. A stack sync that sends a child back for conflicts with its parent's resubmitted head checks the threshold in the same write, as an automation conflict rework does.
+
+For each task, every conflict rework since its last hotspot decision adds one to each file it names. When the rework being written takes a file past the threshold and the task has no open hotspot decision, the same write opens one ([decisions.json](decisions.md#decisionsjson)). The task still goes to `rework`, since its PR cannot merge, but the decision blocks it: refill does not dispatch a worker and a waiting owner is not handed it back ([PR owners](tasks.md#pr-owners)). The orchestrator answers:
+
+- `merge pause`: set `merge pause ID --minutes N --reason R` and answer; the next round's submit holds other merges ([Merge pause](gates.md#merge-pause)).
+- `split`: split the work so the hot files land in a smaller task, and cancel or narrow this one.
+- `keep reworking`: the count starts again from the decision, so another threshold's worth of conflicts opens the next one.
+
+The threshold is the nearest-rank 90th percentile, over every task with a conflict rework in the event log, of the count of the file that task conflicted on most. With fewer than 10 such tasks it is 3. On 2026-10-23 this project's log held 380 conflict reworks over 136 tasks: the worst file came back once for 82 tasks, twice for 26, three times for 19, and four times or more for 9, T499 among them with docs/state.md 18 times. The 90th percentile was 3, so a task trips on its fourth conflict on the same file, where 93% of tasks had stopped.
+
+`status` lists `hot files: FILE (TASK N conflict reworks, DID open); ...` for tasks not yet accepted or cancelled, from each one's latest hotspot decision; JSON `conflict_hotspots: [{file, tasks: [{id, count, decision, status}]}]`.
