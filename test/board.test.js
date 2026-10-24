@@ -442,6 +442,9 @@ test('in a browser, Enter in a decision note answers the recommended option and 
     const d1 = h.readState('decisions.json').decisions[0];
     assert.deepEqual([d1.status, d1.answer, d1.note], ['answered', 'postgres', 'history must survive restarts']);
     await new Promise((resolve) => setTimeout(resolve, 800)); // wait-allow: verify that the completed answer produces no duplicate form submission
+    // The state is written before the response returns, so under load a send
+    // can still be in flight here; a refused second post ends in its message.
+    await b.until(`!document.querySelector('form[data-api="/api/decisions/D1/answer"][aria-busy]')`, 'the send to finish');
     assert.equal(await b.inPage(`(document.querySelector('form[data-api="/api/decisions/D1/answer"] output') || {}).textContent || ''`), '', 'the form sends once: no second, empty post is refused');
 
     // A refused write keeps its message through the redraw that follows it,

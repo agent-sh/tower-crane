@@ -129,6 +129,29 @@ test('generated-only conflicts merge, regenerate and push without rework or a wo
   assert.ok(h.logs().some((e) => e.cmd === 'generated merge' && e.detail.phase === 'pushed'));
 });
 
+test('the generated-file repair runs its script in the project\'s slice at the project\'s gate weight', {
+  skip: process.platform !== 'linux' && 'systemd scopes are Linux only',
+}, (t) => {
+  const h = generatedSetup(t);
+  const pre = ['--require', path.join(__dirname, 'fixtures', 'project-slices.js')];
+  Object.assign(h.env, { TOWER_CRANE_TEST_CONTAINMENT: '1', TC_FAKE_MANAGER_LOG: path.join(h.base, 'manager.jsonl'),
+    TC_FAKE_SCOPE_LOG: path.join(h.base, 'scopes.jsonl') });
+  h.ok(['project', 'set', '--gates-cpu-weight', '700', '--agent', 'orchestrator']);
+  h.submit();
+  h.ok(['check', 'tests', 'T1', '--agent', 'orchestrator'], { pre });
+  h.ok(['project', 'set', '--paused', 'manual generated conflict probe']);
+  h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator'], { pre });
+  assert.ok(h.logs().some((e) => e.cmd === 'generated merge' && e.detail.phase === 'pushed'));
+  const digest = require('node:crypto').createHash('sha256').update(fs.realpathSync(h.state)).digest('hex').slice(0, 12);
+  const launches = fs.readFileSync(h.env.TC_FAKE_SCOPE_LOG, 'utf8').trim().split('\n').map(JSON.parse);
+  const repair = launches.filter((l) => l.argv.join(' ').includes('docs:generate'));
+  assert.ok(repair.length, JSON.stringify(launches.map((l) => l.argv)));
+  for (const launch of launches) {
+    assert.equal(launch.slice, `agents-towercrane_${digest}.slice`, launch.argv.join(' '));
+    assert.equal(launch.cpu_weight, 700, launch.argv.join(' '));
+  }
+});
+
 // A worker can write .git/config. pushInsteadOf rewrites a URL named on the
 // command line but not remote.origin.pushurl, so a push to the checked URL
 // would reach this repository and run its hooks outside every sandbox.
