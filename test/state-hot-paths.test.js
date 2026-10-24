@@ -48,6 +48,7 @@ test('hook polls, writes and waits read only their own events, not the whole log
     read('hook delivery', ['hook', 'inbox', '--binding', binding, '--agent', agent, '--payload', '{}']),
     read('hook poll', ['hook', 'inbox', '--binding', binding, '--agent', agent, '--payload', '{}']),
     read('task note', ['task', 'note', 'T1', 'progress', '--agent', agent]),
+    read('task show', ['task', 'show', 'T1', '--agent', agent]),
     read('submit', ['submit', 'T1', '--sha', sha, '--agent', agent]),
     read('evidence', ['evidence', 'T1', '--type', 'note', '--ok', '--summary', 'checked', '--agent', agent]),
     read('rework', ['rework', 'T1', '--reason', 'again', '--agent', 'owner']),
