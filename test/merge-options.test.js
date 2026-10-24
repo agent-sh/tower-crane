@@ -4,27 +4,29 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { makeRepo } = require('./helpers');
+const { makeRepo, cachedFixture } = require('./helpers');
 const { gateFixture, gateEvidence } = require('./gate-helpers');
 
 function acceptedTask(t) {
-  const h = makeRepo(t);
-  const sha = gateFixture(h);
-  h.git(['switch', '-q', 'main']);
-  h.init(['--repo', 'acme/demo', '--base', 'main']);
-  h.ok(['task', 'add', '--title', 'Keep task worktrees', '--acceptance', 'Preserve the branch', '--acceptance', 'Pin the accepted head']);
-  h.ok(['claim', 'T1', '--agent', 'w-1']);
-  h.ok(['submit', 'T1', '--sha', sha, '--pr', '9', '--branch', 'fixture-change', '--agent', 'w-1']);
-  for (const type of ['tests', 'clean', 'ci']) gateEvidence(h, type, 'checker');
-  h.reviewer('T1', 'r-1', sha);
-  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--ok', '--sha', sha, '--agent', 'r-1']);
-  h.ok(['accept', 'T1']);
+  const h = cachedFixture(t, 'accepted merge options', (h) => {
+    const sha = gateFixture(h);
+    h.git(['switch', '-q', 'main']);
+    h.init(['--repo', 'acme/demo', '--base', 'main']);
+    h.ok(['task', 'add', '--title', 'Keep task worktrees', '--acceptance', 'Preserve the branch', '--acceptance', 'Pin the accepted head']);
+    h.ok(['claim', 'T1', '--agent', 'w-1']);
+    h.ok(['submit', 'T1', '--sha', sha, '--pr', '9', '--branch', 'fixture-change', '--agent', 'w-1']);
+    for (const type of ['tests', 'clean', 'ci']) gateEvidence(h, type, 'checker');
+    h.reviewer('T1', 'r-1', sha);
+    h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--ok', '--sha', sha, '--agent', 'r-1']);
+    h.ok(['accept', 'T1']);
+    return { sha };
+  });
+  const { sha } = h;
   const log = path.join(h.base, 'gh-args.jsonl');
   h.env.FIXTURE_GH_LOG = log;
   return {
     h, sha,
     merge(extra = []) {
-      fs.rmSync(h.env.FIXTURE_MERGED, { force: true });
       fs.rmSync(log, { force: true });
       const evidence = h.json(['merge', 'T1', ...extra, '--agent', 'orchestrator']);
       assert.equal(evidence.ok, true, evidence.summary);
@@ -40,28 +42,27 @@ function acceptedTask(t) {
 }
 
 test('merge defaults commit text from the task and preserves explicit multiline or empty bodies', (t) => {
-  const { merge } = acceptedTask(t);
-  const defaults = merge();
+  const defaults = acceptedTask(t).merge();
   assert.ok(defaults.includes('--squash'));
   assert.ok(defaults.includes('--delete-branch'));
   assert.equal(defaults[defaults.indexOf('--subject') + 1], 'Keep task worktrees');
   assert.equal(defaults[defaults.indexOf('--body') + 1], 'Preserve the branch\nPin the accepted head');
   const body = 'First paragraph.\n\nLiteral `code` and $(text).';
-  const explicit = merge(['--subject', 'Custom squash subject', '--body', body]);
+  const explicit = acceptedTask(t).merge(['--subject', 'Custom squash subject', '--body', body]);
   assert.equal(explicit[explicit.indexOf('--subject') + 1], 'Custom squash subject');
   assert.equal(explicit[explicit.indexOf('--body') + 1], body);
   assert.ok(!explicit.includes('--admin'));
-  const empty = merge(['--body', '']);
+  const empty = acceptedTask(t).merge(['--body', '']);
   assert.equal(empty[empty.indexOf('--body') + 1], '');
-  const rebase = merge(['--method', 'rebase']);
+  const rebase = acceptedTask(t).merge(['--method', 'rebase']);
   assert.ok(rebase.includes('--rebase'));
   assert.ok(!rebase.includes('--subject'));
   assert.ok(!rebase.includes('--body'));
 });
 
 test('agents cannot request admin merging outside owner-set project policy', (t) => {
-  const { h, merge } = acceptedTask(t);
   for (const policy of [undefined, 'false', 'null']) {
+    const { h, merge } = acceptedTask(t);
     if (policy !== undefined) h.ok(['project', 'set', '--merge-admin', policy]);
     assert.ok(!merge().includes('--admin'));
     fs.rmSync(h.env.FIXTURE_GH_LOG, { force: true });
@@ -85,7 +86,7 @@ test('agents cannot request admin merging outside owner-set project policy', (t)
     assert.match(escalated.stderr, /merge\.admin is owner-required; opened D1 for the owner/);
     assert.deepEqual(h.readState('project.json'), project);
   }
-  assert.doesNotMatch(h.ok(['merge', '--help']), /--admin\b/);
+  assert.doesNotMatch(acceptedTask(t).h.ok(['merge', '--help']), /--admin\b/);
 });
 
 test('invalid merge text or methods refuse before calling GitHub', (t) => {
@@ -137,8 +138,9 @@ test('merge options retain the remote branch and select admin merging while reti
   assert.ok(kept.includes('--admin'));
   assert.equal(fs.existsSync(worktree), false);
   assert.equal(h.git(['branch', '--list', 'fixture-change']), '');
-  h.ok(['project', 'set', '--merge-keep-branch', 'false', '--merge-admin', 'false']);
-  const reset = merge(['--method', 'merge']);
+  const resetTask = acceptedTask(t);
+  resetTask.h.ok(['project', 'set', '--merge-keep-branch', 'false', '--merge-admin', 'false']);
+  const reset = resetTask.merge(['--method', 'merge']);
   assert.ok(reset.includes('--merge'));
   assert.ok(reset.includes('--delete-branch'));
   assert.ok(!reset.includes('--admin'));

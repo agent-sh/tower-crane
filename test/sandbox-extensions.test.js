@@ -271,6 +271,10 @@ test('scope fixtures preserve private env and rung overrides across harness retr
   fs.writeFileSync(path.join(bin, 'systemd-run'), `#!${process.execPath}
 const fs = require('node:fs'), cp = require('node:child_process');
 const args = process.argv.slice(2);
+if (args[0] === '--version') {
+  console.log('systemd 259 (259.5-0ubuntu3.4)');
+  process.exit(0);
+}
 const supported = new Set(['CPUQuota', 'MemoryMax', 'TasksMax', 'MemorySwapMax', 'OOMPolicy', 'Delegate']);
 for (let i = 0; i < args.indexOf('--'); i++) {
   if (args[i] === '-p' && !supported.has(args[++i].split('=')[0])) {
@@ -329,7 +333,7 @@ process.exit(process.env.TOWER_CRANE_RETRY === '0' ? 75 : 0);
   }
 });
 
-test('scoped arguments keep literal env references and old systemd refuses to launch the child', {
+test('scoped arguments keep literal env references on systemd with and without --expand-environment', {
   skip: NO_STUBS || (process.platform !== 'linux' && 'Linux systemd scopes'),
 }, (t) => {
   const h = setup(t);
@@ -351,6 +355,12 @@ console.log('literal args passed');
   fs.writeFileSync(path.join(bin, 'systemd-run'), `#!${process.execPath}
 const cp = require('node:child_process');
 const args = process.argv.slice(2);
+// systemd 252 has no --expand-environment and never expands --scope argv; 259 expands unless told not to.
+const old = !!process.env.SIMULATE_OLD_SYSTEMD;
+if (args[0] === '--version') {
+  console.log(old ? 'systemd 252 (252.39-1~deb12u1)' : 'systemd 259 (259.5-0ubuntu3.4)');
+  process.exit(0);
+}
 const supported = new Set(['CPUQuota', 'MemoryMax', 'TasksMax', 'MemorySwapMax', 'OOMPolicy', 'Delegate']);
 for (let i = 0; i < args.indexOf('--'); i++) {
   if (args[i] === '-p' && !supported.has(args[++i].split('=')[0])) {
@@ -358,12 +368,12 @@ for (let i = 0; i < args.indexOf('--'); i++) {
     process.exit(1);
   }
 }
-if (process.env.SIMULATE_OLD_SYSTEMD && args.includes('--expand-environment=no')) {
+if (old && args.includes('--expand-environment=no')) {
   console.error("systemd-run: unrecognized option '--expand-environment=no'");
   process.exit(1);
 }
 let command = args.slice(args.indexOf('--') + 1);
-if (!args.includes('--expand-environment=no')) {
+if (!old && !args.includes('--expand-environment=no')) {
   command = command.map(a => a.replace(/\\$\\{([A-Za-z_][A-Za-z0-9_]*)\\}/g, (_, k) => process.env[k] || ''));
 }
 const r = cp.spawnSync(command[0], command.slice(1), {stdio: 'inherit'});
@@ -379,10 +389,8 @@ process.exit(r.status ?? 1);
   noFileSecrets(h.state);
   fs.rmSync(out);
   releaseExited(h);
-  const refused = h.run(['spawn', '--task', 'T1', '--wait'], { env: { ...env, SIMULATE_OLD_SYSTEMD: '1' } });
-  assert.equal(refused.code, 1, refused.stderr);
-  assert.match(refused.stderr, /unrecognized option.*--expand-environment=no/);
-  assert.equal(fs.existsSync(out), false, 'an unsupported flag must never fall back to expanding arguments');
+  h.ok(['spawn', '--task', 'T1', '--wait'], { env: { ...env, SIMULATE_OLD_SYSTEMD: '1' } });
+  assert.deepEqual(JSON.parse(fs.readFileSync(out, 'utf8')), literals);
   noFileSecrets(h.state);
 });
 
@@ -450,7 +458,9 @@ test('real Codex worker writes the toolchain lock, receives a private env file, 
   fs.mkdirSync(rustup);
   fs.writeFileSync(path.join(rustup, 'toolchain'), 'toolchain');
   const file = path.join(h.base, 'private.env');
-  fs.writeFileSync(file, `${SECRET_KEY}='${SECRET}'\n`, { mode: 0o600 });
+  // codex hands its commands no credential-shaped name, from the env file
+  // either (lib/agents.js codexEnvPolicy); the plain one reaches them.
+  fs.writeFileSync(file, `${SECRET_KEY}='${SECRET}'\nTC_PRIVATE_ENV_FILE_VALUE='${SECRET}'\n`, { mode: 0o600 });
   // The state directory is read-only in the sandbox.
   const results = path.join(h.base, 'results');
   fs.mkdirSync(results);
@@ -463,7 +473,8 @@ test('real Codex worker writes the toolchain lock, receives a private env file, 
   fs.writeFileSync(script, [
     "'use strict';",
     'const fs = require("node:fs"), path = require("node:path"), net = require("node:net");',
-    `if (process.env[${JSON.stringify(SECRET_KEY)}] !== ${JSON.stringify(SECRET)}) throw new Error("private environment missing");`,
+    `if (process.env.TC_PRIVATE_ENV_FILE_VALUE !== ${JSON.stringify(SECRET)}) throw new Error("private environment missing");`,
+    `if (process.env[${JSON.stringify(SECRET_KEY)}] !== undefined) throw new Error("a credential-shaped variable reached the command");`,
     `if (process.env.CARGO_HOME !== ${JSON.stringify(cargo)} || process.env.RUSTUP_HOME !== ${JSON.stringify(rustup)}) throw new Error("toolchain homes missing");`,
     'if (fs.readFileSync(path.join(process.env.RUSTUP_HOME, "toolchain"), "utf8") !== "toolchain") throw new Error("toolchain missing");',
     'fs.closeSync(fs.openSync(path.join(process.env.CARGO_HOME, ".package-cache"), "wx"));',

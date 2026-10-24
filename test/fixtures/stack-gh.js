@@ -10,10 +10,22 @@ let skew = 0;
 Date.now = () => now() + skew;
 const BIN = path.join(__dirname, '..', '..', 'bin', 'tower-crane.js');
 const { ownerKeyFile, ownerProject } = require('../../lib/authority');
-const { updateJson, readPublished } = require('../atomic-file');
+const { updateJson, readPublished, writeAtomic } = require('../atomic-file');
 
 if (process.env.TEST_STACK_DEFER_OBSERVE) {
   require('../../lib/stack').observe = () => {};
+}
+
+if (process.env.TEST_STACK_DIRTY_AFTER_MERGE) {
+  const C = require('../../lib/gates/common');
+  const git = C.git;
+  C.git = async (ctx, cwd, args, opts) => {
+    const result = await git(ctx, cwd, args, opts);
+    if (result.ok && args[0] === 'merge' && args.includes('--no-ff')) {
+      writeAtomic(process.env.TEST_STACK_DIRTY_AFTER_MERGE, 'pending edits\n');
+    }
+    return result;
+  };
 }
 
 // Holds a gh call open until the test releases it, so another command can run meanwhile.
@@ -149,6 +161,7 @@ cp.spawnSync = function stackGh(command, args, opts) {
     }
     if (data.unavailable) return finish('', 9, 'Stacked pull requests are not enabled');
     if (args[1].includes('/stacks')) return finish(data.linked ? [{ id: 5, pull_requests: data.order.map((number) => ({ number })) }] : []);
+    if (/\/issues\/\d+\/comments/.test(args[1])) return finish(data.comments || []);
     // GitHub's asynchronous merge: the POST pins the head and returns at once; the merge
     // lands only when a later status poll finds it complete.
     if (posted) {
@@ -325,6 +338,18 @@ cp.spawnSync = function stackGh(command, args, opts) {
       git(['push', 'origin', pr.headRefName]);
     }
     if (data.syncError) return finish(data.syncOutput || '', 1, data.syncError);
+    if (data.restack) {
+      const { branch, oldParent, parent } = data.restack;
+      const previous = git(['rev-parse', branch]);
+      const tree = git(['worktree', 'list', '--porcelain']).split('\n\n')
+        .find((block) => block.includes(`branch refs/heads/${branch}\n`) || block.endsWith(`branch refs/heads/${branch}`));
+      const cwd = tree.match(/^worktree (.+)$/m)[1];
+      git(['-C', cwd, 'rebase', '--onto', parent, oldParent]);
+      git(['push', `--force-with-lease=refs/heads/${branch}:${previous}`, 'origin', branch]);
+      const head = git(['rev-parse', branch]);
+      Object.values(data.prs).find((pr) => pr.headRefName === branch).headRefOid = head;
+      delete data.restack;
+    }
     return finish();
   }
   throw new Error(`unexpected gh stack: ${args}`);

@@ -87,6 +87,7 @@ test('the npm package ships the plugin and loads pi skills through its CLI', (t)
   // not the benchmark evidence, screenshots and review records kept in the repository.
   assert.deepEqual(files.filter((file) => file.startsWith('docs/')).sort(), [
     'docs/automation.md', 'docs/builtin-ladder.json', 'docs/cli.md', 'docs/design.md', 'docs/ladder.md', 'docs/state.md',
+    ...['ci', 'containment', 'decisions', 'gates', 'review', 'stacks', 'storage', 'tasks'].map((area) => `docs/state/${area}.md`),
   ]);
   assert.ok(files.includes('CHANGELOG.md') && files.includes('LICENSE') && files.includes('README.md'));
   assert.ok(!files.some((file) => /^(test|scripts|research|tools|changelog\.d)\/|^\.tower-crane\//.test(file)),

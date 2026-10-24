@@ -196,7 +196,7 @@ test('restoring a cleanup pin queues and runs an accepted task blocked by missin
 });
 
 for (const change of ['source', 'empty']) {
-  test(`the merge queue refreshes local CI after a ${change} commit advances its checked base`, (t) => {
+  test(`the merge queue reruns pinned local CI on the real merged tree after a ${change} commit advances its checked base`, (t) => {
     const h = accepted(t);
     h.ok(['project', 'set', '--ci-local',
       JSON.stringify({ command: [process.execPath, '-e', 'process.exit(0)'], timeout: 5 })]);
@@ -211,7 +211,7 @@ for (const change of ['source', 'empty']) {
     h.git(['switch', '-q', 'fixture-change']);
     const count = h.logs().filter((e) => e.cmd === 'check ci').length;
     const report = h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'ci');
-    assert.equal(report.ok, change === 'empty', 'reports use the merged result, not a base-only SHA change');
+    assert.equal(report.ok, true, 'reports keep the receipt on the tree it checked');
     h.ok(['merge', '--accepted', '--agent', 'orchestrator']);
     assert.equal(h.github().prs['7'].state, 'MERGED');
     const ci = h.readState('tasks.json').tasks[0].evidence.findLast((e) => e.type === 'ci');
@@ -222,17 +222,18 @@ for (const change of ['source', 'empty']) {
 
 for (const [change, ref] of [
   ['empty', 'main'], ['empty', 'refs/remotes/origin/main'],
-  ['checked changes', 'main'], ['source', 'main'], ['source', 'refs/remotes/origin/main'],
+  ['checked changes', 'main'], ['source', 'main'], ['source', 'refs/remotes/origin/main'], ['rewritten', 'main'],
 ]) {
-  test(`local CI reports ${change === 'source' ? 'invalidate a changed' : 'preserve an identical'} merge after ${change} advances ${ref}`, (t) => {
+  test(`local CI reports ${change === 'rewritten' ? 'invalidate a receipt after a rewritten' : `preserve a pinned receipt after ${change} advances`} ${ref}`, (t) => {
     const h = accepted(t);
     h.ok(['project', 'set', '--ci-local', localCI]);
     h.ok(['check', 'ci', 'T1']);
     const old = h.readState('tasks.json').tasks[0].evidence.findLast((e) => e.type === 'ci');
     const base = h.git(['rev-parse', 'main']);
     let tip;
-    if (change === 'source') {
-      h.git(['switch', '-q', 'main']);
+    if (change === 'source' || change === 'rewritten') {
+      // A rewritten base is a force-push that drops the checked base commit.
+      h.git(['switch', '-q', ...(change === 'rewritten' ? ['--detach', `${base}^`] : ['main'])]);
       fs.appendFileSync(path.join(h.repo, 'README.md'), 'Changed merged result.\n');
       h.git(['add', 'README.md']);
       h.git(['commit', '-qm', 'change base source']);
@@ -247,10 +248,10 @@ for (const [change, ref] of [
     const count = h.logs().filter((e) => e.cmd === 'check ci').length;
     const shown = h.json(['task', 'show', 'T1']);
     const ci = shown.gates.gates.find((g) => g.type === 'ci');
-    assert.equal(ci.ok, change !== 'source');
+    assert.equal(ci.ok, change !== 'rewritten');
     assert.deepEqual(shown.evidence.findLast((e) => e.type === 'ci'), old);
     assert.equal(h.logs().filter((e) => e.cmd === 'check ci').length, count, 'a report does not rerun CI');
-    if (change === 'source') assert.match(ci.reason, /current merged tree/);
+    if (change === 'rewritten') assert.match(ci.reason, /checked base [0-9a-f]+ is not in the selected base's history/);
   });
 }
 
@@ -272,6 +273,36 @@ test('a local CI base ahead of origin is reported once instead of refreshed inde
   assert.equal(h.github().prs['7'].state, 'OPEN');
   assert.equal(h.readState('tasks.json').tasks[0].status, 'accepted');
 });
+
+for (const [verdict, out, ran] of [
+  ['keep', { pr_steps: ['docs'], main_steps: ['readme'], shared: [], verdict: 'keep' }, []],
+  ['shared steps', { pr_steps: ['readme'], main_steps: ['readme'], shared: ['readme'], verdict: 'rerun' }, [['--only', 'readme']]],
+]) {
+  test(`the merge queue refreshes a local CI receipt across a base move through ci.overlap (${verdict})`, (t) => {
+    const h = accepted(t);
+    const runs = path.join(h.base, 'runs.jsonl');
+    const checker = path.join(h.base, 'checker.js');
+    fs.writeFileSync(checker, "require('node:fs').appendFileSync(process.argv[2], JSON.stringify(process.argv.slice(3)) + '\\n');\n");
+    const hook = path.join(h.base, 'overlap.js');
+    fs.writeFileSync(hook, `process.stdout.write(${JSON.stringify(JSON.stringify(out))});\n`);
+    h.ok(['project', 'set', '--ci-local', JSON.stringify({ command: [process.execPath, checker, runs], timeout: 5,
+      rerun_cmd: [process.execPath, checker, runs, '--only', '{steps}'] }),
+    '--ci-overlap', JSON.stringify({ command: [process.execPath, hook], timeout: 5 })]);
+    h.ok(['check', 'ci', 'T1']);
+    const base = h.git(['rev-parse', 'main']);
+    const tip = h.git(['commit-tree', `${base}^{tree}`, '-p', base, '-m', 'base advances']);
+    h.git(['update-ref', 'refs/heads/main', tip]);
+    const read = () => fs.readFileSync(runs, 'utf8').trim().split('\n').map(JSON.parse);
+    const before = read();
+    h.ok(['merge', '--accepted', '--agent', 'orchestrator']);
+    assert.equal(h.github().prs['7'].state, 'MERGED');
+    assert.deepEqual(read().slice(before.length), ran);
+    const ci = h.json(['task', 'show', 'T1']).evidence.findLast((e) => e.type === 'ci');
+    assert.equal(ci.receipt.narrows.base_sha, base);
+    assert.equal(ci.receipt.base_sha, tip);
+    assert.deepEqual(ci.receipt.steps, out.shared);
+  });
+}
 
 test('accept refreshes a stale clean policy before accepting', (t) => {
   const h = accepted(t);

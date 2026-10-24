@@ -497,6 +497,8 @@ test('a reviewer that exits without a verdict is not respawned at that head unti
 test('a supervised worker submission runs gates and dispatches the offline reviewer after exit', async (t) => {
   const h = setup(t);
   configureHarness(h, { rules: true });
+  // A worker that owns its PR waits on it and its review starts at once (pr-owner.test.js); this one does not own it.
+  h.ok(['project', 'set', '--owners', '0']);
   const hold = path.join(h.base, 'worker-hold');
   const spawned = h.runAsync(['spawn', '--task', 'T1', '--wait', '--agent', 'orchestrator'],
     { env: { AUTOMATION_WORKER_HOLD: hold } });

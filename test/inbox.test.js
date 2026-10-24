@@ -647,7 +647,7 @@ test('one fixture exposes every inbox kind and resolving commands clear their co
   event(h, stall, 'stall', { agent: 'stalled', until: claim.until, progress_at: claim.since });
   h.ok(['ask', '--kind', 'technical', '--question', 'Which API?', '--option', 'A', '--option', 'B', '--blocks', stall]);
   h.ok(['msg', '--to', 'orchestrator', '--task', stall, 'Need API guidance', '--agent', 'messenger']);
-  event(h, accepted, 'automation', { phase: 'running', pid: process.pid, ...require('../lib/processes').identity(process.pid) });
+  event(h, accepted, 'executor', { lease: 'cpu:inbox', phase: 'running', kind: 'tests', pid: process.pid, ...require('../lib/processes').identity(process.pid) });
   const github = h.github();
   github.review_comments = { 1: [{ id: 1, html_url: 'https://github.com/acme/demo/pull/1#issuecomment-1',
     body: `Review (Tower Crane, clean context)\n\nBlocking: 1 finding at ${h.sha}.\n\n- lib/value.js:1 - Check null before dereferencing. - Avoid the crash.\n` }] };
@@ -983,13 +983,14 @@ test('GitHub-only findings wake the watcher and endpoint failures retain other f
   h.submit(id, 8);
   const after = () => String(fs.statSync(path.join(h.state, 'events.jsonl')).size);
   // Async GitHub reads must finish within the wait, including a cold cache.
-  const wait = () => h.run(['wait', '--inbox', '--observe', '--after', after(), '--types', 'inbox item', '--timeout', '2', '--agent', 'orchestrator']); // wait-allow: verify the CLI observation, filtering or timeout contract with already-published state
+  // The wake returns as soon as the item lands, so its deadline only bounds a loaded host.
+  const wait = (timeout = '2') => h.run(['wait', '--inbox', '--observe', '--after', after(), '--types', 'inbox item', '--timeout', timeout, '--agent', 'orchestrator']); // wait-allow: verify the CLI observation, filtering or timeout contract with already-published state
   assert.equal(wait().code, 2);
   const github = h.github();
   github.revuto = { name: 'review', app: { slug: 'revuto-review' }, status: 'completed', conclusion: 'failure', output: { summary: 'Bounds check missing' } };
   github.failEndpoint = '/code-scanning/';
   h.save(github);
-  const wake = wait();
+  const wake = wait('60');
   assert.equal(wake.code, 0, wake.stderr);
   assert.equal(JSON.parse(wake.stdout).detail.item, `revuto_failed:${id}`);
   const kinds = h.inbox().items.map((i) => i.kind);
@@ -1500,4 +1501,24 @@ test('a red push or schedule run on the base shows in inbox and status until a l
   h.save(github);
   assert.doesNotMatch(h.ok(['status']), /ci red/);
   assert.deepEqual(red(), []);
+});
+
+// Main pushes run only the shared-files check, so the daily full run is where a regression shows.
+test('a red daily full run stays in inbox past newer green pushes of its workflow until a green full run', (t) => {
+  const h = setup(t);
+  const run = (id, number, event, conclusion) => ({ id, run_number: number, run_attempt: 1, workflow_id: 11, name: 'CI',
+    path: '.github/workflows/ci.yml', event, status: 'completed', conclusion, head_sha: h.sha, html_url: `https://github.com/acme/demo/actions/runs/${id}` });
+  const github = h.github();
+  github.jobs = { 2001: [] };
+  const red = (runs) => {
+    github.main_runs = runs;
+    h.save(github);
+    fs.rmSync(path.join(h.state, 'main-ci-cache.json'), { force: true });
+    return h.inbox().items.filter((i) => i.kind === 'main_ci_failed').map((i) => [i.id, i.run]);
+  };
+  const daily = run(2001, 60, 'schedule', 'failure');
+  assert.deepEqual(red([daily]), [['main_ci_failed:project:11', 2001]]);
+  assert.deepEqual(red([run(2002, 61, 'push', 'success'), daily]), [['main_ci_failed:project:11', 2001]]);
+  assert.match(h.ok(['status']), /main ci red: CI run 2001 attempt 1 \(schedule at /);
+  assert.deepEqual(red([run(2003, 62, 'workflow_dispatch', 'success'), run(2002, 61, 'push', 'success'), daily]), []);
 });

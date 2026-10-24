@@ -53,7 +53,9 @@ for (const pass of [1, 2]) test(`a manual merge racing the merge queue under ano
       assert.equal(calls.filter((a) => a[0] === 'pr' && a[1] === 'merge' && a[2] === String(n)).length, 1, `${id}: GitHub merged once`);
     }
     const merges = h.readState('tasks.json').tasks.find((x) => x.id === upper).evidence.filter((e) => e.type === 'merge');
-    assert.ok(merges.length && merges.every((e) => e.ok), `${upper}: ${JSON.stringify(merges)}`);
+    assert.equal(merges.length, 1, `${upper}: one merge receipt`);
+    assert.equal(merges[0].ok, true);
+    assert.equal(log(h).filter((e) => e.task === upper && e.type === 'merged').length, 1, `${upper}: one merged event`);
   }
 });
 
@@ -87,9 +89,10 @@ test('a manual merge racing an automatic merge of the same task: one merges, the
     assert.equal(calls.filter((a) => a[0] === 'pr' && a[1] === 'merge' && a[2] === String(i)).length, 1, `${id}: GitHub merged once`);
     const task = h.readState('tasks.json').tasks.find((x) => x.id === id);
     const merges = task.evidence.filter((e) => e.type === 'merge');
-    assert.ok(merges.length && merges.every((e) => e.ok), `${id}: ${JSON.stringify(merges)}`);
+    assert.equal(merges.length, 1, `${id}: one merge receipt`);
+    assert.equal(merges[0].ok, true);
+    assert.equal(log(h).filter((e) => e.task === id && e.type === 'merged').length, 1, `${id}: one merged event`);
     assert.match(merges[0].summary, /^merged PR/);
-    if (merges.length > 1) assert.match(merges[1].summary, /already merged/, 'the later merge confirms the head');
     winners[merges[0].via === 'automation' ? 'automation' : 'manual']++;
     const receipts = log(h).filter((e) => e.cmd === 'automation' && e.task === id && e.detail.phase !== 'running');
     assert.deepEqual(receipts.filter((e) => e.detail.phase !== 'done'), [], `${id}: no automatic failure`);

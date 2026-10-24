@@ -128,6 +128,127 @@ process.exit(files.length ? cp.spawnSync(process.execPath, ['--test', ...files],
   assertCleanedUp();
 });
 
+// Each file waits for the other's marker, which only a run side by side gives both: a host-only
+// command that started after the ordinary one ended would leave the ordinary file waiting alone.
+test('host-only commands run beside the ordinary command, and its failure still decides the head', async () => {
+  const dir = path.join(tmp, 'side-by-side');
+  fs.mkdirSync(dir);
+  const meet = (own, other) => `const fs = require('node:fs');
+const path = require('node:path');
+require('node:test')('${own} meets ${other}', async () => {
+  fs.writeFileSync(path.join(${JSON.stringify(dir)}, '${own}'), 'here');
+  const deadline = Date.now() + 30000; // wait-allow: run in turn, the other file never starts, so this bounds the failing case
+  while (!fs.existsSync(path.join(${JSON.stringify(dir)}, '${other}')) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20)); // wait-allow: the other file's marker is the event under test
+  require('node:assert/strict').ok(fs.existsSync(path.join(${JSON.stringify(dir)}, '${other}')), '${other} ran at the same time');
+});
+`;
+  const runner = path.join(tmp, 'side-by-side-runner.cjs');
+  fs.writeFileSync(runner, `const cp = require('node:child_process');
+const excluded = JSON.parse(process.env.TOWER_CRANE_TEST_EXCLUDE || '[]');
+const files = process.argv.slice(2).filter(f => !excluded.includes(f));
+process.exit(files.length ? cp.spawnSync(process.execPath, ['--test', ...files], { stdio: 'inherit' }).status : 0);
+`);
+  const suite = `${NODE} ${quote(runner)} test/host.test.js test/plain.test.js`;
+  const project = {
+    tests: { mode: 'run-only', host_only: ['test/host.test.js'] },
+    gates: { tests_cmd: suite, tests_proof_cmd: `${NODE} --test {tests}` },
+  };
+  const sha = task({ 'test/host.test.js': meet('host', 'plain'), 'test/plain.test.js': meet('plain', 'host') });
+  const met = await gate.run(ctx(sha, { args: { cmd: suite }, project }));
+  assert.equal(met.ok, true, met.summary);
+  assert.deepEqual(fs.readdirSync(dir).sort(), ['host', 'plain']);
+  assert.deepEqual(met.receipt.host_only.run, ['test/host.test.js']);
+
+  // The ordinary command's failure is the head's verdict even when the host-only command passed beside it.
+  const broken = task({
+    'test/host.test.js': "require('node:test')('host passes', () => {});\n",
+    'test/plain.test.js': "require('node:test')('plain fails', () => { throw new Error('plain broke'); });\n",
+  });
+  const failed = await gate.run(ctx(broken, { args: { cmd: suite }, project }));
+  assert.equal(failed.ok, false, failed.summary);
+  assert.deepEqual(failed.test_failure.names, ['plain fails']);
+  assert.ok(failed.summary.startsWith(`\`${suite}\``), failed.summary);
+  assert.deepEqual(failed.receipt.host_only.run, ['test/host.test.js']);
+  assertCleanedUp();
+});
+
+// Fixtures for the test below: a test file that waits SLOW_MS unless its command is stopped, one
+// that passes or fails at once, and a runner that honors the host-only exclusion.
+const SLOW_MS = 20000;
+const slowFile = (dir, name) => `const fs = require('node:fs');
+require('node:test')('${name} waits', async () => {
+  fs.writeFileSync(${JSON.stringify(path.join(dir, `${name}-started`))}, '');
+  await new Promise((r) => setTimeout(r, ${SLOW_MS})); // wait-allow: a command that only a stop ends early
+  fs.writeFileSync(${JSON.stringify(path.join(dir, `${name}-finished`))}, '');
+});
+`;
+const quickFile = (dir, name, error) => `require('node:fs').writeFileSync(${JSON.stringify(path.join(dir, `${name}-started`))}, '');
+require('node:test')('${name} ${error ? 'fails' : 'passes'}', () => {${error ? ` throw new Error('${name} broke');` : ''} });
+`;
+const LANES_RUNNER = path.join(tmp, 'lanes-runner.cjs');
+fs.writeFileSync(LANES_RUNNER, `const cp = require('node:child_process');
+const excluded = JSON.parse(process.env.TOWER_CRANE_TEST_EXCLUDE || '[]');
+const files = process.argv.slice(2).filter(f => !excluded.includes(f));
+process.exit(files.length ? cp.spawnSync(process.execPath, ['--test', ...files], { stdio: 'inherit' }).status : 0);
+`);
+
+// The ordinary command and the host-only commands beside it end together: a side that throws stops
+// the other, and a failing ordinary command stops the host-only side, before the step returns. A
+// command still running when the gate returned would run on in its removed worktree.
+test('a step returns only after both sides end, and one side throwing or the suite failing stops the other', async () => {
+  const suite = `${NODE} ${quote(LANES_RUNNER)} test/plain.test.js`;
+  const project = {
+    tests: { mode: 'run-only', host_only: ['test/*-host.test.js'] },
+    gates: { tests_cmd: suite, tests_proof_cmd: `${NODE} --test {tests}` },
+  };
+  for (const [name, files, throwOn, outcome] of [
+    ['the suite throws while a host-only command runs', (d) => ({ 'test/plain.test.js': quickFile(d, 'plain'), 'test/a-host.test.js': slowFile(d, 'a') }),
+      (cmd) => cmd === suite, 'throws'],
+    ['a host-only command throws while the suite runs', (d) => ({ 'test/plain.test.js': slowFile(d, 'plain'), 'test/a-host.test.js': quickFile(d, 'a') }),
+      (cmd) => cmd.includes('a-host'), 'throws'],
+    ['the suite fails while a host-only command runs', (d) => ({ 'test/plain.test.js': quickFile(d, 'plain', true), 'test/a-host.test.js': slowFile(d, 'a') }),
+      () => false, 'fails'],
+  ]) {
+    const dir = path.join(tmp, `lanes-${name.replace(/\W+/g, '-')}`);
+    fs.mkdirSync(dir);
+    // A second host-only file the stopped side must never start.
+    const sha = task({ ...files(dir), 'test/b-host.test.js': quickFile(dir, 'b') });
+    let running = 0;
+    const exec = async (cmd, args, opts) => {
+      if (!opts.shell && !opts.processTree) return require('node:child_process').spawnSync(cmd, args, opts);
+      running++;
+      let r;
+      try {
+        r = await treeExec(cmd, args, opts);
+      } finally {
+        running--;
+      }
+      if (throwOn(cmd)) throw new Error(`engine code missing after ${cmd}`);
+      return r;
+    };
+    let result = null;
+    let error = null;
+    try {
+      result = await gate.run({ ...ctx(sha, { args: { cmd: suite }, project }), exec });
+    } catch (e) {
+      error = e;
+    }
+    assert.equal(running, 0, `${name}: no command runs once the gate returned`);
+    assert.equal(fs.existsSync(path.join(dir, 'b-started')), false, `${name}: the stopped side starts no further file`);
+    // With nothing left running, a slow file that never finished was stopped, not waited out.
+    assert.deepEqual(fs.readdirSync(dir).filter((f) => f.endsWith('-finished')), [], name);
+    if (outcome === 'throws') {
+      assert.match(error?.message ?? '', /engine code missing/, name);
+    } else {
+      assert.equal(error, null, name);
+      assert.equal(result.ok, false, name);
+      assert.deepEqual(result.test_failure.names, ['plain fails'], name);
+      assert.deepEqual(result.receipt.host_only.run, [], `${name}: the stopped host-only file is not recorded as run`);
+    }
+    assertCleanedUp();
+  }
+});
+
 // Claude Code's sandbox bridge socket, measured on 2.1.296: <TMPDIR>/claude-socks-<16 hex>.sock, at most 108 bytes.
 const HARNESS_SOCKET = 'claude-socks-0123456789abcdef.sock';
 const socketFits = (dir) => Buffer.byteLength(path.join(dir, HARNESS_SOCKET)) <= 108;
@@ -545,7 +666,7 @@ test('a file the task added is removed for the run without the change', async ()
   assertCleanedUp();
 });
 
-test('a native child crash reruns only the failing file once: a one-off passes with a native_crash note and its core read, a repeat or mixed failure fails', { skip: process.platform === 'win32' && 'POSIX signals' }, async () => {
+test('a native child crash reruns only the failing file once: a one-off passes with a native_crash note and its core read, a repeat or one beside an ordinary failure fails', { skip: process.platform === 'win32' && 'POSIX signals' }, async () => {
   const dir = path.join(tmp, 'coredump');
   const keep = path.join(tmp, 'native-cores');
   fs.mkdirSync(dir);
@@ -561,14 +682,17 @@ test('a native child crash reruns only the failing file once: a one-off passes w
   const unreadable = path.join(tmp, 'gdb-bad');
   fs.writeFileSync(unreadable, "#!/bin/sh\necho 'not a core dump: file format not recognized' >&2\nexit 1\n", { mode: 0o755 });
   const spec = `${NODE} --test --test-reporter=spec`;
-  const project = { gates: { tests_cmd: `${spec} test/counted.test.js test/crash.test.js`, tests_proof_cmd: `${spec} {tests}` } };
-  const rerun = (ok) => ({ step: 'head', files: ['test/crash.test.js'], ok });
+  // A crucial head is the file selector over a known list, so a rerun can narrow to the crashed file.
+  const project = { tests: { expensive: true, crucial: ['test/crash.test.js'], map: {} },
+    gates: { tests_cmd: `${spec} test/counted.test.js test/crash.test.js`, tests_proof_cmd: `${spec} {tests}` } };
+  const rerun = (ok) => [{ step: 'head', files: ['test/crash.test.js'], ok }];
+  const flaky = ['test/crash.test.js > child crashes natively'];
   for (const [name, options, want] of [
-    ['one-off', { times: 1, exe: process.execPath, gdb: readable }, { ok: true, crashes: 1, runs: 2, rerun: rerun(true), stack: true, note: /Reran test\/crash\.test\.js once in the same checkout: exit 0/ }],
-    ['one-off in a describe', { times: 1, nest: 'describe', gdb: readable }, { ok: true, crashes: 1, runs: 2, rerun: rerun(true), stack: true, note: /exit 0, so the crash is not the change's/ }],
-    ['one-off in a subtest', { times: 1, nest: 'subtest', gdb: readable }, { ok: true, crashes: 1, runs: 2, rerun: rerun(true), stack: true, note: /exit 0, so the crash is not the change's/ }],
-    ['every time', { times: Infinity, gdb: unreadable }, { ok: false, crashes: 2, runs: 2, rerun: rerun(false), stack: false, note: /Reran test\/crash\.test\.js once in the same checkout: exit 1, native crash again: .*the failure stands/ }],
-    ['beside an ordinary failure', { times: 1, ordinary: true, gdb: readable }, { ok: false, crashes: 1, runs: 1, rerun: undefined, stack: true, note: /Other tests in the run failed without one, so it was not rerun/ }],
+    ['one-off', { times: 1, exe: process.execPath, gdb: readable }, { ok: true, crashes: 1, runs: 2, rerun: rerun(true), stack: true, flaky, note: /Rerun: reran test\/crash\.test\.js once in the same checkout: exit 0; flaky: test\/crash\.test\.js > child crashes natively\./ }],
+    ['one-off in a describe', { times: 1, nest: 'describe', gdb: readable }, { ok: true, crashes: 1, runs: 2, rerun: rerun(true), stack: true, flaky, note: /exit 0; flaky: test\/crash\.test\.js > child crashes natively\./ }],
+    ['one-off in a subtest', { times: 1, nest: 'subtest', gdb: readable }, { ok: true, crashes: 1, runs: 2, rerun: rerun(true), stack: true, flaky, note: /exit 0; flaky: test\/crash\.test\.js > child crashes natively\./ }],
+    ['every time', { times: Infinity, gdb: unreadable }, { ok: false, crashes: 2, runs: 2, rerun: rerun(false), stack: false, flaky: undefined, note: /Rerun: reran test\/crash\.test\.js once in the same checkout: exit 1, native crash again: .*the failure stands/ }],
+    ['beside an ordinary failure', { times: 1, ordinary: true, gdb: readable }, { ok: false, crashes: 1, runs: 2, rerun: rerun(false), stack: true, flaky: undefined, note: /Native crash: child crashes natively \(SIGSEGV, pid \d+\)[^\n]*\. Rerun: reran test\/crash\.test\.js once in the same checkout: exit 1; the failure stands/ }],
   ]) {
     fs.rmSync(gdbArgs, { force: true });
     const marker = path.join(tmp, `crash-${branches}`);
@@ -585,7 +709,9 @@ test('a native child crash reruns only the failing file once: a one-off passes w
     assert.equal(r.ok, want.ok, `${name}: ${r.summary}`);
     assert.match(r.summary, want.note, name);
     assert.equal(r.native_crash.length, want.crashes, name);
-    assert.deepEqual(r.receipt?.native_rerun, want.rerun, name);
+    assert.deepEqual(r.receipt?.reruns, want.rerun, name);
+    assert.deepEqual(r.flaky?.map((f) => f.test), want.flaky, name);
+    if (want.flaky) assert.equal(r.flaky[0].native_crash, true, name);
     for (const crash of r.native_crash) {
       assert.equal(crash.test, 'child crashes natively', name);
       assert.equal(crash.signal, 'SIGSEGV', name);
@@ -611,6 +737,85 @@ test('a native child crash reruns only the failing file once: a one-off passes w
     assert.equal(readPublished(marker, 'utf8').length, want.runs, `${name}: crash test runs`);
     assert.equal(readPublished(counted, 'utf8').length, 1, `${name}: the passing file is not rerun`);
     assert.equal(!!r.confirmed_failure, !want.ok, name);
+    assertCleanedUp();
+  }
+});
+
+test('a failing test reruns once: one that then passes is flaky with both runs, one that fails twice keeps the failure, and a reverted failure is not rerun', async () => {
+  const spec = `${NODE} --test --test-reporter=spec --test-concurrency=1`;
+  const suite = `${spec} test/*.test.js`;
+  // The head runs the full suite command, the file selector over the crucial list, or a chain whose
+  // second part never runs when the first fails.
+  const heads = {
+    suite: { cmd: suite, run: suite },
+    crucial: { cmd: suite, run: `${spec} ${['test/counted.test.js', 'test/flaky.test.js'].map(shellQuote).join(' ')}`,
+      tests: { mode: 'prove', expensive: true, crucial: ['test/flaky.test.js'], map: {} } },
+    chain: { cmd: `${spec} test/flaky.test.js && ${spec} test/broken.test.js` },
+  };
+  heads.chain.run = heads.chain.cmd;
+  const whole = (reason) => new RegExp(`reran the whole command \\(${reason}\\) once in the same checkout`);
+  const unnamed = whole('the command is not gates\\.tests_proof_cmd over a known file list, so it may have stopped before its later parts');
+  for (const [name, { times, head = 'crucial', mode = 'run-only', selector = true, cut = false }, want] of [
+    ['fails once', { times: 1 }, { ok: true, flaky: true, runs: 2, counted: 1, rerun: ['test/flaky.test.js'], note: /Rerun: reran test\/flaky\.test\.js once in the same checkout: exit 0; flaky: test\/flaky\.test\.js > sometimes fails\./ }],
+    ['fails twice', { times: 2 }, { ok: false, flaky: false, runs: 2, counted: 1, rerun: ['test/flaky.test.js'], note: /Rerun: reran test\/flaky\.test\.js once in the same checkout: exit 1; the failure stands\. Failing on the rerun: sometimes fails\./ }],
+    ['fails once under the full suite command', { times: 1, head: 'suite' }, { ok: true, flaky: true, runs: 2, counted: 2, rerun: [], note: unnamed }],
+    // The first part's flaky failure stops the chain, so only a whole rerun reaches the broken part.
+    ['fails once before a part that always fails', { times: 1, head: 'chain' }, { ok: false, flaky: false, runs: 2, counted: 0, broken: 1, rerun: [], note: new RegExp(`${unnamed.source}: exit 1; the failure stands\\. Failing on the rerun: test/broken\\.test\\.js`) }],
+    ['fails once with no file selector', { times: 1, head: 'suite', selector: false }, { ok: true, flaky: true, runs: 2, counted: 2, rerun: [], note: whole('the pinned runner has no file selector \\(gates\\.tests_proof_cmd with \\{tests\\}\\)') }],
+    // A failure printed before the kept tail would go unnamed, so the whole command reruns.
+    ['fails once with its output cut', { times: 1, cut: true }, { ok: true, flaky: true, runs: 2, counted: 2, rerun: [], note: whole("the first run's output was cut to its last \\d+ characters") }],
+    // The reverted run fails test/add.test.js as the proof wants, and that failure is not rerun.
+    ['fails once in prove mode', { times: 1, head: 'suite', mode: 'prove' }, { ok: true, flaky: true, runs: 3, counted: 3, rerun: [], note: /flaky: test\/flaky\.test\.js > sometimes fails\./ }],
+  ]) {
+    const marker = path.join(tmp, `flaky-${branches}`);
+    const counted = path.join(tmp, `flaky-counted-${branches}`);
+    const broken = path.join(tmp, `flaky-broken-${branches}`);
+    const { cmd, run, tests = { mode } } = heads[head];
+    const sha = task({
+      // A crucial head of a test-only diff runs the selector alone, with no proof runs.
+      ...(head === 'crucial' ? {} : { 'lib/add.js': FIX, 'test/add.test.js': ADD_TEST }),
+      'test/counted.test.js': `require('fs').appendFileSync(${JSON.stringify(counted)}, 'x');\n`,
+      ...(head === 'chain' ? { 'test/broken.test.js': `require('fs').appendFileSync(${JSON.stringify(broken)}, 'x');\nthrow new Error('always broken');\n` } : {}),
+      'test/flaky.test.js': `const { test } = require('node:test');
+const assert = require('node:assert');
+const fs = require('node:fs');
+test('sometimes fails', () => {
+  // read-published: only this test writes the marker, and runs are sequential.
+  const runs = fs.existsSync(${JSON.stringify(marker)}) ? fs.readFileSync(${JSON.stringify(marker)}, 'utf8').length : 0;
+  fs.appendFileSync(${JSON.stringify(marker)}, 'x');
+  if (${cut} && runs < ${times}) process.stdout.write(('x'.repeat(1023) + '\\n').repeat(1536));
+  assert.ok(runs >= ${times}, 'flaked on run ' + runs);
+});
+`,
+    });
+    const project = { tests, gates: { tests_cmd: cmd, ...(selector ? { tests_proof_cmd: `${spec} {tests}` } : {}) } };
+    const r = await gate.run(ctx(sha, { args: { cmd }, project }));
+    assert.equal(r.ok, want.ok, `${name}: ${r.summary}`);
+    assert.match(r.summary, want.note, name);
+    assert.deepEqual(r.receipt.reruns, [{ step: 'head', files: want.rerun, ok: want.ok }], name);
+    assert.equal(!!r.confirmed_failure, !want.ok, name);
+    const count = (file) => (fs.existsSync(file) ? readPublished(file, 'utf8').length : 0);
+    assert.equal(count(marker), want.runs, `${name}: flaky test runs`);
+    assert.equal(count(counted), want.counted, `${name}: passing file runs`);
+    assert.equal(count(broken), want.broken ?? 0, `${name}: broken file runs`);
+    if (!want.flaky) {
+      assert.equal(r.flaky, undefined, name);
+      continue;
+    }
+    // The head line gives the first run's exit beside the rerun's.
+    assert.match(r.summary, /: exit 1, then exit 0 on its rerun\n/, name);
+    assert.equal(r.flaky.length, 1, name);
+    const [flaky] = r.flaky;
+    assert.equal(flaky.test, 'test/flaky.test.js > sometimes fails', name);
+    assert.equal(flaky.step, 'head', name);
+    assert.deepEqual(flaky.files, ['test/flaky.test.js'], name);
+    assert.equal(flaky.first_failure.command, run, name);
+    assert.equal(flaky.first_failure.status, 1, name);
+    assert.match(flaky.first_failure.error, /flaked on run 0/, name);
+    assert.match(flaky.first_failure.excerpt, /^✖ sometimes fails[^\n]*\n[\s\S]*flaked on run 0/, name);
+    assert.equal(flaky.rerun.command, want.rerun.length ? `${spec} ${shellQuote('test/flaky.test.js')}` : run, name);
+    assert.equal(flaky.rerun.status, 0, name);
+    assert.ok(flaky.rerun.duration_ms >= 0 && flaky.first_failure.duration_ms >= 0, name);
     assertCleanedUp();
   }
 });
@@ -1066,6 +1271,25 @@ test('expensive prove needs a pinned scoped command that passes at head, fails a
   const r = await gate.run(ctx(sha, { project: expensive(`${NODE} proof.js {tests}`) }));
   assert.equal(r.ok, true, r.summary);
   assert.match(r.summary, /kept a scoped proof/);
+  assertCleanedUp();
+});
+
+test('the receipt times each step the gate ran', async () => {
+  const sha = task({ 'lib/add.js': FIX, 'test/add.test.js': ADD_TEST });
+  const broken = task({ 'lib/add.js': 'module.exports = () => 0;\n', 'test/add.test.js': ADD_TEST });
+  const expensive = { tests: { expensive: true }, gates: { tests_cmd: CMD, tests_proof_cmd: `${CMD} {tests}` } };
+  for (const [name, at, project, steps] of [
+    ['prove, full suite reverted', sha, {}, ['head', 'reverted', 'total']],
+    ['prove with a scoped proof', sha, expensive, ['head', 'proof', 'reverted', 'total']],
+    ['run-only', sha, { tests: { mode: 'run-only' } }, ['head', 'total']],
+    ['a failing head and its base rerun', broken, {}, ['head', 'base', 'total']],
+  ]) {
+    const r = await gate.run(ctx(at, { project }));
+    assert.deepEqual(Object.keys(r.receipt.phases).sort(), [...steps].sort(), name);
+    for (const step of steps) assert.ok(Number.isInteger(r.receipt.phases[step]) && r.receipt.phases[step] >= 0, `${name}: ${step}`);
+    assert.ok(r.receipt.phases.total >= r.receipt.phases.head, name);
+    if (steps.includes('base')) assert.equal(r.receipt.phases.base, r.receipt.base_rerun.duration_ms, name);
+  }
   assertCleanedUp();
 });
 
