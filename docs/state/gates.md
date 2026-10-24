@@ -122,9 +122,9 @@ record `created`, the process's creation time in UTC epoch milliseconds, when
 it can be read, or `seen`, the recording time, otherwise. A different process
 at the same PID ends a receipt whose `created` no longer matches. An unreadable
 creation time keeps that holder unobservable and busy while its PID still
-responds. As for state lock holders, matching creation-time reads may be reused
-for the lock's stale
-interval; a mismatch stays known for that PID and creation time. Older receipts
+responds. As for state lock holders, a matching or unreadable creation-time
+read may be reused for the lock's stale interval; a mismatch stays known for
+that PID and creation time. Older receipts
 without `created` retain PID signal probing.
 
 `done` deduplicates completed work. `executor` records a reaction that reached CPU
