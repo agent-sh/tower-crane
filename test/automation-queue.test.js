@@ -816,7 +816,7 @@ for (const [why, end] of Object.entries(PAUSE_ENDS)) {
   });
 }
 
-test('an armed merge pause holds nothing until its task submits', (t) => {
+test('an armed merge pause holds nothing until its task submits', async (t) => {
   const h = queueFixture(t);
   h.ok(['rework', 'T2', '--reason', CONFLICT.replace('#7', '#8'), '--agent', 'orchestrator']);
   h.ok(['merge', 'pause', 'T2', '--minutes', '30', '--reason', 'lands docs first', '--agent', 'orchestrator']);
@@ -828,7 +828,9 @@ test('an armed merge pause holds nothing until its task submits', (t) => {
   h.ok(['accept', 'T1', '--agent', 'orchestrator']);
   h.consume();
   assert.equal(h.github().prs['7'].state, 'MERGED', 'an armed pause holds no merge');
-  // Refill gave the rework to a worker, which submits it.
+  // Refill gave the rework to a worker, which submits it. Its supervisor
+  // takes the lease after the dispatch returns.
+  await waitUntil(() => !!h.json(['task', 'show', 'T2']).claim, { paths: [h.state], what: 'the refilled worker takes T2' });
   const worker = h.json(['task', 'show', 'T2']).claim.agent;
   h.ok(['submit', 'T2', '--sha', h.second, '--pr', '8', '--agent', worker]);
   const holding = h.json(['status']).merge_pause;
