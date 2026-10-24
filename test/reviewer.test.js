@@ -936,9 +936,10 @@ test('changed requirements and unrelated rework keep the full review scope', (t)
   }
 });
 
-test('a rework with a rebased or merged base update gets a full review without upstream changes in its diff', (t) => {
+test('a rework after a base update narrows to the worker\'s own new lines when the head merged the base, and a rebase gets a full review', (t) => {
   for (const update of ['rebase', 'merge']) {
     const h = setup(t, 'easy', 'other', undefined, { gated: true });
+    const reviewedSha = h.sha;
     h.reviewer('T1', 'first-reviewer');
     h.ok(['evidence', 'T1', '--agent', 'first-reviewer', '--type', 'review', '--fail',
       '--sha', h.sha, '--summary', 'correction.md must explain the value']);
@@ -960,13 +961,22 @@ test('a rework with a rebased or merged base update gets a full review without u
     commandReviewer(h, out);
     const dispatched = h.json(['spawn', '--task', 'T1', '--role', 'review', '--wait']);
     const prompt = fs.readFileSync(out, 'utf8');
-    assert.match(prompt, /## Review scope\n\nFull review/);
-    assert.match(prompt, /not an ancestor|base advanced/);
     const packet = reviewPacket(h);
-    assert.match(packet, /diff --git a\/value.js b\/value.js/);
-    assert.match(packet, /diff --git a\/correction.md b\/correction.md/);
-    assert.ok(!packet.includes('diff --git a/upstream.md'));
-    assert.equal(dispatched.review_scope, null);
+    assert.match(packet, /diff --git a\/correction.md b\/correction.md/, update);
+    assert.ok(!packet.includes('diff --git a/upstream.md'), update);
+    if (update === 'rebase') {
+      assert.match(prompt, /## Review scope\n\nFull review/);
+      assert.match(prompt, /not an ancestor/);
+      assert.match(packet, /diff --git a\/value.js b\/value.js/);
+      assert.equal(dispatched.review_scope, null);
+      continue;
+    }
+    // The raw diff from the reviewed sha holds the merged upstream file; the replayed one does not.
+    assert.match(h.git(['diff', '--name-only', reviewedSha, h.sha]), /upstream\.md/);
+    assert.match(prompt, /## Review scope\n\nRe-review/);
+    assert.match(prompt, new RegExp(`automatic merge of ${reviewedSha} with the base`));
+    assert.ok(!packet.includes('diff --git a/value.js'), 'the reviewed change stays out of the narrowed diff');
+    assert.equal(dispatched.review_scope.sha, reviewedSha);
   }
 });
 
@@ -1083,10 +1093,12 @@ test('review dispatch refuses a submitted head, configured base or review scope 
   }
 });
 
-test('accept runs tests, clean and CI before dispatch, then automation accepts after review', async (t) => {
+for (const testsFirst of [false, true]) {
+test(`accept runs clean and CI before dispatch and tests ${testsFirst ? 'before it' : 'after review'}, then automation accepts`, async (t) => {
   const h = setup(t);
   const out = path.join(h.base, 'review-context.txt');
   commandReviewer(h, out);
+  if (testsFirst) h.ok(['project', 'set', '--review-policy', '{"tests_first":true}']);
   h.ok(['submit', 'T1', '--agent', 'builder', '--sha', h.sha, '--pr', '7']);
   const result = h.json(['accept', 'T1']);
   assert.equal(result.status, 'submitted');
@@ -1094,19 +1106,24 @@ test('accept runs tests, clean and CI before dispatch, then automation accepts a
   await waitOnRepo(h, () => h.readState('tasks.json').tasks[0].status === 'accepted');
   const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   const dispatch = events.findIndex((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer');
-  for (const type of ['tests', 'clean', 'ci']) assert.ok(events.findIndex((e) => e.cmd === `check ${type}` && e.detail.ok) < dispatch);
+  const review = events.findIndex((e) => e.cmd === 'evidence' && e.detail.type === 'review' && e.detail.ok);
+  for (const type of ['clean', 'ci']) assert.ok(events.findIndex((e) => e.cmd === `check ${type}` && e.detail.ok) < dispatch);
+  const tests = events.findIndex((e) => e.cmd === 'check tests' && e.detail.ok);
+  assert.ok(testsFirst ? tests >= 0 && tests < dispatch : tests > review, `tests at ${tests}, dispatch at ${dispatch}, review at ${review}`);
   assert.match(fs.readFileSync(out, 'utf8'), /Gate results/);
   const accepted = h.readState('tasks.json').tasks[0];
   assert.equal(accepted.status, 'accepted');
   assert.ok(accepted.evidence.some((e) => e.type === 'review' && e.ok));
 });
+}
 
 describe('remaining reviewer integration cases', { concurrency: caseConcurrency }, () => {
 test('a failed automatic gate never starts a reviewer', (t) => {
   const h = setup(t);
   const out = path.join(h.base, 'review-context.txt');
   commandReviewer(h, out);
-  h.ok(['project', 'set', '--tests-cmd', 'node -e "process.exit(1)"']);
+  // Tests first, so the failing suite runs before any review dispatch.
+  h.ok(['project', 'set', '--tests-cmd', 'node -e "process.exit(1)"', '--review-policy', '{"tests_first":true}']);
   const failed = h.run(['accept', 'T1', '--cmd', 'node -e "process.exit(1)"']);
   assert.equal(failed.code, 1);
   assert.ok(!fs.existsSync(out));
@@ -1118,7 +1135,9 @@ test('automatic tests honor owner none mode and forward expensive proof commands
   for (const expensive of [false, true]) {
     const h = setup(t);
     commandReviewer(h, path.join(h.base, 'review-context.txt'));
-    h.ok(['project', 'set', '--tests-mode', expensive ? 'prove' : 'none', '--tests-expensive', String(expensive), '--tests-proof-cmd', 'node {tests}']);
+    // Tests first, so accept runs the suite before it dispatches review.
+    h.ok(['project', 'set', '--tests-mode', expensive ? 'prove' : 'none', '--tests-expensive', String(expensive), '--tests-proof-cmd', 'node {tests}',
+      '--review-policy', '{"tests_first":true}']);
     const args = expensive ? ['--cmd', 'node test/value.test.js', '--proof-cmd', 'node {tests}'] : [];
     assert.equal(h.json(['accept', 'T1', ...args]).review_pending, true);
     const evidence = h.readState('tasks.json').tasks[0].evidence.find((e) => e.type === 'tests');

@@ -4,7 +4,9 @@
 
 Trusted watchers and dispatch supervisors consume lifecycle events as
 software reactions. They run submission gates, dispatch review after the
-tracked worker exits or while it waits as the PR's owner, accept independent passing review, merge accepted
+tracked worker exits or while it waits as the PR's owner, run the tests gate
+after passing review in the [gate order](gates.md#gate-order), accept independent
+passing review, merge accepted
 PRs with green gates, and detect conflicting outstanding PRs after merges.
 Conflict rework names the hand-written files. Generated-file repair can
 advance the worker branch or leave a mixed merge prepared. Native
@@ -53,7 +55,7 @@ the receipt's code and signal. A hold at the crash cap adds `failures`
 reviewer (the one that ended last), how it ended and its log, and says that
 `accept ID` dispatches the next reviewer. The event wakes the orchestrator.
 Tests, cleanup and source verification run when the submitted PR head
-matches, even with unknown mergeability. CI, review dispatch and merging
+matches (tests after review, in the [gate order](gates.md#gate-order)), even with unknown mergeability. CI, review dispatch and merging
 retain their mergeability guards.
 
 ## Review inbox findings
