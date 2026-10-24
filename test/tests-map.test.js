@@ -472,13 +472,14 @@ test('incremental proof scope preserves acceptable receipts across policy varian
     ['default-expense prove', ['--tests-expensive', 'null'], false, 'full'],
     ['scoped prove', [], false, 'incremental'],
     ['non-expensive run-only', ['--tests-expensive', 'false', '--tests-mode', 'run-only'], false, 'incremental'],
-    ['non-expensive kept-only', ['--tests-expensive', 'false', '--tests-keep', '["docs/**"]'], true, 'full'],
-    ['scoped kept-only', ['--tests-keep', '["docs/**"]'], true, 'incremental'],
+    ['non-expensive kept-only', ['--tests-expensive', 'false', '--tests-keep', '["data/**"]'], true, 'full'],
+    ['scoped kept-only', ['--tests-keep', '["data/**"]'], true, 'incremental'],
     ['non-expensive without template', ['--tests-expensive', 'false', '--tests-proof-cmd', 'null'], false, 'full'],
   ]) {
-    const h = incrementalFixture(t, undefined, flags);
+    // A kept path outside the docs paths: a docs-only diff skips the tests gate's suites altogether.
+    const h = incrementalFixture(t, { 'docs/**': ['test/mapped.test.js'], 'data/**': ['test/mapped.test.js'], '**/*.md': [] }, flags);
     if (kept) h.git(['branch', '-f', 'main', 'HEAD']);
-    resubmit(h, 'docs/state.md');
+    resubmit(h, kept ? 'data/state.json' : 'docs/state.md', kept ? '{}\n' : undefined);
     const result = check(h);
     assert.equal(h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'tests').ok, true, name);
     assert.equal(result.receipt.head_mode, expected, name);
@@ -1017,15 +1018,16 @@ test('run-only incremental resubmission uses the pinned map without hosted full-
   assert.equal(h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'tests').ok, true);
 });
 
-test('a kept docs-only diff can use incremental selection without a new proof', (t) => {
-  const h = incrementalFixture(t, { 'docs/**': ['test/mapped.test.js'] }, ['--tests-keep', '["docs/**"]']);
+test('a kept-only diff can use incremental selection without a new proof', (t) => {
+  // Kept data, not docs: a docs-only diff skips the tests gate's suites altogether.
+  const h = incrementalFixture(t, { 'data/**': ['test/mapped.test.js'] }, ['--tests-keep', '["data/**"]']);
   h.git(['branch', '-f', 'main', 'HEAD']);
-  resubmit(h, 'docs/state.md');
+  resubmit(h, 'data/state.json', '{}\n');
   const result = check(h);
   assert.equal(result.receipt.mode, 'run-only (test-only diff)');
   assert.equal(result.receipt.head_mode, 'incremental');
   assert.equal(result.receipt.incremental_from, h.fullSha);
-  assert.deepEqual(result.receipt.changed_files, ['docs/state.md']);
+  assert.deepEqual(result.receipt.changed_files, ['data/state.json']);
   assert.deepEqual(result.receipt.head_tests, ['test/mapped.test.js']);
   assert.equal(result.commands.filter((c) => c.command !== 'git').length, 1);
   assert.equal(h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'tests').ok, true);
