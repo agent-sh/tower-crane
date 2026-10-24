@@ -13,7 +13,7 @@ const path = require('node:path');
 const cp = require('node:child_process');
 const G = require('../lib/governor');
 const B = require('../lib/broker');
-const { makeRepo, ROOT } = require('./helpers');
+const { makeRepo, cachedFixture, ROOT } = require('./helpers');
 const { writeHost } = require('./host');
 const { waitUntil, childClosed, killGroup } = require('./signals');
 
@@ -245,22 +245,30 @@ test('status shows the test-thread budget, every holder and its grant', (t) => {
   assert.match(h.ok(['status']), /^test threads: budget 2 of 2 on 3 cores, other work load 0; 0 runs hold 0 of 0 requested$/m);
 });
 
-test('CPU pressure or load past the defer lines steps a run down by the overshoot, once per interval and not below one thread a run', (t) => {
-  const h = makeRepo(t);
-  h.init();
+for (const [label, governor, healthy, overshoot] of [
+  ['default 90 percent', null, 80, 100],
+  ['configured 60 percent', { psi_cpu_defer: 60 }, 40, 80],
+]) test(`CPU pressure or load past the defer lines steps a run down by the overshoot, once per interval and not below one thread a run (${label})`, (t) => {
+  const h = cachedFixture(t, 'test-grant-pressure', (h) => h.init());
+  if (governor) h.ok(['project', 'set', '--governor', JSON.stringify(governor)]);
+  const project = h.readState('project.json');
   const host = h.env.TOWER_CRANE_HOST_ROOT;
   writeHost(host, { cores: 8, load: 0 });
-  const lease = G.testLease({ env: h.env, stateDir: h.state }, { requested: 4, task: 'T1' });
+  const lease = G.testLease({ env: h.env, stateDir: h.state }, { requested: 4, task: 'T1', project });
   t.after(() => lease.release());
   assert.equal(lease.grant, 4);
-  // Pressure 80 against a line of 60 cuts the threads held by 60/80: 4 becomes 3,
-  // whoever caused it, the run's own files included.
-  writeHost(host, { cores: 8, load: 0, cpuSome: 80 });
+  const line = G.settings({ governor }).psi_cpu_defer;
+  for (const cpuSome of [healthy, line - 0.01, line]) {
+    writeHost(host, { cores: 8, load: 0, cpuSome });
+    assert.equal(lease.refresh().grant, 4, `no overshoot at ${cpuSome} percent against ${line}`);
+  }
+  // The overshoot cuts the held threads by line / pressure: 4 becomes 3.
+  writeHost(host, { cores: 8, load: 0, cpuSome: overshoot });
   assert.equal(lease.refresh().grant, 3);
   // The next step waits for the interval, so a reading that lags does not ratchet the run down.
   assert.equal(lease.refresh().grant, 3);
   // No growth past the line: a second run gets its one thread out of what is held.
-  const second = G.testLease({ env: h.env, stateDir: h.state }, { requested: 4, task: 'T2' });
+  const second = G.testLease({ env: h.env, stateDir: h.state }, { requested: 4, task: 'T2', project });
   t.after(() => second.release());
   assert.equal(second.grant, 1);
   assert.ok(lease.refresh().grant + second.refresh().grant <= 3, 'no growth past what the runs held');
