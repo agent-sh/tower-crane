@@ -93,6 +93,28 @@ test('a wait host on a tool behind the engine leaves the coverage refresh to a c
   assert.deepEqual(h.github().calls, []);
 });
 
+// Coverage now measures data a test reads, so only a glob is out of its reach: a hand-set entry for
+// a data file the artifact measures takes the measured suites, and entries it does not measure stay.
+for (const [mode, event] of [
+  ['manual file', null], ['manual run', null], ['scheduled run', 'schedule'], ['dispatched run', 'workflow_dispatch'],
+]) test(`every refresh path replaces a measured data file's hand-set suites: ${mode}`, (t) => {
+  const h = setup(t);
+  const previous = { '**/*.md': [], 'data.json': [SUITE], 'scripts/guard.ps1': [SUITE], 'gone.js': [SUITE] };
+  h.ok(['project', 'set', '--tests-map', JSON.stringify(previous)]);
+  const artifact = { sha: h.headSha, tests: [SUITE, 'test/data.test.js'],
+    map: { 'data.json': ['test/data.test.js'], 'new.js': [SUITE] } };
+  h.save({ ...h.github(), artifact, runs: [h.runData({ event: event || 'schedule' })] });
+  if (mode === 'manual file') {
+    const file = path.join(h.base, 'incoming-map.json');
+    fs.writeFileSync(file, JSON.stringify(artifact));
+    h.ok(['tests', 'map', 'refresh', '--file', file]);
+  } else if (mode === 'manual run') h.ok(['tests', 'map', 'refresh', '--from-run', '42']);
+  else h.pass();
+  assert.deepEqual(h.readState('project.json').tests.map, { ...previous, ...artifact.map });
+  const detail = h.refreshes().at(-1).detail;
+  assert.deepEqual([detail.declared, detail.measured, detail.tests, detail.automatic], [1, 2, 2, event ? true : undefined]);
+});
+
 test('automation rejects incomplete, older, divergent and missing coverage runs', (t) => {
   for (const [name, patch] of [
     ['incomplete', { run: { status: 'in_progress', conclusion: null } }],
