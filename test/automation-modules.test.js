@@ -7,6 +7,7 @@ const path = require('node:path');
 const cp = require('node:child_process');
 const { makeRepo, ROOT } = require('./helpers');
 const { fakeAgentEnv } = require('./agent-env');
+const { HUNG_TEST_MS } = require('./signals');
 const { select } = require('../lib/tests-map');
 const { globToRegExp } = require('../lib/gates/tests');
 
@@ -37,7 +38,7 @@ test('area modules load first without losing the automation exports or shared se
         if (Object.hasOwn(automation, name)) assert.equal(automation[name], area[name], name);
       }
       assert.equal(typeof automation.consume, 'function');
-    `], { env: fakeAgentEnv(process.env), encoding: 'utf8', timeout: 30000 });
+    `], { env: fakeAgentEnv(process.env), encoding: 'utf8', timeout: HUNG_TEST_MS });
     assert.equal(run.status, 0, `${area}: ${run.stderr}`);
   }
 });
