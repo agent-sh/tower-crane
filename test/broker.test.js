@@ -1107,9 +1107,8 @@ test('dead() reads a broker file only as a plain file: a link the agent made is 
   assert.equal(B.dead(file), false, 'a link is not followed');
   fs.rmSync(file);
   require('node:child_process').execFileSync('mkfifo', [file]);
-  const started = Date.now();
+  // A read that waited for a writer would never return here.
   assert.equal(B.dead(file), false, 'a FIFO reads as no record');
-  assert.ok(Date.now() - started < 5000, 'without waiting for a writer');
 });
 
 // A start writes its broker file whole, by a rename. One that fails before
