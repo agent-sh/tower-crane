@@ -158,6 +158,15 @@ test('status and one persistent inbox item name unselected tests, excluding help
   assert.equal(inbox.items.filter((entry) => entry.kind === 'tests_unselected').length, 0);
 });
 
+test('a test the declared map at the base names is selected', (t) => {
+  const h = fixture(t);
+  assert.deepEqual(h.json(['status']).tests_unselected, ['test/unselected.test.js']);
+  fs.writeFileSync(path.join(h.repo, 'tests-map.declared.json'), JSON.stringify({ 'unmeasurable.sh': ['test/unselected.test.js'] }));
+  h.git(['add', 'tests-map.declared.json']);
+  h.git(['commit', '-qm', 'declare the unmeasured script']);
+  assert.deepEqual(h.json(['status']).tests_unselected, []);
+});
+
 test('automatic refresh selects the newest completed full base run with an artifact regardless of conclusion', async (t) => {
   for (const conclusion of ['success', 'failure', 'cancelled', 'timed_out']) {
     await t.test(conclusion, async (t) => {
