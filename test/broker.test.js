@@ -993,7 +993,12 @@ test('what the agent leaves at its socket breaks neither the next spawn nor the 
   broker.close();
   closed = true;
   fs.mkdirSync(path.join(sock, 'inside'), { recursive: true });
-  t.mock.method(fs, 'renameSync', () => { throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' }); });
+  // Only the socket's: the broker lock and broker.json are renamed into place too.
+  const rename = fs.renameSync;
+  t.mock.method(fs, 'renameSync', (from, to) => {
+    if (from === sock) throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
+    return rename(from, to);
+  });
   await assert.rejects(B.start(job), /cannot clear .*\/s, which is in the way of the broker socket \(EACCES\)/);
   assert.equal(fs.existsSync(path.dirname(job.broker)), false, 'the refused start leaves no broker directory');
   assert.ok(fs.existsSync(path.join(sock, 'inside')), 'and does not walk the tree');
@@ -1035,6 +1040,154 @@ test('closing never walks a broker directory the agent wrote: what else is there
   assert.match(notices[0], new RegExp(`left ${where.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} as ${moved.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
 });
 
+// Seen 2026-10-23 (worker-T499-14 attempt 18): a resume started the agent's
+// next monitor while the last one still ran its gates. The last one's close
+// then deleted the new broker.json and renamed brokers/<agent>/ aside, so
+// every brokered command of the resumed codex agent failed with EACCES.
+test('a monitor closing after the agent\'s next spawn started leaves that spawn its broker file, directory and socket', async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'resume', '--acceptance', 'noted']);
+  const brokers = path.join(h.base, 'brokers');
+  const unixRows = process.platform === 'win32' ? [] : [['claude'], ['claude', 'codex']];
+  for (const [i, harnesses] of [['codex'], ...unixRows].entries()) {
+    const agent = `worker-T1-${i + 1}`;
+    const where = path.join(brokers, agent);
+    const leaf = harnesses.includes('claude') ? agentDir(path.join(h.base, 'homes', agent), process.env) : null;
+    if (leaf) t.after(() => fs.rmSync(leaf, { recursive: true, force: true }));
+    const job = { state: h.state, task: 'T1', agent, role: 'worker', harness: harnesses[0], broker_harnesses: harnesses,
+      cwd: h.repo, broker: path.join(where, B.FILE), ...(leaf ? { agent_socket_dir: leaf } : {}) };
+    const label = harnesses.join('+');
+    const first = await B.start(job);
+    // What a codex agent's sandbox wrote in its own broker directory.
+    fs.writeFileSync(path.join(where, 'agent-file'), 'x');
+    const inode = fs.statSync(where).ino;
+    const second = await B.start(job);
+    let closed = false;
+    t.after(() => closed || second.close());
+    const token = JSON.parse(fs.readFileSync(job.broker, 'utf8')).token;
+    first.close();
+    assert.equal(fs.statSync(where).ino, inode, `${label}: the directory stays in place`);
+    assert.deepEqual(fs.readdirSync(brokers).filter((n) => n.startsWith(`.stale-${agent}-`)), [], `${label}: nothing is renamed aside`);
+    const address = JSON.parse(fs.readFileSync(job.broker, 'utf8'));
+    assert.equal(address.token, token, `${label}: broker.json is the later broker's`);
+    if (leaf) {
+      assert.equal(JSON.parse(fs.readFileSync(path.join(leaf, 'owner.json'), 'utf8')).pid, process.pid, `${label}: the socket leaf keeps its owner record`);
+      // Closing the first server unlinked the shared socket path; the later broker's guard listens there again.
+      await waitUntil(() => fs.lstatSync(address.socket, { throwIfNoEntry: false })?.isSocket(), { paths: [leaf], what: `${label}: the socket again` });
+    }
+    const r = await B.forward(job.broker, ['task', 'note', 'T1', `after resume ${label}`], h.state);
+    assert.equal(r.code, 0, `${label}: ${r.stderr}`);
+    second.close();
+    closed = true;
+    assert.equal(fs.existsSync(where), false, `${label}: the later broker removes the directory it took over`);
+    const aside = fs.readdirSync(brokers).filter((n) => n.startsWith(`.stale-${agent}-`));
+    assert.deepEqual(fs.readdirSync(path.join(brokers, aside[0])), ['agent-file'], `${label}: the agent's file moves aside with it`);
+    if (leaf) assert.equal(fs.existsSync(leaf), false, `${label}: and the socket leaf`);
+  }
+  assert.deepEqual(h.readState('tasks.json').tasks[0].notes.map((n) => n.text), [['codex'], ...unixRows].map((r) => `after resume ${r.join('+')}`));
+  assert.deepEqual(fs.readdirSync(brokers).filter((n) => n.endsWith('.lock')), [], 'every broker lock is released');
+});
+
+// prune asks dead() about a broker file in a directory a codex agent writes.
+// A link there is not followed and a FIFO is not waited on: either reads as
+// no broker record, so the directory is not called dead.
+test('dead() reads a broker file only as a plain file: a link the agent made is not followed and a FIFO does not block', { skip: process.platform === 'win32' && 'no FIFO or plain symlink on Windows' }, (t) => {
+  const s = scratch(t);
+  const where = path.join(s.base, 'brokers', 'worker-T1-1');
+  fs.mkdirSync(where, { recursive: true });
+  const file = path.join(where, B.FILE);
+  // A port nothing listens on: a plain record naming it is dead.
+  const record = path.join(s.base, 'record.json');
+  fs.writeFileSync(record, `${JSON.stringify({ host: '127.0.0.1', port: 1, token: 'x' })}\n`);
+  fs.copyFileSync(record, file);
+  assert.equal(B.dead(file), true, 'a plain record of a refused address is dead');
+  fs.rmSync(file);
+  fs.symlinkSync(record, file);
+  assert.equal(B.dead(file), false, 'a link is not followed');
+  fs.rmSync(file);
+  require('node:child_process').execFileSync('mkfifo', [file]);
+  // A read that waited for a writer would never return here.
+  assert.equal(B.dead(file), false, 'a FIFO reads as no record');
+});
+
+// A start writes its broker file whole, by a rename. One that fails before
+// that file names it leaves the earlier broker of the agent its file and its
+// directory.
+test('a start that fails before its broker file names it leaves the earlier broker its file and directory', async (t) => {
+  const s = scratch(t);
+  const job = { ...s.job, harness: 'codex', broker_harnesses: ['codex'], broker: path.join(s.base, 'brokers', 'worker-T1-1', B.FILE) };
+  const first = await B.start(job);
+  t.after(() => first.close());
+  const where = path.dirname(job.broker);
+  const before = fs.readFileSync(job.broker, 'utf8');
+  const inode = fs.statSync(where).ino;
+  const write = fs.writeFileSync;
+  t.mock.method(fs, 'writeFileSync', (p, ...rest) => {
+    if (path.dirname(String(p)) === where && String(p).endsWith('.new')) throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' });
+    return write(p, ...rest);
+  });
+  await assert.rejects(B.start(job), /ENOSPC/);
+  t.mock.restoreAll();
+  assert.equal(fs.readFileSync(job.broker, 'utf8'), before, 'the failed start keeps the earlier broker\'s file');
+  assert.equal(fs.statSync(where).ino, inode, 'and its directory');
+});
+
+// Closing a Unix server unlinks its path, whoever listens there now. An
+// earlier monitor of the agent, in its own process, closes while the later
+// broker is between listening on the shared socket and arming its guard.
+test('an earlier monitor closing while the agent\'s next broker starts on the same socket leaves that broker listening', { skip: process.platform === 'win32' && 'Windows uses a named pipe' }, async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'overlap', '--acceptance', 'noted']);
+  const agent = 'worker-T1-1';
+  const leaf = agentDir(path.join(h.base, 'homes', agent), process.env);
+  t.after(() => fs.rmSync(leaf, { recursive: true, force: true }));
+  const job = { state: h.state, task: 'T1', agent, role: 'worker', harness: 'claude', broker_harnesses: ['claude'],
+    cwd: h.repo, broker: path.join(h.base, 'brokers', agent, B.FILE), agent_socket_dir: leaf };
+  const signals = path.join(h.base, 'signals');
+  fs.mkdirSync(signals);
+  const [ready, go, closed] = ['ready', 'go', 'closed'].map((n) => path.join(signals, n));
+  // The earlier monitor: starts, then closes once go appears.
+  const earlier = require('node:child_process').spawn(process.execPath, ['-e', `
+    const fs = require('node:fs');
+    const B = require(${JSON.stringify(path.join(ROOT, 'lib', 'broker'))});
+    B.start(${JSON.stringify(job)}).then((broker) => {
+      const watcher = fs.watch(${JSON.stringify(signals)}, () => {
+        if (!fs.existsSync(${JSON.stringify(go)})) return;
+        watcher.close();
+        broker.close();
+        fs.writeFileSync(${JSON.stringify(closed)}, '');
+        process.exit(0);
+      });
+      fs.writeFileSync(${JSON.stringify(ready)}, '');
+    });
+  `], { stdio: ['ignore', 'inherit', 'inherit'] });
+  t.after(() => earlier.exitCode === null && earlier.signalCode === null && earlier.kill('SIGKILL'));
+  const exited = new Promise((resolve) => earlier.once('exit', resolve));
+  await waitUntil(() => fs.existsSync(ready), { paths: [signals], what: 'the earlier broker started' });
+  const chmod = fs.chmodSync;
+  let held = null;
+  t.mock.method(fs, 'chmodSync', (p, mode) => {
+    if (p === path.join(leaf, 's') && held === null) {
+      fs.writeFileSync(go, '');
+      const s = new Int32Array(new SharedArrayBuffer(4));
+      for (let i = 0; i < 20 && !fs.existsSync(closed); i++) Atomics.wait(s, 0, 0, 100); // wait-allow: the earlier close waits for this start's lock and never writes closed here, so the bound is the expected path; an unlocked close lands within milliseconds
+      held = !fs.existsSync(closed);
+    }
+    return chmod(p, mode);
+  });
+  const later = await B.start(job);
+  t.mock.restoreAll();
+  t.after(() => later.close());
+  assert.equal(held, true, 'the earlier close waited for the later start');
+  await exited;
+  const { socket } = JSON.parse(fs.readFileSync(job.broker, 'utf8'));
+  await waitUntil(() => fs.lstatSync(socket, { throwIfNoEntry: false })?.isSocket(), { paths: [leaf], what: 'the later broker listens again' });
+  const r = await B.forward(job.broker, ['task', 'note', 'T1', 'after the overlap'], h.state);
+  assert.equal(r.code, 0, r.stderr);
+});
+
 test('a broker for claude and codex routes listens on both, and an agent that cannot use the socket uses TCP', { skip: process.platform === 'win32' && 'Windows uses a named pipe for both' }, async (t) => {
   const h = makeRepo(t);
   h.init();
@@ -1058,6 +1211,8 @@ test('a brokered resubmit asks gh about its PR by name, with no repository for g
   h.ok(['claim', 'T1', '--agent', 'worker-T1-1']);
   h.ok(['submit', 'T1', '--agent', 'worker-T1-1', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736', '--branch', 'change', '--pr', '7']);
   const log = path.join(h.base, 'gh.log');
+  const historyMode = path.join(h.base, 'gh-history.json');
+  fs.writeFileSync(historyMode, JSON.stringify({ denied: false }));
   const preload = path.join(h.base, 'gh.js');
   fs.writeFileSync(preload, `
 const cp = require('node:child_process');
@@ -1068,14 +1223,20 @@ cp.spawnSync = function (command, args, opts) {
   // The submit also reads the head's green checks, so the stub answers those endpoints too.
   const green = { name: 'test (ubuntu)', status: 'completed', conclusion: 'success', app: 'github-actions', suite: 1, url: null, output: null };
   const suite = { id: 1, app: 'github-actions', status: 'completed', conclusion: 'success', runs: 1 };
-  const out = args[0] === 'pr' ? { state: 'OPEN', headRefName: 'change', mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }
+  if (args[0] === 'api' && args[1].includes('/actions/runs?branch=')) {
+    const denied = JSON.parse(require('node:fs').readFileSync(process.env.BROKER_GH_HISTORY, 'utf8')).denied;
+    return { status: denied ? 126 : 0, stdout: '', stderr: denied ? "gh api is not allowed by this agent's agent file" : '' };
+  }
+  const out = args[0] === 'pr' ? { state: 'OPEN', headRefName: 'change', headRefOid: '5bfcb6f56ab912a009883c798a61298c507dada4', mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }
     : args[1].includes('check-runs') ? green : args[1].includes('check-suites') ? suite : null;
   return { status: 0, stdout: out ? JSON.stringify(out) : '', stderr: '' };
 };
 `);
-  const saved = { NODE_OPTIONS: process.env.NODE_OPTIONS, BROKER_GH_LOG: process.env.BROKER_GH_LOG };
+  const saved = { NODE_OPTIONS: process.env.NODE_OPTIONS, BROKER_GH_LOG: process.env.BROKER_GH_LOG,
+    BROKER_GH_HISTORY: process.env.BROKER_GH_HISTORY };
   process.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`;
   process.env.BROKER_GH_LOG = log;
+  process.env.BROKER_GH_HISTORY = historyMode;
   t.after(() => {
     for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k]; else process.env[k] = v;
   });
@@ -1094,12 +1255,47 @@ cp.spawnSync = function (command, args, opts) {
     { env: { TOWER_CRANE_BROKER: job.broker } });
   assert.equal(r.code, 0, r.stderr);
   const calls = fs.readFileSync(log, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
-  // The submit reads the PR twice: its state and branch, then its mergeability.
+  // Each PR inspection must name the repository and run outside the worker's git config.
   const views = calls.filter((c) => c.args[0] === 'pr');
-  assert.equal(views.length, 2);
+  assert.equal(views.length, 3);
   for (const view of views) assert.deepEqual(view.args.slice(0, 5), ['pr', 'view', '7', '-R', 'acme/demo']);
   assert.ok(calls.some((c) => c.args[0] === 'api' && c.args[1].includes('/check-runs')), 'the submit reads the head checks');
-  for (const call of calls) {
+  assert.equal(h.readState('tasks.json').tasks[0].pushes_since_last_submit, 1);
+  for (const row of [
+    { name: 'explicit PR, history available', pr: ['--pr', '7'], denied: false },
+    { name: 'recorded PR, history available', pr: [], denied: false },
+    { name: 'explicit PR, history denied', pr: ['--pr', '7'], denied: true },
+    { name: 'recorded PR, history denied', pr: [], denied: true },
+  ]) {
+    fs.writeFileSync(historyMode, JSON.stringify({ denied: row.denied }));
+    const before = fs.readFileSync(log, 'utf8').trim().split('\n').length;
+    const result = await B.forward(job.broker, ['submit', 'T1', '--sha', '5bfcb6f56ab912a009883c798a61298c507dada4', ...row.pr], h.state);
+    assert.equal(result.code, 0, `${row.name}: ${result.stderr}`);
+    const added = fs.readFileSync(log, 'utf8').trim().split('\n').slice(before).map(JSON.parse);
+    assert.equal(added.filter((c) => c.args[0] === 'pr').length, row.pr.length ? 3 : 2, row.name);
+    for (const view of added.filter((c) => c.args[0] === 'pr')) {
+      assert.deepEqual(view.args.slice(0, 5), ['pr', 'view', '7', '-R', 'acme/demo'], row.name);
+    }
+    const history = added.filter((c) => c.args[0] === 'api' && c.args[1].includes('/actions/runs?branch='));
+    assert.equal(history.length, 1, row.name);
+    const query = new URL(`https://github.test/${history[0].args[1]}`);
+    assert.equal(query.pathname, '/repos/acme/demo/actions/runs', row.name);
+    assert.equal(query.searchParams.get('branch'), 'change', row.name);
+    assert.match(query.searchParams.get('created'), /^>=\d{4}-/, row.name);
+    assert.ok(history[0].args.includes('--paginate'), row.name);
+    assert.equal(h.readState('tasks.json').tasks[0].pushes_since_last_submit, row.denied ? null : 0, row.name);
+    const receipt = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim()
+      .split('\n').map(JSON.parse).findLast((e) => e.cmd === 'submit');
+    if (row.denied) {
+      assert.equal(receipt.detail.push_history_error, undefined, row.name);
+      assert.match(receipt.detail.push_history_note, /gh policy refuses PR head history/, row.name);
+      assert.match(result.stdout, /pushes_since_last_submit is unavailable/, row.name);
+      assert.doesNotMatch(result.stdout, /warning: pushes_since_last_submit/, row.name);
+    } else {
+      assert.equal(receipt.detail.push_history_error, undefined, row.name);
+    }
+  }
+  for (const call of fs.readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse)) {
     assert.equal(call.cwd, h.state);
     assert.ok(call.git_dir && !fs.existsSync(call.git_dir), 'git finds no repository');
   }
@@ -1809,7 +2005,10 @@ test('the broker\'s unframing never waits on a body the end frame has ended', ()
 // before frames did, and socket receives the connection. Resolves with the
 // answer's code (null without one), its stderr and the {need} the broker
 // sent.
-function handPush(f, sha, send, { end = false, socket = () => {} } = {}) {
+// With end, the agent ends its side after its pack, as a shim from before
+// framed packs does. With pipe, it then hangs up after that many ms unless
+// data arrives, as libuv closes a Windows named pipe after a shutdown.
+function handPush(f, sha, send, { end = false, pipe = 0, socket = () => {} } = {}) {
   const net = require('node:net');
   const b = JSON.parse(fs.readFileSync(f.job.broker, 'utf8'));
   return new Promise((resolve) => {
@@ -1818,11 +2017,13 @@ function handPush(f, sha, send, { end = false, socket = () => {} } = {}) {
     let code = null;
     let stderr = '';
     let need = null;
+    let received = 0;
     socket(sock);
     sock.setEncoding('utf8');
     sock.on('error', () => {});
     sock.on('connect', () => sock.write(`${JSON.stringify({ token: b.token, push: { sha } })}\n`));
     sock.on('data', (d) => {
+      received++;
       buf += d;
       for (let nl = buf.indexOf('\n'); nl >= 0; nl = buf.indexOf('\n')) {
         const msg = JSON.parse(buf.slice(0, nl));
@@ -1833,6 +2034,10 @@ function handPush(f, sha, send, { end = false, socket = () => {} } = {}) {
           need = msg.need;
           for (const part of send(need.have)) sock.write(part);
           if (end) sock.end();
+          if (end && pipe) {
+            const at = received;
+            setTimeout(() => received === at && sock.destroy(), pipe); // wait-allow: the Windows pipe's close after a shutdown is a timer
+          }
         }
       }
     });
@@ -1901,10 +2106,20 @@ test('the broker refuses bad frames from the agent and frees the cache lock', as
 // copy of the tool, so only a shim from a snapshot before framed packs sends
 // a bare one. Its broker says so, not "pack signature mismatch", and the
 // shim, which ends its side after its pack, still gets that answer.
+// On Windows that shim's pipe closes 50 ms after it ends its side, sooner than
+// git can fail on the pack, so the answer must not wait for git. The broker's
+// index-pack here takes seconds to fail, and the shim waits a little longer
+// than the pipe would, so a busy host's event loop does not decide the test.
 test('a broker tells a shim from before framed packs why its push failed', async (t) => {
   const f = await pushFixture(t);
   const sha = f.commit('a.txt', 'a\n');
-  const old = await handPush(f, sha, (have) => [packOf(f, sha, have)], { end: true });
+  const cp = require('node:child_process');
+  const spawn = cp.spawn;
+  t.after(() => { cp.spawn = spawn; });
+  cp.spawn = (command, args, opts) => (args.includes('index-pack')
+    ? spawn(process.execPath, ['-e', 'process.stdin.resume(); setTimeout(() => process.exit(1), 3000)'], opts) // wait-allow: an index-pack slower to fail than the pipe stays open
+    : spawn(command, args, opts));
+  const old = await handPush(f, sha, (have) => [packOf(f, sha, have)], { end: true, pipe: 500 });
   assert.notEqual(old.code, null, 'the old shim gets the answer');
   assert.notEqual(old.code, 0);
   assert.match(old.stderr, /sent its pack unframed, as a Tower Crane snapshot from before framed packs \(T291\) does/);

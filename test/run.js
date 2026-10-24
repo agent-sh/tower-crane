@@ -2,9 +2,9 @@
 
 // npm test runs the whole suite; `npm test -- FILE... [--test-* flags]` runs
 // only the files given. Each file runs in a node --test runner of its own,
-// longest measured file first, at most --test-concurrency at once and never
-// more than one below the machine's core count, since every file also starts
-// CLI and git processes of its own. npm test asks for 4; a caller such as the
+// unmeasured files first, then longest measured. No more files run at once
+// than --test-concurrency or one below the machine's core count, since each
+// also starts CLI and git processes of its own. npm test asks for 4; a caller such as the
 // tests gate on a large host may ask for more. Inside Tower Crane
 // (TOWER_CRANE_TEST_GRANT) that number is a request: the host governor grants
 // up to it and the run resizes to its grant as it changes
@@ -44,6 +44,12 @@ function fileCost(durations) {
 function longestFirst(files, durations = fileDurations()) {
   const cost = fileCost(durations);
   return [...files].sort().sort((a, b) => cost(b) - cost(a));
+}
+// An unmeasured file can take much longer than its median shard cost.
+// Start it before measured files so a new long file does not start last.
+function startOrder(files, durations = fileDurations()) {
+  const listed = (file) => Number.isFinite(durations[file]) && durations[file] >= 0;
+  return [...files.filter((file) => !listed(file)).sort(), ...longestFirst(files.filter(listed), durations)];
 }
 // Shard INDEX of TOTAL gets an equal share of the measured time: the longest file
 // goes to the shard with the least time so far. The runner owns the split and it
@@ -154,7 +160,7 @@ function sweepRuns(base, keep) {
 // and stop time inside the 40-minute test step limit in .github/workflows/ci.yml.
 const SHARD_DEADLINE_MIN = 36;
 if (require.main !== module) {
-  module.exports = { testFiles, shardFiles, longestFirst, fileDurations, SHARD_DEADLINE_MIN };
+  module.exports = { testFiles, shardFiles, longestFirst, startOrder, fileDurations, SHARD_DEADLINE_MIN };
   return;
 }
 
@@ -259,7 +265,7 @@ const hostEnv = { ...process.env };
 const coverageDir = process.env.TC_TEST_COVERAGE_DIR ? path.resolve(process.env.TC_TEST_COVERAGE_DIR) : null;
 const ROOT = path.join(__dirname, '..');
 const started = Date.now();
-const queue = longestFirst(run);
+const queue = startOrder(run);
 const running = new Map();
 const totals = {};
 const failing = [];

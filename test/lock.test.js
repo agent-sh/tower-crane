@@ -113,6 +113,46 @@ test('an old marker without process identity cannot be kept alive by a reused PI
   }
 });
 
+// On Windows the state lock's marker carries no start identity, so a waiter judges a live holder
+// by the marker's age. A test clock set ahead (HOOK_CLOCK_FILE) must not make a fresh marker old:
+// in spawn-resume.test.js a waiter broke a live holder's lock and finished its commit under it,
+// and the holder's own rename failed with ENOENT (CI run 39897049976).
+test('under a test clock set ahead, a fresh marker without start identity keeps its live holder', async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  const clock = path.join(h.base, 'clock');
+  fs.writeFileSync(clock, String(Date.now() + 120000));
+  const ready = path.join(h.base, 'ready');
+  const release = path.join(h.base, 'release');
+  const holder = spawn(process.execPath, ['--require', HOOKS, '-e', `
+const fs = require('node:fs');
+const S = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'state.js'))});
+const lock = S.acquireLock(${JSON.stringify(h.state)});
+// Windows writes no start identity into this marker; the rewrite keeps its time.
+const { mtime } = fs.statSync(lock.file);
+const marker = JSON.parse(fs.readFileSync(lock.file, 'utf8'));
+delete marker.start_ticks;
+fs.writeFileSync(lock.file, JSON.stringify(marker));
+fs.utimesSync(lock.file, mtime, mtime);
+fs.writeFileSync(${JSON.stringify(ready)}, '');
+const poll = () => (fs.existsSync(${JSON.stringify(release)}) ? S.releaseLock(lock) : setTimeout(poll, 20)); // wait-allow: probe cadence; the test writes the release
+poll();
+`], { env: { ...h.env, HOOK_CLOCK_FILE: clock }, stdio: 'ignore' });
+  const exited = new Promise((resolve) => holder.on('close', resolve));
+  try {
+    await waitUntil(() => fs.existsSync(ready), { what: 'the holder takes the lock', alive: holder });
+    const result = h.run(['task', 'add', '--title', 'under a held lock', '--acceptance', 'waits'], {
+      hooks: { HOOK_CLOCK_FILE: clock }, env: { TOWER_CRANE_INTERVALS: SHORT_WAIT },
+    });
+    assert.equal(result.code, 3, result.stdout + result.stderr);
+    assert.match(result.stderr, /state is locked by pid \d+/);
+    assert.deepEqual(h.readState('tasks.json').tasks, []);
+  } finally {
+    fs.writeFileSync(release, '');
+    await exited;
+  }
+});
+
 test('a known live holder keeps an old marker until the waiter times out', { skip: process.platform !== 'linux' }, (t) => {
   const h = makeRepo(t);
   h.init();

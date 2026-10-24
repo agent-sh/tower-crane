@@ -1188,7 +1188,8 @@ const shim = cp.spawn(process.execPath, ${JSON.stringify(['--require', HOOKS, pa
   { detached: true, stdio: 'ignore', env: { ...process.env, HOOK_DIE_REAP: '1', HOOK_DIE_REAP_AFTER: '400', HOOK_STATE: ${JSON.stringify(h.state)} } });
 shim.unref();
 const end = Date.now() + 300000;
-while (!fs.existsSync(${JSON.stringify(dir)}) && Date.now() < end) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+const parent = process.ppid;
+while (!fs.existsSync(${JSON.stringify(dir)}) && Date.now() < end && process.ppid === parent) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
 `);
   commandRung(h, 'small', [process.execPath, agent, '{prompt}']);
   h.run(['spawn', '--role', 'small', '--task', 'T1', '--wait', '--json']);
@@ -1276,8 +1277,8 @@ test('a failed spawn never deletes a worktree another command took up', async (t
   const release = path.join(h.base, 'worker-may-write');
   // The worker stays alive with nothing written until the test releases it,
   // then writes into its working directory.
-  const worker = `const fs = require("fs"); const end = Date.now() + 300000;
-while (!fs.existsSync(process.argv[1]) && Date.now() < end) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+  const worker = `const fs = require("fs"); const end = Date.now() + 300000; const parent = process.ppid;
+while (!fs.existsSync(process.argv[1]) && Date.now() < end && process.ppid === parent) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
 fs.writeFileSync(${JSON.stringify(output)}, "work in progress");`;
   commandRung(h, 'small', [process.execPath, '-e', worker, release]);
   const branchExists = (b) => h.git(['branch', '--list', b]).replace(/^[*+ ]+/, '') === b;

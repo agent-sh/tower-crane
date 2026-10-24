@@ -88,7 +88,7 @@ if (env.HOOK_KEEP_SPAWN_DIRS) {
 if (env.HOOK_NO_START_TICKS) {
   const write = fs.writeFileSync;
   fs.writeFileSync = function markerWithoutStartTicks(file, data, ...args) {
-    if (typeof file === 'string' && /[\\/]lock\.\d+\.[0-9a-f]{16}\.new[\\/][0-9a-f]{16}$/.test(file) && typeof data === 'string') {
+    if (typeof file === 'string' && /[\\/][^\\/]+\.\d+\.[0-9a-f]{16}\.new[\\/][0-9a-f]{16}$/.test(file) && typeof data === 'string') {
       const marker = JSON.parse(data);
       delete marker.start_ticks;
       data = JSON.stringify(marker);
@@ -130,6 +130,20 @@ if (env.HOOK_CLOCK_FILE) {
   global.Date = class extends DateClass {
     constructor(...args) { super(...(args.length ? args : [clock()])); }
     static now() { return clock(); }
+  };
+  // A state lock whose holder cannot be identified (on Windows, when its creation time cannot be
+  // read) is judged by its marker's age against Date.now(). A new marker carries the file system's
+  // time, so against this clock every held lock would look as far gone as the clock is ahead and
+  // be broken under its holder. A marker this process writes carries this clock's time instead,
+  // as refreshMarkedLock in lib/state.js stamps one with new Date().
+  const writeFile = fs.writeFileSync;
+  fs.writeFileSync = function clockedMarker(file, ...rest) {
+    const out = writeFile.call(this, file, ...rest);
+    if (typeof file === 'string' && /[\\/][^\\/]+\.\d+\.[0-9a-f]{16}\.new[\\/][0-9a-f]{16}$/.test(file)) {
+      const now = new Date();
+      fs.utimesSync(file, now, now);
+    }
+    return out;
   };
 }
 
@@ -182,7 +196,7 @@ function stop(signal) {
   writeAtomic(signal, String(process.pid), undefined, real);
   const go = `${signal}.go`;
   const end = Date.now() + 300000;
-  while (!real.existsSync(go) && Date.now() < end) sleep(10);
+  while (!real.existsSync(go) && Date.now() < end) sleep(10); // spin-allow: preloaded into the CLI under test, which can be a detached supervisor whose dispatcher exits by design; the deadline bounds it
 }
 
 // HOOK_BARRIER=DIR with HOOK_BARRIER_N=N: the first time this process finds
@@ -194,7 +208,7 @@ function barrier() {
   barrierDone = true;
   real.writeFileSync(path.join(env.HOOK_BARRIER, String(process.pid)), '');
   const end = Date.now() + 300000;
-  while (real.readdirSync(env.HOOK_BARRIER).length < Number(env.HOOK_BARRIER_N) && Date.now() < end) sleep(5);
+  while (real.readdirSync(env.HOOK_BARRIER).length < Number(env.HOOK_BARRIER_N) && Date.now() < end) sleep(5); // spin-allow: preloaded into the CLI under test, which can be a detached supervisor whose dispatcher exits by design; the deadline bounds it
 }
 
 const once = {};
@@ -349,7 +363,7 @@ function before(name, args, raw = args) {
   if (env.HOOK_SUPERVISOR_LOCK_AFTER && name === 'mkdirSync' && inState(target) && /^lock\.\d+\.[0-9a-f]+\.new$/.test(path.basename(String(target)))
     && path.basename(process.argv[1] || '') === 'spawn-monitor.js') {
     const end = Date.now() + 300000;
-    while (!real.existsSync(env.HOOK_SUPERVISOR_LOCK_AFTER) && Date.now() < end) sleep(10);
+    while (!real.existsSync(env.HOOK_SUPERVISOR_LOCK_AFTER) && Date.now() < end) sleep(10); // spin-allow: preloaded into the CLI under test, which can be a detached supervisor whose dispatcher exits by design; the deadline bounds it
   }
   // HOOK_JITTER_MS=MS: a random pause of up to MS before each call on the state.
   if (env.HOOK_JITTER_MS && (inState(target) || inState(args[1]))) sleep(Math.floor(Math.random() * Number(env.HOOK_JITTER_MS)));
