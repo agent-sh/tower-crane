@@ -241,25 +241,25 @@ for (const action of ['cancel', 'supersede']) {
 
 test('retirement saves an ignored-file list and a binary patch larger than Git child output limits', { timeout: 300000 }, (t) => {
   const h = setup(t);
-  fs.writeFileSync(path.join(h.repo, '.gitignore'), 'node_modules/\n');
+  fs.writeFileSync(path.join(h.repo, '.gitignore'), 'local-notes/\n');
   fs.writeFileSync(path.join(h.repo, 'payload.bin'), Buffer.alloc(1));
   h.git(['add', '.gitignore', 'payload.bin']);
   h.git(['commit', '-qm', 'binary baseline']);
   const wt = h.json(['worktree', 'T1']);
   const payload = require('node:crypto').randomBytes(2 * 1024 * 1024);
   fs.writeFileSync(path.join(wt.path, 'payload.bin'), payload);
-  const ignored = path.join(wt.path, 'node_modules');
+  const ignored = path.join(wt.path, 'local-notes');
   fs.mkdirSync(ignored);
   const name = (i) => 'x'.repeat(135) + String(i).padStart(5, '0') + '.bin';
-  for (let i = 0; i < 8000; i++) fs.writeFileSync(path.join(ignored, name(i)), `artifact ${i}`);
-  assert.ok(8000 * ('node_modules/'.length + name(0).length + 1) > 1024 * 1024);
+  for (let i = 0; i < 8000; i++) fs.writeFileSync(path.join(ignored, name(i)), `note ${i}`);
+  assert.ok(8000 * ('local-notes/'.length + name(0).length + 1) > 1024 * 1024);
   h.ok(['task', 'update', 'T1', '--status', 'cancelled']);
   gone(h, wt);
   const saved = h.json(['task', 'show', 'T1']).worktree.saved;
   assert.ok(fs.statSync(path.join(saved, 'tracked.patch')).size > 1024 * 1024);
-  const copies = path.join(saved, 'files', 'node_modules');
+  const copies = path.join(saved, 'files', 'local-notes');
   assert.equal(fs.readdirSync(copies).length, 8000);
-  assert.equal(fs.readFileSync(path.join(copies, name(7999)), 'utf8'), 'artifact 7999');
+  assert.equal(fs.readFileSync(path.join(copies, name(7999)), 'utf8'), 'note 7999');
   h.git(['apply', '--binary', path.join(saved, 'tracked.patch')]);
   assert.deepEqual(fs.readFileSync(path.join(h.repo, 'payload.bin')), payload);
 });

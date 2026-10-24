@@ -1,0 +1,1 @@
+- CPU-profile regression fixtures use measured CPU work so scheduler contention does not shorten their workload. Both profile integrations cover ordinary execution and pauses.
