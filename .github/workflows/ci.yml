@@ -204,6 +204,18 @@ jobs:
           }
         env:
           TOWER_CRANE_TEST_TMP: ${{ runner.temp }}/tower-crane-tests
+      # A hung pass ends at the step limit, which leaves the job its log.
+      - name: Repeat finite nested fork storm ten times
+        timeout-minutes: 15
+        shell: pwsh
+        run: |
+          foreach ($attempt in 1..10) {
+            Write-Host "Finite nested fork storm: pass $attempt/10"
+            npm test -- test/containment.test.js --test-name-pattern="finite nested fork storm"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+        env:
+          TOWER_CRANE_TEST_TMP: ${{ runner.temp }}/tower-crane-tests
       - name: Repeat Claude interrupted native worker ten times
         shell: pwsh
         run: |
