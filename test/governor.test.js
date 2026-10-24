@@ -168,6 +168,8 @@ test('a window whose set grew past its reservation raises the next reservation f
     // The new 1.125 joins 199 others; the percentile stays at 1 while the window's own ratio holds.
     ['measured, from 100 windows on', ratios(...Array.from({ length: 197 }, () => 0.5), 1, 1, 1), 'measured', 4, 4.5, 4.5],
     ['a raise already in force', ratios(0.5, 0.5, 0.5), 'raised', 3, 3.5, 3.5, { ratio: 0.75, at, until: new Date(t0 + 30 * 60000).toISOString(), units: ['worker-1', 'worker-2'] }],
+    // Still in force at the crossing, it names a unit that has ended since; the raise that extends it drops that id.
+    ['a raise extended while in force', ratios(0.5, 0.5, 0.5), 'raised', 3, 3.5, 3.5, { ratio: 0.75, at, until: new Date(t0 + 90 * 60000).toISOString(), units: ['worker-1', 'worker-2', 'worker-9'] }],
     // A raise recorded before raises named their set covers every unit, and so does the raise that extends it.
     ['a raise from before raises named their set, from 100 windows on', ratios(...Array.from({ length: 197 }, () => 0.5), 1, 1, 1), 'raised', 4.2, 4.5, 4.5,
       { ratio: 1.05, at, until: new Date(t0 + 90 * 60000).toISOString() }, true],
