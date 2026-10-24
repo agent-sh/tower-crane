@@ -9,6 +9,60 @@ const { ROOT } = require('./helpers');
 const { readText, escapeTableCell } = require('../scripts/text');
 const { fakeAgentEnvFindings } = require('../scripts/fake-agent-env');
 const { makeDocsRepo } = require('./docs-fixture');
+const { scratchFindings } = require('../scripts/check-shared-files');
+
+test('scratch lint catches inline, imported, renamed and computed system temp access', () => {
+  for (const code of [
+    'os.tmpdir()',
+    "require('node:os').tmpdir()",
+    'require("os").tmpdir()',
+    "(require('node:os')).tmpdir()",
+    "const { tmpdir } = require('node:os'); tmpdir();",
+    "const { tmpdir: allocate } = require('os'); allocate();",
+    "const { 'tmpdir': allocate } = require('node:os'); allocate();",
+    "const system = require('os'); const allocate = system.tmpdir; allocate();",
+    "const system = require('node:os'); system /* gap */ . tmpdir ();",
+    "require('node:os')['tmpdir']()",
+    'os["tmpdir"]()',
+    'os[`tmpdir`]()',
+    "const allocate = require('os')['tmpdir']; allocate();",
+    "import { tmpdir as allocate } from 'node:os'; allocate();",
+    "import * as system from 'os'; system.tmpdir();",
+    'os?.tmpdir?.()',
+    'const dir = `${os.tmpdir()}`;',
+  ]) assert.ok(scratchFindings(code).length, code);
+  for (const code of [
+    "require('node:os').homedir()",
+    "const { homedir: home } = require('os'); home();",
+    'commandRoot(env)',
+    "const flags = '-Djava.io.tmpdir=private';",
+    "const flag = `-Djava.io.tmpdir=${dir}`;",
+    '// the JVM uses java.io.tmpdir, which is set explicitly',
+  ]) assert.deepEqual(scratchFindings(code), [], code);
+});
+
+test('the shared check rejects system temp fallbacks in runtime and scripts', (t) => {
+  const f = fixture(t);
+  f.change();
+  for (const [dir, source, extension = 'js'] of [
+    ['lib', 'os.tmpdir()'],
+    ['bin', 'os . tmpdir (\n)'],
+    ['scripts', "const dir = '/tmp';"],
+    ['lib', 'const dir = "/tmp/child";'],
+    ['scripts', 'const dir = `/tmp/${name}`;'],
+    ['lib', 'os.tmpdir()', 'cjs'],
+    ['scripts', 'mkdir "/tmp/work"', 'sh'],
+    ['lib', "const root = require('node:os').tmpdir();"],
+  ]) {
+    const file = `${dir}/scratch-fallback.${extension}`;
+    f.write(file, source);
+    const rejected = f.check();
+    assert.equal(rejected.status, 1, source);
+    assert.match(rejected.stderr, /scratch-fallback\.(?:js|cjs|sh):.*scratch-root/);
+    fs.rmSync(path.join(f.h.repo, file));
+  }
+  assert.equal(f.check().status, 0);
+});
 
 test('the shared check rejects CLI-running fake fixtures without the env helper', (t) => {
   const lines = [
