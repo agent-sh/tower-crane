@@ -191,16 +191,16 @@ process.exit(r.status ?? 1);
   }
 });
 
-test('the base lease budgets both joining a cache holder and a fresh run', () => {
+test('the base comparison contributes one shared timeout budget to the lease', () => {
   const cases = [
-    [{ mode: 'run-only' }, 0, 3, 8],
-    [{ mode: 'run-only' }, 2, 1, 8],
-    [{ mode: 'prove' }, 0, 1, 6],
-    [{ mode: 'prove', expensive: true }, 1, 2, 16],
-    [{ mode: 'none' }, 2, 3, 0],
+    [{ mode: 'run-only' }, 0, 3],
+    [{ mode: 'run-only' }, 2, 7],
+    [{ mode: 'prove' }, 0, 5],
+    [{ mode: 'prove', expensive: true }, 1, 13],
+    [{ mode: 'none' }, 2, 0],
   ];
-  for (const [tests, hosts, files, expected] of cases) {
-    assert.equal(gate.plannedCommands({ tests }, 'code', hosts, files), expected, JSON.stringify({ tests, hosts, files }));
+  for (const [tests, hosts, expected] of cases) {
+    assert.equal(gate.plannedCommands({ tests }, 'code', hosts), expected, JSON.stringify({ tests, hosts }));
   }
 });
 
