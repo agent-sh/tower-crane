@@ -469,7 +469,9 @@ test('a PATH entry of /tmp or /, or a gate path of /tmp, grants a sandboxed clau
 // What claude's sandbox allows back in /tmp, over real paths. A path that is
 // /, /tmp, or holds /tmp, the home or (for PATH and TMPDIR) the state
 // directory is dropped, never widened to its parent.
-test('tmpGrants drops /, /tmp and parents of the home or state from claude\'s /tmp grants, with a reason each', () => {
+test('tmpGrants drops /, /tmp and parents of the home or state from claude\'s /tmp grants, with a reason each', {
+  skip: process.platform === 'win32' && 'the table holds POSIX paths, and hostTmp grants /tmp on Linux only',
+}, () => {
   const base = { dir: '/tmp', home: '/tmp/h/home', state: '/tmp/s/state', outside: [], caller: null, path: [] };
   const rows = [
     ['PATH /tmp', { path: ['/tmp'] }, [], ['the PATH directory /tmp is /tmp itself']],

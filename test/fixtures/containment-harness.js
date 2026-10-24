@@ -52,7 +52,7 @@ if (mode === 'nested-limit' || mode === 'nested-memory') {
   hold();
 } else if (mode === 'nested') {
   const n = Number(depth);
-  const record = { pid: process.pid, group: process.platform === 'linux' ? C.currentGroup() : null, inherited: process.env[C.MARK] || null };
+  const record = { pid: process.pid, ppid: process.ppid, group: process.platform === 'linux' ? C.currentGroup() : null, inherited: process.env[C.MARK] || null };
   fs.appendFileSync(file, JSON.stringify(record) + '\n');
   if (n < 2) {
     const spawn = n === 0 ? C.spawn : cp.spawn;

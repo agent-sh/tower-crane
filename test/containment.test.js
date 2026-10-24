@@ -376,7 +376,9 @@ test('the sweep removes report directories and failed units of dead supervisors 
   assert.deepEqual(calls, []);
 });
 
-test('a scope that settles failed is reset and a clean one is left alone', async () => {
+test('a scope that settles failed is reset and a clean one is left alone', {
+  skip: process.platform !== 'linux' && 'systemd user scopes are Linux-only',
+}, async () => {
   const cp = require('node:child_process');
   const original = cp.execFile;
   for (const [states, reset] of [[['deactivating', 'failed'], true], [['active', 'inactive'], false], [[''], false]]) {
@@ -769,7 +771,10 @@ test('fake harness nested launches and detached grandchildren retain containment
   assert.equal(result.error, undefined, result.stderr);
   const records = fs.readFileSync(file, 'utf8').trim().split('\n').map(JSON.parse);
   assert.equal(records.length, 3);
-  assert.equal(admittedPid, records[0].pid, 'the governor must measure the actual harness process');
+  // A Windows gate command runs under its job wrapper (lib/gate-job.ps1), which starts the harness
+  // as its child; the governor measures the wrapper's tree, which holds the harness.
+  assert.equal(admittedPid, process.platform === 'win32' ? records[0].ppid : records[0].pid,
+    'the governor must measure the actual harness process');
   if (result.containment.backend === 'cgroup') {
     const parent = C.currentGroup().split('/');
     const slice = parent.findLastIndex((name) => name.endsWith('.slice'));

@@ -44,6 +44,7 @@
     "test/events.test.js",
     "test/evidence-revision.test.js",
     "test/evidence.test.js",
+    "test/fallback-answers.test.js",
     "test/fallback.test.js",
     "test/fixtures.test.js",
     "test/gate-commands.test.js",

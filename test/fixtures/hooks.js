@@ -423,6 +423,7 @@ if (STATE) {
 }
 
 let pendingLockRead;
+let pendingPauseRead;
 function after(name, args, rawArgs = args) {
   const target = args[0];
   // HOOK_SYNC_TRACE=FILE appends `fsync NAME`, `append NAME` and `rename NAME`
@@ -475,9 +476,18 @@ function after(name, args, rawArgs = args) {
   }
   // HOOK_PAUSE_ON=FILE stops at HOOK_PAUSED after its first read of a file
   // the database does not hold; HOOK_PAUSE_PROCESS optionally limits the
-  // pause to one executable's basename.
+  // pause to one executable's basename. A read through a descriptor pauses
+  // once the reader closes it: Windows refuses a rename onto a file another
+  // process holds open, which a paused reader would do forever.
   if (env.HOOK_PAUSE_ON && !STEP_OF[env.HOOK_PAUSE_ON] && ['readFileSync', 'readSync'].includes(name) && inState(target) && path.basename(target) === env.HOOK_PAUSE_ON
-    && (!env.HOOK_PAUSE_PROCESS || path.basename(process.argv[1]) === env.HOOK_PAUSE_PROCESS) && first('pause')) stop(env.HOOK_PAUSED);
+    && (!env.HOOK_PAUSE_PROCESS || path.basename(process.argv[1]) === env.HOOK_PAUSE_PROCESS) && first('pause')) {
+    if (typeof rawArgs[0] === 'number') pendingPauseRead = rawArgs[0];
+    else stop(env.HOOK_PAUSED);
+  }
+  if (name === 'closeSync' && pendingPauseRead !== undefined && rawArgs[0] === pendingPauseRead) {
+    pendingPauseRead = undefined;
+    stop(env.HOOK_PAUSED);
+  }
   // Windows keeps an unlinked marker pending deletion until its reader closes
   // it. Pause with the snapshot, without keeping the lock directory open.
   if (env.HOOK_STOP_LOCK_READ && name === 'readFileSync' && inLock(target) && first('lock-read')) {
