@@ -88,8 +88,12 @@ test('a chain member\'s rework during the link\'s GitHub call refuses the first 
   const reworks = fs.readFileSync(path.join(f.h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)
     .map((e) => e.cmd === 'rework' && /^racing rework from (\d+)$/.exec(e.detail?.reason)?.[1]).filter(Boolean);
   assert.equal(reworks.length, 1, 'one link attempt raced the rework');
-  const links = f.read().calls.filter((c) => c.args[0] === 'stack' && c.args[1] === 'link' && String(c.pid) === reworks[0]);
-  assert.equal(links.length, 2, 'the refused first link is retried once');
+  const calls = f.read().calls.filter((c) => c.args[0] === 'stack' && c.args[1] === 'link');
+  const links = calls.filter((c) => String(c.pid) === reworks[0]);
+  // The refused first link is retried once, unless another observer linked the PR after it
+  // (linkFresh then finds nothing left to link).
+  const linkedByOther = calls.slice(calls.indexOf(links[0]) + 1).some((c) => String(c.pid) !== reworks[0]);
+  assert.ok(links.length === 2 || (links.length === 1 && linkedByOther), `the refused first link is retried once: ${JSON.stringify(calls.map((c) => c.pid))}`);
   assert.deepEqual(linkFailures(f), []);
 });
 

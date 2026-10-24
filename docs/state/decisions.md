@@ -69,6 +69,7 @@ Workers, reviewers and every other identity are refused both. For an operational
 | `ci.required`, `ci.ignore_apps`, `ci.capped_review` | operational | `project set --ci-required`, `--ci-ignore-apps`, `--ci-capped-review` |
 | `ci.local` | operational | `project set --ci-local`, `task update --ci-local` |
 | `ci.dispatch` | operational | `project set --ci-dispatch` |
+| `ci.max_dispatches` | operational | `project set --ci-max-dispatches` |
 | `tests.paths`, `tests.keep`, `tests.host_only`, `tests.host_env`, `tests.mode`, `tests.by_kind`, `tests.expensive`, `tests.map`, `tests.crucial` | operational | `project set --tests-*`; `tests map refresh` also pins `tests.map` |
 | `limits.workers`, `limits.lease_minutes`, `limits.paused` | operational | `project set --workers`, `--lease-minutes`, `--paused REASON` (empty resumes) |
 | `limits.owners`, `limits.owner_idle_minutes` | operational | `project set --owners`, `--owner-idle-minutes` |
