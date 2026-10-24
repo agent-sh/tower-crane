@@ -58,6 +58,14 @@ if (entry === 'tower-crane.js'
           return rows;
         };
       }
+      // A read of every event takes its rows one at a time.
+      const each = mod.eachEventAfter;
+      mod.eachEventAfter = function* heldEach(...args) {
+        for (const row of each.apply(this, args)) {
+          hold([row]);
+          yield row;
+        }
+      };
     }
     return mod;
   };
