@@ -123,7 +123,7 @@ test('the host transport probe passes on a private peer and fails without one', 
   for (const name of ['runtime unset, stale bus', 'runtime empty, stale bus', 'runtime present, no session bus', 'custom runtime, stale bus']) {
     assert.match(ok.stdout, new RegExp(`${name}: canScope=true, systemd-run scope planned`));
   }
-  assert.ok(peer.calls.length >= 4, JSON.stringify(peer.calls));
+  assert.ok(peer.calls.length >= 4, `${ok.stdout}${JSON.stringify(peer.calls)}`);
   assert.ok(peer.calls.every(call => call.member === 'Get' || call.member === 'GetEnvironment'), JSON.stringify(peer.calls));
   const failed = await run(missing);
   assert.notEqual(failed.status, 0, failed.stdout);

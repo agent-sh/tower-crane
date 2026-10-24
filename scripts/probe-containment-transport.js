@@ -14,6 +14,7 @@ fs.mkdirSync(cache, { recursive: true });
 const custom = fs.mkdtempSync(path.join(cache, 't423-transport-'));
 fs.symlinkSync(path.join(runtime, 'systemd'), path.join(custom, 'systemd'), 'dir');
 const read = fs.readFileSync;
+console.log(`inherited: XDG_RUNTIME_DIR=${process.env.XDG_RUNTIME_DIR ?? '<unset>'}, DBUS_SESSION_BUS_ADDRESS=${process.env.DBUS_SESSION_BUS_ADDRESS ?? '<unset>'}`);
 try {
   // Gate probes inherit a delegated scope. Force the manager branch while keeping
   // the real client and socket, so delegation cannot hide a broken transport.
@@ -42,3 +43,4 @@ try {
   fs.rmSync(custom, { recursive: true, force: true });
 }
 assert.equal(C.canScope(), true, 'host caller must support a real or delegated scope');
+console.log('host caller: canScope=true');
