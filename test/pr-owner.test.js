@@ -109,6 +109,23 @@ test('a failed review reaches the owner with its findings, and the owner submits
   assert.deepEqual(h.logs().filter((e) => e.cmd === 'rework').map((e) => e.detail.from_review), [true]);
 });
 
+test('a failure that climbs the task goes to a new worker on the next rung, not back to its owner', async (t) => {
+  const h = ownerFixture(t);
+  h.env.OWNER_HEADS = JSON.stringify([h.sha]);
+  // An earlier review FAIL at easy, so the owner's failing tests are the second rework there.
+  h.ok(['claim', 'T1', '--agent', 'worker']);
+  h.ok(['submit', 'T1', '--sha', h.sha, '--agent', 'worker']);
+  h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', h.sha, '--revision', '1',
+    '--summary', 'lib/other.js:3 - wrong branch']);
+  h.ok(['rework', '--from-review', 'T1', '--agent', 'orchestrator']);
+  await runEngine(h);
+  const climb = h.logs().filter((e) => e.cmd === 'climb');
+  assert.deepEqual(climb.map((e) => [e.detail.from, e.detail.to]), [['easy', 'medium']]);
+  assert.equal(h.task().tier, 'medium');
+  assert.equal(h.logs().filter((e) => e.cmd === 'claim' && e.detail.handover).length, 0, 'nothing went back to the easy owner');
+  assert.deepEqual(h.outcomes().map((o) => [o.outcome, o.reason]), [['exit', 'sent back to rework for a new worker']]);
+});
+
 test('a review that fails only on PR-body claims gets its body fixer while the owner waits, with no rework', async (t) => {
   const h = ownerFixture(t, { OWNER_REVIEW_BODY: '1' });
   h.env.OWNER_REVIEW_FAIL_ONCE = path.join(h.base, 'review-failed');

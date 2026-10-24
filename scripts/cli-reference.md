@@ -136,7 +136,7 @@ tower-crane task update T1 --ci-local null --agent owner
 
 `merge` defaults to `--method squash`, with the task title as the commit subject and its acceptance lines joined by newlines as the body. `--subject` and `--body` override these independently, preserving multiline text and an explicitly empty body. A subject must be non-blank. `--method merge` uses the same commit text options; `--method rebase` omits them and refuses explicit subject or body overrides. Every merge invocation uses GitHub's full head SHA with `--match-head-commit` after verifying it matches the accepted SHA. When GitHub refuses `gh pr merge` because the PR is part of a stack that no task records, a squash or merge retries through the asynchronous merge API with the same method, `--subject` and `--body`, and pins the accepted head with `expected_head_sha`. After the merge is confirmed, that fallback deletes the head branch under the same rule as the ordinary merge. A rebase keeps the refusal, since the API cannot rebase. Branch deletion is requested unless `merge.keep_branch` is true. Only owner-set `merge.admin: true` adds GitHub's admin option for solely owned repositories; the fallback refuses instead, since the API has no admin option. There is no one-off `merge --admin` flag; acceptance, review, CI and head checks still apply.
 
-`project set --review-policy JSON --agent owner` replaces `review` with optional diff limits, risk paths, a minimum reviewer rung and prices. Only an explicitly identified owner can set this policy or its prices. For example:
+`project set --review-policy JSON --agent owner` replaces `review` with optional diff limits, risk paths, docs paths, a minimum reviewer rung and prices. Only an explicitly identified owner can set this policy or its prices. For example:
 
 ```sh
 tower-crane project set --review-policy '{"small_lines":100,"small_files":5,"risk_paths":["auth/**"],"prices":{"openai.gpt-6-luna":{"input":0.10,"cache_write":0.125,"cache_read":0.01,"output":0.50},"openai.gpt-6.1-sol":{"input":2,"cache_write":2.50,"cache_read":0.10,"output":10},"claude-opus-5-5":{"input":4,"cache_write":5,"cache_read":0.20,"output":20}}}' --agent owner
@@ -147,6 +147,64 @@ Rates are dollars per million tokens; use the actual provider model IDs and rate
 Briefs can use `## Shared`, `## Worker` and `## Reviewer` level-two headings. Matching is case-insensitive, and headings inside fenced code blocks are ordinary text. Content before the first role heading is shared; each section runs to the next role heading. `## Rework notes` also starts a shared section, so corrections appended by `rework` stay visible to role-filtered brief readers. `brief get ID` infers worker or reviewer from the `--agent` or `TOWER_CRANE_AGENT` name. Use `--role worker` or `--role reviewer` to select explicitly. Owner and orchestrator identities see the full brief by default.
 
 `init --review-policy JSON` accepts the same operational setting.
+
+`review.docs_paths` is an array of repository-relative globs, defaulting to
+`["docs/**","**/*.md","changelog.d/**"]`. The Markdown glob includes root and
+nested files. A configured array replaces the default; `[]` disables docs
+classification. `review.docs_exclude` excludes matching paths from that list.
+Use exclusions for documents pinned by executable contracts or digest checks.
+`prompts/`, `skills/` and `agents/` always require ordinary review and testing.
+
+A whole docs-only diff makes `check tests` record a `docs only` pass without a
+suite, including on a fresh task. `project set --docs-cmd CMD` pins an optional
+cheap documentation command for link, lint or other docs checks; `null` clears
+it. `check docs ID` runs it at the submitted head. When the command is configured, docs-only submissions require
+this cheap gate, and `check tests` also runs the cheap command when it skips a
+suite. A failed docs command blocks acceptance. Code test commands are never
+used as the cheap docs command.
+
+On `submit`, passing and `--followups-only` independent reviews carry across
+docs-only changes. Their passing tests and CI evidence also carry, so acceptance
+queues no new review, tests or CI suite. If submit could not read repository
+metadata, automation prepares carryover before its software gates. Cleanup still
+checks the new head.
+Requirements edits, unreadable commits, rewritten history, instruction changes
+and code changes beyond named small fixes keep the normal gates.
+
+For a small fix round, the independent reviewer records every blocker with
+`--findings '[{"kind":"nit","path":"lib/value.js","line":12,"claim":"Use the named return value"}]'`.
+Use `doc-fix` for a docs correction and `title-body-fix` for a PR title or body
+correction. Code nits need a positive `line`; an optional `end_line` names the
+last affected line. Every changed code hunk must fit a named line range, and
+every undisputed code finding must have a hunk in its own range. Each undisputed
+docs finding must name a changed file. An unchanged finding needs a dispute
+and reason; changing unrelated docs does not resolve it.
+Substantive or important docs findings keep review required. A failed review
+with follow-ups and no blockers uses `evidence --fail --followups-only`. These
+verdicts add no redesign hold, review churn, escalation or failed-review scope.
+
+`submit --disputes '[{"finding":1,"reason":"The contract already requires this behavior"}]'`
+records a dispute by its one-based finding number. The finding's path must stay
+unchanged. `accept` accepts the same flag. Disputes appear in the orchestrator's
+inbox as `review_dispute` information, without holding the task.
+
+The orchestrator or owner can use
+`accept ID --attest-fix REVIEW_SHA --reason "Applied the exact named fix"` to
+attest a small code fix from the latest independent review. Each code hunk must
+fit the review's named file and line range. The receipt records the attestor,
+reason and diff digest. Workers and reviewers cannot attest. For a submitted
+head whose title or body findings have been corrected, the orchestrator or owner
+uses `accept ID --metadata-fixed --reason "Corrected the PR description"`.
+Any other changes must fit the named findings. Unverified metadata findings
+remain blockers even when docs or code changed. The automatic body fixer carries
+review after verifying the edit and unchanged
+checkout, without another reviewer. A passing review at the same head already
+survives title and body edits.
+
+Carryover evidence records `carried_from` for its source evidence,
+`reviewed_head` for the original reviewed commit, the reason, files, docs policy,
+diff digest and any disputes or attestation. Matching `review carry` and
+`gate carry` audit events are required. Carryover is not a waiver.
 
 The list settings also work with `init`. Omitted options leave their fields unchanged. Removing a field keeps other settings in its object section and removes the section itself only when empty. Invalid JSON, a value other than an array or `null`, or a blank or non-string array entry exits 2 and writes no state or event, including when combined with valid settings.
 
@@ -378,15 +436,32 @@ Before constructing an agent home, spawn also sweeps orphan `brokers/<agent>/` d
 
 `task add --lock lab/rdma --lock gpu/0 --environment lab` stores exclusive resource names and an informational environment label. Names are case-sensitive, trimmed and deduplicated. Tasks with any shared lock cannot hold worker leases or dispatch reservations at the same time, regardless of `limits.workers` or environment labels. Claim, worker spawn and expired renewal check under the state lock and name the holding task and agent on refusal. An unclaimed spawn reserves its locks with its worker slot, including retry backoff; its generated agent consumes that reservation on claim. Reviewer and other non-worker dispatches do not acquire resource locks. Environment labels do not select a harness or change its environment variables.
 
-Failed review evidence can supply `--findings '[{"kind":"false-claim","path":"PR body","claim":"The diagnostic is printed."}]'`. List every blocker with non-blank `kind`, `path` and `claim` strings and no other fields; this flag is refused for notes and passing reviews. A false claim qualifies only when correcting prose resolves it without a behavior or contract change. The light path requires every finding to be a false claim confined to `PR body`, `CHANGELOG.md` or single Markdown fragments under `changelog.d/`, or an incorrectly blocking finding at `PR title`, regardless of kind. Title findings are follow-ups, never blockers. PR-body false claims remain blockers until verified; other metadata does not get the title exception. Missing structured findings, mixed code blockers and contract claims, including `docs/cli.md` and `docs/state.md`, retain full review and rework.
+Failed review evidence lists every blocker in `--findings` as
+`{kind, path, claim}`, with optional positive `line` and `end_line`. A finding
+classified as `nit`, `doc-fix` or `title-body-fix` is eligible for a small fix
+round; substantive docs findings remain `important`. PR-body false claims keep
+an automatic repair path: the worker corrects the body, the engine verifies the
+edit and unchanged checkout, then carries the reviewed code without another
+reviewer or test run. `rework --from-review` refuses body-only findings so the
+repair can stay at the same head. An ordinary `rework --reason` is still available
+when the correction requires wider code changes. Title findings are follow-ups,
+never blockers. A failed full review at the unchanged head stays failed; only
+the orchestrator or owner can request another full round with `--retry-review`.
 
-When every finding is a PR-body false claim or a title finding, automation dispatches a body-only repair on the task's worker rung, resuming its session when supported and available. The task stays submitted and `status` shows `fixing PR body`. The worker edits with `gh pr edit --body-file` or `--title`, then exits without claiming, submitting, editing repository files, committing or pushing. The broker refuses pushes and PR changes beyond the body and title. Once the worker exits, the engine verifies that the body or title changed, tracked checkout files are clean, both local and remote heads still match the submitted head, and the actual base branch matches the dispatch snapshot or the engine's current expected target, then requests the same light check as `accept ID`, covering only the named claims or title. Untracked files such as the body file do not block the repair. The expected target permits stack retirement to retarget the PR after a parent merge, including one during the GitHub request. Changed heads, tracked files or unexpected actual base branches go to normal rework without a light check, including for unsandboxed harnesses. A pass accepts at the same head and revision.
+When every finding is a PR-body false claim or a title finding, automation dispatches a body-only repair on the task's worker rung, resuming its session when supported and available. The task stays submitted and `status` shows `fixing PR body`. The worker edits with `gh pr edit --body-file` or `--title`, then exits without claiming, submitting, editing repository files, committing or pushing. The broker refuses pushes and PR changes beyond the body and title. Once the worker exits, the engine verifies that the body or title changed, tracked checkout files are clean, both local and remote heads still match the submitted head, and the actual base branch matches the dispatch snapshot or the engine's current expected target, then carries review, tests and CI without another reviewer or suite run. Every named body/title field must change. Untracked files such as the body file do not block the repair. The expected target permits stack retirement to retarget the PR after a parent merge, including one during the GitHub request. Changed heads, tracked files or unexpected actual base branches require ordinary rework, including for unsandboxed harnesses. Verified correction accepts at the same head and revision. The orchestrator or owner confirms manual corrections with `accept ID --metadata-fixed --reason R`.
 
-A light reviewer that leaves no verdict uses the ordinary reviewer recovery policy: retryable crashes or outages and expired missing receipts get a replacement check at the same head without another body edit. A clean no-verdict exit or three crashed review sessions hold dispatch and surface `review_held`; `accept ID` retries the corrected body's check after the cause is handled. An exited, held reviewer is no longer shown as `fixing PR body`. No-verdict exits do not count as failed body checks.
+A verified automatic correction queues no reviewer, so ordinary reviewer exit recovery does not add a metadata check. Existing explicitly dispatched light checks retain their recorded recovery context; they are not part of the automatic repair route.
 
-Two consecutive failed automatic body-only re-checks at that head and revision stop the loop; `inbox` shows `review_body_stuck` with the latest findings and a correction hint. A fixer that exits without changing the body or title also stops with this item, except an `availability_failure` exit retries the repair once. A second exit without an edit stops the loop. An outage after a successful edit still allows the light check. The orchestrator can correct the body and run `accept ID`, or use `rework ID --reason R` when code changes are needed. `rework --from-review` still refuses body-only failures. A submission without a linked PR and recorded branch retains the explicit correction and `accept` path.
+A body fixer that leaves the body unchanged stops with `review_body_stuck`.
+An availability failure before an edit gets one repair retry; an availability
+failure after the edit still allows verified carryover. The inbox keeps the
+reason and a correction hint. A code change needs ordinary rework.
 
-Changelog claims need a new head, so they go through `rework --from-review` like other failures. The next revision's review is a light check when the diff since the failed review changes only the named changelog fragments. The new head requires software gates as usual. Other source changes restore full review. The reviewer checks every corrected claim against its code or probe and records fresh evidence; an uncorrected claim still blocks. Prose-only failures do not escalate rungs.
+Changelog corrections need a new head. After review rework, a docs-only or
+named small fix round carries the review, tests and CI evidence. Substantive
+findings and wider code changes retain ordinary review. An explicit reviewer
+dispatch can still narrow its packet to prior blockers; carryover does not queue
+that dispatch.
 
 `submit` stores the full lowercase commit SHA in the task and submit event. Full 40-character SHA-1 or 64-character SHA-256 IDs are accepted as given without requiring their objects locally; a commit may exist only in another checkout. Abbreviations are resolved with `git rev-parse --verify <sha>^{commit}` in the task repository. If local resolution fails, submit fetches the supplied or recorded task branch from origin and retries. A prefix that remains unknown or ambiguous, or resolves to a non-commit object, refuses without changing state. A sandboxed worker resolves inside its sandbox before forwarding the full SHA; the host broker runs no Git. Existing abbreviated submitted SHAs stay unchanged and match review and gate evidence by prefix, including active reviewer dispatches, so a full-SHA failed review remains actionable through `rework --from-review`.
 
@@ -448,7 +523,7 @@ a PR-body false claim. Title-only findings remain nonblocking follow-ups. Combin
 refusal. This is checked again after software gates and under the acceptance
 lock before any waiver is recorded.
 A real `spawn --role review` still sends a current code FAIL to full-findings
-rework. PR-body false claims and title findings take only the light repair
+rework. PR-body false claims and title findings take the verified metadata repair
 path; title findings are follow-ups, never blockers.
 If findings cannot be retrieved, the task stays submitted. Dry-run review
 previews do not change state.
@@ -498,12 +573,12 @@ dispatch. Both kinds are checked again on the next pass. A dispatch lock still
 stops the whole batch. Reviewers do not take worker slots, so full worker capacity
 does not prevent their retry. A running reaction for the same task postpones the
 retry. A successful reviewer dispatch, a verdict, or a changed head, revision or
-submission status clears that dispatch debt. A failed PR-body verdict still
-allows a deferred light review to retry. `status` lists `deferred reviewers:
+submission status clears that dispatch debt. An explicitly dispatched light check can retain its
+legacy recovery context after a failed PR-body verdict. `status` lists `deferred reviewers:
 TASK since AT: REASON`; JSON `deferred_reviewers` carries `id`, `sha`, `revision`,
-`since` and `reason`, even after the governor's registry hint expires. Automatic
+`since` and `reason`, even after the governor's registry hint expires. Previously dispatched
 light reviews keep their `body_recheck` context through deferral, retry and
-evidence, so their failures still count toward the two-failure repair stop.
+evidence. Verified metadata repair carries review and creates no such dispatch.
 An outstanding debt is recorded once regardless of changing governor readings.
 Status uses the latest matching reviewer reason from the governor registry,
 falling back to the recorded reason when that hint expires.
@@ -783,6 +858,8 @@ Failure at the range top opens one blocking owner decision. Answer it and apply 
 <!-- commands:Decisions:start -->
 <!-- commands:Decisions:end -->
 
+`answer DID --choice C --note T` sends the asker a message with the choice and the full note directly below it, labelled `Orchestrator note:`. The answer command, `decisions` and blocked tasks' notes use the same format. Answered `decisions` rows keep the stored answer rule on the choice line. For an escalated question answered by the orchestrator, the answer command prints its no-setting-authority notice after the full note. When the note spans multiple lines or is longer than the first choice line, the first line says `answer has a note with N lines`; blank lines count. Worker hook delivery keeps the choice and note together. Fresh and resumed worker prompts include every answered decision that blocks their task, even if an earlier worker already acknowledged its message. Fallback routes read the task's current answers when rebuilding the prompt, including answers received and acknowledged during the previous attempt. Each worker prompt includes a task answer once, even when its message is unread. Same-route retries that start a fresh conversation retain answers already embedded in their base prompt and append only later answers from current state. A fallback rebuild records the answers in its new base prompt for subsequent retries; warm resumes retain their existing conversation.
+
 `decision withdraw DID --reason R` closes an open decision that no longer needs an answer. Only the agent that opened it (verified identity, matching `asked_by`) or the owner can withdraw it; anyone else is refused. A decision already answered or withdrawn is refused too. Withdrawing needs no owner answer and does not make the requested change; the event records the reason, and each task the decision blocked gets the reason in its notes.
 
 `decision delegate DID --answerers '["worker-1"]'` replaces the decision's named answerers; `[]` clears them. `--technical true` marks it technical and lifts a spend, credential, setting or `--owner-required` reason, but never an escalated setting; `false` removes the technical mark. A decision that keeps an owner-only kind or reason refuses `--answerers`. Both settings are owner-required. An orchestrator request opens an approval bound to the decision and supplied fields; rerun it after the owner answers `approve`. Both paths emit the shared setting audit. The orchestrator answers technical decisions by default. `project set --decision-delegation '{"orchestrator_technical":false}' --agent owner` keeps them with the owner; a technical decision is an `ask --kind technical` that names no owner-required setting and carries no `--owner-required` reason, and the owner may unmark one with `--technical false`. `null` clears the project rule, which restores the default. The answer event records the actor and its rule: `owner`, `owner-named-agent`, `owner-technical-delegation` or `orchestrator-escalated-question`. Escalated questions (`escalation` set, `approval_request` not true) are also answerable by the orchestrator when both project delegation booleans are not false and no independent owner restriction remains. The exception removes only escalation: `owner_required` and non-technical kinds, including crisis, still keep questions with the owner unless the owner lifts them. `project set --decision-delegation '{"orchestrator_escalated_questions":false}' --agent owner` restores their old refusal. Their answers apply no settings, even when the selected option asks for widening; the answer output reminds the caller that a separate owner approval request is still needed. The widening command opens that request and applies nothing until the owner approves and the command is repeated. Approval requests stay owner-only. `decisions` text shows answer rules; `status` lists the orchestrator's escalated answers from the last 24 hours or linked to still-open tasks, including choices, authors and rules, in text and `decisions_orchestrator_escalated` JSON. `decisions_orchestrator_escalated_count` keeps the total recorded count, and `decisions` keeps the complete history. The board labels escalated questions as questions and reserves approval controls for `approval_request: true`.
@@ -811,7 +888,7 @@ The orchestrator does not run a waiter of its own. Its harness delivers events i
 
 In Claude Code, arm the mod once after the startup snapshot: the model calls the `mcp__tower-crane__watch` tool with `after` set to the snapshot's `cursor` (and `agent` or `state` when they differ from `TOWER_CRANE_AGENT`, `TOWER_CRANE_STATE` or the state found from the working directory), or the person runs `/tower-crane-watch [cursor]`. A session started with `TOWER_CRANE_AGENT=orchestrator` arms itself at session start. Arming again restarts the follower from the given cursor or from where the last one stopped. If the follower exits, a toast says so and names the command.
 
-A push carries ids, never content: one line per event (`- E…: decision-answer D5 from owner`, `- E…: worker-message T3 from worker-T3-1`), then `Run tower-crane inbox for findings and resolving commands` and the cursor (`OFFSET:CUTS`). Spawned orchestrator homes acknowledge what they delivered with `hook inbox` receipts and count events from the cursor their home was built at (`after` and `cuts` in `hook.json`; a home without `cuts` counts from the plain offset).
+A push names each event (`- E…: decision-answer D5 from owner`, `- E…: worker-message T3 from worker-T3-1`), then says `Run tower-crane inbox for findings and resolving commands` and gives the cursor (`OFFSET:CUTS`). Decision-answer wakes and answer messages to the asker also carry the choice and full labelled note below their event line. Other wakes carry ids and kinds only. Spawned orchestrator homes acknowledge what they delivered with `hook inbox` receipts and count events from the cursor their home was built at (`after` and `cuts` in `hook.json`; a home without `cuts` counts from the plain offset).
 
 `tower-crane wait [--after CURSOR] [--for NAME] [--task ID] [--types TYPES] [--timeout SEC | --follow] [--observe]` blocks until the first matching event. Run this single command in your harness's background executor and act on its completion.
 
@@ -821,7 +898,7 @@ A push carries ids, never content: one line per event (`- E…: decision-answer 
 - SIGTERM or SIGINT stops new automation reservations and gates. The active gate finishes, its evidence is recorded, and `wait` releases its executor lease and exits 0. Signal shutdown prints `stopped by SIGTERM after draining 1 gate`, using the received signal and the number of gates that finished during the drain. `--json` and `--follow` print `{"reason":"signal","signal":"SIGTERM","drained":1}` instead. Idle waits and `--observe` waits also exit 0, with `drained: 0`. The signal stops only `wait`: workers that its refill already dispatched keep running under their spawn monitors. A second signal kills the active gate command tree immediately or cancels its source-page fetch; interrupted gates do not count as drained. These notices are distinct from wake events and timeout records. Interrupted reactions remain retryable at the next `wait` startup; an interrupted gate records a failure without a confirmed test failure and can be rerun with `gates retry`. A second signal during the tests gate's base rerun kills that rerun, so the failure records `base_rerun_killed` with signal `SIGKILL` and automation retries it once at the same head instead of reworking.
 - No timeout is imposed unless `--timeout` supplies seconds (fractions allowed). On timeout, stdout is `{"type":"timeout","offset":N,"cursor":"N:CUTS"}` followed by a newline and the exit code is 2. The offset follows the last complete line scanned, including filtered events.
 - An event line contains `id`, `type`, `to`, `at`, `agent`, `cmd`, `task`, `detail`, `offset` and `cursor`. `offset` is the byte position after that event's newline; `cursor` is `OFFSET:CUTS`, the offset with the length of `events.cuts.jsonl` the wait had applied. Pass `cursor` to the next wait to retain events that arrived while handling the first; `id` and `offset` work too, without the exact resolution across a cut.
-- `--follow` never exits on an event: it prints `{"type":"ready","offset":N,"cursor":"N:CUTS"}` once its cursor is set, then one line per matching event with `id`, `type`, `to`, `agent`, `task`, `offset`, `cursor`, `decision` for decision events and `steer: true` for a steered message, and no `detail`. It runs until interrupted or until its reader closes stdout, and refuses `--timeout`.
+- `--follow` never exits on an event: it prints `{"type":"ready","offset":N,"cursor":"N:CUTS"}` once its cursor is set, then one line per matching event with `id`, `type`, `to`, `agent`, `task`, `offset`, `cursor`, `decision` for decision events and `steer: true` for a steered message, and no `detail`. Decision answers and their messages to the asker also include `text` with the choice and full labelled note. It runs until interrupted or until its reader closes stdout, and refuses `--timeout`.
 
 Automatic stack maintenance still uses synchronous Git/GitHub commands and can delay signal handling until the current command returns. Software gate commands and PR inspection run asynchronously and remain cancellable.
 
@@ -957,7 +1034,7 @@ The server tails the event log for reloads and owner messages, and retains histo
 | `POST /api/controls` | owner only: invoke a control's existing CLI handler with `{command, flags, pos}` |
 | `POST /api/controls/answer` | owner only: `{decision: "D1", choice: "approve"}` or `decline`; approve also applies a recorded supported request |
 
-The Controls page links every row of `tower-crane authority` to its form. Retry a failed review invokes `accept --retry-review` for the selected task; it requests another review without changing the submitted head or revision. Project controls cover limits, pause, budgets, test and cleanup commands, CI and review policies, merge options, decision delegation and spawn grants. Rung controls cover every ladder field; Settings keeps its ladder table and default harness selector. Personal controls edit fallback routes (`ladder set RUNG --fallbacks`), save the ladder defaults, and set the browser kit. Task controls edit kind, tier, owner blockers, CI overrides, budgets and cancellation, release claims, interrupt running work, prioritize gate work, accept with gate waivers, delegate a decision and delegate orchestration. The publication form records approval; publication itself remains the orchestrator's work.
+The Controls page links every row of `tower-crane authority` to its form. Project controls cover limits, pause, budgets, test and cleanup commands, CI and review policies, merge options, decision delegation and spawn grants. Rung controls cover every ladder field; Settings keeps its ladder table and default harness selector. Personal controls edit fallback routes (`ladder set RUNG --fallbacks`), save the ladder defaults, and set the browser kit. Task controls edit kind, tier, owner blockers, CI overrides, budgets and cancellation, release claims, interrupt running work, prioritize gate work, accept with gate waivers, explicitly retry a failed review, attest a named review fix, confirm corrected PR title/body findings, delegate a decision and delegate orchestration. The publication form records approval; publication itself remains the orchestrator's work.
 
 `POST /api/controls` accepts `project set`, `ladder set`, `ladder harness`, `ladder save-user`, `browser-kit set`, `task update`, `gates prioritize`, `decision delegate`, `owner-done`, `release`, `interrupt`, `accept`, `spawn` (`task` and role `orchestrator`, without `ready`, `wait` or `dry-run`), and `ask` (setting `publish`, without a question). Flag values are strings, repeatable flags are arrays of strings, and positional arguments are strings. Flags are the CLI's names, so a rung's `web_mcp` field is sent as `web-mcp`. Global options and unknown commands or flags are refused. For example:
 
@@ -1211,7 +1288,7 @@ Windows orchestrator commands discover their persistent caller from one CIM proc
 
 `tower-crane mcp --agent orchestrator` serves the inbox and batch actions as MCP tools over stdio. Pass `--state DIR` outside the project. The plugin registers it for Claude Code, and spawned Claude and Codex orchestrators receive it in their generated homes. The Codex plugin command surface exposes `/tower-crane-inbox`, `/tower-crane-spawn-ready`, `/tower-crane-merge-accepted`, `/tower-crane-rework-from-review ID` and `/tower-crane-release-dead`.
 
-Use `inbox --json` for typed findings with `action.command` and `action.argv`; use the returned command to resolve each item. Messages, stalls, decision answers and owner comments can be acknowledged after handling with `inbox --ack ITEM`. Owner-only decisions require the owner's answer; technical decisions are the orchestrator's to answer unless `decision_delegation.orchestrator_technical` is false. Escalated technical questions without another owner restriction are also answerable when `decision_delegation.orchestrator_escalated_questions` is not false; approval requests stay owner-only. GitHub observation failures remain visible as `github_error` items. Batch merge refusals remain in the inbox while independent mergeable entries continue through the existing current-base and stack checks.
+Use `inbox --json` for typed findings with `action.command` and `action.argv`; use the returned command to resolve each item. Messages, stalls, decision answers, owner comments and informational review disputes can be acknowledged after handling with `inbox --ack ITEM`. Owner-only decisions require the owner's answer; technical decisions are the orchestrator's to answer unless `decision_delegation.orchestrator_technical` is false. Escalated technical questions without another owner restriction are also answerable when `decision_delegation.orchestrator_escalated_questions` is not false; approval requests stay owner-only. GitHub observation failures remain visible as `github_error` items. Batch merge refusals remain in the inbox while independent mergeable entries continue through the existing current-base and stack checks.
 
 Repeat `--ack ITEM` to acknowledge several handled items atomically. All ids must be current acknowledgeable items; duplicate ids count once and an invalid id refuses the whole batch. A single item keeps its existing JSON response; a batch returns `{acknowledged: [ITEM, ...], count}`.
 
@@ -1219,7 +1296,7 @@ Each owner comment has its own `owner_comment:TASK:EVENT` id (`project` for deci
 
 Foreground inbox reads use cached GitHub observations and never wait on GitHub. The host's `wait --inbox` follower refreshes them concurrently across PRs, at most once a minute, in `inbox-github-cache.json` in the state directory. A changed repository, base or GitHub host invalidates the cache; a changed task status, PR, submitted SHA or revision invalidates that task's reads. Missing or overdue entries produce one `github_pending` summary with the task count and last refresh time. Overdue valid observations remain visible until replacement, marked `stale: true`, so a slow follower pass does not hide findings. Future timestamps and changed task versions cannot supply old findings. A pending item re-reads `inbox` when the last completed refresh is recent; a missing or overdue refresh offers `wait --inbox --observe --timeout 1`. These actions do not start a persistent host or run reactions and worker dispatch. Real background failures remain explicit `github_error` items alongside local findings. Gate and merge commands use their own fresh GitHub reads.
 
-Use `inbox --ack-before TIME` to acknowledge every current acknowledgeable item at or before a timestamp, optionally restricted by `--kind message|stall|decision_answer|owner_comment|review_exit_missing`. The command writes one audit event with the count and UTC cutoff and returns `{acknowledged: [ITEM, ...], count, cutoff}`, including when nothing matches. It uses each item's `at`, which is the source event time, a derived stall's lease expiry, or a decision's answer time. `--kind` requires `--ack-before`, and `--ack` cannot combine with `--ack-before`. Task and GitHub findings cannot be acknowledged.
+Use `inbox --ack-before TIME` to acknowledge every current acknowledgeable item at or before a timestamp, optionally restricted by `--kind message|stall|decision_answer|owner_comment|review_exit_missing|review_dispute`. The command writes one audit event with the count and UTC cutoff and returns `{acknowledged: [ITEM, ...], count, cutoff}`, including when nothing matches. It uses each item's `at`, which is the source event time, a derived stall's lease expiry, or a decision's answer time. `--kind` requires `--ack-before`, and `--ack` cannot combine with `--ack-before`. Task and GitHub findings cannot be acknowledged.
 
 ```sh
 tower-crane inbox --ack message:T12:E123 --ack decision_answer:project:D4 --agent orchestrator
