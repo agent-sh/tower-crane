@@ -302,6 +302,27 @@ test(`stack parent recovery with ${descendant} hot-path descendant at depth ${de
 });
 }
 
+for (const depth of [1, 2]) {
+test(`a stack ancestor with a live lease holds its hot paths from a descendant at depth ${depth}`, (t) => {
+  const f = StackFixture.stacked(t), h = f.h;
+  let child = 'T2';
+  if (depth === 2) {
+    const id = f.add('grandchild', 'T2'), wt = h.json(['worktree', id]);
+    f.submit(id, 13, wt);
+    child = id;
+  }
+  h.ok(['project', 'set', '--hot-paths', '["T1.txt"]']);
+  for (const id of new Set(['T1', 'T2', child])) h.ok(['brief', 'set', id, '-'], { input: '## Scope\n\nT1.txt\n' });
+  const doc = h.readState('tasks.json');
+  recoveryState(doc.tasks.find((task) => task.id === 'T1'), 'live', 'worker-T1');
+  recoveryState(doc.tasks.find((task) => task.id === child), 'rework', `worker-${child}`);
+  h.writeState('tasks.json', doc);
+  const result = h.run(['claim', child, '--agent', `worker-${child}`]);
+  assert.equal(result.code, 1, result.stdout);
+  assert.match(result.stderr, /waits on hot path T1.txt held by T1/);
+});
+}
+
 test('concurrent hot-path recovery claims grant one live worker', async (t) => {
   const h = fixture(t), doc = h.readState('tasks.json');
   for (const task of doc.tasks.slice(0, 2)) recoveryState(task, 'rework', `worker-${task.id}`);
