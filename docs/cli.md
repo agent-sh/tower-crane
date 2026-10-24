@@ -1469,7 +1469,9 @@ The CLI refuses manual software verdicts, and software receipts require matching
 | | |
 | `check sources ID` | fetch the distinct cited pages from committed `research/ID.json` and verify every quote; records sources evidence; required for research kind on every tier |
 | | |
-| `check tests ID [--cmd CMD] [--proof-cmd CMD]` | use `tests.by_kind` over `tests.mode` (default `prove`); `prove` requires the pinned head command or an eligible selection to pass at head and tests to fail after reverting other changes, with T8 build-file keeps; expensive proof runs mapped head suites when `tests.map` and full-suite `ci.required` are pinned, falls back to CMD for unmapped sources, and uses a scoped `{tests}` command at head and after reversion; A resubmission can use incremental coverage from an audited earlier full pass in the current revision lineage under the same gate policy. Map the complete delta from that ancestor, including merged base changes, through pinned `tests.map` or the repository seed unchanged from the merge base; select changed tests, mapped suites and path/basename readers. Directory-enumerating readers need source-glob mappings, including for changed test files. Shared CLI runtime and runner deltas retain full coverage; non-scoped prove retains the full head command. Record `head_mode: incremental`, `incremental_from` and `head_tests`; empty incremental selections run no head command. Acceptance and merge require both the incremental and anchor receipts. `run-only` requires a passing head run and can reuse a full anchor; `none` verifies the submitted commit without running CMD; records `tests`, resolved `tests_mode`, and failed test names plus a bounded output tail when its command fails; timeouts record infrastructure failure and interrupted files instead. A live tests run at the same head and revision is joined, not repeated. The host governor admits the run first: a deferral or a stop mid-run exits 3 and records no evidence ([Gates](#gates)). After the head suite passes, run declared `host_probes` at the submitted sha before proof reversion; none mode still runs probes. Record status, duration and a redacted output tail in `receipt.host_probes`, included in reviewer gate results. A normal nonzero exit or timed-out probe fails the gate as a worker failure. Other signal and resource-cap interruptions are runner crashes and get one automation retry before rework. A wait-shutdown interruption is a void: it reruns without using that retry and never reworks. Hotfix proof compares the merge commit with its recorded first parent |
+| `check tests ID [--cmd CMD] [--proof-cmd CMD]` | use `tests.by_kind` over `tests.mode` (default `prove`); `prove` requires the pinned head command or an eligible selection to pass at head and tests to fail after reverting other changes, with T8 build-file keeps; expensive proof runs mapped head suites when `tests.map` and full-suite `ci.required` are pinned, falls back to CMD for unmapped sources, and uses a scoped `{tests}` command at head and after reversion; A resubmission can use incremental coverage from an audited earlier full pass in the current revision lineage under the same gate policy. Map the complete delta from that ancestor, including merged base changes, through pinned `tests.map` or the repository seed unchanged from the merge base; select changed tests, mapped suites and path/basename readers. Directory-enumerating readers need source-glob mappings, including for changed test files. Shared CLI runtime and runner deltas retain full coverage; non-scoped prove retains the full head command. Record `head_mode: incremental`, `incremental_from` and `head_tests`; empty incremental selections run no head command. Acceptance and merge require both the incremental and anchor receipts. `run-only` requires a passing head run and can reuse a full anchor; `none` verifies the submitted commit without running CMD; records `tests`, resolved `tests_mode`, retained redacted head and base logs, and failed test names with capped first error blocks plus a bounded output tail when its command fails; timeouts record infrastructure failure and interrupted files instead. A live tests run at the same head and revision is joined, not repeated. The host governor admits the run first: a deferral or a stop mid-run exits 3 and records no evidence ([Gates](#gates)). After the head suite passes, run declared `host_probes` at the submitted sha before proof reversion; none mode still runs probes. Record status, duration and a redacted output tail in `receipt.host_probes`, included in reviewer gate results. A normal nonzero exit or timed-out probe fails the gate as a worker failure. Other signal and resource-cap interruptions are runner crashes and get one automation retry before rework. A wait-shutdown interruption is a void: it reruns without using that retry and never reworks. Hotfix proof compares the merge commit with its recorded first parent |
+| | |
+| `gate log ID [--type tests] [--test NAME] [--run head\|base\|scoped\|reverted]` | read the latest audited tests evidence that has logs, including after rework. Prints the complete retained head output by default; --test selects the first diagnostic block of that exact name, without the summary's per-test or aggregate cap. Summary diagnostics have a 32 KiB compact-JSON budget; every name remains listed, with an omitted count and log pointer for remaining blocks. --run selects base reruns, scoped proof or reverted proof output. Multiple commands in a phase print in run order. Logs are redacted, bounded to 1 MiB per command and kept for the newest five gate runs per task. A missing or pruned log is reported explicitly. Workers and reviewers can read only their own task's logs through the state broker |
 | | |
 | `gates prioritize ID (--reason R [--rank N] \| --clear)` | operational (orchestrator or owner): prioritize the task's submitted gate reactions until acceptance, cancellation or `--clear`, including later notifications, rework and resubmission. Priorities run in first-request order by default; new priorities append after existing ranks, repeated requests keep their place, and `--rank N` sets a nonnegative safe integer rank (lower first, ties in first-request order). Accepted merges always run first in acceptance order, including their merged-tree tests; requests cannot change that order or preempt a running reaction. Setting priority requires queued work and refuses accepted tasks. `--clear` needs no queued work or reason. Logs a `gates prioritize` event; `status` and `inbox` show the gate queue and reason |
 | | |
@@ -1664,6 +1666,7 @@ Gates:
   check docs       run the optional pinned cheap docs command at the submitted head; records docs
   check sources    fetch distinct cited pages and verify every quoted claim in research/ID.json at submitted sha; records sources
   check tests      check tests under the project and task kind mode; records tests
+  gate log         print a task's latest stored tests log or one failing test's first error block
   gates prioritize set or clear a task's gate priority after accepted merges
   gates retry      orchestrator or owner: rerun each failed software gate at the submitted head, at unchanged inputs; --from-rework undoes an automatic gate rework
   merge            merge accepted PRs with passing gates; linked stacks use pinned merge commits and can complete partially
@@ -1771,6 +1774,17 @@ usage: tower-crane decision <subcommand> ...
   decision delegate owner-required: set named answerers or mark a decision technical
   decision note    append a comment on a decision
   decision withdraw withdraw an unanswered decision under asker, owner or question delegation
+```
+
+</details>
+
+<details>
+<summary>tower-crane gate --help</summary>
+
+```text
+usage: tower-crane gate <subcommand> ...
+
+  gate log         print a task's latest stored tests log or one failing test's first error block
 ```
 
 </details>
@@ -2560,6 +2574,28 @@ options:
   --summary T              one line
   --ref URL                link to the run, review or log
   --findings JSON          every blocker as {kind, path, claim, line?, end_line?}; classify small fixes as nit, doc-fix or title-body-fix
+
+global options:
+  --state DIR              state directory (default: TOWER_CRANE_STATE, then .tower-crane/ in the main checkout)
+  --agent NAME             who is acting (default: TOWER_CRANE_AGENT; task processes cannot use owner; fallback needs an interactive terminal outside a task)
+  --json                   machine output on stdout
+  --help                   show help
+```
+
+</details>
+
+<details>
+<summary>tower-crane gate log --help</summary>
+
+```text
+usage: tower-crane gate log ID [--type tests] [--test NAME] [--run head|base|scoped|reverted]
+
+print a task's latest stored tests log or one failing test's first error block
+
+options:
+  --type tests             gate type (default tests)
+  --test NAME              exact failing test name
+  --run PHASE              head (default), base, scoped or reverted
 
 global options:
   --state DIR              state directory (default: TOWER_CRANE_STATE, then .tower-crane/ in the main checkout)
