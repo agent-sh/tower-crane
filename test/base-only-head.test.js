@@ -222,6 +222,21 @@ test('a resolved head reruns its failing selected test file once on its own', (t
   assert.match(tests.summary, /Rerun: reran test\/shared\.test\.js once in the same checkout: exit 0; flaky: test\/shared\.test\.js > shared holds TWO\./);
 });
 
+// The resolved run selects as any crucial head does, so a bad crucial list
+// fails the gate instead of falling back to the full suite.
+test('a resolved head in crucial mode fails on a crucial path missing at head, as any head does', (t) => {
+  const h = gated(t);
+  upstream(h, true);
+  mergeAndSubmit(h, { conflict: true });
+  h.ok(['project', 'set', '--tests-crucial', '["test/missing.test.js"]']);
+  const r = h.run(['check', 'tests', 'T1']);
+  assert.notEqual(r.code, 0, r.stdout);
+  const tests = h.readState('tasks.json').tasks[0].evidence.findLast((e) => e.type === 'tests');
+  assert.equal(tests.ok, false);
+  assert.match(tests.summary, /tests\.crucial names paths that are not test files at head: test\/missing\.test\.js/);
+  assert.deepEqual(tests.commands.filter((c) => c.command !== 'git'), [], 'no suite ran');
+});
+
 test('a head that changes one line of the own change gets the normal gates', (t) => {
   const h = gated(t);
   const head = advance(h, { extra: { file: 'value.js', text: 'module.exports = 1; // one\n' } });
