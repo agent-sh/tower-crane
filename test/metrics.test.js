@@ -318,3 +318,24 @@ test('a native landing counts as a merge, apart from Tower Crane merges, and sta
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('a merge event that confirms a native landing at its head and revision is the landing, not a Tower Crane merge', () => {
+  const dir = fs.mkdtempSync(path.join(TMP_ROOT, 'metrics-'));
+  try {
+    writeLog(path.join(dir, 'events.jsonl'), [
+      ev(0, 'task add', 'T1'), ev(1, 'claim', 'T1', {}, 'worker-T1-1'), ev(2, 'submit', 'T1', { sha: 's1' }, 'worker-T1-1'),
+      ev(3, 'check tests', 'T1', { type: 'tests', ok: true, sha: 's1' }),
+      ev(10, 'task landed', 'T1', { pr: 7, merge_sha: 'm1', sha: 'h1', revision: 3, merged_at: at(8), reason: 'native review' }),
+      ev(14, 'merge', 'T1', { type: 'merge', ok: true, sha: 'h1', revision: 3, source: 'merge' }),
+      // T2's merge at another revision than its landing is its own.
+      ev(0, 'task add', 'T2'), ev(1, 'task landed', 'T2', { pr: 8, merge_sha: 'm2', sha: 'h2', revision: 1, merged_at: at(1) }),
+      ev(20, 'merge', 'T2', { type: 'merge', ok: true, sha: 'h2b', revision: 2 }),
+    ]);
+    const r = M.report(dir, { since: B, until: B + 60 * MIN });
+    assert.deepEqual([r.merges.total, r.merges.tower_crane, r.merges.native_landed], [3, 1, 2]);
+    assert.equal(r.gate_runs.per_task.tests.n, 1, 'only T2, merged by Tower Crane, is in the scorecard');
+    assert.equal(r.gate_runs.per_task.tests.sum, 0);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
