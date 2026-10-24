@@ -170,9 +170,19 @@ test('idle is measured from the registry\'s CPU samples over the newest one ten 
   assert.deepEqual(G.idleOf({ ...now, allowed: ['2', '3'] }, samples), { share: 0.2, seconds: 10 }, 'only the CPUs this process may use');
   assert.deepEqual(G.idleOf(now, samples.slice(3)), { share: 0.5, seconds: 4 }, 'no sample ten seconds old: the oldest one a second old');
   assert.equal(G.idleOf(now, [samples[0], samples[4]]), null, 'a stale sample and one under a second old measure nothing');
+  // Nothing ticked for 40 s of quiet before 15 s of saturation: the sample from before the burst would
+  // read 73% idle while avg10 sees only the burst, so it measures nothing and the pressure line holds.
+  const burst = { ...now, stat: { per: per(100, 4000 + 4015), cpus: 4 }, pressure: { cpu: { some: { avg10: 88 } } }, load: 4, cores: 4, weights: true };
+  const quiet = [{ at: iso(-55000), per: per(45, 4000) }];
+  assert.equal(G.idleOf(burst, quiet), null, 'a sample past avg10\'s window and two ticks measures nothing');
+  assert.deepEqual(G.assess({ ...burst, levels: [], binding: null }, { units: [], others: [], history: [], stat: quiet }, s, 0, 'worker').signals, ['cpu pressure']);
+  assert.deepEqual(G.idleOf(now, [{ at: iso(-14000), per: per(86, [3320, 3320, 1200, 1200]) }]), { share: 0.6, seconds: 14 }, 'one up to two ticks past the window still counts');
   const reg = { stat: samples.map((x) => ({ ...x })) };
   G.recordStat(reg, now.stat, T);
   assert.deepEqual(reg.stat.map((x) => x.at), [iso(-10000), iso(-4000), iso(-500)], 'kept back to the newest sample ten seconds old, and one a second at most');
+  const old = { stat: [{ at: iso(-20000), per: per(80, 0) }, { at: iso(-15000), per: per(85, 0) }] };
+  G.recordStat(old, now.stat, T);
+  assert.deepEqual(old.stat.map((x) => x.at), [iso(0)], 'samples past two ticks beyond the window are dropped');
   G.recordStat(reg, now.stat, T + 600);
   assert.deepEqual(reg.stat.map((x) => x.at), [iso(-10000), iso(-4000), iso(-500), iso(600)]);
   G.recordStat(reg, now.stat, T - 2000);
