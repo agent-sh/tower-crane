@@ -403,7 +403,8 @@ directly above it; entries are ordered by their bottom task's latest
 `head_mode: "crucial"` and `head_tests` when crucial mode selected the suites, where
 `base_sha` is the `project.base` tip merged into the head, `members` lists
 the entry's task ids bottom up and `commands` lists the Git and shell
-executions with their status. An ok check at the same sha, revision,
+executions with their status. A suite that ran in a contained command also
+records `cpu`, its CPU weight ([CPU shares](containment.md#cpu-shares)). An ok check at the same sha, revision,
 `base_sha` and command is reused. It is a merge precondition, not gate
 evidence; it never changes `evidence`.
 
