@@ -11,6 +11,14 @@ PRs with green gates, and detect conflicting outstanding PRs after merges.
 Conflict rework names the hand-written files. Generated-file repair can
 advance the worker branch or leave a mixed merge prepared. Native
 workers without an exit record need explicit review dispatch.
+A supervisor whose agent exited and whose exit is recorded leaves its own
+reactions (its agent's `submit`, review evidence and `spawn exit`) to a live
+`wait --follow` on the same host that runs reactions, found by its controller
+record: it queues each one still owed as `automation queued` with
+`handed_to`, the host's pid, and exits. The queue entry wakes that host and
+outlives both processes, so any later trusted `wait` drains it. With no such
+host the supervisor drains them itself, in a child process in the
+dispatcher's environment, and exits when the drain ends.
 A reviewer whose `spawn exit` receipt shows code 0, no signal and no
 availability failure, with no review evidence at the current head and
 revision, holds automatic review dispatch there: the next reviewer would read
