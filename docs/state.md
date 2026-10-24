@@ -140,3 +140,5 @@ Existing links use these anchors. Follow the link to the contract in its area.
 <a id="conflict-hotspots"></a>[conflict-hotspots](state/review.md#conflict-hotspots)
 
 <a id="merge-pause"></a>[merge-pause](state/gates.md#merge-pause)
+
+<a id="base-only-heads"></a>[base-only-heads](state/gates.md#base-only-heads)
