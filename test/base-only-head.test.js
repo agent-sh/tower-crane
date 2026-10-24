@@ -237,6 +237,24 @@ test('a resolved head in crucial mode fails on a crucial path missing at head, a
   assert.deepEqual(tests.commands.filter((c) => c.command !== 'git'), [], 'no suite ran');
 });
 
+// The remote base decides: a local base moved past it does not make its
+// commits upstream ones, and a merge of the remote base still does.
+for (const pushed of [false, true]) test(`a merge of a local base the remote ${pushed ? 'holds' : 'lacks'} ${pushed ? 'is' : 'is not'} a base-only head`, (t) => {
+  const h = gated(t);
+  h.git(['update-ref', 'refs/remotes/origin/main', 'main']);
+  // Code, not docs, so docs-round carryover cannot keep the results either.
+  h.git(['switch', '-q', 'main']);
+  write(h, 'sneaky.js', 'module.exports = 2;\n');
+  h.git(['add', 'sneaky.js']);
+  h.git(['commit', '-qm', 'move the local base']);
+  h.git(['switch', '-q', 'fixture-change']);
+  if (pushed) h.git(['update-ref', 'refs/remotes/origin/main', 'main']);
+  mergeAndSubmit(h);
+  const task = h.readState('tasks.json').tasks[0];
+  assert.equal(task.carry?.kind, pushed ? 'base-only' : undefined);
+  for (const type of ['tests', 'clean', 'review']) assert.equal(gate(h, type).ok, pushed, type);
+});
+
 test('a head that changes one line of the own change gets the normal gates', (t) => {
   const h = gated(t);
   const head = advance(h, { extra: { file: 'value.js', text: 'module.exports = 1; // one\n' } });
