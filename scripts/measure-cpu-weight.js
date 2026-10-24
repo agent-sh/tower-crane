@@ -24,6 +24,11 @@ const path = require('node:path');
 const cp = require('node:child_process');
 const crypto = require('node:crypto');
 const C = require('../lib/containment');
+const { commandRoot } = require('../lib/scratch-root');
+
+function measurementRoot(env = process.env) {
+  return env.TOWER_CRANE_TEST_TMP || env.TMPDIR || commandRoot(env);
+}
 
 // The tests gate command this repository pins, on three CLI-heavy files.
 const GATE_FILES = ['test/ladder.test.js', 'test/authority.test.js', 'test/state-compatibility.test.js'];
@@ -40,7 +45,8 @@ const BURN_LIMIT_S = 600;
 const CACHE = path.join(process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache'), 'tower-crane-cpu-weight');
 // The tests gate gives each run its own TMPDIR, so the probes of one gate run
 // share a results file and a later run starts its own.
-const RUN_KEY = crypto.createHash('sha256').update(path.resolve(os.tmpdir())).digest('hex').slice(0, 12);
+const RUN_ROOT = measurementRoot();
+const RUN_KEY = crypto.createHash('sha256').update(path.resolve(RUN_ROOT)).digest('hex').slice(0, 12);
 const RESULTS = path.join(CACHE, `results-${RUN_KEY}.jsonl`);
 
 const units = new Set();
@@ -107,8 +113,8 @@ async function sample(groups, ms) {
 async function fairness() {
   const caller = C.callerSlice();
   const list = cpus();
-  const tower = C.projectSlice(caller, path.join(os.tmpdir(), 'measure-project-a'));
-  const other = C.projectSlice(caller, path.join(os.tmpdir(), 'measure-project-b'));
+  const tower = C.projectSlice(caller, path.join(RUN_ROOT, 'measure-project-a'));
+  const other = C.projectSlice(caller, path.join(RUN_ROOT, 'measure-project-b'));
   const layouts = [
     // Before this change: every scope flat in the caller's slice at the default weight.
     { name: 'flat, gate at 100', gate: [caller, 100], agent: [caller, 100], other: [caller, 100] },
@@ -149,7 +155,7 @@ const pct = (x) => `${(x * 100).toFixed(1)}%`;
 async function gate(weight, run, summary) {
   const caller = C.callerSlice();
   const list = cpus();
-  const slice = C.projectSlice(caller, path.join(os.tmpdir(), 'measure-project-a'));
+  const slice = C.projectSlice(caller, path.join(RUN_ROOT, 'measure-project-a'));
   let row;
   try {
     const agents = [];
@@ -210,4 +216,8 @@ async function main() {
   throw new Error('usage: measure-cpu-weight.js fairness | gate WEIGHT [--run N] [--summary]');
 }
 
-main().catch((error) => { stop(); console.error(error.stack || error.message); process.exitCode = 1; });
+if (require.main === module) {
+  main().catch((error) => { stop(); console.error(error.stack || error.message); process.exitCode = 1; });
+}
+
+module.exports = { measurementRoot };

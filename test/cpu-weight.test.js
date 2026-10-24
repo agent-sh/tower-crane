@@ -21,6 +21,23 @@ const UNIT = 'tower-crane-123-0123456789abcdef.scope';
 
 const digest = (dir) => crypto.createHash('sha256').update(fs.realpathSync(dir)).digest('hex').slice(0, 12);
 
+test('CPU measurement scratch keeps explicit gate identity and uses cache defaults', () => {
+  const { measurementRoot } = require('../scripts/measure-cpu-weight');
+  const cache = path.join(TMP_ROOT, 'measurement-cache');
+  const gate = path.join(TMP_ROOT, 'measurement-gate');
+  const override = path.join(TMP_ROOT, 'measurement-override');
+  for (const [settings, expected] of [
+    [{}, path.join(cache, 'tower-crane')],
+    [{ TOWER_CRANE_TMP: override }, override],
+    [{ TMPDIR: gate }, gate],
+    [{ TOWER_CRANE_TEST_TMP: override, TMPDIR: gate }, override],
+    [{ TOWER_CRANE_SANDBOX: '1', TMP: gate }, gate],
+    [{ TOWER_CRANE_SANDBOX: '1', TEMP: gate }, gate],
+  ]) {
+    assert.equal(measurementRoot({ XDG_CACHE_HOME: cache, LOCALAPPDATA: cache, ...settings }), expected);
+  }
+});
+
 function scratch(t, name) {
   const dir = fs.mkdtempSync(path.join(TMP_ROOT, `${name}-`));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));

@@ -1,0 +1,1 @@
+- CPU-measurement probes use the shared scratch selector when no explicit test or gate directory is provided. Their run identity still groups probes from the same gate directory.
