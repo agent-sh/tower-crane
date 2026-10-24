@@ -220,7 +220,9 @@ ran records its outcome either way, so moved heads still go to rework.
 Stopped steps record no deferral; the next refresh retries them.
 `automation queued` records a blocked notification's source, with
 `executors` set to the cap when it waits for an executor rather than for
-another reaction of the same task. Queued notifications for accepted, unmerged PR
+another reaction of the same task. A source first queued behind its task's
+reaction that later waits for an executor gets a second record with
+`executors`. Queued notifications for accepted, unmerged PR
 tasks run first, in the order of their current `accept` events. This includes
 older notifications that now run a merge and any merged-tree test the merge
 needs. Running reactions are never preempted.
