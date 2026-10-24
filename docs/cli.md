@@ -572,7 +572,9 @@ says so once on stderr. A reaction that a newer engine overtakes while it
 runs is queued the same way at its next gate, accept or merge. The older
 executor's `check`, `accept`, `merge`, `merge --accepted` and `spawn` refuse
 with `refused: this tool (VERSION SHA) is behind the project's engine
-(VERSION SHA)`, and its refill dispatches nothing and says so once. Restart a wait host after upgrading.
+(VERSION SHA)`, and its refill dispatches nothing and says so once. Its
+`spawn` refuses before failed-review routing or a stacked parent refresh, so
+the task is left as it was. Restart a wait host after upgrading.
 The trusted `wait` host refills worker slots on its own path, beside its
 event reactions: at startup, on every state change, on the fallback tick and
 after each reaction pass, so a gate reaction that runs a full suite for most

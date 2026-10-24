@@ -751,13 +751,14 @@ test('a tool behind the engine refuses before a parent refresh merges or pushes 
   // A newer engine's gate record makes this checkout's tool the stale one.
   fs.appendFileSync(path.join(f.h.state, 'events.jsonl'), `${JSON.stringify({ at: new Date().toISOString(), agent: 'orchestrator',
     cmd: 'check tests', task: 'T1', detail: { tool: { sha: 'f'.repeat(40), version: '99.0.0', committed: null } } })}\n`);
-  for (const args of [['check', 'clean', 'T2'], ['spawn', '--role', 'review', '--task', 'T2']]) {
+  // A gate refuses at its parent refresh; a spawn refuses before it reaches one.
+  for (const [what, args] of [['stack parent refresh', ['check', 'clean', 'T2']], ['spawn', ['spawn', '--role', 'review', '--task', 'T2']]]) {
     const result = f.h.run(args);
     assert.equal(result.code, 1, `${args.join(' ')}: ${result.stderr}`);
     assert.equal(f.h.git(['rev-parse', 'HEAD'], top.wt.path), top.sha, args.join(' '));
     f.h.git(['fetch', '-q', 'origin', top.wt.branch]);
     assert.equal(f.h.git(['rev-parse', `origin/${top.wt.branch}`]), remote, args.join(' '));
-    assert.match(result.stderr, /T2: stack parent refresh refused: this tool \(.+\) is behind the project's engine \(99\.0\.0 ffffffff\)/, args.join(' '));
+    assert.match(result.stderr, new RegExp(`T2: ${what} refused: this tool \\(.+\\) is behind the project's engine \\(99\\.0\\.0 ffffffff\\)`), args.join(' '));
   }
   assert.equal(events(f).some((e) => e.task === 'T2' && e.cmd === 'stack sync'), false);
 });

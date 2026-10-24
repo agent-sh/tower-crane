@@ -154,6 +154,23 @@ test('an executor on an older tool leaves queued work for a current one; receipt
   assert.deepEqual(h.logs().findLast((e) => e.cmd === 'merge queue' && e.detail.phase === 'running').detail.tool, current);
 });
 
+test('an older tool\'s review spawn refuses before routing a failed review and leaves the task as it was', (t) => {
+  const h = setup(t);
+  h.submit();
+  h.ok(['check', 'ci', 'T1', '--agent', 'orchestrator']);
+  h.reviewer('T1', 'reviewer');
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha, '--fail',
+    '--findings', JSON.stringify([{ kind: 'defect', path: 'lib/x.js', claim: 'broken' }]), '--agent', 'reviewer']);
+  const before = h.readState('tasks.json').tasks[0];
+  const r = oldTool(h)(['spawn', '--role', 'review', '--task', 'T1', '--agent', 'orchestrator']);
+  assert.equal(r.code, 1, r.stdout + r.stderr);
+  assert.match(r.stderr, /T1: spawn refused: this tool \(0\.0\.0 a79075ad\) is behind the project's engine/);
+  assert.doesNotMatch(r.stdout, /sent back for rework/);
+  const after = h.readState('tasks.json').tasks[0];
+  assert.deepEqual([after.status, after.revision], [before.status, before.revision]);
+  assert.deepEqual(h.logs().filter((e) => e.cmd === 'rework'), []);
+});
+
 test('a supervisor whose agent exits runs only its own task\'s reactions; the wait host runs another task\'s queued one', async (t) => {
   const h = setup(t);
   configureHarness(h);
