@@ -91,9 +91,9 @@ Lock attempts use private staging directories named with the process pid and a f
 | | |
 | `plan import FILE` | add tasks from a JSON array of task objects (ids may be local names, resolved in order; `-` reads stdin). Fields: `id`, `title`, `acceptance`, `kind`, `needs`, `size`, `tier`, `depends_on`, `needs_owner`, `locks`, `environment`; `needs_owner` is trimmed and blank values store null. A dependency names an earlier entry or an existing task. Any bad entry refuses the whole file |
 | | |
-| `project set [--name N] [--goal G] [--repo O/R] [--base B] [--workers N] [--lease-minutes MIN] [--owners N] [--owner-idle-minutes MIN] [--tasks-max N] [--memory-max-bytes N] [--paused REASON] [--budget-hours H\|null] [--budget-tokens N\|null] [--standards S] [--tests-cmd CMD] [--clean-cmd CMD] [--clean-paths JSON] [--tests-proof-cmd CMD] [--executors N] [--tests-timeout-min MIN] [--clean-timeout-min MIN] [--host-probe-timeout-min MIN] [--tmp-root DIR] [--rework-hold-min MIN] [--final-review JSON] [--presubmit JSON] [--gates-cpu-weight N] [--agents-cpu-weight N] [--tests-paths JSON] [--tests-keep JSON] [--tests-host-only JSON] [--tests-host-env JSON] [--tests-mode MODE] [--tests-by-kind JSON] [--tests-expensive JSON] [--tests-map JSON] [--tests-crucial JSON] [--ci-ignore-apps JSON] [--ci-required JSON] [--ci-capped-review JSON] [--ci-local JSON] [--ci-overlap JSON] [--ci-dispatch JSON] [--ci-max-dispatches N\|null] [--merge-keep-branch JSON] [--merge-admin JSON] [--publish-policy JSON] [--review-policy JSON] [--governor JSON] [--research-min-sources N] [--archive-retention-days DAYS] [--sandbox JSON] [--env JSON] [--env_file FILE] [--scope JSON] [--session-bus JSON] [--broker-verbs JSON]` | change settings, limits and budget; `--budget-hours null` and `--budget-tokens null` remove a limit through the owner-required budget-raise path |
+| `project set [--name N] [--goal G] [--repo O/R] [--base B] [--workers N] [--lease-minutes MIN] [--owners N] [--owner-idle-minutes MIN] [--tasks-max N] [--memory-max-bytes N] [--paused REASON] [--budget-hours H\|null] [--budget-tokens N\|null] [--standards S] [--tests-cmd CMD] [--clean-cmd CMD] [--docs-cmd CMD] [--clean-paths JSON] [--tests-proof-cmd CMD] [--executors N] [--tests-timeout-min MIN] [--clean-timeout-min MIN] [--host-probe-timeout-min MIN] [--tmp-root DIR] [--rework-hold-min MIN] [--final-review JSON] [--presubmit JSON] [--gates-cpu-weight N] [--agents-cpu-weight N] [--tests-paths JSON] [--tests-keep JSON] [--tests-host-only JSON] [--tests-host-env JSON] [--tests-mode MODE] [--tests-by-kind JSON] [--tests-expensive JSON] [--tests-map JSON] [--tests-crucial JSON] [--ci-ignore-apps JSON] [--ci-required JSON] [--ci-capped-review JSON] [--ci-local JSON] [--ci-overlap JSON] [--ci-dispatch JSON] [--ci-max-dispatches N\|null] [--merge-keep-branch JSON] [--merge-admin JSON] [--publish-policy JSON] [--review-policy JSON] [--governor JSON] [--research-min-sources N] [--archive-retention-days DAYS] [--sandbox JSON] [--env JSON] [--env_file FILE] [--scope JSON] [--session-bus JSON] [--broker-verbs JSON]` | change settings, limits and budget; `--budget-hours null` and `--budget-tokens null` remove a limit through the owner-required budget-raise path |
 | | |
-| `project show` | print settings, including resolved agent, reviewer, orchestrator and gate `resources.tasks_max` and `resources.memory_max_bytes`, `gates.tests_cmd`, `gates.clean_cmd`, `gates.clean_paths`, `gates.tests_proof_cmd`, `gates.executors`, `gates.tests_timeout_min`, `gates.clean_timeout_min`, `gates.host_probe_timeout_min`, `gates.tmp_root`, `gates.rework_hold_min`, `gates.final_review`, `gates.presubmit`, `gates.cpu_weight`, `agents.cpu_weight`, `tests.paths`, `tests.keep`, `tests.host_only`, `tests.host_env`, `tests.mode`, `tests.by_kind`, `tests.expensive`, `tests.map`, `tests.crucial`, `ci.ignore_apps`, `ci.required`, `ci.local`, `ci.overlap`, `ci.dispatch`, `ci.max_dispatches`, `merge.keep_branch`, `merge.admin`, `decision_delegation.orchestrator_technical`, `decision_delegation.orchestrator_escalated_questions`, `research.min_sources`, `archive.retention_days` and `governor`, one line per broker verb with its argv, pinned source and timeout, and the resolved ladder |
+| `project show` | print settings, including resolved agent, reviewer, orchestrator and gate `resources.tasks_max` and `resources.memory_max_bytes`, `gates.tests_cmd`, `gates.clean_cmd`, `gates.docs_cmd`, `gates.clean_paths`, `gates.tests_proof_cmd`, `gates.executors`, `gates.tests_timeout_min`, `gates.clean_timeout_min`, `gates.host_probe_timeout_min`, `gates.tmp_root`, `gates.rework_hold_min`, `gates.final_review`, `gates.presubmit`, `gates.cpu_weight`, `agents.cpu_weight`, `tests.paths`, `tests.keep`, `tests.host_only`, `tests.host_env`, `tests.mode`, `tests.by_kind`, `tests.expensive`, `tests.map`, `tests.crucial`, `ci.ignore_apps`, `ci.required`, `ci.local`, `ci.overlap`, `ci.dispatch`, `ci.max_dispatches`, `merge.keep_branch`, `merge.admin`, `decision_delegation.orchestrator_technical`, `decision_delegation.orchestrator_escalated_questions`, `research.min_sources`, `archive.retention_days` and `governor`, one line per broker verb with its argv, pinned source and timeout, and the resolved ladder |
 | | |
 | `task add --title T --acceptance A [--acceptance A2] [--kind K] [--needs JSON] [--size S] [--tier T] [--dep ID] [--lock NAME]... [--environment LABEL] [--needs-owner REASON] [--brief FILE]` | add a task; prints its id. `--brief FILE` writes the brief in the same command, so the task needs no `brief set` before spawn. A `needs_owner` reason is trimmed; a blank value stores null. `T` is `easy`, `medium`, `hard`, `research` or an ascending range such as `easy..medium`; without it the tier comes from kind and size (state.md). `--needs '["browser"]'` declares browser capability. Refused for an unknown dependency or capability. Repeat `--lock` for exclusive resources |
 | | |
@@ -107,7 +107,7 @@ Lock attempts use private staging directories named with the process pid and a f
 | | |
 | `task update ID [--title T] [--acceptance A]... [--closed-acceptance] [--dep ID]... [--lock NAME]... [--environment LABEL] [--size S] [--kind K] [--needs JSON] [--tier T] [--priority urgent\|normal] [--needs-owner REASON] [--ci-local JSON] [--broker-verbs NAME,...] [--budget-hours H\|null] [--budget-tokens N\|null] [--interrupt] [--status cancelled \| --superseded-by ID]` | change a task; acceptance, dependency or capability changes bump `revision`. `--closed-acceptance` declares the changed acceptance a closed list and clears the repeated-review dispatch gate; only the orchestrator or owner may set it, and unchanged acceptance refuses it. A live claim refuses changes to acceptance, dependencies, `--needs`, kind or the local CI override unless `--interrupt` stops it first (see `interrupt`); notes, title, size, tier and priority never stop a run. `--priority urgent\|normal` is operational (orchestrator or owner); urgent tasks go first in `ready`, `spawn --ready` and automation refill, before unblock count and task id. Missing priority means normal; setting normal removes the field and restores the default order. Priority changes do not bump `revision`. `--needs '[]'` clears capabilities, `--dep ''` clears dependencies, `--needs-owner ''` clears the owner ask. `--lock` replaces all resource locks; `--lock ''` clears them. Lock changes require no live lease or dispatch reservation. `--environment ''` clears the label. Changing `--tier`, and clearing or replacing an existing owner ask, are operational (the orchestrator or the owner); any agent may set a new ask or keep the same reason. Changing `--kind` is operational, except that leaving `code` is owner-required and a submitted or accepted task refuses any kind change until `rework` ([Authority](state.md#authority)). Cancelling a task that has an owner ask is operational when the orchestrator or the engine set it (`task.cancel_hold`) and owner-required when the owner or a worker did (`task.cancel_needs_owner`); `needs_owner_by` records who. `--ci-local` sets or clears an operational local CI override. Refused if it would form a cycle. An accepted task cannot be cancelled, and its acceptance, dependencies, capabilities, kind and local CI override change only after `rework`. `--broker-verbs NAME,...` replaces the task's broker verb grants (`''` clears them): granting a verb whose `delegate` is true, or removing grants, is operational; granting any other verb is owner-required ([Broker verbs](state.md#broker-verbs)). `--budget-hours`, `--budget-tokens` set the task's budget, enforced on live usage like the project budget; `null` removes the limit. Lowering is operational; raising or removing a finite limit is owner-required. Cancelling or `--superseded-by ID` retires the worktree and local branch, saving local commits and dirty work under the state directory first, and archives the task scratch to `archive/ID/` before removing it. A running agent exits through its supervisor; failed removal remains stale in inbox |
 | | |
-| `tests map refresh (--from-run RUN_ID \| --file FILE)` | operational (orchestrator or owner): pin `tests.map` from `tests-coverage-map.json`, the map `node scripts/tests-coverage-map.js` or `test/run.js` with `TC_TEST_COVERAGE_DIR` builds from V8 coverage of a full run (each source file to the test files that ran any of its code, CLI processes they started included, plus the commit it was built at). `--from-run RUN_ID` downloads the run's `tests-coverage-map` artifact with `gh run download`; `--file FILE` reads a local copy. Measured sources replace previous suites for tests present in the artifact; suites for absent tests and sources absent from coverage survive. Hand-set entries for files coverage cannot measure, globs and non-code entries are kept. Preserved suites must still be tracked at the artifact commit: deleted or renamed test paths are pruned, and entries emptied by pruning are removed. Explicit empty declarations survive. The artifact commit must be available locally; an unreadable commit refuses without a write. A map that is not `{sha, tests, map}` with literal sources refuses without a write. The `tests map refresh` event records the run or file, the sha and the entry counts |
+| `tests map refresh (--from-run RUN_ID \| --file FILE)` | operational (orchestrator or owner): pin `tests.map` from `tests-coverage-map.json`, the map `node scripts/tests-coverage-map.js` or `test/run.js` with `TC_TEST_COVERAGE_DIR` builds from V8 coverage and non-JS file reads of a full run (each source file to the test files that ran its code or read it, CLI processes they started included, plus the commit it was built at). `--from-run RUN_ID` downloads the run's `tests-coverage-map` artifact with `gh run download`; `--file FILE` reads a local copy. Sources in the artifact replace previous suites for tests present in it; suites for absent tests, sources the run did not reach and globs survive. Preserved suites must still be tracked at the artifact commit: deleted or renamed test paths are pruned, and entries emptied by pruning are removed. Explicit empty declarations survive. New declarations live in checked-in `tests-map.declared.json`, read at task head and merged over the pinned map. The artifact commit must be available locally; an unreadable commit refuses without a write. A map that is not `{sha, tests, map}` with literal sources refuses without a write. The `tests map refresh` event records the run or file, the sha and the entry counts |
 | | |
 | `validate` | report cycles, unknown dependencies, tasks without acceptance, `L` tasks without a `split:` note, oversize budgets (planned hours at S=1, M=4, L=8 over `budget.hours`, or spend over either budget); exit 1 if anything is reported. It takes the state lock to read, finishing any interrupted commit first, then reconciles tasks.json with `events.jsonl` and reports drift: tasks or task notes the log records that tasks.json lacks, a `next` the log has already used, and a tasks.json change whose event the log lacks. It also reports every ladder rung that cannot run, and warns per open task when no reviewer rung can run. Warnings about this machine follow: no harness program on PATH for any worker tier, or for an open task's tier, or for any reviewer rung; and a failing `gh auth status` (or no gh), since every worker opens a PR with gh. Warnings do not change the exit code |
 <!-- commands:Plan:end -->
@@ -189,7 +189,7 @@ tower-crane task update T1 --ci-local null --agent owner
 
 `merge` defaults to `--method squash`, with the task title as the commit subject and its acceptance lines joined by newlines as the body. `--subject` and `--body` override these independently, preserving multiline text and an explicitly empty body. A subject must be non-blank. `--method merge` uses the same commit text options; `--method rebase` omits them and refuses explicit subject or body overrides. Every merge invocation uses GitHub's full head SHA with `--match-head-commit` after verifying it matches the accepted SHA. When GitHub refuses `gh pr merge` because the PR is part of a stack that no task records, a squash or merge retries through the asynchronous merge API with the same method, `--subject` and `--body`, and pins the accepted head with `expected_head_sha`. After the merge is confirmed, that fallback deletes the head branch under the same rule as the ordinary merge. A rebase keeps the refusal, since the API cannot rebase. Branch deletion is requested unless `merge.keep_branch` is true. Only owner-set `merge.admin: true` adds GitHub's admin option for solely owned repositories; the fallback refuses instead, since the API has no admin option. There is no one-off `merge --admin` flag; acceptance, review, CI and head checks still apply.
 
-`project set --review-policy JSON --agent owner` replaces `review` with optional diff limits, risk paths, a minimum reviewer rung and prices. Only an explicitly identified owner can set this policy or its prices. For example:
+`project set --review-policy JSON --agent owner` replaces `review` with optional diff limits, risk paths, docs paths, a minimum reviewer rung and prices. Only an explicitly identified owner can set this policy or its prices. For example:
 
 ```sh
 tower-crane project set --review-policy '{"small_lines":100,"small_files":5,"risk_paths":["auth/**"],"prices":{"openai.gpt-6-luna":{"input":0.10,"cache_write":0.125,"cache_read":0.01,"output":0.50},"openai.gpt-6.1-sol":{"input":2,"cache_write":2.50,"cache_read":0.10,"output":10},"claude-opus-5-5":{"input":4,"cache_write":5,"cache_read":0.20,"output":20}}}' --agent owner
@@ -200,6 +200,64 @@ Rates are dollars per million tokens; use the actual provider model IDs and rate
 Briefs can use `## Shared`, `## Worker` and `## Reviewer` level-two headings. Matching is case-insensitive, and headings inside fenced code blocks are ordinary text. Content before the first role heading is shared; each section runs to the next role heading. `## Rework notes` also starts a shared section, so corrections appended by `rework` stay visible to role-filtered brief readers. `brief get ID` infers worker or reviewer from the `--agent` or `TOWER_CRANE_AGENT` name. Use `--role worker` or `--role reviewer` to select explicitly. Owner and orchestrator identities see the full brief by default.
 
 `init --review-policy JSON` accepts the same operational setting.
+
+`review.docs_paths` is an array of repository-relative globs, defaulting to
+`["docs/**","**/*.md","changelog.d/**"]`. The Markdown glob includes root and
+nested files. A configured array replaces the default; `[]` disables docs
+classification. `review.docs_exclude` excludes matching paths from that list.
+Use exclusions for documents pinned by executable contracts or digest checks.
+`prompts/`, `skills/` and `agents/` always require ordinary review and testing.
+
+A whole docs-only diff makes `check tests` record a `docs only` pass without a
+suite, including on a fresh task. `project set --docs-cmd CMD` pins an optional
+cheap documentation command for link, lint or other docs checks; `null` clears
+it. `check docs ID` runs it at the submitted head. When the command is configured, docs-only submissions require
+this cheap gate, and `check tests` also runs the cheap command when it skips a
+suite. A failed docs command blocks acceptance. Code test commands are never
+used as the cheap docs command.
+
+On `submit`, passing and `--followups-only` independent reviews carry across
+docs-only changes. Their passing tests and CI evidence also carry, so acceptance
+queues no new review, tests or CI suite. If submit could not read repository
+metadata, automation prepares carryover before its software gates. Cleanup still
+checks the new head.
+Requirements edits, unreadable commits, rewritten history, instruction changes
+and code changes beyond named small fixes keep the normal gates.
+
+For a small fix round, the independent reviewer records every blocker with
+`--findings '[{"kind":"nit","path":"lib/value.js","line":12,"claim":"Use the named return value"}]'`.
+Use `doc-fix` for a docs correction and `title-body-fix` for a PR title or body
+correction. Code nits need a positive `line`; an optional `end_line` names the
+last affected line. Every changed code hunk must fit a named line range, and
+every undisputed code finding must have a hunk in its own range. Each undisputed
+docs finding must name a changed file. An unchanged finding needs a dispute
+and reason; changing unrelated docs does not resolve it.
+Substantive or important docs findings keep review required. A failed review
+with follow-ups and no blockers uses `evidence --fail --followups-only`. These
+verdicts add no redesign hold, review churn, escalation or failed-review scope.
+
+`submit --disputes '[{"finding":1,"reason":"The contract already requires this behavior"}]'`
+records a dispute by its one-based finding number. The finding's path must stay
+unchanged. `accept` accepts the same flag. Disputes appear in the orchestrator's
+inbox as `review_dispute` information, without holding the task.
+
+The orchestrator or owner can use
+`accept ID --attest-fix REVIEW_SHA --reason "Applied the exact named fix"` to
+attest a small code fix from the latest independent review. Each code hunk must
+fit the review's named file and line range. The receipt records the attestor,
+reason and diff digest. Workers and reviewers cannot attest. For a submitted
+head whose title or body findings have been corrected, the orchestrator or owner
+uses `accept ID --metadata-fixed --reason "Corrected the PR description"`.
+Any other changes must fit the named findings. Unverified metadata findings
+remain blockers even when docs or code changed. The automatic body fixer carries
+review after verifying the edit and unchanged
+checkout, without another reviewer. A passing review at the same head already
+survives title and body edits.
+
+Carryover evidence records `carried_from` for its source evidence,
+`reviewed_head` for the original reviewed commit, the reason, files, docs policy,
+diff digest and any disputes or attestation. Matching `review carry` and
+`gate carry` audit events are required. Carryover is not a waiver.
 
 The list settings also work with `init`. Omitted options leave their fields unchanged. Removing a field keeps other settings in its object section and removes the section itself only when empty. Invalid JSON, a value other than an array or `null`, or a blank or non-string array entry exits 2 and writes no state or event, including when combined with valid settings.
 
@@ -438,7 +496,7 @@ Before constructing an agent home, spawn also sweeps orphan `brokers/<agent>/` d
 <!-- commands:Run:start -->
 | Command | Does |
 |---|---|
-| `accept ID [--retry-review] [--cmd CMD] [--proof-cmd CMD] [--waive TYPE --reason R] [--drop-citation PATH --reason R]` | a current independent failed review refuses with exit 1, returning `review_failed: true`, the failed `review` and the open `inbox` item in JSON without changing head or revision or dispatching a second full review. A new head, a new revision or operational `--retry-review` (orchestrator or owner) allows review dispatch. Review waivers cannot clear a current failed verdict with blocking findings, including PR-body false claims, even when combined with `--retry-review`. PR-body false claims and incorrectly blocking title findings use only the light correction path. Otherwise run missing or stale software gates first. Tests and clean use pinned project commands. Optional `--cmd` and `--proof-cmd` must match their pins; none mode needs no test command. When they pass and review is missing, dispatch it and return `review_pending: true` while keeping the task submitted. For a PR-body-only or title failure, automation dispatches a worker restricted to editing body and title, then requests a light check of the named claims or the PR title after verifying an edit and a fixed head. PR title findings are follow-ups, never blockers or reasons for a full re-review. PR-body false claims remain blockers until verified; other metadata does not get this exception. Two consecutive failed automatic light checks at that head stop the loop with `review_body_stuck` in inbox. Explicit `accept` can request another light check after correction. Call again after review evidence arrives to accept. With `gates.final_review` set and a PR, once every other gate passes `accept` runs the final review at the head and revision before accepting, once: from a gate worktree at the commit, when the external reviewer's check there matches `capped_pattern` (at every head when `when` is `always`). Exit 0 accepts; `concerns_exit` sends the task to rework with the command's output and the PR's review comments at the head, and exits 1; any other end is recorded as `refused` or `not_run`, does not block, and shows in the accept output, the `accept` event, `status` and the board. Current successful receipts are reused; stale successful receipts run again under the host governor. A voided gate runs again like a missing one; other current failures or unaudited attempted receipts require an explicit gate rerun. Review is checked separately from software gates. A tests, clean or local CI run already live at the same head and revision, started by automation or another command, is joined: `accept` waits for its evidence instead of starting a second run. A gate the host governor defers or stops exits 3 with its reason, records no evidence and accepts nothing; run `accept` again once there is room. `--waive review` is operational when the reviewer is capped or down at the submitted head (a capped review run in its `check ci` evidence, or a review spawn that exited without a verdict) and owner-required otherwise; waiving tests, clean, sources or ci is owner-required. Once the gates pass, and before acceptance, the task scratch is archived to `archive/ID/` in the state directory (see `task archive`); a scratch path the PR body, notes, evidence or a decision cites is kept whole, and accept refuses, naming it, when a cited path is missing, an empty directory, not a regular file, over 32 MiB or cannot be redacted. The refusal is recorded for `inbox` (`archive_refused`). `--drop-citation PATH --reason R` (operational, audited as `accept.drop_citation`) sets aside a citation that is stale or wrong; the manifest keeps it under `dropped`, and the drop counts once that accept lands |
+| `accept ID [--cmd CMD] [--proof-cmd CMD] [--waive TYPE --reason R] [--drop-citation PATH --reason R] [--attest-fix SHA --reason R] [--metadata-fixed --reason R] [--disputes JSON] [--retry-review]` | carry independent review, tests and CI across docs-only changes, named nit fixes and unchanged disputed findings. Tests on a whole docs-only diff run no suite; configured cheap docs checks still run. PR title and body corrections at an unchanged head retain gates. Orchestrator or owner `--attest-fix SHA --reason R` carries a review when every code hunk fits its named file and line ranges; `--metadata-fixed --reason R` records a verified title or body correction; other changes must satisfy every named fix. `--disputes JSON` records reasons for findings left unchanged and informs the orchestrator inbox. A failed full review at this unchanged head is retained without a new round; the orchestrator or owner uses `--retry-review` to request one, or rework for code changes. PR-title findings are follow-ups, never blockers. Run missing or stale software gates, then dispatch review when needed and accept when all gates pass. Waivers and dropped citations keep their existing authority |
 | | |
 | `ci completed ID --sha SHA` | orchestrator or owner: deliver a CI completion hint for an active submitted head, rerun the CI gate and advance passing tasks |
 | | |
@@ -452,7 +510,7 @@ Before constructing an agent home, spawn also sweeps orphan `brokers/<agent>/` d
 | | |
 | `event ID` | print one event with its detail, as a wake line names it |
 | | |
-| `evidence ID --type T (--ok \| --fail) [--sha S] [--revision N] [--summary T] [--ref URL] [--findings JSON]` | record `review` or `note` evidence; `review` requires `--sha`, while `note` defaults to the task's submitted sha. `--revision N` names the task revision the evidence is about and is refused above the current revision; review evidence from a reviewer that `spawn` did not start requires it, and a spawned reviewer's verdict keeps its dispatch revision. `--findings JSON` on a failed review records every blocker as `{kind, path, claim}`; `false-claim` blockers confined to `PR body`, `CHANGELOG.md` or `changelog.d/*.md` qualify for light correction checks. Incorrectly blocking findings at `PR title` also take this path regardless of kind; reviewers must list title findings as follow-ups. Missing structured findings or mixed code blockers keep the full review path. Refuses `tests`, `clean`, `sources`, `ci` and `merge` for every agent and either verdict; use the gate commands |
+| `evidence ID --type T (--ok \| --fail) [--sha S] [--revision N] [--summary T] [--ref URL] [--findings JSON] [--followups-only]` | record `review` or `note` evidence; `review` requires `--sha`, while `note` defaults to the task's submitted sha. `--revision N` names the task revision the evidence is about and is refused above the current revision; review evidence from a reviewer that `spawn` did not start requires it, and a spawned reviewer's verdict keeps its dispatch revision. `--findings JSON` on a failed review records every blocker as `{kind, path, claim, line?, end_line?}`; `false-claim` blockers confined to `PR body` use verified metadata repair without rework; changelog fixes need a new head. Verified docs-only or named small fix rounds carry review, tests and CI without another reviewer or suite run. Classify small fixes as `nit`, `doc-fix` or `title-body-fix`; code nits need a positive `line` and optional `end_line`. `--followups-only` marks a failed verdict with no blocking findings. Missing or mixed metadata keeps the full review path. Refuses `tests`, `clean`, `sources`, `ci` and `merge` for every agent and either verdict; use the gate commands |
 | | |
 | `hook ACTION --binding FILE [--payload JSON\|-]` | deliver harness messages and record activity under the home identity |
 | | |
@@ -484,11 +542,11 @@ Before constructing an agent home, spawn also sweeps orphan `brokers/<agent>/` d
 | | |
 | `renew ID [--lease MIN]` | extend the lease from now; only the claimant. An expired lease must pass the claim checks again (unmet dependency, owner blocker, open decision, resource lock, workers limit), so a refused renewal leaves it expired |
 | | |
-| `rework ID --reason R \| --from-review ID` | `--from-review ID` refuses failed reviews whose findings are all PR-body false claims or title findings, with correction and light-check instructions, leaving the revision unchanged. For other failures it fetches all issue-comment pages for the linked PR and selects the last `Review (Tower Crane` body at the submitted SHA, preserving every finding and its comment link in the reason. Unposted reviews use their evidence summary. A linked review that cannot be fetched or matched refuses without changing state; the head, revision and latest failed evidence are rechecked under the lock after fetching. Otherwise send a submitted or accepted task back and bump `revision`, invalidating earlier evidence even at the same sha, and a todo task whose latest release came while a decision blocked it, answered or not, goes back the same way; the reason is appended under `## Rework notes` in its brief and as a task note |
+| `rework ID --reason R \| --from-review ID` | `--from-review ID` refuses failed reviews whose findings are PR-body false claims or title findings, with correction and carryover instructions, leaving the revision unchanged. For other failures it fetches all issue-comment pages for the linked PR and selects the last `Review (Tower Crane` body at the submitted SHA, preserving every finding and its comment link in the reason. Unposted reviews use their evidence summary. A linked review that cannot be fetched or matched refuses without changing state; the head, revision and latest failed evidence are rechecked under the lock after fetching. Otherwise send a submitted or accepted task back and bump `revision`, invalidating earlier evidence even at the same sha, and a todo task whose latest release came while a decision blocked it, answered or not, goes back the same way; the reason is appended under `## Rework notes` in its brief and as a task note |
 | | |
 | `spend ID [--minutes N] [--tokens N] [--input N] [--cached N] [--cache-write N] [--output N] [--rung R] [--harness H] [--model M] [--from-spawn AGENT]` | add spend, with optional native-agent usage breakdown and metadata; rung defaults the harness, model and profile from the current ladder. Model IDs are trimmed and case-folded; provider prefixes remain distinct. Collect an exited spawn's captured usage once per route and fresh retry invocation; resumed retries share their session's cumulative usage. Retry a failed monitor or enrich an unknown/partial entry when telemetry arrives. Refuses a live process or an unknown spawn; cannot be mixed with manual spend |
 | | |
-| `submit ID --sha S [--branch B] [--pr N] [--summary T] [--precheck R] [--host-probe CMD]` | mark submitted as the claimant or replace a submitted head as its submitter. When `gates.presubmit` is set, run its argv in the worker worktree and environment before recording the head; nonzero exit, timeout or a missing command refuses with bounded redacted output and a refusal event. Three equivalent consecutive failures, ignoring known reporter timing fields, or a missing or inaccessible hook executable, pause retries and open an orchestrator inbox item; `presubmit retry` resumes and `presubmit override` records a reason to bypass once. A pass records the command and duration on the submit event. `S` is 7 to 64 hex characters. Repeat `--host-probe CMD` for measurements or kernel checks the sandbox cannot run. Each submission replaces `host_probes` (omitting it clears them); changing the list at the same commit advances the revision, invalidating old gate leases and verdicts, including failures. Commands run from the scratch worktree root at `S`, with no input, gate resource caps, `tests.host_env`, and `gates.host_probe_timeout_min` (default 10 minutes each). Normal nonzero exits and timeouts fail the tests gate and return output through rework. Signal and resource-cap interruptions get one automation retry before rework. A wait-shutdown interruption is a void: it reruns without using that retry and never reworks. Declare pending host results in the PR body and leave cleanup to the clean gate. For a task with a recorded PR (`--pr`, or the one already recorded), the PR's checks at `S` are read: a failing check refuses with the failing jobs and the first failing lines of their logs and points to `ci checks ID` for check output, annotations and current code-scanning alerts. Checks still running do not refuse: the head is recorded, the output names them, a task note records them, and `check ci` waits for them on the host; a failure there returns as rework with the same job names and log lines. Revuto's open inline findings are printed either way; a `[P1]`/`[P2]` finding already on the PR with no change at its path since the comment and no `[resolved]` reply refuses, as review ok would, and submit does not wait for findings still to come. Capped reviews (`ci.capped_review`) do not block. Where the agent's gh policy refuses `gh api`, submit prints that the head was not checked and goes ahead. Local CI (`ci.local`) and a project without a repo skip the check. For a task with a recorded PR, an open PR blocks changing its PR number or head branch. After it is closed or merged, a new PR supplies its head branch unless `--branch` is given and matches it. `--precheck` records the submitter's own review result at this head on the `submit` event; it never refuses or gates the submission. A submitter whose worker spawn is live takes ownership of the PR while fewer than `limits.owners` other owners wait (`own: true` on the event), and waits on the task with `wait --own`; past the limit the output tells it to exit. A head whose commits add an empty file named like a claude sandbox placeholder (`.bashrc`, `.claude/settings.json` and the other protected names it binds over) refuses; a real file by that name needs content |
+| `submit ID --sha S [--branch B] [--pr N] [--summary T] [--precheck R] [--host-probe CMD] [--disputes JSON]` | mark submitted as the claimant or replace a submitted head as its submitter. When `gates.presubmit` is set, run its argv in the worker worktree and environment before recording the head; nonzero exit, timeout or a missing command refuses with bounded redacted output and a refusal event. Three equivalent consecutive failures, ignoring known reporter timing fields, or a missing or inaccessible hook executable, pause retries and open an orchestrator inbox item; `presubmit retry` resumes and `presubmit override` records a reason to bypass once. A pass records the command and duration on the submit event. `S` is 7 to 64 hex characters. Repeat `--host-probe CMD` for measurements or kernel checks the sandbox cannot run. Each submission replaces `host_probes` (omitting it clears them); changing the list at the same commit advances the revision, invalidating old gate leases and verdicts, including failures. Commands run from the scratch worktree root at `S`, with no input, gate resource caps, `tests.host_env`, and `gates.host_probe_timeout_min` (default 10 minutes each). Normal nonzero exits and timeouts fail the tests gate and return output through rework. Signal and resource-cap interruptions get one automation retry before rework. A wait-shutdown interruption is a void: it reruns without using that retry and never reworks. Declare pending host results in the PR body and leave cleanup to the clean gate. For a task with a recorded PR (`--pr`, or the one already recorded), the PR's checks at `S` are read: a failing check refuses with the failing jobs and the first failing lines of their logs and points to `ci checks ID` for check output, annotations and current code-scanning alerts. Checks still running do not refuse: the head is recorded, the output names them, a task note records them, and `check ci` waits for them on the host; a failure there returns as rework with the same job names and log lines. Revuto's open inline findings are printed either way; a `[P1]`/`[P2]` finding already on the PR with no change at its path since the comment and no `[resolved]` reply refuses, as review ok would, and submit does not wait for findings still to come. Capped reviews (`ci.capped_review`) do not block. Where the agent's gh policy refuses `gh api`, submit prints that the head was not checked and goes ahead. Local CI (`ci.local`) and a project without a repo skip the check. For a task with a recorded PR, an open PR blocks changing its PR number or head branch. After it is closed or merged, a new PR supplies its head branch unless `--branch` is given and matches it. `--precheck` records the submitter's own review result at this head on the `submit` event; it never refuses or gates the submission. A submitter whose worker spawn is live takes ownership of the PR while fewer than `limits.owners` other owners wait (`own: true` on the event), and waits on the task with `wait --own`; past the limit the output tells it to exit. A head whose commits add an empty file named like a claude sandbox placeholder (`.bashrc`, `.claude/settings.json` and the other protected names it binds over) refuses; a real file by that name needs content |
 | | |
 | `verb NAME [--param KEY=VALUE]... [--task ID]` | run broker verb `NAME` from `broker.verbs` for a task whose `broker_verbs` grants it, as the task's claimant (or the orchestrator or owner). A sandboxed worker's call goes through its state broker, which runs it on the host. Every declared parameter is required, matches its type and whole-value pattern, and is substituted into its own argv element; there is no shell. The program runs in the pinned source: the copy of the approved base branch commit in the state directory, whose files are checked against their recorded SHA-256 first, or the owner's `source.path`. It runs in a contained scope with the verb's `resources` (default: the gate caps) and `timeout_sec`, with `{out}` and `TOWER_CRANE_VERB_OUT` naming a directory no sandbox writes. Each declared output it wrote is copied to the task scratch as `verb-NAME-STAMP-OUTPUT` with an exclusive create. Prints the verb's stdout, then its exit and each output's path and SHA-256; stderr goes to stderr. Exits with the verb's exit code, or 1 for a timeout, signal or cap. Every run appends `verb` evidence: params, exit code, signal, timeout, resource cap, duration, output digests and the pinned source ([Broker verbs](state.md#broker-verbs)) |
 | | |
@@ -497,15 +555,32 @@ Before constructing an agent home, spawn also sweeps orphan `brokers/<agent>/` d
 
 `task add --lock lab/rdma --lock gpu/0 --environment lab` stores exclusive resource names and an informational environment label. Names are case-sensitive, trimmed and deduplicated. Tasks with any shared lock cannot hold worker leases or dispatch reservations at the same time, regardless of `limits.workers` or environment labels. Claim, worker spawn and expired renewal check under the state lock and name the holding task and agent on refusal. An unclaimed spawn reserves its locks with its worker slot, including retry backoff; its generated agent consumes that reservation on claim. Reviewer and other non-worker dispatches do not acquire resource locks. Environment labels do not select a harness or change its environment variables.
 
-Failed review evidence can supply `--findings '[{"kind":"false-claim","path":"PR body","claim":"The diagnostic is printed."}]'`. List every blocker with non-blank `kind`, `path` and `claim` strings and no other fields; this flag is refused for notes and passing reviews. A false claim qualifies only when correcting prose resolves it without a behavior or contract change. The light path requires every finding to be a false claim confined to `PR body`, `CHANGELOG.md` or single Markdown fragments under `changelog.d/`, or an incorrectly blocking finding at `PR title`, regardless of kind. Title findings are follow-ups, never blockers. PR-body false claims remain blockers until verified; other metadata does not get the title exception. Missing structured findings, mixed code blockers and contract claims, including `docs/cli.md` and `docs/state.md`, retain full review and rework.
+Failed review evidence lists every blocker in `--findings` as
+`{kind, path, claim}`, with optional positive `line` and `end_line`. A finding
+classified as `nit`, `doc-fix` or `title-body-fix` is eligible for a small fix
+round; substantive docs findings remain `important`. PR-body false claims keep
+an automatic repair path: the worker corrects the body, the engine verifies the
+edit and unchanged checkout, then carries the reviewed code without another
+reviewer or test run. `rework --from-review` refuses body-only findings so the
+repair can stay at the same head. An ordinary `rework --reason` is still available
+when the correction requires wider code changes. Title findings are follow-ups,
+never blockers. A failed full review at the unchanged head stays failed; only
+the orchestrator or owner can request another full round with `--retry-review`.
 
-When every finding is a PR-body false claim or a title finding, automation dispatches a body-only repair on the task's worker rung, resuming its session when supported and available. The task stays submitted and `status` shows `fixing PR body`. The worker edits with `gh pr edit --body-file` or `--title`, then exits without claiming, submitting, editing repository files, committing or pushing. The broker refuses pushes and PR changes beyond the body and title. Once the worker exits, the engine verifies that the body or title changed, tracked checkout files are clean, both local and remote heads still match the submitted head, and the actual base branch matches the dispatch snapshot or the engine's current expected target, then requests the same light check as `accept ID`, covering only the named claims or title. Untracked files such as the body file do not block the repair. The expected target permits stack retirement to retarget the PR after a parent merge, including one during the GitHub request. Changed heads, tracked files or unexpected actual base branches go to normal rework without a light check, including for unsandboxed harnesses. A pass accepts at the same head and revision.
+When every finding is a PR-body false claim or a title finding, automation dispatches a body-only repair on the task's worker rung, resuming its session when supported and available. The task stays submitted and `status` shows `fixing PR body`. The worker edits with `gh pr edit --body-file` or `--title`, then exits without claiming, submitting, editing repository files, committing or pushing. The broker refuses pushes and PR changes beyond the body and title. Once the worker exits, the engine verifies that the body or title changed, tracked checkout files are clean, both local and remote heads still match the submitted head, and the actual base branch matches the dispatch snapshot or the engine's current expected target, then carries review, tests and CI without another reviewer or suite run. Every named body/title field must change. Untracked files such as the body file do not block the repair. The expected target permits stack retirement to retarget the PR after a parent merge, including one during the GitHub request. Changed heads, tracked files or unexpected actual base branches require ordinary rework, including for unsandboxed harnesses. Verified correction accepts at the same head and revision. The orchestrator or owner confirms manual corrections with `accept ID --metadata-fixed --reason R`.
 
-A light reviewer that leaves no verdict uses the ordinary reviewer recovery policy: retryable crashes or outages and expired missing receipts get a replacement check at the same head without another body edit. A clean no-verdict exit or three crashed review sessions hold dispatch and surface `review_held`; `accept ID` retries the corrected body's check after the cause is handled. An exited, held reviewer is no longer shown as `fixing PR body`. No-verdict exits do not count as failed body checks.
+A verified automatic correction queues no reviewer, so ordinary reviewer exit recovery does not add a metadata check. Existing explicitly dispatched light checks retain their recorded recovery context; they are not part of the automatic repair route.
 
-Two consecutive failed automatic body-only re-checks at that head and revision stop the loop; `inbox` shows `review_body_stuck` with the latest findings and a correction hint. A fixer that exits without changing the body or title also stops with this item, except an `availability_failure` exit retries the repair once. A second exit without an edit stops the loop. An outage after a successful edit still allows the light check. The orchestrator can correct the body and run `accept ID`, or use `rework ID --reason R` when code changes are needed. `rework --from-review` still refuses body-only failures. A submission without a linked PR and recorded branch retains the explicit correction and `accept` path.
+A body fixer that leaves the body unchanged stops with `review_body_stuck`.
+An availability failure before an edit gets one repair retry; an availability
+failure after the edit still allows verified carryover. The inbox keeps the
+reason and a correction hint. A code change needs ordinary rework.
 
-Changelog claims need a new head, so they go through `rework --from-review` like other failures. The next revision's review is a light check when the diff since the failed review changes only the named changelog fragments. The new head requires software gates as usual. Other source changes restore full review. The reviewer checks every corrected claim against its code or probe and records fresh evidence; an uncorrected claim still blocks. Prose-only failures do not escalate rungs.
+Changelog corrections need a new head. After review rework, a docs-only or
+named small fix round carries the review, tests and CI evidence. Substantive
+findings and wider code changes retain ordinary review. An explicit reviewer
+dispatch can still narrow its packet to prior blockers; carryover does not queue
+that dispatch.
 
 `submit` stores the full lowercase commit SHA in the task and submit event. Full 40-character SHA-1 or 64-character SHA-256 IDs are accepted as given without requiring their objects locally; a commit may exist only in another checkout. Abbreviations are resolved with `git rev-parse --verify <sha>^{commit}` in the task repository. If local resolution fails, submit fetches the supplied or recorded task branch from origin and retries. A prefix that remains unknown or ambiguous, or resolves to a non-commit object, refuses without changing state. A sandboxed worker resolves inside its sandbox before forwarding the full SHA; the host broker runs no Git. Existing abbreviated submitted SHAs stay unchanged and match review and gate evidence by prefix, including active reviewer dispatches, so a full-SHA failed review remains actionable through `rework --from-review`.
 
@@ -567,7 +642,7 @@ a PR-body false claim. Title-only findings remain nonblocking follow-ups. Combin
 refusal. This is checked again after software gates and under the acceptance
 lock before any waiver is recorded.
 A real `spawn --role review` still sends a current code FAIL to full-findings
-rework. PR-body false claims and title findings take only the light repair
+rework. PR-body false claims and title findings take the verified metadata repair
 path; title findings are follow-ups, never blockers.
 If findings cannot be retrieved, the task stays submitted. Dry-run review
 previews do not change state.
@@ -628,12 +703,12 @@ dispatch. Both kinds are checked again on the next pass. A dispatch lock still
 stops the whole batch. Reviewers do not take worker slots, so full worker capacity
 does not prevent their retry. A running reaction for the same task postpones the
 retry. A successful reviewer dispatch, a verdict, or a changed head, revision or
-submission status clears that dispatch debt. A failed PR-body verdict still
-allows a deferred light review to retry. `status` lists `deferred reviewers:
+submission status clears that dispatch debt. An explicitly dispatched light check can retain its
+legacy recovery context after a failed PR-body verdict. `status` lists `deferred reviewers:
 TASK since AT: REASON`; JSON `deferred_reviewers` carries `id`, `sha`, `revision`,
-`since` and `reason`, even after the governor's registry hint expires. Automatic
+`since` and `reason`, even after the governor's registry hint expires. Previously dispatched
 light reviews keep their `body_recheck` context through deferral, retry and
-evidence, so their failures still count toward the two-failure repair stop.
+evidence. Verified metadata repair carries review and creates no such dispatch.
 An outstanding debt is recorded once regardless of changing governor readings.
 Status uses the latest matching reviewer reason from the governor registry,
 falling back to the recorded reason when that hint expires.
@@ -1045,7 +1120,7 @@ The token protects against foreign web origins and against local processes that 
 | | |
 | `ci log JOB_ID [--failed-tests] [--task ID]` | fetch the log of job JOB_ID with `gh api repos/R/actions/jobs/JOB_ID/logs` while its run is still going, strip ANSI escapes, write it to `ci-job-JOB_ID.log` in the task scratch and print the path. The job must run on the task's branch head, the PR head the worker pushes, so a job of another branch or an older head is refused. `--failed-tests` also prints each failing test name with its first error line, from node --test (TAP and spec), go test and pytest output. `--task` defaults to TOWER_CRANE_TASK, so a worker reads its own PR through the state broker instead of waiting for the run to finish |
 | | |
-| `inbox [--ack ITEM]... [--ack-before TIME [--kind KIND]] [--json]` | orchestrator or owner: read state once for current failed software gates and inspect PR heads, mergeability, uncapped revuto failures and inline comments, and open CodeQL alerts on the submitted head or its verified current PR merge commit. The host follower refreshes GitHub observations, including CI runs on the project base, at most once a minute; foreground inbox reads use the cache and summarize unread data in one `github_pending` item: a failed or cancelled push, schedule or dispatch run that no later run of its workflow turned green is a `main_ci_failed` item with its failing jobs and test names, and a test that fails again after a green run is a `main_ci_flaky` item; both resolve by opening a task or naming the open one, and clear on a green run. A ready or rework task without a brief gets a `brief_missing` item, resolved by `brief set`, in place of its `ready` or `rework_ready` item. Work the host governor deferred or stopped is a `governor_deferred` or `governor_stopped` item with its reason; both clear on their own. Returns typed `items` with `action.command` and `action.argv`, plus live gate `executors`, the `gate_queue` in drain order, and `owner` with the closing owner line (`owner: nothing needed` unless a crisis is open or a decision or hold waits on the owner). Failed reviews include the full latest Tower Crane comment at the submitted SHA and `finding_count`; fetch errors remain explicit. Failed gates include their summary and test diagnostics; audited confirmed code failures resolve through rework, while pending checks and observation failures offer a gate rerun. Remotely merged accepted heads remain actionable with `merge --accepted` until their audited local merge receipt exists. Stale software gates on an open mergeable accepted PR resolve with `check GATE ID` before merge. GitHub failures are explicit items. `--ack ITEM` acknowledges a handled message, stall, decision answer, owner comment or missing review exit; repeat it to acknowledge several items in one locked write and one event. `--ack-before TIME` acknowledges every matching item at or before the timestamp, optionally filtered by `--kind`, in one locked write and one event with the count and cutoff. Task messages and decision answers older than 24 h disappear when their tasks are cancelled or accepted and merged; their history remains. Task and GitHub findings clear only when their condition clears |
+| `inbox [--ack ITEM]... [--ack-before TIME [--kind KIND]] [--json]` | orchestrator or owner: read state once for current failed software gates and inspect PR heads, mergeability, uncapped revuto failures and inline comments, and open CodeQL alerts on the submitted head or its verified current PR merge commit. The host follower refreshes GitHub observations, including CI runs on the project base, at most once a minute; foreground inbox reads use the cache and summarize unread data in one `github_pending` item: a failed or cancelled push, schedule or dispatch run that no later run of its workflow turned green is a `main_ci_failed` item with its failing jobs and test names, and a test that fails again after a green run is a `main_ci_flaky` item; both resolve by opening a task or naming the open one, and clear on a green run. A ready or rework task without a brief gets a `brief_missing` item, resolved by `brief set`, in place of its `ready` or `rework_ready` item. Work the host governor deferred or stopped is a `governor_deferred` or `governor_stopped` item with its reason; both clear on their own. Returns typed `items` with `action.command` and `action.argv`, plus live gate `executors`, the `gate_queue` in drain order, and `owner` with the closing owner line (`owner: nothing needed` unless a crisis is open or a decision or hold waits on the owner). Failed reviews include the full latest Tower Crane comment at the submitted SHA and `finding_count`; fetch errors remain explicit. Failed gates include their summary and test diagnostics; audited confirmed code failures resolve through rework, while pending checks and observation failures offer a gate rerun. Remotely merged accepted heads remain actionable with `merge --accepted` until their audited local merge receipt exists. Stale software gates on an open mergeable accepted PR resolve with `check GATE ID` before merge. GitHub failures are explicit items. `--ack ITEM` acknowledges a handled message, stall, decision answer, owner comment, missing review exit or informational review dispute; repeat it to acknowledge several items in one locked write and one event. `--ack-before TIME` acknowledges every matching item at or before the timestamp, optionally filtered by `--kind`, in one locked write and one event with the count and cutoff. Task messages and decision answers older than 24 h disappear when their tasks are cancelled or accepted and merged; their history remains. Task and GitHub findings clear only when their condition clears |
 | | |
 | `metrics [--since 7d\|ISO] [--until ISO] [--by day] [--claimed-after ISO]` | efficiency of the tasks merged in the window (an ok `merge` event at or after `--since` and before `--until`), each with its whole history: merges per day; gate runs per merged task by gate (tests, clean, review, ci, head check) with governor deferrals and tests-gate wall time; reworks per merged task and reworks raised in the window by cause, with the share Tower Crane caused; tokens per merged task (p50, p90, sum) by role, rung and harness, with the spend entries that have no tokens counted apart, never as zero; lead-time phases (queued, working, waiting for gates, gating, reviewing, rework waiting, accepted to merged) and the waiting share; submits per merged task and first-pass time. `--claimed-after` keeps only tasks first claimed at or after that time and reports how many it excluded. Read-only and lock-free: it streams `events.jsonl` up to its size at start, leaves out a torn last line and writes nothing. `--json` names every definition |
 | | |
@@ -1120,7 +1195,7 @@ The server tails the event log for reloads and owner messages, and retains histo
 | `POST /api/controls` | owner only: invoke a control's existing CLI handler with `{command, flags, pos}` |
 | `POST /api/controls/answer` | owner only: `{decision: "D1", choice: "approve"}` or `decline`; approve also applies a recorded supported request |
 
-The Controls page links every row of `tower-crane authority` to its form. Retry a failed review invokes `accept --retry-review` for the selected task; it requests another review without changing the submitted head or revision. Project controls cover limits, pause, budgets, test and cleanup commands, CI and review policies, merge options, decision delegation and spawn grants. Rung controls cover every ladder field; Settings keeps its ladder table and default harness selector. Personal controls edit fallback routes (`ladder set RUNG --fallbacks`), save the ladder defaults, and set the browser kit. Task controls edit kind, tier, owner blockers, CI overrides, budgets and cancellation, release claims, interrupt running work, prioritize gate work, accept with gate waivers, delegate a decision and delegate orchestration. The publication form records approval; publication itself remains the orchestrator's work.
+The Controls page links every row of `tower-crane authority` to its form. Project controls cover limits, pause, budgets, test and cleanup commands, CI and review policies, merge options, decision delegation and spawn grants. Rung controls cover every ladder field; Settings keeps its ladder table and default harness selector. Personal controls edit fallback routes (`ladder set RUNG --fallbacks`), save the ladder defaults, and set the browser kit. Task controls edit kind, tier, owner blockers, CI overrides, budgets and cancellation, release claims, interrupt running work, prioritize gate work, accept with gate waivers, explicitly retry a failed review, attest a named review fix, confirm corrected PR title/body findings, delegate a decision and delegate orchestration. The publication form records approval; publication itself remains the orchestrator's work.
 
 `POST /api/controls` accepts `project set`, `ladder set`, `ladder harness`, `ladder save-user`, `browser-kit set`, `task update`, `gates prioritize`, `decision delegate`, `owner-done`, `release`, `interrupt`, `accept`, `spawn` (`task` and role `orchestrator`, without `ready`, `wait` or `dry-run`), and `ask` (setting `publish`, without a question). Flag values are strings, repeatable flags are arrays of strings, and positional arguments are strings. Flags are the CLI's names, so a rung's `web_mcp` field is sent as `web-mcp`. Global options and unknown commands or flags are refused. For example:
 
@@ -1353,6 +1428,8 @@ The CLI refuses manual software verdicts, and software receipts require matching
 | | |
 | `check clean ID [--cmd CMD]` | run pinned `gates.clean_cmd` at the submitted commit against `base` (the recorded first parent for hotfixes); records `clean`, ok when every check ran and none reported a HIGH finding in the change (a report without diff scope is cut to the changed lines); timeouts record infrastructure failure. A live clean run at the same head and revision is joined, not repeated. The host governor admits the run first: a deferral or a stop mid-run exits 3 and records no evidence ([Gates](#gates)) |
 | | |
+| `check docs ID` | run the optional pinned cheap docs command at the submitted head; records docs |
+| | |
 | `check sources ID` | fetch the distinct cited pages from committed `research/ID.json` and verify every quote; records sources evidence; required for research kind on every tier |
 | | |
 | `check tests ID [--cmd CMD] [--proof-cmd CMD]` | use `tests.by_kind` over `tests.mode` (default `prove`); `prove` requires pinned `gates.tests_cmd` to pass at head and fail after reverting other changes, with T8 build-file keeps; expensive proof runs mapped head suites when `tests.map` and full-suite `ci.required` are pinned, falls back to CMD for unmapped sources, and uses a scoped `{tests}` command at head and after reversion; `run-only` requires the pinned command to pass once at head; `none` verifies the submitted commit without running CMD; records `tests`, resolved `tests_mode`, and failed test names plus a bounded output tail when its command fails; timeouts record infrastructure failure and interrupted files instead. A live tests run at the same head and revision is joined, not repeated. The host governor admits the run first: a deferral or a stop mid-run exits 3 and records no evidence ([Gates](#gates)). After the head suite passes, run declared `host_probes` at the submitted sha before proof reversion; none mode still runs probes. Record status, duration and a redacted output tail in `receipt.host_probes`, included in reviewer gate results. A normal nonzero exit or timed-out probe fails the gate as a worker failure. Other signal and resource-cap interruptions are runner crashes and get one automation retry before rework. A wait-shutdown interruption is a void: it reruns without using that retry and never reworks. Hotfix proof compares the merge commit with its recorded first parent |
@@ -1398,7 +1475,7 @@ Windows orchestrator commands discover their persistent caller from one CIM proc
 
 `tower-crane mcp --agent orchestrator` serves the inbox and batch actions as MCP tools over stdio. Pass `--state DIR` outside the project. The plugin registers it for Claude Code, and spawned Claude and Codex orchestrators receive it in their generated homes. The Codex plugin command surface exposes `/tower-crane-inbox`, `/tower-crane-spawn-ready`, `/tower-crane-merge-accepted`, `/tower-crane-rework-from-review ID` and `/tower-crane-release-dead`.
 
-Use `inbox --json` for typed findings with `action.command` and `action.argv`; use the returned command to resolve each item. Messages, stalls, decision answers and owner comments can be acknowledged after handling with `inbox --ack ITEM`. Owner-only decisions require the owner's answer; technical decisions are the orchestrator's to answer unless `decision_delegation.orchestrator_technical` is false. Escalated technical questions without another owner restriction are also answerable when `decision_delegation.orchestrator_escalated_questions` is not false; approval requests stay owner-only. GitHub observation failures remain visible as `github_error` items. Batch merge refusals remain in the inbox while independent mergeable entries continue through the existing current-base and stack checks.
+Use `inbox --json` for typed findings with `action.command` and `action.argv`; use the returned command to resolve each item. Messages, stalls, decision answers, owner comments and informational review disputes can be acknowledged after handling with `inbox --ack ITEM`. Owner-only decisions require the owner's answer; technical decisions are the orchestrator's to answer unless `decision_delegation.orchestrator_technical` is false. Escalated technical questions without another owner restriction are also answerable when `decision_delegation.orchestrator_escalated_questions` is not false; approval requests stay owner-only. GitHub observation failures remain visible as `github_error` items. Batch merge refusals remain in the inbox while independent mergeable entries continue through the existing current-base and stack checks.
 
 Repeat `--ack ITEM` to acknowledge several handled items atomically. All ids must be current acknowledgeable items; duplicate ids count once and an invalid id refuses the whole batch. A single item keeps its existing JSON response; a batch returns `{acknowledged: [ITEM, ...], count}`.
 
@@ -1406,7 +1483,7 @@ Each owner comment has its own `owner_comment:TASK:EVENT` id (`project` for deci
 
 Foreground inbox reads use cached GitHub observations and never wait on GitHub. The host's `wait --inbox` follower refreshes them concurrently across PRs, at most once a minute, in `inbox-github-cache.json` in the state directory. A changed repository, base or GitHub host invalidates the cache; a changed task status, PR, submitted SHA or revision invalidates that task's reads. Missing or overdue entries produce one `github_pending` summary with the task count and last refresh time. Overdue valid observations remain visible until replacement, marked `stale: true`, so a slow follower pass does not hide findings. Future timestamps and changed task versions cannot supply old findings. A pending item re-reads `inbox` when the last completed refresh is recent; a missing or overdue refresh offers `wait --inbox --observe --timeout 1`. These actions do not start a persistent host or run reactions and worker dispatch. Real background failures remain explicit `github_error` items alongside local findings. Gate and merge commands use their own fresh GitHub reads.
 
-Use `inbox --ack-before TIME` to acknowledge every current acknowledgeable item at or before a timestamp, optionally restricted by `--kind message|stall|decision_answer|owner_comment|review_exit_missing`. The command writes one audit event with the count and UTC cutoff and returns `{acknowledged: [ITEM, ...], count, cutoff}`, including when nothing matches. It uses each item's `at`, which is the source event time, a derived stall's lease expiry, or a decision's answer time. `--kind` requires `--ack-before`, and `--ack` cannot combine with `--ack-before`. Task and GitHub findings cannot be acknowledged.
+Use `inbox --ack-before TIME` to acknowledge every current acknowledgeable item at or before a timestamp, optionally restricted by `--kind message|stall|decision_answer|owner_comment|review_exit_missing|review_dispute`. The command writes one audit event with the count and UTC cutoff and returns `{acknowledged: [ITEM, ...], count, cutoff}`, including when nothing matches. It uses each item's `at`, which is the source event time, a derived stall's lease expiry, or a decision's answer time. `--kind` requires `--ack-before`, and `--ack` cannot combine with `--ack-before`. Task and GitHub findings cannot be acknowledged.
 
 ```sh
 tower-crane inbox --ack message:T12:E123 --ack decision_answer:project:D4 --agent orchestrator
@@ -1481,11 +1558,11 @@ Plan:
   task note        append a note
   task show        show one task with its gates, evidence and notes
   task update      change a task; acceptance, dependency or capability changes bump its revision (--dep '' clears dependencies); live requirements changes need --interrupt; an accepted task's material settings wait for rework
-  tests map refresh pin tests.map from a full CI run's coverage, preserving missing and declared coverage
+  tests map refresh pin tests.map from a full CI run's coverage, preserving what the run did not measure
   validate         report plan and ladder errors (exit 1 if any); warn when an open task has no runnable reviewer, no harness on PATH can run a worker or reviewer, or gh auth status fails
 
 Run:
-  accept           refuse repeated review at a failed head and revision; otherwise run missing or stale software gates, dispatch review when green and accept when all gates pass
+  accept           carry verified small corrections, retain a failed full review at an unchanged head unless explicitly retried, and accept when gates pass
   ci completed     handle a CI completion notification; query CI again and advance green tasks
   ci dispatch      run the repository's CI workflow (workflow_dispatch) on the task's branch at its head and record the run; ci checks shows its jobs and failing tests
   ci resolve       mark a revuto finding on the task's PR resolved with a [resolved] reply; find COMMENT_ID beside path:line in ci checks, rework prompts or submit reports
@@ -1547,6 +1624,7 @@ Agents and worktrees:
 Gates:
   check ci         configured local CI on the merged tree, or GitHub checks on the submitted sha; records ci
   check clean      cleanup tool on the task branch against base reports no HIGH finding; records clean
+  check docs       run the optional pinned cheap docs command at the submitted head; records docs
   check sources    fetch distinct cited pages and verify every quoted claim in research/ID.json at submitted sha; records sources
   check tests      check tests under the project and task kind mode; records tests
   gates prioritize set or clear a task's gate priority after accepted merges
@@ -1609,6 +1687,7 @@ usage: tower-crane check <subcommand> ...
 
   check ci         configured local CI on the merged tree, or GitHub checks on the submitted sha; records ci
   check clean      cleanup tool on the task branch against base reports no HIGH finding; records clean
+  check docs       run the optional pinned cheap docs command at the submitted head; records docs
   check sources    fetch distinct cited pages and verify every quoted claim in research/ID.json at submitted sha; records sources
   check tests      check tests under the project and task kind mode; records tests
 ```
@@ -1768,7 +1847,7 @@ usage: tower-crane task <subcommand> ...
 ```text
 usage: tower-crane tests <subcommand> ...
 
-  tests map refresh pin tests.map from a full CI run's coverage, preserving missing and declared coverage
+  tests map refresh pin tests.map from a full CI run's coverage, preserving what the run did not measure
 ```
 
 </details>
@@ -1789,12 +1868,15 @@ usage: tower-crane worktree <subcommand> ...
 <summary>tower-crane accept --help</summary>
 
 ```text
-usage: tower-crane accept ID [--retry-review] [--cmd CMD] [--proof-cmd CMD] [--waive TYPE --reason R] [--drop-citation PATH --reason R]
+usage: tower-crane accept ID [--cmd CMD] [--proof-cmd CMD] [--waive TYPE --reason R] [--drop-citation PATH --reason R] [--attest-fix SHA --reason R] [--metadata-fixed --reason R] [--disputes JSON] [--retry-review]
 
-refuse repeated review at a failed head and revision; otherwise run missing or stale software gates, dispatch review when green and accept when all gates pass
+carry verified small corrections, retain a failed full review at an unchanged head unless explicitly retried, and accept when gates pass
 
 options:
-  --retry-review           operational (orchestrator or owner): explicitly retry review at the same failed head and revision
+  --retry-review           orchestrator or owner: explicitly retry the failed full review at this unchanged head
+  --attest-fix SHA         orchestrator or owner: attest the exact named fix from this reviewed head
+  --metadata-fixed         orchestrator or owner: title or body findings corrected at the unchanged head
+  --disputes JSON          disputed findings left unchanged as [{finding, reason}], using one-based finding numbers
   --cmd CMD                must match the pinned gates.tests_cmd
   --proof-cmd CMD          must match pinned gates.tests_proof_cmd
   --waive TYPE             waive tests, clean, sources, review or ci: review is operational (orchestrator or owner), the rest owner-required (repeatable)
@@ -2024,6 +2106,23 @@ cleanup tool on the task branch against base reports no HIGH finding; records cl
 
 options:
   --cmd CMD                must match pinned gates.clean_cmd; omit to use it
+
+global options:
+  --state DIR              state directory (default: TOWER_CRANE_STATE, then .tower-crane/ in the main checkout)
+  --agent NAME             who is acting (default: TOWER_CRANE_AGENT; task processes cannot use owner; fallback needs an interactive terminal outside a task)
+  --json                   machine output on stdout
+  --help                   show help
+```
+
+</details>
+
+<details>
+<summary>tower-crane check docs --help</summary>
+
+```text
+usage: tower-crane check docs ID
+
+run the optional pinned cheap docs command at the submitted head; records docs
 
 global options:
   --state DIR              state directory (default: TOWER_CRANE_STATE, then .tower-crane/ in the main checkout)
@@ -2410,11 +2509,12 @@ global options:
 <summary>tower-crane evidence --help</summary>
 
 ```text
-usage: tower-crane evidence ID --type T (--ok | --fail) [--sha S] [--revision N] [--summary T] [--ref URL] [--findings JSON]
+usage: tower-crane evidence ID --type T (--ok | --fail) [--sha S] [--revision N] [--summary T] [--ref URL] [--findings JSON] [--followups-only]
 
 record review or note evidence; review needs --sha, note defaults to the submitted sha
 
 options:
+  --followups-only         failed independent review contains follow-ups and no blockers
   --type T                 review or note; tests, clean, sources, ci and merge require gate commands
   --ok                     it passed
   --fail                   it failed
@@ -2422,7 +2522,7 @@ options:
   --revision N             task revision the evidence is about; required for review from a reviewer spawn did not start
   --summary T              one line
   --ref URL                link to the run, review or log
-  --findings JSON          every blocking finding as {kind, path, claim}; failed reviews only
+  --findings JSON          every blocker as {kind, path, claim, line?, end_line?}; classify small fixes as nit, doc-fix or title-body-fix
 
 global options:
   --state DIR              state directory (default: TOWER_CRANE_STATE, then .tower-crane/ in the main checkout)
@@ -2530,7 +2630,7 @@ actionable state and GitHub findings with resolving commands
 options:
   --ack ITEM               acknowledge a handled inbox item; repeat for one atomic batch (repeatable)
   --ack-before TIME        acknowledge all matching items at or before this timestamp
-  --kind KIND              with --ack-before: message, stall, decision_answer, owner_comment or review_exit_missing
+  --kind KIND              with --ack-before: message, stall, decision_answer, owner_comment, review_exit_missing or review_dispute
 
 global options:
   --state DIR              state directory (default: TOWER_CRANE_STATE, then .tower-crane/ in the main checkout)
@@ -2571,6 +2671,7 @@ options:
   --standards S            "default" or a path to a standards Markdown file
   --tests-cmd CMD          operational (orchestrator or owner): pin the test command; null clears it
   --clean-cmd CMD          operational (orchestrator or owner): pin the cleanup command prefix; null clears it
+  --docs-cmd CMD           operational (orchestrator or owner): optional cheap documentation link and lint command; null clears it
   --clean-paths JSON       operational (orchestrator or owner): absolute or ~/ tool dependency paths bound read-only in worker sandboxes; [] or null clears them
   --tests-proof-cmd CMD    operational (orchestrator or owner): pin the scoped proof template with {tests}; null clears it
   --executors N            operational (orchestrator or owner): automation executors running gates at once on this host (default 2)
@@ -2942,7 +3043,7 @@ global options:
 <summary>tower-crane project set --help</summary>
 
 ```text
-usage: tower-crane project set [--name N] [--goal G] [--repo O/R] [--base B] [--workers N] [--lease-minutes MIN] [--owners N] [--owner-idle-minutes MIN] [--tasks-max N] [--memory-max-bytes N] [--paused REASON] [--budget-hours H|null] [--budget-tokens N|null] [--standards S] [--tests-cmd CMD] [--clean-cmd CMD] [--clean-paths JSON] [--tests-proof-cmd CMD] [--executors N] [--tests-timeout-min MIN] [--clean-timeout-min MIN] [--host-probe-timeout-min MIN] [--tmp-root DIR] [--rework-hold-min MIN] [--final-review JSON] [--presubmit JSON] [--gates-cpu-weight N] [--agents-cpu-weight N] [--tests-paths JSON] [--tests-keep JSON] [--tests-host-only JSON] [--tests-host-env JSON] [--tests-mode MODE] [--tests-by-kind JSON] [--tests-expensive JSON] [--tests-map JSON] [--tests-crucial JSON] [--ci-ignore-apps JSON] [--ci-required JSON] [--ci-capped-review JSON] [--ci-local JSON] [--ci-overlap JSON] [--ci-dispatch JSON] [--ci-max-dispatches N|null] [--merge-keep-branch JSON] [--merge-admin JSON] [--publish-policy JSON] [--review-policy JSON] [--governor JSON] [--research-min-sources N] [--archive-retention-days DAYS] [--sandbox JSON] [--env JSON] [--env_file FILE] [--scope JSON] [--session-bus JSON] [--broker-verbs JSON]
+usage: tower-crane project set [--name N] [--goal G] [--repo O/R] [--base B] [--workers N] [--lease-minutes MIN] [--owners N] [--owner-idle-minutes MIN] [--tasks-max N] [--memory-max-bytes N] [--paused REASON] [--budget-hours H|null] [--budget-tokens N|null] [--standards S] [--tests-cmd CMD] [--clean-cmd CMD] [--docs-cmd CMD] [--clean-paths JSON] [--tests-proof-cmd CMD] [--executors N] [--tests-timeout-min MIN] [--clean-timeout-min MIN] [--host-probe-timeout-min MIN] [--tmp-root DIR] [--rework-hold-min MIN] [--final-review JSON] [--presubmit JSON] [--gates-cpu-weight N] [--agents-cpu-weight N] [--tests-paths JSON] [--tests-keep JSON] [--tests-host-only JSON] [--tests-host-env JSON] [--tests-mode MODE] [--tests-by-kind JSON] [--tests-expensive JSON] [--tests-map JSON] [--tests-crucial JSON] [--ci-ignore-apps JSON] [--ci-required JSON] [--ci-capped-review JSON] [--ci-local JSON] [--ci-overlap JSON] [--ci-dispatch JSON] [--ci-max-dispatches N|null] [--merge-keep-branch JSON] [--merge-admin JSON] [--publish-policy JSON] [--review-policy JSON] [--governor JSON] [--research-min-sources N] [--archive-retention-days DAYS] [--sandbox JSON] [--env JSON] [--env_file FILE] [--scope JSON] [--session-bus JSON] [--broker-verbs JSON]
 
 change project settings, limits and budget
 
@@ -2968,6 +3069,7 @@ options:
   --standards S            "default" or a path to a standards Markdown file
   --tests-cmd CMD          operational (orchestrator or owner): pin the test command; null clears it
   --clean-cmd CMD          operational (orchestrator or owner): pin the cleanup command prefix; null clears it
+  --docs-cmd CMD           operational (orchestrator or owner): optional cheap documentation link and lint command; null clears it
   --clean-paths JSON       operational (orchestrator or owner): absolute or ~/ tool dependency paths bound read-only in worker sandboxes; [] or null clears them
   --tests-proof-cmd CMD    operational (orchestrator or owner): pin the scoped proof template with {tests}; null clears it
   --executors N            operational (orchestrator or owner): automation executors running gates at once on this host (default 2)
@@ -3311,11 +3413,12 @@ global options:
 <summary>tower-crane submit --help</summary>
 
 ```text
-usage: tower-crane submit ID --sha S [--branch B] [--pr N] [--summary T] [--precheck R] [--host-probe CMD]
+usage: tower-crane submit ID --sha S [--branch B] [--pr N] [--summary T] [--precheck R] [--host-probe CMD] [--disputes JSON]
 
 mark submitted as the claimant or replace a submitted head as its submitter
 
 options:
+  --disputes JSON          disputed findings left unchanged as [{finding, reason}], using one-based finding numbers
   --sha S                  commit to review
   --branch B               branch holding it
   --pr N                   pull request number
@@ -3485,7 +3588,7 @@ global options:
 ```text
 usage: tower-crane tests map refresh (--from-run RUN_ID | --file FILE)
 
-pin tests.map from a full CI run's coverage, preserving missing and declared coverage
+pin tests.map from a full CI run's coverage, preserving what the run did not measure
 
 options:
   --from-run RUN_ID        workflow run whose tests-coverage-map artifact to download with gh run download

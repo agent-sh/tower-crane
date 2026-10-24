@@ -48,6 +48,30 @@ function check(h) {
   return JSON.parse(result.stdout);
 }
 
+test('the checked-in import seed has valid paths and supplies CLI map entries', async (t) => {
+  const seed = JSON.parse(fs.readFileSync(path.join(ROOT, 'tools/tests-map.json'), 'utf8'));
+  assert.ok(seed && typeof seed === 'object' && !Array.isArray(seed));
+  const rows = [
+    ['checked-in seed', seed, true],
+    ['array instead of map', [], false],
+    ['escaping source', { ...seed, '../outside.js': [] }, false],
+    ['escaping suite', { ...seed, 'bin/tower-crane.js': ['../outside.test.js'] }, false],
+    ['suite glob', { ...seed, 'bin/tower-crane.js': ['test/*.test.js'] }, false],
+    ['scalar suite', { ...seed, 'bin/tower-crane.js': 'test/commands.test.js' }, false],
+  ];
+  for (const [name, value, valid] of rows) {
+    await t.test(name, () => {
+      assert.equal(require('../lib/tests-map').settingError(value) === null, valid);
+    });
+  }
+  assert.ok(Array.isArray(seed['bin/tower-crane.js']));
+  // A representative entry keeps the CLI argument within Windows' command-line limit.
+  const selected = { 'bin/tower-crane.js': seed['bin/tower-crane.js'] };
+  const h = makeRepo(t);
+  h.init(['--tests-map', JSON.stringify(selected)]);
+  assert.deepEqual(h.json(['project', 'show']).tests.map, selected);
+});
+
 test('mapped head suites preserve scoped proof and policy-bound evidence through the CLI', (t) => {
   const h = fixture(t);
   assert.deepEqual(h.json(['project', 'show']).tests.map, map);
@@ -77,6 +101,20 @@ test('mapped head suites preserve scoped proof and policy-bound evidence through
   check(h);
   h.ok(['project', 'set', '--ci-required', '[]']);
   assert.equal(h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'tests').ok, false);
+});
+
+test('mapped selection overlays declarations at submitted head and keeps policy-bound evidence', (t) => {
+  const h = fixture(t, { '**/*.md': [] });
+  const before = h.readState('project.json');
+  fs.writeFileSync(path.join(h.repo, 'tests-map.declared.json'), '{"value.js":["test/value.test.js"]}\n');
+  h.git(['add', '.']);
+  h.git(['commit', '-qm', 'declare new source']);
+  h.ok(['submit', 'T1', '--sha', h.git(['rev-parse', 'HEAD']), '--agent', 'worker']);
+  const result = check(h);
+  assert.equal(result.receipt.head_mode, 'mapped', result.summary);
+  assert.deepEqual(result.receipt.head_tests, ['test/value.test.js']);
+  assert.deepEqual(h.readState('project.json'), before);
+  assert.equal(h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'tests').ok, true);
 });
 
 for (const [reason, settings, flags] of [
