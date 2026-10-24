@@ -1,1 +1,0 @@
-- Refresh complete decision answers from state on fallback, so the choice and labelled note survive acknowledgement before or during an attempt.

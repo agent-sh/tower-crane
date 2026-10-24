@@ -1,1 +1,0 @@
-- Keep complete decision-answer wait help and state contracts in the modular command table and split documentation layout.
