@@ -46,7 +46,7 @@ poll();
   const setPRs = (restore) => S.withLock(h.state, () => {
     const tasks = h.readState('tasks.json');
     for (const task of tasks.tasks) if (saved.has(task.id)) task.pr = restore ? saved.get(task.id) : null;
-    h.writeState('tasks.json', tasks);
+    StateFiles.writeDoc(h.state, 'tasks.json', tasks, { locked: true });
   });
   if (saved.size) setPRs(false);
   fs.rmSync(release);
@@ -224,7 +224,7 @@ for (const reaction of ['review dispatch', 'body findings', 'accepted merge', 'm
           StateFiles.appendLog(h.state, [
             { at, agent: 'orchestrator', cmd: 'spawn', task: 'T1', detail },
             { at, agent: 'orchestrator', cmd: 'spawn exit', task: 'T1', detail: { ...detail, code: 0 } },
-          ].map((e) => `${JSON.stringify(e)}\n`).join(''));
+          ].map((e) => `${JSON.stringify(e)}\n`).join(''), { locked: true });
         });
       }
       const before = h.logs().filter((e) => e.cmd === 'check tests').length;
