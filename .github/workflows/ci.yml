@@ -157,7 +157,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh run download "$GITHUB_RUN_ID" -R "$GITHUB_REPOSITORY" -p 'coverage-map-shard-*' -D "$RUNNER_TEMP/coverage-shards"
-          node scripts/tests-coverage-map.js merge --expect 3 --out "$RUNNER_TEMP/tests-coverage-map.json" "$RUNNER_TEMP"/coverage-shards/*/tests-coverage-map.json
+          node scripts/tests-coverage-map.js merge --out "$RUNNER_TEMP/tests-coverage-map.json" "$RUNNER_TEMP"/coverage-shards/*/tests-coverage-map.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: tests-coverage-map

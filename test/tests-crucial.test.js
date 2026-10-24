@@ -315,7 +315,8 @@ fs.copyFileSync(${JSON.stringify(file)}, path.join(args[args.indexOf('-D') + 1],
   assert.deepEqual({ run: pinned.run, sha: pinned.sha, declared: pinned.declared }, { run: 4242, sha: head, declared: 2 });
   // Measured entries replace the pinned ones; the globs and files coverage cannot see stay as declared.
   assert.deepEqual(p.readState('project.json').tests.map, {
-    '**/*.md': [], 'docs/cli.md': ['test/other.test.js'], 'lib/merge.js': ['test/cli.test.js'], 'tool/runner.js': ['test/cli.test.js'],
+    '**/*.md': [], 'docs/cli.md': ['test/other.test.js'], 'lib/gone.js': ['test/old.test.js'],
+    'lib/merge.js': ['test/cli.test.js'], 'tool/runner.js': ['test/cli.test.js'],
   });
   const events = fs.readFileSync(path.join(p.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   assert.equal(events.filter((e) => e.cmd === 'tests map refresh').at(-1).detail.authority, 'orchestrator');

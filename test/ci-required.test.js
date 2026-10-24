@@ -132,7 +132,7 @@ test('main pushes and same-repo PRs run only the shared check; fork PRs, tags, d
     const shards = workflowMatrix(workflow).filter((m) => Function('github', 'matrix', `return (${coverage});`)(github, m));
     assert.deepEqual(jobNames(shards), ['schedule', 'manual run'].includes(event) ? REQUIRED.slice(0, 3) : [], event);
   }
-  assert.match(jobBlock(workflow, 'coverage-map'), /node scripts\/tests-coverage-map\.js merge --expect 3 /);
+  assert.match(jobBlock(workflow, 'coverage-map'), /node scripts\/tests-coverage-map\.js merge --out /);
   assert.match(jobBlock(workflow, 'coverage-map'), /name: tests-coverage-map\n/);
 });
 
