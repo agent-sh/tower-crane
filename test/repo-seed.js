@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const crypto = require('node:crypto');
 const path = require('node:path');
 const zlib = require('node:zlib');
-const { tempRoot } = require('./tmp-root');
+const { tempRoot, markFixtureOwner } = require('./tmp-root');
 
 function writeObject(repo, type, content) {
   const body = Buffer.concat([Buffer.from(`${type} ${content.length}\0`), content]);
@@ -38,6 +38,7 @@ function createRepoSeed(tmpRoot = tempRoot()) {
   const base = fs.realpathSync.native(fs.mkdtempSync(path.join(tmpRoot, 'tower-crane-seed-')));
   const repo = path.join(base, 'repo');
   try {
+    markFixtureOwner(base);
     fs.mkdirSync(repo);
     const gitDir = path.join(repo, '.git');
     for (const dir of ['hooks', 'info', 'objects/info', 'objects/pack', 'refs/heads', 'refs/tags', 'logs/refs/heads']) {

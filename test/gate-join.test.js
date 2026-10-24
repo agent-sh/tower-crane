@@ -21,8 +21,9 @@ function fixture(t) {
 const fs = require('node:fs');
 fs.appendFileSync(process.argv[2], 'run\\n');
 const deadline = performance.now() + 300000;
+const parent = process.ppid;
 while (!fs.existsSync(process.argv[3])) {
-  if (performance.now() > deadline) process.exit(1);
+  if (performance.now() > deadline || process.ppid !== parent) process.exit(1);
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
 }
 `);
@@ -170,7 +171,7 @@ test('a joiner that receives evidence from a run interrupted by wait shutdown ru
 });
 
 // A tests gate whose every command counts its runs and holds until the test releases it,
-// in expensive prove mode with two test files: up to ten command budgets per run.
+// in expensive prove mode with two test files: up to thirteen timeout budgets per run.
 const MINUTES = 10;
 function testsFixture(t) {
   return cachedFixture(t, 'gate-join-tests', (h) => {
@@ -186,8 +187,9 @@ function testsFixture(t) {
 const fs = require('node:fs');
 fs.appendFileSync(process.argv[2], 'run\\n');
 const deadline = performance.now() + 300000;
+const parent = process.ppid;
 while (!fs.existsSync(process.argv[3])) {
-  if (performance.now() > deadline) process.exit(1);
+  if (performance.now() > deadline || process.ppid !== parent) process.exit(1);
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
 }
 if (!fs.readFileSync('lib.js', 'utf8').includes('new')) process.exit(1);
@@ -214,32 +216,70 @@ console.log('# tests 1\\n# pass 1\\n# fail 0\\n# skipped 0');
 
 const testLeases = (h) => logs(h).filter((e) => e.cmd === 'gate run' && e.detail.type === 'tests');
 
-test('the planned commands of a tests run cover each mode, expensive proof, host-only files and a native crash rerun', () => {
+test('the repo head lease at 75 minutes sums sequential commands and one shared base budget', () => {
+  const root = path.resolve(__dirname, '..');
+  const head = cp.spawnSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' });
+  assert.equal(head.status, 0, head.stderr);
+  const cases = [
+    [['test/live-git-sandbox.test.js', 'test/live-sandbox.test.js'], 19],
+    [[], 7],
+  ];
+  for (const [hosts, budgets] of cases) {
+    const project = { gates: { tests_timeout_min: 75 }, tests: { expensive: true, host_only: hosts } };
+    const budget = require('../lib/gate-runs').budgetMs({}, project, root, { kind: 'code', sha: head.stdout.trim() }, 'tests');
+    // Head, scoped proof and revert each run ordinary and host-only commands;
+    // each can rerun once, and the shared base step adds one budget.
+    assert.equal(budget, budgets * (75 + 1) * 60000, JSON.stringify(hosts));
+  }
+});
+
+test('an unobservable tests holder expires at the deadline its planner recorded', (t) => {
+  const h = testsFixture(t);
+  fs.writeFileSync(h.release, '');
+  h.ok(['check', 'tests', 'T1']);
+  const first = testLeases(h).find((e) => e.detail.phase === 'running');
+  const before = runs(h);
+  const preload = path.join(h.base, 'deadline-clock.cjs');
+  fs.writeFileSync(preload, 'Date.now = () => Number(process.env.TC_DEADLINE_NOW);\n');
+  const source = 'gate:unobservable-tests';
+  fs.appendFileSync(path.join(h.state, 'events.jsonl'), `${JSON.stringify({
+    ...first, detail: { ...first.detail, source, host: 'another-host' },
+  })}\n`);
+  const r = h.run(['check', 'tests', 'T1'], { env: {
+    NODE_OPTIONS: `--require=${preload}`,
+    TC_DEADLINE_NOW: String(Date.parse(first.detail.deadline)),
+  } });
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stderr, /cannot be observed and passed its deadline .*; treating it as ended and running the gate here/);
+  assert.equal(runs(h), before + 5);
+  assert.deepEqual(testLeases(h).findLast((e) => e.detail.phase === 'running').detail.replaces, [source]);
+});
+
+test('the planned commands of a tests run cover each mode, expensive proof, host-only files and one rerun of each', () => {
   const Tests = require('../lib/gates/tests');
   const Runs = require('../lib/gate-runs');
   const cases = [
     [{ mode: 'none' }, 0, 0],
-    [{ mode: 'run-only' }, 0, 4],
-    [{ mode: 'run-only' }, 2, 6],
+    [{ mode: 'run-only' }, 0, 3],
+    [{ mode: 'run-only' }, 2, 7],
     [{}, 0, 5],
-    [{ expensive: true }, 0, 6],
-    [{ host_only: ['test/h.js'] }, 1, 7],
-    [{ expensive: true, host_only: ['test/h.js'] }, 1, 9],
-    [{ mode: 'prove', by_kind: { docs: 'run-only' } }, 0, 4, 'docs'],
+    [{ expensive: true }, 0, 7],
+    [{ host_only: ['test/h.js'] }, 1, 9],
+    [{ expensive: true, host_only: ['test/h.js'] }, 1, 13],
+    [{ mode: 'prove', by_kind: { docs: 'run-only' } }, 0, 3, 'docs'],
     [{ mode: 'bogus' }, 0, 0],
   ];
   for (const [tests, hosts, want, kind = 'code'] of cases) {
     assert.equal(Tests.plannedCommands({ tests }, kind, hosts), want, JSON.stringify({ tests, hosts, kind }));
   }
-  assert.equal(Tests.plannedCommands({ tests: { mode: 'run-only' } }, 'code', 0, 3), 8, 'three failing files can each wait and run');
-  assert.equal(Tests.plannedCommands({ tests: { expensive: true } }, 'code', 2, 3), 16, 'base files have independent wait and run budgets');
   const project = { gates: { tests_timeout_min: 2, clean_timeout_min: 3 }, tests: { expensive: true }, ci: { local: { command: ['ci'], timeout: 90 } } };
   const task = { kind: 'code', sha: 'abc' };
-  // Each planned command gets its timeout and a minute for the metadata queries around it.
-  assert.equal(Runs.budgetMs({}, project, null, task, 'tests'), 6 * (120000 + 60000));
-  assert.equal(Runs.budgetMs({ flags: { timeout: '1' } }, project, null, task, 'tests'), 6 * (60000 + 60000), 'a --timeout override sets each command budget');
+  // Each planned budget gets its timeout and a minute for the metadata queries around it.
+  assert.equal(Runs.budgetMs({}, project, null, task, 'tests'), 7 * (120000 + 60000));
+  assert.equal(Runs.budgetMs({ flags: { timeout: '1' } }, project, null, task, 'tests'), 7 * (60000 + 60000), 'a --timeout override sets each command budget');
   assert.equal(Runs.budgetMs({}, project, null, task, 'clean'), 180000 + 60000, 'clean runs one command');
-  assert.equal(Runs.budgetMs({}, project, null, task, 'ci'), 90000 + 60000, 'local CI runs one command');
+  assert.equal(Runs.budgetMs({}, project, null, task, 'ci'), 2 * (90000 + 60000), 'local CI runs its command and one rerun on the same merge');
+  assert.equal(Runs.budgetMs({}, { ...project, ci: { local: { ...project.ci.local, rerun: false } } }, null, task, 'ci'), 90000 + 60000, 'without the rerun, the command alone');
   assert.equal(Runs.budgetMs({}, { tests: { mode: 'none' } }, null, task, 'tests'), 60000, 'a run with no command keeps the metadata minute');
 });
 
@@ -272,8 +312,8 @@ test('a tests run leases until every command it may start could have used its fu
   // Head and scoped proof each with the host-only file, then the reverted run, which fails at its first command.
   assert.equal(runs(h), 5, 'one passing run starts five timed commands');
   const lease = testLeases(h).find((e) => e.detail.phase === 'running');
-  // The fixture has one ordinary test and one host-only file; both may fail, and one native crash may rerun.
-  const planned = 11 * (MINUTES * 60000 + 60000);
+  // The fixture has one ordinary test and one host-only file; each command may rerun once.
+  const planned = 13 * (MINUTES * 60000 + 60000);
   const held = Date.parse(lease.detail.deadline) - Date.parse(lease.at);
   assert.ok(Math.abs(held - planned) < 5000, `deadline ${held} ms after the start, want ${planned}`);
 });
@@ -291,7 +331,8 @@ test('a holder without start ticks, past one command budget but inside its plann
   // As recorded on macOS: the same deadline span, started two command budgets ago.
   const at = Date.now() - 2 * MINUTES * 60000;
   const span = Date.parse(first.detail.deadline) - Date.parse(first.at);
-  const { start_ticks: _ticks, ...detail } = first.detail;
+  // The lease names the first run's process; a macOS one carries none of these to tell it by.
+  const { start_ticks: _ticks, pidns: _pidns, created: _created, seen: _seen, ...detail } = first.detail;
   const append = (e) => fs.appendFileSync(path.join(h.state, 'events.jsonl'), `${JSON.stringify(e)}\n`);
   append({ ...first, at: new Date(at).toISOString(), detail: { ...detail, source: 'gate:mac', pid: process.pid, host: os.hostname(), deadline: new Date(at + span).toISOString() } });
   let stderr = '';

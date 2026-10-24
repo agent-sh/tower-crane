@@ -175,6 +175,11 @@
     "reason": "Test filename in the measured shard durations"
   },
   {
+    "path": "tests-map.declared.json",
+    "text": "claude-provider.test.js",
+    "reason": "Test filename in the declared coverage map"
+  },
+  {
     "path": "tools/tests-map.json",
     "text": "claude-provider.test.js",
     "reason": "Module or fixture filename in the test coverage map"
@@ -183,6 +188,11 @@
     "path": "tools/tests-map.json",
     "text": "claude-provider.js",
     "reason": "Module or fixture filename in the test coverage map"
+  },
+  {
+    "path": "tools/tests-map.json",
+    "text": "claude-sandbox-placeholders.js",
+    "reason": "Module filename in the generated test coverage map"
   },
   {
     "path": "tools/tests-map.json",

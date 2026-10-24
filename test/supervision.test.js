@@ -1,6 +1,6 @@
 'use strict';
 
-const { waitOnRepo, killPid, killGroup } = require('./signals');
+const { waitOnRepo, childExit, killPid, killGroup } = require('./signals');
 
 const { test, describe } = require('node:test');
 const assert = require('node:assert/strict');
@@ -26,6 +26,8 @@ const caseConcurrency = 2;
 // Windows, whose supervisor starts slower, keeps the production window.
 const SHORT_STARTUP_MS = process.platform === 'win32' ? 10000 : 4000;
 const S = require('../lib/state');
+const Governor = require('../lib/governor');
+const { MIN_USAGE_MS } = require('../lib/ladder');
 
 const log = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
 const sketches = (h) => ['sketch.md', 'sketch.html'].map((file) => ({
@@ -54,6 +56,33 @@ function controlledBackoff(h) {
   };
 }
 
+function assertClaimPreserved(previous, current) {
+  const { until: previousUntil, ...previousIdentity } = previous;
+  const { until: currentUntil, ...currentIdentity } = current;
+  assert.deepEqual(currentIdentity, previousIdentity);
+  assert.ok(Date.parse(currentUntil) >= Date.parse(previousUntil), 'supervision can extend the same claim');
+}
+
+test('retry claim preservation allows renewals but rejects changed identity or shorter expiry', () => {
+  const first = { agent: 'worker-T1-1', since: '2026-10-22T00:10:13.877Z', from: 'spawn',
+    until: '2026-10-22T00:11:14.434Z' };
+  const renewed = { ...first, until: '2026-10-22T00:11:44.568Z' };
+  for (const [name, previous, current, valid] of [
+    ['unchanged', first, { ...first }, true],
+    ['Windows renewal', first, renewed, true],
+    ['another renewal', renewed, { ...renewed, until: '2026-10-22T00:12:14.568Z' }, true],
+    ['changed agent', first, { ...renewed, agent: 'worker-T1-2' }, false],
+    ['changed since', first, { ...renewed, since: '2026-10-22T00:10:14.877Z' }, false],
+    ['changed from', first, { ...renewed, from: 'replacement' }, false],
+    ['shorter expiry', first, { ...first, until: '2026-10-22T00:11:14.433Z' }, false],
+    ['expiry lost after renewal', renewed, first, false],
+  ]) {
+    const check = () => assertClaimPreserved(previous, current);
+    if (valid) assert.doesNotThrow(check, name);
+    else assert.throws(check, assert.AssertionError, name);
+  }
+});
+
 function setup(t, { failures = 1, error = '75', records = null, hold = 0, waitForFinish = false, config = {}, env = {}, busy = false, claimDelay = 0, claim = true, sessionReceipt = false, publishBarrier = false } = {}) {
   const h = makeTaskRepo(t, [{
     args: ['--title', 'Supervise an outage', '--tier', 'easy', '--acceptance', 'same session reruns'],
@@ -80,7 +109,8 @@ ${publishBarrier ? `if (attempts.length === 2) {
   fs.writeFileSync = (target, data) => {
     const fd = fs.openSync(target, 'w');
     write(file + '.writing', '');
-    while (!fs.existsSync(file + '.publish')) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+    const parent = process.ppid, deadline = Date.now() + 300000;
+    while (!fs.existsSync(file + '.publish') && process.ppid === parent && Date.now() < deadline) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
     try { write(fd, data); } finally { fs.closeSync(fd); }
   };
 }` : ''}
@@ -88,8 +118,7 @@ const pending = file + '.next-' + process.pid;
 fs.writeFileSync(pending, JSON.stringify(attempts));
 fs.renameSync(pending, file);
 ${sessionReceipt ? "console.log(JSON.stringify({ type: 'thread.started', thread_id: 'supervised-session' }));" : ''}
-${busy ? `cp.spawn(process.execPath, ['-e', ${JSON.stringify("const fs = require('node:fs'); fs.writeFileSync(process.argv[1], 'ready'); while (!fs.existsSync(process.argv[2])) { Math.sqrt(Math.random()); }")},
-  file + '.busy', file + '.finish'], { stdio: 'ignore' });` : ''}
+${busy ? `cp.spawn(process.execPath, [${JSON.stringify(path.join(__dirname, 'fixtures', 'busy-child.js'))}, file + '.busy', file + '.finish'], { stdio: 'ignore' });` : ''}
 const finish = () => {
   if (attempts.length <= ${failures}) {
     ${records ? `for (const record of ${JSON.stringify(records)}) console.log(JSON.stringify(record)); process.exit(1);`
@@ -248,7 +277,8 @@ test('a recorded Bedrock outage reruns with the session and claim kept', (t) => 
   assert.equal(result.code, 0, result.stderr);
   const attempts = h.readAttempts();
   assert.equal(attempts.length, 2);
-  for (const key of ['agent', 'session', 'cwd', 'claim']) assert.deepEqual(attempts[1][key], attempts[0][key]);
+  for (const key of ['agent', 'session', 'cwd']) assert.deepEqual(attempts[1][key], attempts[0][key]);
+  assertClaimPreserved(attempts[0].claim, attempts[1].claim);
   assert.equal(log(h).filter((e) => e.cmd === 'spawn retry').length, 1);
   assert.equal(h.json(['task', 'show', 'T1']).run.phase, 'waiting');
 });
@@ -275,15 +305,43 @@ test('a recovered rate-limit reconnect does not retry a later permanent failure'
   assert.equal(task.run.reason, 'exit 1');
 });
 
-test('default retry budget waits beyond the observed ten-minute outage and remains bounded', (t) => {
-  const clock = path.join(__dirname, 'fixtures', 'supervision-backoff-clock.js').replace(/\\/g, '/');
-  const h = setup(t, { failures: 5, env: { NODE_OPTIONS: `--require "${clock}"` } });
+test('default retry budget waits beyond the observed ten-minute outage and remains bounded', async (t) => {
+  const h = setup(t, { failures: 5 });
+  const backoff = controlledBackoff(h);
+  const clockFile = path.join(h.base, 'renewal-clock');
+  const now = Date.now();
+  fs.writeFileSync(clockFile, String(now));
   h.ok(['ladder', 'set', 'easy', '--clear', 'supervision']);
-  const result = h.spawn();
-  assert.equal(result.code, 0, result.stderr);
+  const spawned = h.json(['spawn', '--task', 'T1'], { env: { ...backoff.env, HOOK_CLOCK_FILE: clockFile } });
+  // Advancing the clock leaves earlier real wake timers pending after exit.
+  h.teardown.push(() => {
+    try { killPid(spawned.monitor_pid, 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') throw e; }
+  });
+  let elapsed = 0;
+  // Advance the retry clock; process sampling and startup timers stay real.
+  for (const [index, delay] of [30000, 60000, 120000, 240000, 480000].entries()) {
+    await waitOnRepo(h, () => log(h).filter((e) => e.cmd === 'spawn phase' && e.detail.phase === 'retrying').length === index + 1,
+      `retry ${index + 1} was not recorded`);
+    if (index === 0) {
+      // Cross half of the actual grant even when startup extends its duration.
+      const grant = log(h).findLast((e) => e.cmd === 'claim' && e.agent === spawned.agent);
+      const until = Date.parse(grant.detail.until);
+      const duration = until - Date.parse(grant.at);
+      fs.writeFileSync(clockFile, String(until - duration / 2 + 1));
+      await waitOnRepo(h, () => log(h).some((e) => e.cmd === 'renew'), 'the held retry did not renew its claim');
+    }
+    elapsed += delay;
+    backoff.advance(elapsed);
+  }
+  await waitOnRepo(h, () => log(h).some((e) => e.cmd === 'spawn exit' && e.detail.agent === spawned.agent),
+    'the last retry did not exit');
+  const exit = log(h).findLast((e) => e.cmd === 'spawn exit' && e.detail.agent === spawned.agent);
+  assert.equal(exit.detail.code, 0);
   const attempts = h.readAttempts();
   assert.equal(attempts.length, 6);
-  for (const attempt of attempts) assert.deepEqual(attempt.claim, attempts[0].claim);
+  for (let i = 1; i < attempts.length; i++) assertClaimPreserved(attempts[i - 1].claim, attempts[i].claim);
+  assert.ok(Date.parse(attempts[1].claim.until) > Date.parse(attempts[0].claim.until), 'the next attempt sees the renewed lease');
+  assert.equal(log(h).filter((e) => e.cmd === 'claim' && !e.detail.renewed).length, 1);
   const delays = log(h).filter((e) => e.cmd === 'spawn phase' && e.detail.phase === 'retrying').map((e) => e.detail.backoff_ms);
   assert.deepEqual(delays, [30000, 60000, 120000, 240000, 480000]);
   assert.equal(delays.reduce((sum, delay) => sum + delay, 0), 930000);
@@ -303,10 +361,7 @@ for (const error of ['75', 'outage', 'codex-error', 'signal']) {
     assert.equal(attempts.length, 2);
     assert.equal(attempts[0].agent, 'worker-T1-1');
     for (const key of ['agent', 'session', 'cwd']) assert.deepEqual(attempts[1][key], attempts[0][key]);
-    const { until: firstUntil, ...firstClaim } = attempts[0].claim;
-    const { until: nextUntil, ...nextClaim } = attempts[1].claim;
-    assert.deepEqual(nextClaim, firstClaim);
-    assert.ok(Date.parse(nextUntil) >= Date.parse(firstUntil), 'supervision can renew the same claim');
+    assertClaimPreserved(attempts[0].claim, attempts[1].claim);
     assert.equal(attempts[1].retry, '1');
     assert.equal(log(h).filter((e) => e.cmd === 'spawn').length, 1);
     assert.equal(log(h).filter((e) => e.cmd === 'claim' && !e.detail.renewed).length, 1);
@@ -423,7 +478,8 @@ for (const [launch, launchEnv] of [['platform launch', {}], ['launch handshake',
     } else {
       if (task === 'T1' && retry === 1) {
         fs.writeFileSync(${JSON.stringify(retryReady)}, '');
-        while (!fs.existsSync(${JSON.stringify(`${retryReady}.go`)})) Atomics.wait(delay, 0, 0, 10);
+        const parent = process.ppid, deadline = Date.now() + 300000;
+        while (!fs.existsSync(${JSON.stringify(`${retryReady}.go`)}) && process.ppid === parent && Date.now() < deadline) Atomics.wait(delay, 0, 0, 10);
       }
       console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'last report from ' + agent } }));
     }
@@ -569,45 +625,68 @@ test('a permanent exit is blocked without retrying and submit clears its phase',
   assert.equal(h.json(['task', 'show', 'T1']).run, null);
 });
 
-test('progress paths and CPU detect a stalled process without dropping its live claim', { skip: process.platform !== 'linux' }, async (t) => {
-  const h = setup(t, { failures: 0, waitForFinish: true, config: { stall_ms: 250, progress_paths: ['progress.txt'] } });
-  const spawned = h.json(['spawn', '--task', 'T1'], { hooks: { HOOK_RENDER_DELAY_MS: '500' } });
-  try {
-    await waitOnRepo(h, () => h.readAttempts().length === 1, 'idle worker did not finish startup');
-    const blocked = await waitOnRepo(h, () => {
+for (const row of [
+  { name: 'normal observer', renderMs: 0, observerMs: 0 },
+  { name: 'delayed observer', renderMs: 500, observerMs: 3000 },
+]) {
+  test(`progress paths and CPU detect a stalled process without dropping its live claim: ${row.name}`, { skip: process.platform !== 'linux' }, async (t) => {
+    const h = setup(t, { failures: 0, waitForFinish: true, config: { stall_ms: 250, progress_paths: ['progress.txt'] } });
+    // Hold each sampled phase until the CLI and both saved boards have observed it.
+    const clock = controlledBackoff(h);
+    let time = 0;
+    const sample = () => clock.advance(time += 1000);
+    const spawned = h.json(['spawn', '--task', 'T1'], {
+      hooks: { HOOK_RENDER_DELAY_MS: String(row.renderMs) }, env: clock.env,
+    });
+    const phase = () => log(h).findLast((e) => e.cmd === 'spawn phase')?.detail.phase;
+    const observe = (check, what) => waitOnRepo(h, check, what, { signal: t.signal });
+    const blocked = () => observe(() => {
+      if (phase() !== 'blocked') sample();
       const shown = h.ok(['task', 'show', 'T1']);
       const views = sketches(h);
       return shown.includes('blocked: no progress paths or CPU activity')
         && views.every(({ text }) => text.includes('blocked: no progress paths or CPU activity')) && { shown, views };
     }, 'idle process and saved sketches did not show stall');
-    assert.match(blocked.shown, /blocked: no progress paths or CPU activity/);
-    for (const { file, text } of blocked.views) {
-      assert.match(text, /blocked: no progress paths or CPU activity/, `${file} shows the stalled phase`);
+    try {
+      await observe(() => h.readAttempts().length === 1, 'idle worker did not finish startup');
+      for (const source of [
+        { name: 'configured path', update: () => fs.writeFileSync(path.join(spawned.cwd, 'progress.txt'), 'progress\n') },
+        { name: 'tool hook', update: () => {
+          // Tool hooks write outside the event log; the agent's progress file counts too.
+          fs.mkdirSync(path.dirname(S.progressFile(h.state, spawned.agent)), { recursive: true });
+          fs.appendFileSync(S.progressFile(h.state, spawned.agent), '{}\n');
+        } },
+      ]) {
+        const stalled = await blocked();
+        assert.match(stalled.shown, /blocked: no progress paths or CPU activity/);
+        for (const { file, text } of stalled.views) {
+          assert.match(text, /blocked: no progress paths or CPU activity/, `${source.name}: ${file} shows the stalled phase`);
+        }
+        source.update();
+        sample();
+        // A sibling case can block this test process beyond the supervisor's next sample.
+        if (row.observerMs) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, row.observerMs); // wait-allow: delayed observation is the regression input
+        const cleared = await observe(() => {
+          if (phase() !== 'running') sample();
+          const shown = h.ok(['task', 'show', 'T1']);
+          const views = sketches(h);
+          return phase() === 'running' && !shown.includes('blocked: no progress paths or CPU activity')
+            && views.every(({ text }) => !text.includes('blocked: no progress paths or CPU activity')) && views;
+        }, `${source.name} progress and saved sketches did not clear stall`);
+        for (const { file, text } of cleared) {
+          assert.doesNotMatch(text, /blocked: no progress paths or CPU activity/, `${source.name}: ${file} clears the stalled phase`);
+        }
+      }
+      assert.equal(h.json(['task', 'show', 'T1']).claim.agent, spawned.agent);
+      assert.deepEqual(h.json(['status']).exited_claims, []);
+    } finally {
+      // Keep the worker alive until both board transitions have been observed.
+      fs.writeFileSync(`${h.attempts}.finish`, '');
     }
-    fs.writeFileSync(path.join(spawned.cwd, 'progress.txt'), 'progress\n');
-    const cleared = await waitOnRepo(h, () => {
-      const phase = log(h).findLast((e) => e.cmd === 'spawn phase');
-      const views = sketches(h);
-      return phase?.detail.phase === 'running'
-        && views.every(({ text }) => !text.includes('blocked: no progress paths or CPU activity')) && views;
-    }, 'path progress and saved sketches did not clear stall');
-    for (const { file, text } of cleared) {
-      assert.doesNotMatch(text, /blocked: no progress paths or CPU activity/, `${file} clears the stalled phase`);
-    }
-    // Tool hooks write outside the event log; the agent's progress file counts too.
-    await waitOnRepo(h, () => h.json(['task', 'show', 'T1']).run?.phase === 'blocked', 'idle process did not stall again');
-    fs.mkdirSync(path.dirname(S.progressFile(h.state, spawned.agent)), { recursive: true });
-    fs.appendFileSync(S.progressFile(h.state, spawned.agent), '{}\n');
-    await waitOnRepo(h, () => h.json(['task', 'show', 'T1']).run?.phase === 'running', 'tool progress did not clear stall');
-    assert.equal(h.json(['task', 'show', 'T1']).claim.agent, spawned.agent);
-    assert.deepEqual(h.json(['status']).exited_claims, []);
-  } finally {
-    // Keep the worker alive until both board transitions have been observed.
-    fs.writeFileSync(`${h.attempts}.finish`, '');
-  }
-  await waitOnRepo(h, () => !detachedAlive({ pid: spawned.monitor_pid }), 'supervisor did not finish');
-  assert.equal(h.json(['task', 'show', 'T1']).run.phase, 'waiting');
-});
+    await observe(() => !detachedAlive({ pid: spawned.monitor_pid }), 'supervisor did not finish');
+    assert.equal(h.json(['task', 'show', 'T1']).run.phase, 'waiting');
+  });
+}
 
 // Pauses the supervisor before its first read of the state, so the spawn's
 // reservation stays live until the test lets the supervisor take the lease.
@@ -1045,6 +1124,22 @@ test('quiet supervision samples state and progress paths on a seconds-scale inte
   }
 });
 
+test('with no wait leading the host governor, a supervisor measures as a follower', async (t) => {
+  const h = setup(t, { failures: 0, waitForFinish: true });
+  h.json(['spawn', '--task', 'T1']);
+  try {
+    await waitOnRepo(h, () => fs.existsSync(h.attempts), 'worker did not start');
+    const monitor = log(h).findLast((e) => e.cmd === 'spawn').detail.monitor_pid;
+    await waitOnRepo(h, () => {
+      try { return Governor.read(h.env)?.ticked_by?.pid === monitor; } catch { return false; }
+    }, 'the supervisor did not tick');
+    assert.equal(Governor.read(h.env).ticked_by.lead, false);
+  } finally {
+    fs.writeFileSync(h.attempts + '.finish', '');
+    await waitOnRepo(h, () => log(h).some((e) => e.cmd === 'spawn phase' && e.detail.phase === 'waiting'), 'worker did not finish');
+  }
+});
+
 describe('supervision completion cases', { concurrency: caseConcurrency }, () => {
 test('Windows natural exits do not send taskkill to an exited or reused pid', (t) => {
   const h = setup(t, { failures: 0 });
@@ -1297,7 +1392,9 @@ const [planted, result, named] = process.argv.slice(1, 4);
 const spin = (ms) => { const until = Date.now() + ms; while (Date.now() < until); }; // wait-allow: paces the planted writes like a worker fighting the removal
 // Windows refuses to open a file the supervisor is deleting (EPERM).
 const plant = () => { try { fs.writeFileSync(planted, named + '\\n'); } catch (e) { if (e.code !== 'EPERM') throw e; } };
+const started = Date.now();
 for (let i = 0; i < 300; i++) { plant(); spin(5); }
+fs.writeFileSync(result + '.ms', String(Date.now() - started));
 const end = Date.now() + 300000;
 const check = () => {
   if (!fs.existsSync(planted)) fs.writeFileSync(result, 'removed');
@@ -1313,8 +1410,11 @@ check();
   assert.equal(fs.existsSync(result) && readPublished(result, 'utf8'), 'removed', r.stderr);
   assert.equal(fs.existsSync(planted), false);
   const removed = log(h).filter((e) => e.cmd === 'commondir removed');
-  // About 1.5 s of writes: one event per sample interval and one at exit.
-  assert.ok(removed.length >= 1 && removed.length <= 4, `${removed.length} events`);
+  // About 1.5 s of writes, longer on a loaded host: the first removal, one
+  // event per sample interval after it, one interval late at most, and one at exit.
+  const wrote = Number(readPublished(`${result}.ms`, 'utf8'));
+  const most = Math.ceil(wrote / MIN_USAGE_MS) + 2;
+  assert.ok(removed.length >= 1 && removed.length <= most, `${removed.length} events in ${wrote} ms of writes, at most ${most}`);
   assert.ok(removed.every((e) => e.detail.count >= 1));
   assert.ok(removed.reduce((n, e) => n + e.detail.count, 0) > removed.length, 'removals are counted, not recorded one by one');
   assert.equal(removed[0].task, 'T1');

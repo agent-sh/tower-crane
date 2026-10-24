@@ -5,8 +5,10 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
-const { BIN, cachedFixture } = require('./helpers');
+const vm = require('node:vm');
+const { BIN, cachedFixture, makeRepo } = require('./helpers');
 const { gateFixture } = require('./gate-helpers');
+const { HUNG_TEST_MS } = require('./signals');
 
 const REQUIRED = [
   'test (ubuntu-latest, node 26, shard 1/3)',
@@ -87,14 +89,14 @@ function jobBlock(workflow, id) {
 
 // A job's `if:` under one event's github context and dispatch inputs. The workflow's conditions use
 // ==, !=, !, &&, ||, startsWith and cancelled(), whose JavaScript forms mean the same for these values.
-function runsOn(workflow, id, { inputs = {}, ...github }) {
+function runsOn(workflow, id, { inputs = {}, ...github }, cancelled = false) {
   const condition = /^ {4}if: (.+)$/m.exec(jobBlock(workflow, id))?.[1];
   if (!condition) return true;
   const value = (root, name) => JSON.stringify(name.split('.').slice(1).reduce((o, k) => o?.[k], root) ?? null);
   const js = condition.replace(/^"(.*)"$/, '$1').replace(/^\$\{\{\s*|\s*\}\}$/g, '')
     .replace(/github(?:\.[\w]+)+/g, (name) => value(github, name))
     .replace(/inputs(?:\.[\w]+)+/g, (name) => value(inputs, name));
-  return Function('startsWith', 'cancelled', `return (${js});`)((a, b) => String(a).startsWith(b), () => false);
+  return Function('startsWith', 'cancelled', 'always', `return (${js});`)((a, b) => String(a).startsWith(b), () => cancelled, () => true);
 }
 
 const REPO = 'agent-sh/tower-crane';
@@ -111,7 +113,7 @@ const EVENTS = {
 test('main pushes and same-repo PRs run only the shared check; fork PRs, tags, daily and manual runs the full matrix', () => {
   const workflow = readWorkflow(path.resolve(__dirname, '..'));
   const jobs = [...workflow.split('\njobs:\n')[1].matchAll(/^ {2}([\w-]+):\n/gm)].map((m) => m[1]);
-  assert.deepEqual(jobs, ['checks', 'test', 'coverage-map', 'repeats', 'gate-scratch', 'model-swap', 'profile', 'mutants']);
+  assert.deepEqual(jobs, ['checks', 'test', 'coverage-map', 'repeats', 'gate-scratch', 'model-swap', 'profile', 'mutants', 'focused']);
   const full = ['test', 'repeats', 'gate-scratch', 'model-swap'];
   for (const [event, expected] of [
     ['main push', ['checks']],
@@ -132,8 +134,178 @@ test('main pushes and same-repo PRs run only the shared check; fork PRs, tags, d
     const shards = workflowMatrix(workflow).filter((m) => Function('github', 'matrix', `return (${coverage});`)(github, m));
     assert.deepEqual(jobNames(shards), ['schedule', 'manual run'].includes(event) ? REQUIRED.slice(0, 3) : [], event);
   }
-  assert.match(jobBlock(workflow, 'coverage-map'), /node scripts\/tests-coverage-map\.js merge --expect 3 /);
+  assert.match(jobBlock(workflow, 'coverage-map'), /node scripts\/tests-coverage-map\.js merge --out /);
   assert.match(jobBlock(workflow, 'coverage-map'), /name: tests-coverage-map\n/);
+  for (const event of ['schedule', 'manual run']) {
+    assert.equal(runsOn(workflow, 'coverage-map', EVENTS[event], true), true, `${event}: collect available maps after a cancelled shard`);
+  }
+});
+
+test('focused dispatch selects its runners and skips every other job, including profile jobs', () => {
+  const workflow = readWorkflow(path.resolve(__dirname, '..'));
+  assert.match(workflow, /^ {6}tests:\n {8}description: [^\n]+\n {8}type: string\n {8}default: ''$/m);
+  assert.match(workflow, /^ {6}os:\n {8}description: [^\n]+\n {8}type: choice\n {8}default: both\n {8}options:\n {10}- both\n {10}- ubuntu-latest\n {10}- windows-latest$/m);
+  const jobs = [...workflow.split('\njobs:\n')[1].matchAll(/^ {2}([\w-]+):\n/gm)].map((m) => m[1]);
+  const focused = jobBlock(workflow, 'focused');
+  assert.match(focused, /^ {4}name: 'focused tests \(\$\{\{ matrix\.os \}\}: \$\{\{ inputs\.tests \}\}\)'$/m);
+  assert.match(focused, /^ {4}runs-on: \$\{\{ matrix\.os \}\}$/m);
+  assert.match(focused, /node-version: 26/);
+  assert.match(focused, /^ {4}timeout-minutes: 45$/m);
+  assert.match(focused, /^ {8}timeout-minutes: 40$/m);
+  assert.match(focused, /TOWER_CRANE_TEST_TMP: \$\{\{ runner\.temp \}\}\/tower-crane-tests/);
+  assert.match(focused, /TC_TEST_SHARD_LOG_DIR: \$\{\{ runner\.temp \}\}\/shard-log/);
+  assert.match(focused, /TC_TEST_SHARD: '1\/1'/);
+  assert.match(focused, /TC_TEST_SHARD_DEADLINE_MIN: 36/);
+  assert.match(focused, /TC_SHARD_GUARD_DEADLINE_MIN: 38/);
+  assert.match(focused, /if: always\(\)\n {8}uses: actions\/upload-artifact@[\s\S]*path: \$\{\{ runner\.temp \}\}\/shard-log/);
+  assert.doesNotMatch(focused, /TC_TEST_COVERAGE_DIR:|npm test|check:shared/);
+  const matrix = /^ {8}os: \$\{\{ (.+) \}\}$/m.exec(focused)?.[1];
+  assert.ok(matrix, 'focused runner matrix comes from the os input');
+  for (const [os, expected] of [
+    [undefined, ['ubuntu-latest', 'windows-latest']],
+    ['both', ['ubuntu-latest', 'windows-latest']],
+    ['ubuntu-latest', ['ubuntu-latest']],
+    ['windows-latest', ['windows-latest']],
+  ]) {
+    const inputs = { tests: 'test/ci-required.test.js test/gates/ci.test.js', os };
+    assert.deepEqual(Function('inputs', 'fromJSON', `return (${matrix});`)(inputs, JSON.parse), expected, String(os));
+    for (const profile of [false, true]) {
+      const event = { ...EVENTS['manual run'], inputs: { ...inputs, profile, hang: true } };
+      assert.deepEqual(jobs.filter((id) => runsOn(workflow, id, event)), ['focused'], `${os}, profile ${profile}`);
+    }
+  }
+});
+
+test('the testing guide and worker skill document a focused command that agrees with the workflow', () => {
+  const root = path.resolve(__dirname, '..');
+  const workflow = readWorkflow(root);
+  const focused = jobBlock(workflow, 'focused');
+  const matrix = /^ {8}os: \$\{\{ (.+) \}\}$/m.exec(focused)[1];
+  const agents = require('../lib/agents');
+  const { ghDenied } = require('../lib/shim');
+  const workerPolicy = agents.policy(agents.load('worker'));
+  for (const [file, diagnostic] of [
+    ['docs/testing.md', false],
+    ['skills/tower-crane-work/SKILL.md', true],
+  ]) {
+    const text = fs.readFileSync(path.join(root, file), 'utf8').replace(/\r\n/g, '\n');
+    const command = /gh workflow run ci\.yml --ref BRANCH -f tests='([^']+)' -f os=(ubuntu-latest|windows-latest|both)\b/.exec(text);
+    assert.ok(command, `${file} gives the focused dispatch command with both inputs`);
+    const [, tests, os] = command;
+    for (const name of tests.split(/\s+/)) {
+      assert.ok(name.startsWith('test/') && name.endsWith('.test.js'), `${file}: ${name} is a test file`);
+      assert.ok(fs.statSync(path.join(root, name)).isFile(), `${file}: the example file exists`);
+    }
+    const systems = Function('inputs', 'fromJSON', `return (${matrix});`)({ tests, os }, JSON.parse);
+    assert.deepEqual(systems, os === 'both' ? ['ubuntu-latest', 'windows-latest'] : [os], `${file}: selected runners`);
+    const instructions = diagnostic ? text.split('\n').find((line) => line.includes(command[0]))
+      : text.split('## Focused CI dispatch\n')[1]?.split(/\n## /)[0];
+    assert.ok(instructions, `${file}: focused instructions`);
+    assert.equal(ghDenied(['workflow', 'run', 'ci.yml', '--ref', 'BRANCH',
+      '-f', `tests=${tests}`, '-f', `os=${os}`], workerPolicy), 'gh workflow run',
+      `${file}: the documented command requires execution outside the worker sandbox`);
+    assert.match(instructions, /orchestrator or owner/, `${file}: the worker requests an authorized actor`);
+    assert.match(instructions, /on the host/, `${file}: execution uses host GitHub access`);
+    assert.match(instructions, /worker sandbox refuses `gh workflow run`/, `${file}: the worker authority boundary`);
+    assert.match(instructions, /space-separated/, `${file}: file-list syntax`);
+    assert.match(instructions, /Node 26/, `${file}: focused Node version`);
+    assert.match(instructions, /all other jobs are skipped|skips every other job/, `${file}: focused-only execution`);
+    assert.match(instructions, /progress(?: and watchdog)? logs?/, `${file}: diagnostic artifact`);
+    if (diagnostic) assert.match(instructions, /does not replace PR CI or the tests gate/, `${file}: diagnostic scope`);
+  }
+});
+
+test('focused dispatch validates every path before starting exactly the named files as literal arguments', () => {
+  const focused = jobBlock(readWorkflow(path.resolve(__dirname, '..')), 'focused');
+  const script = /node <<'NODE'\n([\s\S]*?)\n {10}NODE/.exec(focused)?.[1]?.replace(/^ {10}/gm, '');
+  assert.ok(script, 'the focused step runs its validator as node code');
+  assert.match(focused, /FOCUSED_TESTS: \$\{\{ inputs\.tests \}\}/);
+  assert.doesNotMatch(script, /\$\{\{/, 'untrusted input arrives through the environment');
+  for (const platform of ['linux', 'win32']) {
+    for (const [input, expected] of [
+      ['test/ci-required.test.js', ['test/ci-required.test.js']],
+      ['  test/ci-required.test.js \t test/gates/ci.test.js  ', ['test/ci-required.test.js', 'test/gates/ci.test.js']],
+      ['test/a.b/c.test.js', ['test/a.b/c.test.js']],
+      ['test/ci-required.test.js test/gates/ci.test.js test/ci-required.test.js', ['test/ci-required.test.js', 'test/gates/ci.test.js']],
+      ['', null], ['   ', null], ['lib/ci.test.js', null], ['test/a.js', null],
+      ['test/../outside.test.js', null], ['test/gates/../../outside.test.js', null],
+      ['test/./a.test.js', null], ['test//a.test.js', null],
+      ['/test/a.test.js', null], ['test\\a.test.js', null], ['test/*.test.js', null],
+      ['test/ci-required.test.js --test-name-pattern=x', null],
+      ['test/ci-required.test.js test/a.test.js;echo', null],
+      ['test/ci-required.test.js $(echo).test.js', null],
+    ]) {
+      const calls = [];
+      const exit = {};
+      let status;
+      try {
+        vm.runInNewContext(script, {
+          require: (name) => {
+            assert.equal(name, 'node:child_process');
+            return { spawnSync: (...args) => { calls.push(args); return { status: 7 }; } };
+          },
+          console: { error: () => {} },
+          process: { env: { FOCUSED_TESTS: input }, platform, execPath: 'node',
+            exit: (code) => { status = code; throw exit; } },
+        });
+      } catch (error) {
+        if (error !== exit) throw error;
+      }
+      if (!expected) {
+        assert.equal(status, 1, `${platform}: refuses ${JSON.stringify(input)}`);
+        assert.equal(calls.length, 0, 'no test starts before all paths pass validation');
+      } else {
+        assert.equal(status, 7, 'the test exit status reaches the step');
+        assert.equal(calls.length, 1);
+        const [command, args, options] = calls[0];
+        assert.equal(command, platform === 'win32' ? 'pwsh' : 'node');
+        assert.deepEqual(Array.from(args), [
+          ...(platform === 'win32' ? ['-NoProfile', '-File', 'scripts/shard-guard.ps1', 'node'] : []),
+          'test/run.js', '--test-concurrency=3', ...expected,
+        ]);
+        assert.equal(options.stdio, 'inherit');
+        assert.ok(!options.shell);
+      }
+    }
+  }
+});
+
+test('the focused step logs every named file for one or several files and refuses a mixed invalid list before running', (t) => {
+  const root = path.resolve(__dirname, '..');
+  const h = makeRepo(t);
+  const focused = jobBlock(readWorkflow(root), 'focused');
+  const script = /node <<'NODE'\n([\s\S]*?)\n {10}NODE/.exec(focused)[1].replace(/^ {10}/gm, '');
+  const shard = /TC_TEST_SHARD: '([^']+)'/.exec(focused)?.[1] || '';
+  for (const [input, status] of [
+    ['test/gates/ci.test.js', 0],
+    ['test/gates/ci.test.js test/workflow-if.test.js', 0],
+    ['test/gates/ci.test.js test/../outside.test.js', 1],
+  ]) {
+    const logDir = path.join(h.base, `log-${input.split(/\s+/).length}-${status}`);
+    const result = cp.spawnSync(process.execPath, ['-e', script], {
+      cwd: root, env: { ...process.env, FOCUSED_TESTS: input, TOWER_CRANE_TEST_TMP: h.base,
+        TC_TEST_SHARD: shard, TC_TEST_SHARD_LOG_DIR: logDir },
+      encoding: 'utf8', timeout: HUNG_TEST_MS,
+    });
+    assert.equal(result.status, status, result.stdout + result.stderr);
+    if (status === 0) {
+      assert.match(result.stdout, /hotfix checks only push workflows/);
+      assert.match(result.stdout, /ℹ fail 0/);
+      const files = input.split(/\s+/);
+      const count = files.reduce((sum, file) => sum + [...fs.readFileSync(path.join(root, file), 'utf8').matchAll(/^test\(/gm)].length, 0);
+      assert.match(result.stdout, new RegExp(`ℹ tests ${count}\\n`), 'only the named files contribute tests');
+      const progress = fs.readFileSync(path.join(logDir, 'progress.log'), 'utf8');
+      for (const state of ['started', 'ended']) {
+        const logged = [...progress.matchAll(new RegExp(`^file ${state}: (.+)$`, 'gm'))]
+          .map((m) => path.relative(root, m[1].trim()).split(path.sep).join('/')).sort();
+        assert.deepEqual(logged, [...files].sort(), `the artifact records every file ${state}`);
+      }
+    } else {
+      assert.match(result.stderr, /Each path must be a literal/);
+      assert.doesNotMatch(result.stdout, /tower-crane: test\/|ℹ tests/);
+      assert.ok(!fs.existsSync(logDir), 'invalid input never starts the runner or its logging');
+    }
+  }
 });
 
 test('the matrix is all ten shards, beside the proofs and the repeat job', () => {
@@ -159,22 +331,23 @@ test('the matrix is all ten shards, beside the proofs and the repeat job', () =>
   for (const [id, command] of [['profile', /- run: node scripts\/suite-profile\.js [^\n]*--baseline "\$BASELINE" --runs 3 [^\n]*\| tee /],
     ['mutants', /- run: node scripts\/mutants\.js --no-full 2>&1 \| tee /]]) {
     const job = workflow.split(`\n  ${id}:\n`)[1].split(/\n {2}[\w-]+:\n/)[0];
-    assert.match(job, /^ {4}if: github\.event_name == 'workflow_dispatch' && inputs\.profile$/m, `${id} runs on a profile dispatch only`);
+    assert.match(job, /^ {4}if: github\.event_name == 'workflow_dispatch' && !inputs\.tests && inputs\.profile$/m, `${id} runs on a profile dispatch only`);
     assert.match(job, command, id);
     assert.match(job, /\| tee [^\n]*\n(?: {8}#[^\n]*\n)* {8}shell: bash\n/, `${id}: pipefail keeps the exit status through tee`);
     assert.match(job, /uses: actions\/upload-artifact@/, `${id} keeps its output`);
   }
   assert.match(repeatJob, /^ {4}runs-on: windows-latest$/m);
   const repeats = [...repeatJob.matchAll(/- name: (Repeat [^\n]+)/g)].map((m) => m[1]);
-  assert.deepEqual(repeats, ['Repeat Claude Code mod wakeup twenty times', 'Repeat Claude interrupted native worker ten times',
+  assert.deepEqual(repeats, ['Repeat Claude Code mod wakeup twenty times', 'Repeat finite nested fork storm ten times',
+    'Repeat Claude interrupted native worker ten times',
     'Repeat lock-free reader and torn recovery tests thirty times', 'Repeat state compatibility twenty times',
     'Repeat owner authority and board approval files ten times', 'Repeat interrupt during backoff and origin read tests twenty times',
     'Repeat mutation containment tests ten times'],
   'the wakeup loop runs first, on a fresh runner');
   // GitHub keeps one running and one pending run per group, and a newer run replaces the pending one.
-  // Main pushes share a group so only the newest pending head waits; tag, scheduled and manual runs stay unique.
-  assert.match(workflow, /^concurrency:\n {2}group: \$\{\{ github\.event_name == 'pull_request' && format\('ci-pr-\{0\}', github\.event\.pull_request\.number\) \|\| github\.ref == 'refs\/heads\/main' && github\.event_name == 'push' && 'ci-main-push' \|\| format\('ci-run-\{0\}', github\.run_id\) \}\}\n {2}cancel-in-progress: \$\{\{ github\.event_name == 'pull_request' \}\}\n/m,
-    'PR runs cancel per PR; main pushes share one group that never cancels a running run; tag, scheduled and manual runs are unique');
+  // Main pushes share a group so only the newest pending head waits; tag, scheduled and focused runs stay unique.
+  assert.match(workflow, /^concurrency:\n {2}group: \$\{\{ github\.event_name == 'pull_request' && format\('ci-pr-\{0\}', github\.event\.pull_request\.number\) \|\| github\.ref == 'refs\/heads\/main' && github\.event_name == 'push' && 'ci-main-push' \|\| github\.event_name == 'workflow_dispatch' && inputs\.tests && format\('ci-focused-\{0\}', github\.run_id\) \|\| github\.event_name == 'workflow_dispatch' && format\('ci-dispatch-\{0\}\{1\}', github\.ref, inputs\.profile && '-profile' \|\| inputs\.hang && '-hang' \|\| ''\) \|\| format\('ci-run-\{0\}', github\.run_id\) \}\}\n {2}cancel-in-progress: \$\{\{ github\.event_name == 'pull_request' \|\| github\.event_name == 'workflow_dispatch' \}\}\n/m,
+    'PR runs cancel per PR; main pushes share one group that never cancels a running run; a dispatch replaces the one on its branch, profile and hang apart, and a focused dispatch and tag and scheduled runs are unique');
 });
 
 test('a shard reaches its deadline, and leaves a log, before the test step and job limits cancel it without one', () => {
@@ -215,7 +388,7 @@ test('a shard reaches its deadline, and leaves a log, before the test step and j
 
 test('the stack section says hosted CI runs on every stack member at its own base', () => {
   const root = path.resolve(__dirname, '..');
-  const state = fs.readFileSync(path.join(root, 'docs', 'state.md'), 'utf8');
+  const state = fs.readFileSync(path.join(root, 'docs', 'state', 'stacks.md'), 'utf8');
   assert.match(state, /Hosted CI runs on every stack member at its own base\. `ci\.yml` has no base filter on pull requests\b/);
 });
 
@@ -303,7 +476,7 @@ test('documented fork PR job lists pass CI with the full matrix check runs', (t)
   const root = path.resolve(__dirname, '..');
   const names = jobNames(workflowMatrix(readWorkflow(root)));
   const h = fixture(t);
-  for (const file of ['docs/state.md', 'docs/cli.md']) {
+  for (const file of ['docs/state/tasks.md', 'docs/cli.md']) {
     const text = fs.readFileSync(path.join(root, file), 'utf8');
     const documented = text.match(/(?:PR test jobs are|matrix jobs have these full names:)\s+`(\[[^`]+\])`/);
     assert.ok(documented, `${file} documents the PR job names`);

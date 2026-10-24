@@ -4,9 +4,10 @@ const cp = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const { check } = require('./cli-docs');
+const { check: checkDocLinks } = require('./doc-links');
 const { fragments, released } = require('./changelog');
 const { normalizeText, readText } = require('./text');
-const { checkTestWaits } = require('./test-waits');
+const { checkTestWaits, checkSpins } = require('./test-waits');
 const { checkSuiteDeadline } = require('./suite-time');
 const { checkFakeAgentEnvs } = require('./fake-agent-env');
 const { checkMutants } = require('./mutants');
@@ -105,8 +106,10 @@ function main(args) {
     else base = args[++i];
   }
   check(root);
+  checkDocLinks(root);
   checkStdinReads(root);
   checkTestWaits(root);
+  checkSpins(root);
   checkFakeAgentEnvs(root);
   checkSuiteDeadline(root);
   // Mutation scoring runs shared checks on deliberately changed code.

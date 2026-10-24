@@ -1,0 +1,1 @@
+- Keep the escalation stall fixture idle without timer callbacks that can count as CPU progress. Cover normal and expensive runtime timer cases.

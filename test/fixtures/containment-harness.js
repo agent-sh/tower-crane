@@ -23,11 +23,18 @@ if (mode === 'nested-limit' || mode === 'nested-memory') {
     setTimeout(() => {}, 300); // wait-allow: allow the parent's resource monitor to observe the child cap event
   });
 } else if (mode === 'nested-storm') {
+  // The storm must stay inside the inner attempt's caps, so only the outer task cap can stop it.
+  // A Windows watchdog sums working sets: the storm's thirteen Node processes measured 495 MiB
+  // on a hosted runner, close enough to a 512 MiB cap that the inner attempt could stop it first.
   const child = C.spawn(process.execPath, [__filename, 'storm', file], {
-    stdio: 'inherit', resources: { tasks_max: 128, memory_max_bytes: 512 * 1024 * 1024 },
+    stdio: 'inherit', resources: { tasks_max: 128, memory_max_bytes: 4 * 1024 * 1024 * 1024 },
   });
   child.on('error', () => process.exitCode = 1);
-  child.on('exit', (code) => process.exitCode = code);
+  child.on('exit', (code) => {
+    // A cap the inner attempt reaches stops the storm before the outer watchdog can count it.
+    if (child.resourceReason) process.stderr.write(`inner attempt: ${child.resourceReason}\n`);
+    process.exitCode = code;
+  });
 } else if (mode === 'storm') {
   let count = 0;
   const timer = setInterval(() => {

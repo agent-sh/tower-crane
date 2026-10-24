@@ -9,6 +9,7 @@ const { waitOnRepo } = require('./signals');
 const { gateFixture, retireRevision } = require('./gate-helpers');
 const Reviewer = require('../lib/reviewer');
 const { shellQuote } = require('../lib/gates/common');
+const { holdExecutor } = require('./automation-helpers');
 
 function fixture(t) {
   return cachedFixture(t, 'merged-hotfix', (h) => {
@@ -173,6 +174,27 @@ test('accept runs missing software gates and dispatches one normal reviewer at t
   h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', h.sha, '--agent', r.reviewer]);
   h.ok(['wait', '--task', 'T1', '--types', 'accepted', '--after', cursor, '--timeout', '300']);
   assert.equal(task(h).status, 'accepted');
+});
+
+test('a hotfix reaction runs the tests and clean gates accept starts under the executor cap, and its CI read holds none', (t) => {
+  const h = fixture(t);
+  h.ok(['project', 'set', '--executors', '1']);
+  silentReviewer(h);
+  const free = holdExecutor(h);
+  record(h);
+  const consume = () => h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0']);
+  consume();
+  assert.deepEqual(task(h).evidence, [], 'no gate runs while another task holds the only executor');
+  assert.ok(events(h).some((e) => e.cmd === 'automation queued' && e.task === 'T1' && e.detail.executors === 1));
+  free();
+  consume();
+  assert.deepEqual(task(h).evidence.map((e) => [e.type, e.ok]), [['tests', true], ['clean', true], ['ci', true]]);
+  const log = events(h);
+  const own = log.filter((e) => e.cmd === 'executor' && e.task === 'T1');
+  assert.deepEqual(own.filter((e) => e.detail.phase === 'running').map((e) => e.detail.kind), ['tests', 'clean']);
+  assert.equal(new Set(own.map((e) => e.detail.lease)).size, 1, 'tests and clean share one lease');
+  const released = log.indexOf(own.find((e) => e.detail.phase === 'done'));
+  assert.ok(released >= 0 && released < log.findIndex((e) => e.cmd === 'check ci' && e.task === 'T1'), 'the lease is released before the CI read');
 });
 
 test('each failed software gate opens one follow-up against main with no old PR, sha or branch', (t) => {
@@ -450,6 +472,32 @@ function falseFailure(h) {
   assert.equal(task(h).hotfix.follow_up, 'T2');
   return task(h);
 }
+
+test('hotfix cancellation and re-recording retire gate priority until a new request', (t) => {
+  const h = fixture(t);
+  const queue = () => {
+    const source = events(h).findLast((e) => e.cmd === 'hotfix' && e.task === 'T1');
+    // Seed the executor queue so this lifecycle test needs no held CPU process.
+    fs.appendFileSync(path.join(h.state, 'events.jsonl'), JSON.stringify({
+      at: new Date().toISOString(), agent: 'orchestrator', cmd: 'automation queued', task: 'T1',
+      detail: { source: source.id },
+    }) + '\n');
+    return h.json(['status']).gate_queue.queued.find((q) => q.id === 'T1');
+  };
+  record(h);
+  queue();
+  h.ok(['gates', 'prioritize', 'T1', '--reason', 'urgent hotfix']);
+  assert.equal(h.json(['status']).gate_queue.queued[0].prioritized.reason, 'urgent hotfix');
+  const failure = h.run(['check', 'ci', 'T1'], { env: { FIXTURE_MERGE_RUN: 'failure' } });
+  assert.equal(failure.code, 1);
+  assert.equal(task(h).status, 'cancelled');
+  assert.ok(events(h).some((e) => e.cmd === 'hotfix rework' && e.task === 'T1'));
+  h.ok(['hotfix', 'T1', '--pr', '42', '--sha', h.sha, '--reason', 'main was red at the merge commit']);
+  assert.equal(task(h).status, 'submitted');
+  assert.equal(queue().prioritized, null, 're-recording cannot restore the cancelled priority');
+  h.ok(['gates', 'prioritize', 'T1', '--reason', 'new priority request']);
+  assert.equal(h.json(['status']).gate_queue.queued[0].prioritized.reason, 'new priority request');
+});
 
 test('recording the same PR again supersedes a false-failure follow-up and lets accept take the new revision', (t) => {
   const h = fixture(t);

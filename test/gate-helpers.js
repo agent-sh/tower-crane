@@ -108,6 +108,8 @@ if (args[0] === 'pr' && args[1] === 'merge') {
   console.log(JSON.stringify({id: 1, status: 'completed'}));
 } else if (args[0] === 'api' && /\\/merge-async\\/\\d+$/.test(args[1])) {
   console.log(JSON.stringify({id: 1, status: 'completed'}));
+} else if (args[0] === 'api' && args[1].includes('/actions/runs?branch=fixture-change')) {
+  // The current head is published before its first workflow starts.
 } else if (args[0] === 'api' && process.env.FIXTURE_PR_COMMENTS && /\\/pulls\\/\\d+\\/comments/.test(args[1])) {
   // Inline review comments on the PR, as gh prints them one per line.
   for (const c of JSON.parse(process.env.FIXTURE_PR_COMMENTS)) console.log(JSON.stringify(c));
@@ -122,6 +124,7 @@ if (args[0] === 'pr' && args[1] === 'merge') {
     isCrossRepository: false,
     state: process.env['FIXTURE_PR_STATE_' + pr] || process.env.FIXTURE_PR_STATE || (fs.existsSync(merged) ? 'MERGED' : 'OPEN'),
     mergeCommit: {oid: process.env.FIXTURE_SHA},
+    ...(process.env.FIXTURE_PR_BODY ? {body: process.env.FIXTURE_PR_BODY} : {}),
   }));
 } else {
   const ok = process.env.FIXTURE_GATE_OK !== '0';

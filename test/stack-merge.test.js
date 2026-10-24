@@ -24,8 +24,10 @@ const routes = (f) => merges(f).map((m) => m.route);
 test('wait cancels an asynchronous stack merge query or backoff on the second signal', {
   skip: process.platform === 'win32' ? 'Windows child.kill does not deliver POSIX signals' : false,
 }, async (t) => {
-  for (const stage of ['query', 'backoff']) {
-    await t.test(stage, async (t) => {
+  for (const [stage, signalDelay] of [
+    ['query', 0], ['backoff', 0], ['query', 4000], ['backoff', 4000],
+  ]) {
+    await t.test(`${stage}${signalDelay ? ' with delayed signal dispatch' : ''}`, async (t) => {
       const f = stacked(t);
       f.accept('T1');
       f.accept('T2');
@@ -33,18 +35,22 @@ test('wait cancels an asynchronous stack merge query or backoff on the second si
       const sleeping = path.join(f.h.base, 'backoff-ready');
       const observed = path.join(f.h.base, 'signal-observed');
       const preload = path.join(f.h.base, 'poll-observer.js');
-      // Hold a poll delay at its configured maximum to test cancellation while sleeping.
+      // Keep the poll held until cancellation, bounded by the hung-test backstop.
       fs.writeFileSync(preload, `
 const fs = require('node:fs'), timers = require('node:timers/promises');
 const timeout = global.setTimeout, delay = timers.setTimeout;
 const pause = (ms) => {
   if (ms !== 1000 || !fs.existsSync(${JSON.stringify(poll)})) return ms;
   fs.writeFileSync(${JSON.stringify(sleeping)}, '');
-  return 10000;
+  return ${HUNG_TEST_MS};
 };
 global.setTimeout = (fn, ms, ...args) => timeout(fn, pause(ms), ...args);
 timers.setTimeout = (ms, ...args) => delay(pause(ms), ...args);
-for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => fs.appendFileSync(${JSON.stringify(observed)}, signal + '\\n'));
+for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => {
+  fs.appendFileSync(${JSON.stringify(observed)}, signal + '\\n');
+  // A busy event loop can dispatch cancellation after a short exit budget.
+  if (signal === 'SIGINT' && ${signalDelay}) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ${signalDelay}); // wait-allow: reproduces delayed signal dispatch.
+});
 `);
       const env = { ...f.h.env, TEST_STACK_POLL_READY: poll,
         NODE_OPTIONS: `${f.h.env.NODE_OPTIONS} --require=${JSON.stringify(preload)}`,
@@ -62,18 +68,14 @@ for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => fs.appendFi
         await waitFor(observed, { what: 'wait starts draining' });
         assert.equal(child.exitCode, null, 'the first signal drains the active merge');
         child.kill('SIGINT');
-        const timeout = Symbol('timeout');
-        let deadline;
-        const exited = await Promise.race([result, new Promise((resolve) => {
-          deadline = setTimeout(() => resolve(timeout), 3000); // wait-allow: cancellation must beat the merge's 10 s poll deadline
-        })]);
-        clearTimeout(deadline);
-        assert.notEqual(exited, timeout, 'the second signal cancels the merge without waiting for its poll deadline');
+        const exited = await result;
         assert.equal(exited.code, 0, JSON.stringify(exited));
         assert.match(exited.stdout, /stopped by SIGTERM after draining 0 gates/);
         assert.deepEqual(routes(f), ['async 11'], 'the upper merge never starts');
         const task = f.h.json(['task', 'show', 'T2']);
-        assert.equal(task.evidence.findLast((entry) => entry.type === 'merge').ok, false, 'interrupted merge is retryable');
+        const evidence = task.evidence.findLast((entry) => entry.type === 'merge');
+        assert.equal(evidence.ok, false, 'interrupted merge is retryable');
+        assert.match(evidence.summary, /asynchronous merge of PR #11 interrupted/, 'cancellation ends the held poll');
         const events = fs.readFileSync(path.join(f.h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
         assert.equal(events.findLast((event) => event.cmd === 'automation').detail.phase, 'deferred');
         assert.equal(f.read().prs[11].state, 'OPEN');
@@ -344,6 +346,34 @@ test('stack merge rechecks every accepted head and records evidence for all merg
   f.h.ok(['merge', 'T2']);
   assert.equal(routes(f).length, 2);
 });
+
+// T493's review: the merge gate checked the hold only for the task named, whose base is T1's
+// branch until T1 lands, so merge T2 landed T1 on a main another task held.
+for (const target of ['T2', 'T1']) {
+  test(`a base hold on main refuses merge ${target} while the stack's bottom member lands there`, (t) => {
+    const f = stacked(t);
+    f.add('holder');
+    f.submit('T3', 13, f.h.json(['worktree', 'T3']));
+    f.accept('T3');
+    f.accept('T1');
+    f.accept('T2');
+    const holder = f.h.json(['task', 'show', 'T3']);
+    const hold = '2 local CI reruns in a row came back behind a moved main';
+    fs.appendFileSync(path.join(f.h.state, 'events.jsonl'), `${JSON.stringify({
+      id: `E${require('node:crypto').randomUUID()}`, at: new Date().toISOString(), cmd: 'local ci rerun', agent: 'orchestrator', task: 'T3',
+      detail: { sha: holder.sha, revision: holder.revision, base: 'main', from: 'a'.repeat(40), tip: 'b'.repeat(40), reason: 'moved', lost: 2, hold },
+    })}\n`);
+    f.write((d) => { d.calls = []; });
+    const r = f.h.run(['merge', target]);
+    assert.equal(r.code, 1, r.stdout + r.stderr);
+    assert.match(r.stdout + r.stderr, new RegExp(`${target}: merges to main are held for T3 until its local CI lands: ${hold}`));
+    assert.deepEqual(routes(f), [], 'nothing merges');
+    // The hold ends when the holder leaves the accepted head it was recorded for.
+    f.h.ok(['rework', 'T3', '--reason', 'the holder needs more work']);
+    f.h.ok(['merge', target]);
+    assert.deepEqual(routes(f), target === 'T2' ? ['async 11', 'async 12'] : ['async 11']);
+  });
+}
 
 test('an unaccepted lower task, unknown remote lower PR, or auto-merge prevents stack merge', (t) => {
   const f = stacked(t);
@@ -864,18 +894,21 @@ test('confirming a merged stack member records evidence for it alone, not for me
 
 test('local CI covers each dependency base and merge rechecks lower receipts', (t) => {
   const f = stacked(t);
-  f.h.ok(['project', 'set', '--ci-local', JSON.stringify({ command: [process.execPath, '-e', 'process.exit(0)'], timeout: 30 })]);
+  // The command reads moved.txt, so a main that adds it voids the lower receipt.
+  f.h.ok(['project', 'set', '--ci-local', JSON.stringify({ command: [process.execPath, '-e', 'process.exit(0)'], timeout: 30, inputs: ['moved.txt'] })]);
   for (const id of ['T1', 'T2']) {
     f.h.ok(['check', 'ci', id]);
     f.h.ok(['accept', id, '--waive', 'review', '--reason', 'offline fixture']);
   }
   const receipt = f.h.json(['task', 'show', 'T2']).evidence.findLast((e) => e.type === 'ci').receipt;
   assert.equal(receipt.base_sha, f.sha);
-  f.h.git(['commit', '--allow-empty', '-qm', 'main moved']);
+  fs.writeFileSync(path.join(f.h.repo, 'moved.txt'), 'moved\n');
+  f.h.git(['add', 'moved.txt']);
+  f.h.git(['commit', '-qm', 'main moved']);
   f.h.git(['push', 'origin', 'main']);
   const r = f.h.run(['merge', 'T2']);
   assert.equal(r.code, 1);
-  assert.match(r.stderr, /check ci T1 before merging/);
+  assert.match(r.stderr, /the base changed moved\.txt, which the task changes or the CI command reads; run tower-crane check ci T1 before merging/);
   assert.deepEqual(routes(f), []);
 });
 

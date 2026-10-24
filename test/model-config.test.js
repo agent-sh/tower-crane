@@ -9,7 +9,7 @@ const { ROOT, ACCOUNT_HOME, pinLiveRung, makeRepo, makeProjectRepo, makeTaskRepo
 const { readPublished } = require('./atomic-file');
 
 const { modelSelections } = require('../scripts/check-model-config');
-const { DEADLINE_MIN } = require('../scripts/suite-time');
+const { PROOF_DEADLINE_MIN } = require('../scripts/suite-time');
 
 test('cached fixtures pin their ladder and keep copies independent', (t) => {
   const tasks = [{ args: ['--title', 'Cached task', '--acceptance', 'pinned model'], brief: 'cached brief\n' }];
@@ -102,9 +102,12 @@ const cp = require('node:child_process');
 const original = cp.spawnSync;
 cp.spawnSync = function (command, args, options) {
   if (command !== process.execPath || (args[0] !== '--test' && args[0] !== path.join(options.cwd, 'test', 'run.js'))) return original.call(this, command, args, options);
-  if (args[0] !== path.join(options.cwd, 'test', 'run.js') || !args.includes('--test-concurrency=3') || options.timeout !== 45 * 60 * 1000) {
+  if (args[0] !== path.join(options.cwd, 'test', 'run.js') || !args.includes('--test-concurrency=3') || options.timeout !== ${PROOF_DEADLINE_MIN} * 60 * 1000) {
     throw new Error('probe must use the software-gate runner and deadline');
   }
+  require('node:assert/strict').deepEqual(args.slice(3),
+    ['test/ladder.test.js', 'test/broker.test.js', 'test/spawn.test.js', 'test/gates/tests.test.js']);
+  require('node:assert/strict').equal(options.env.TOWER_CRANE_SOCKET_DIR, process.env.TOWER_CRANE_SOCKET_DIR);
   for (const key of ['XDG_CACHE_HOME', 'LOCALAPPDATA', 'TC_TEST_SHARD', 'NODE_TEST_CONTEXT']) {
     if (key in options.env) throw new Error('probe inherited ' + key);
   }
@@ -128,10 +131,11 @@ cp.spawnSync = function (command, args, options) {
   const summary = path.join(h.base, 'step-summary.md');
   const result = cp.spawnSync(process.execPath, ['--require', hook, path.join(ROOT, 'scripts', 'probe-model-swap.js')],
     { cwd: ROOT, env: { ...h.env, TOWER_CRANE_TEST_TMP: cache, XDG_CACHE_HOME: 'caller-cache',
-      LOCALAPPDATA: 'caller-cache', TC_TEST_SHARD: '1/3', GITHUB_STEP_SUMMARY: summary }, encoding: 'utf8', timeout: 300000 });
+      LOCALAPPDATA: 'caller-cache', TC_TEST_SHARD: '1/3', GITHUB_STEP_SUMMARY: summary,
+      TOWER_CRANE_SOCKET_DIR: path.join(h.base, 'granted-sockets') }, encoding: 'utf8', timeout: 300000 });
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /Model swap probe passed/);
-  assert.match(result.stdout, new RegExp(`^Model swap probe: suite wall time \\d+\\.\\d min, \\d+% of the ${DEADLINE_MIN}-minute software-gate deadline$`, 'm'));
+  assert.match(result.stdout, new RegExp(`^Model swap probe: suite wall time \\d+\\.\\d min, \\d+% of the ${PROOF_DEADLINE_MIN}-minute software-gate deadline$`, 'm'));
   assert.match(fs.readFileSync(summary, 'utf8'), /^Model swap probe: suite wall time /);
   assert.equal(fs.readFileSync(path.join(cache, 'model-swap-probe.tap'), 'utf8'), 'not ok 1 - replaced log\n');
   const failed = cp.spawnSync(process.execPath, ['--require', hook, path.join(ROOT, 'scripts', 'probe-model-swap.js')],
@@ -250,6 +254,62 @@ test('release manifest model-literal exemption stays within its file and token',
     const target = path.join(h.repo, file);
     fs.writeFileSync(target, `module.exports = ${JSON.stringify(literals)};\n`);
     assert.deepEqual(modelSelections(h.repo, h.env), rejected.map(text => `${file}:1: ${text}`), JSON.stringify(literals));
+    fs.rmSync(target);
+  }
+});
+
+test('generated coverage filename allowance stays within its map and exact token', (t) => {
+  const h = makeRepo(t);
+  fs.mkdirSync(path.join(h.repo, 'tools'), { recursive: true });
+  const token = ['claude', 'sandbox', 'placeholders.js'].join('-');
+  const file = 'tools/tests-map.json';
+  const entries = JSON.parse(fs.readFileSync(path.join(ROOT, 'tools', 'model-literals.json'), 'utf8'))
+    .filter(entry => entry.path === file && entry.text === token);
+  const allowfile = path.join(h.repo, 'tools/model-literals.json');
+  fs.writeFileSync(allowfile, JSON.stringify(entries));
+  const model = ['claude', 'fixture-2099'].join('-');
+  for (const [where, value, rejected] of [
+    [file, { [`lib/${token}`]: ['test/example.test.js'] }, []],
+    [file, { 'lib/example.js': [`test/${token}`] }, []],
+    [file, { [`lib/${token}-other`]: [] }, [token + '-other']],
+    [file, { [`lib/${token.replace('.js', '.mjs')}`]: [] }, [token.replace('.js', '.mjs')]],
+    ['tools/another-map.json', { [`lib/${token}`]: [] }, [token]],
+    [file, { [`lib/${token}`]: [model] }, [model]],
+  ]) {
+    const target = path.join(h.repo, where);
+    fs.writeFileSync(target, JSON.stringify(value));
+    assert.deepEqual(modelSelections(h.repo, h.env), rejected.map(text => `${where}:1: ${text}`),
+      JSON.stringify(value));
+    fs.rmSync(target);
+  }
+  assert.equal(entries.length, 1);
+  fs.writeFileSync(allowfile, JSON.stringify([{ ...entries[0], reason: '' }]));
+  assert.throws(() => modelSelections(h.repo, h.env), /reason/);
+});
+
+test('declared coverage metadata model-literal exemption stays within its file and token', async (t) => {
+  const h = makeRepo(t);
+  fs.mkdirSync(path.join(h.repo, 'tools'), { recursive: true });
+  const entries = JSON.parse(fs.readFileSync(path.join(ROOT, 'tools', 'model-literals.json'), 'utf8'))
+    .filter(entry => entry.path === 'tests-map.declared.json');
+  fs.writeFileSync(path.join(h.repo, 'tools', 'model-literals.json'), JSON.stringify(entries));
+  const declared = JSON.parse(fs.readFileSync(path.join(ROOT, 'tests-map.declared.json'), 'utf8'));
+  const name = ['claude', 'provider.test.js'].join('-');
+  const model = ['claude', 'fixture-2099'].join('-');
+  const rows = [
+    ['tests-map.declared.json', declared, []],
+    ['tests-map.declared.json', { 'lib/provider.js': [`test/${name}`] }, []],
+    ['tests-map.other.json', { 'lib/provider.js': [`test/${name}`] }, [name]],
+    ['tests-map.declared.json', { 'lib/provider.js': [`test/${name.replace('.test', '-other.test')}`] }, [name.replace('.test', '-other.test')]],
+    ['tests-map.declared.json', { model }, [model]],
+    ['tests-map.declared.json', { 'lib/provider.js': [model, `test/${name}`] }, [model]],
+  ];
+  for (const [index, [file, data, rejected]] of rows.entries()) {
+    const target = path.join(h.repo, file);
+    fs.writeFileSync(target, JSON.stringify(data));
+    await t.test(`${file}: variant ${index + 1}`, () => {
+      assert.deepEqual(modelSelections(h.repo, h.env), rejected.map(text => `${file}:1: ${text}`));
+    });
     fs.rmSync(target);
   }
 });

@@ -16,8 +16,12 @@ function scratch(prefix) {
   return fs.mkdtempSync(path.join(base, `${prefix}-`));
 }
 
-// Keeps the user's global config (signing, hooks, default branch) out of the fixtures.
+// Worker state and Git overrides can send a fixture's locks or writes to the real checkout.
 function isolateGit(dir) {
+  delete process.env.TOWER_CRANE_STATE;
+  for (const key of Object.keys(process.env)) {
+    if (key.startsWith('GIT_')) delete process.env[key];
+  }
   const cfg = path.join(dir, 'gitconfig');
   fs.writeFileSync(cfg, FOREGROUND_MAINTENANCE);
   Object.assign(process.env, {

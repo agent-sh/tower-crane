@@ -52,9 +52,15 @@ function buildQueue(h) {
   fs.writeFileSync(suite, `const fs = require('node:fs'), path = require('node:path');
 const gh = JSON.parse(fs.readFileSync(${JSON.stringify(h.env.AUTOMATION_GITHUB)}, 'utf8'));
 fs.appendFileSync(${JSON.stringify(h.suiteLog)}, JSON.stringify({ pr7: gh.prs['7'].state }) + '\\n');
-// A gate run that fails once, as gates did for tasks accepted before evidence.
-const failOnce = ${JSON.stringify(path.join(h.base, 'fail-once'))};
-if (fs.existsSync(failOnce)) { fs.rmSync(failOnce); process.exit(1); }
+// Gate runs that fail, as gates did for tasks accepted before evidence; the file holds how many.
+const failRuns = ${JSON.stringify(path.join(h.base, 'fail-runs'))};
+if (fs.existsSync(failRuns)) {
+  // read-published: only this script rewrites the count, one gate run at a time.
+  const left = Number(fs.readFileSync(failRuns, 'utf8')) - 1;
+  if (left > 0) fs.writeFileSync(failRuns, String(left));
+  else fs.rmSync(failRuns);
+  process.exit(1);
+}
 // One run moves main while it runs, as another merge landing would.
 if (fs.existsSync(${JSON.stringify(path.join(h.base, 'move-main-once'))})) {
   fs.rmSync(${JSON.stringify(path.join(h.base, 'move-main-once'))});
@@ -116,7 +122,7 @@ test('main moves: a mergeable PR keeps its evidence and merges after one head-of
 // Crucial mode (tests.crucial, tests.expensive and tests.map): the head of the line runs what the
 // tests gate selects for the change it brings onto main, never the full suite. A run-only task's
 // tests gate selects nothing, so its head check runs the full command as before.
-for (const [mode, crucial] of [['prove', true], ['run-only', false]]) test(`in crucial mode with tests.mode ${mode} the head check runs ${crucial ? 'the crucial and mapped suites of the change' : 'the full command'}`, (t) => {
+for (const [mode, crucial, addedOnBase] of [['prove', true, false], ['run-only', false, false], ['prove', true, true]]) test(`in crucial mode with tests.mode ${mode} the head check runs ${crucial ? 'the crucial and mapped suites of the change' : 'the full command'}${addedOnBase ? ' including a crucial file added on base' : ''}`, (t) => {
   const h = setup(t);
   const log = path.join(h.base, 'suite-argv.jsonl');
   const suite = path.join(h.base, 'suite.js');
@@ -137,6 +143,17 @@ for (const f of files) require(path.resolve(f));
   fs.appendFileSync(path.join(h.repo, 'README.md'), 'Independent base update.\n');
   h.git(['add', 'README.md']);
   h.git(['commit', '-qm', 'advance main']);
+  if (addedOnBase) {
+    fs.mkdirSync(path.join(h.repo, 'test'), { recursive: true });
+    fs.writeFileSync(path.join(h.repo, 'test/new.test.js'), `require('node:fs').appendFileSync(${JSON.stringify(path.join(h.base, 'new-ran'))}, 'x');\n`);
+    h.git(['add', '.']);
+    h.git(['commit', '-qm', 'new crucial suite']);
+    h.ok(['project', 'set', '--tests-crucial', '["test/value.test.js","test/new.test.js"]']);
+    const gate = h.json(['check', 'tests', 'T1', '--agent', 'worker']);
+    assert.equal(gate.ok, true, gate.summary);
+    assert.equal(gate.receipt.crucial_skipped[0].path, 'test/new.test.js');
+    assert.equal(fs.existsSync(path.join(h.base, 'new-ran')), false, 'the task gate skips the new base suite');
+  }
   const runs = fs.readFileSync(log, 'utf8').trim().split('\n').length;
   h.reviewer('T1', 'reviewer');
   h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha, '--ok', '--agent', 'reviewer']);
@@ -151,10 +168,12 @@ for (const f of files) require(path.resolve(f));
     return;
   }
   assert.equal(check.detail.head_mode, 'crucial');
-  assert.deepEqual(check.detail.head_tests, ['test/value.test.js']);
-  assert.equal(check.detail.command, `${node} ${shellQuote('test/value.test.js')}`);
-  assert.deepEqual(fs.readFileSync(log, 'utf8').trim().split('\n').slice(runs).map(JSON.parse), [['test/value.test.js']],
+  const expected = addedOnBase ? ['test/new.test.js', 'test/value.test.js'] : ['test/value.test.js'];
+  assert.deepEqual(check.detail.head_tests, expected);
+  assert.equal(check.detail.command, `${node} ${expected.map(shellQuote).join(' ')}`);
+  assert.deepEqual(fs.readFileSync(log, 'utf8').trim().split('\n').slice(runs).map(JSON.parse), [expected],
     'the head check named its suites; a full run names none');
+  if (addedOnBase) assert.equal(fs.readFileSync(path.join(h.base, 'new-ran'), 'utf8'), 'x', 'the merged-tree check ran the new suite once');
 });
 
 test('the head check runs the suite on a clean checkout of the merge', (t) => {
@@ -471,7 +490,8 @@ test('an accepted PR that already merged without current evidence is confirmed a
   acceptBoth(h);
   // T1 is a legacy task: its tests evidence no longer passes and its PR
   // landed on GitHub before tower-crane recorded merge evidence.
-  fs.writeFileSync(path.join(h.base, 'fail-once'), '');
+  // The run and its one rerun both fail, so the evidence does not pass.
+  fs.writeFileSync(path.join(h.base, 'fail-runs'), '2');
   h.run(['check', 'tests', 'T1', '--agent', 'orchestrator']);
   assert.equal(h.json(['task', 'show', 'T1']).gates.ok, false);
   const github = h.github();
@@ -507,6 +527,43 @@ test('a head the queue cannot advance is reported once and the PR behind it merg
   assert.match(skips[0].detail.reason, /merged with head f+, not the accepted/);
   assert.equal(h.readState('tasks.json').tasks[0].status, 'accepted');
 });
+
+// T1's supervisor reaches T2's head either after passing T1 over, with nothing
+// merged to wake the wait host, or after merging T1.
+for (const [name, t1] of [['T1 is passed over', 'OPEN'], ['T1 merges', 'MERGED']]) {
+  test(`a supervisor stopping at another task's head hands it to the wait host: ${name}`, (t) => {
+    const h = queueFixture(t);
+    acceptBoth(h);
+    const github = h.github();
+    github.prs['7'].refuseMerge = t1 === 'OPEN';
+    h.saveGithub(github);
+    // T2's accept reaction already ran while T1's supervisor held the queue and
+    // ended deferred, so no receipt or marker of its own keeps it owed.
+    const accept = h.logs().findLast((e) => e.cmd === 'accept' && e.task === 'T2');
+    fs.appendFileSync(path.join(h.state, 'events.jsonl'), `${JSON.stringify({ at: new Date().toISOString(), agent: 'orchestrator',
+      cmd: 'automation', task: 'T2', detail: { source: accept.id, phase: 'deferred', error: null } })}\n`);
+    const script = path.join(h.base, 'supervisor.js');
+    fs.writeFileSync(script, `const lib = ${JSON.stringify(path.join(path.dirname(BIN), '..', 'lib'))};
+const stateDir = ${JSON.stringify(h.state)};
+const events = require(lib + '/state').readEvents(stateDir).filter((e) => e.cmd === 'accept' && e.task === 'T1');
+require(lib + '/automation').consume({ stateDir, cwd: ${JSON.stringify(h.repo)}, env: process.env, agent: 'orchestrator',
+  flags: {}, pos: [], reactionTask: 'T1' }, events, true).then(() => {}, (e) => { console.error(e); process.exit(1); });
+`);
+    const run = require('node:child_process').spawnSync(process.execPath, [script], { cwd: h.repo, env: h.env, encoding: 'utf8' });
+    assert.equal(run.status, 0, run.stderr);
+    assert.equal(h.github().prs['7'].state, t1);
+    assert.equal(h.github().prs['8'].state, 'OPEN', 'the supervisor merged nothing of T2');
+    const done = h.logs().findLast((e) => e.cmd === 'merge queue' && e.detail.phase !== 'requested');
+    assert.equal(done.detail.phase, 'done');
+    assert.equal(done.detail.blocked.task, 'T2', 'the release names the head it stopped at');
+    const handoffs = h.logs().filter((e) => e.cmd === 'automation reconcile' && e.detail.handoff);
+    assert.deepEqual(handoffs.map((e) => [e.task, e.detail.handoff, e.detail.sha]), [['T2', 'T1', h.second]]);
+    assert.deepEqual(h.json(['status']).gate_queue.queued.map((q) => q.id), ['T2'], 'the handoff is owed in the queue');
+    h.consume();
+    assert.equal(h.github().prs['8'].state, 'MERGED');
+    assert.deepEqual(h.json(['status']).gate_queue.queued, [], 'the merge settled the handoff');
+  });
+}
 
 for (const failure of ['failView', 'invalidView']) {
   test(`an unreadable queue head (${failure}) is skipped once and the ready PR behind it merges`, (t) => {

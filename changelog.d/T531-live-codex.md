@@ -1,0 +1,1 @@
+- Live codex tests on a Bedrock profile authenticate again: the rung names an env-store credential that reads the bearer token from the codex home's `.env`, which spawn no longer links.
