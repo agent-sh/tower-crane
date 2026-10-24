@@ -44,7 +44,7 @@ permissions:
 # main run is never cancelled. Tag and scheduled runs keep unique groups; a manual run replaces an older
 # manual run on its branch, with profile and hang runs in groups of their own so a routine dispatch never cancels them.
 concurrency:
-  group: ${{ github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || github.ref == 'refs/heads/main' && github.event_name == 'push' && 'ci-main-push' || github.event_name == 'workflow_dispatch' && format('ci-dispatch-{0}{1}', github.ref, inputs.profile && '-profile' || inputs.hang && '-hang' || '') || format('ci-run-{0}', github.run_id) }}
+  group: ${{ github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || github.ref == 'refs/heads/main' && github.event_name == 'push' && 'ci-main-push' || github.event_name == 'workflow_dispatch' && inputs.tests && format('ci-focused-{0}', github.run_id) || github.event_name == 'workflow_dispatch' && format('ci-dispatch-{0}{1}', github.ref, inputs.profile && '-profile' || inputs.hang && '-hang' || '') || format('ci-run-{0}', github.run_id) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' }}
 
 jobs:
@@ -428,7 +428,8 @@ jobs:
         run: |
           node <<'NODE'
           const { spawnSync } = require('node:child_process');
-          const files = (process.env.FOCUSED_TESTS || '').trim().split(/\s+/);
+          // A name given twice runs once: exactly the named files.
+          const files = [...new Set((process.env.FOCUSED_TESTS || '').trim().split(/\s+/))];
           if (files.some((file) => !/^test\/(?:[\w.-]+\/)*[\w.-]+\.test\.js$/.test(file)
             || file.split('/').some((part) => part === '.' || part === '..'))) {
             console.error('Each path must be a literal test/*.test.js file without traversal, globs or flags');

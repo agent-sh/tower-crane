@@ -226,6 +226,7 @@ test('focused dispatch validates every path before starting exactly the named fi
       ['test/ci-required.test.js', ['test/ci-required.test.js']],
       ['  test/ci-required.test.js \t test/gates/ci.test.js  ', ['test/ci-required.test.js', 'test/gates/ci.test.js']],
       ['test/a.b/c.test.js', ['test/a.b/c.test.js']],
+      ['test/ci-required.test.js test/gates/ci.test.js test/ci-required.test.js', ['test/ci-required.test.js', 'test/gates/ci.test.js']],
       ['', null], ['   ', null], ['lib/ci.test.js', null], ['test/a.js', null],
       ['test/../outside.test.js', null], ['test/gates/../../outside.test.js', null],
       ['test/./a.test.js', null], ['test//a.test.js', null],
@@ -344,9 +345,9 @@ test('the matrix is all ten shards, beside the proofs and the repeat job', () =>
     'Repeat mutation containment tests ten times'],
   'the wakeup loop runs first, on a fresh runner');
   // GitHub keeps one running and one pending run per group, and a newer run replaces the pending one.
-  // Main pushes share a group so only the newest pending head waits; tag, scheduled and manual runs stay unique.
-  assert.match(workflow, /^concurrency:\n {2}group: \$\{\{ github\.event_name == 'pull_request' && format\('ci-pr-\{0\}', github\.event\.pull_request\.number\) \|\| github\.ref == 'refs\/heads\/main' && github\.event_name == 'push' && 'ci-main-push' \|\| format\('ci-run-\{0\}', github\.run_id\) \}\}\n {2}cancel-in-progress: \$\{\{ github\.event_name == 'pull_request' \}\}\n/m,
-    'PR runs cancel per PR; main pushes share one group that never cancels a running run; tag, scheduled and manual runs are unique');
+  // Main pushes share a group so only the newest pending head waits; tag, scheduled and focused runs stay unique.
+  assert.match(workflow, /^concurrency:\n {2}group: \$\{\{ github\.event_name == 'pull_request' && format\('ci-pr-\{0\}', github\.event\.pull_request\.number\) \|\| github\.ref == 'refs\/heads\/main' && github\.event_name == 'push' && 'ci-main-push' \|\| github\.event_name == 'workflow_dispatch' && inputs\.tests && format\('ci-focused-\{0\}', github\.run_id\) \|\| github\.event_name == 'workflow_dispatch' && format\('ci-dispatch-\{0\}\{1\}', github\.ref, inputs\.profile && '-profile' \|\| inputs\.hang && '-hang' \|\| ''\) \|\| format\('ci-run-\{0\}', github\.run_id\) \}\}\n {2}cancel-in-progress: \$\{\{ github\.event_name == 'pull_request' \|\| github\.event_name == 'workflow_dispatch' \}\}\n/m,
+    'PR runs cancel per PR; main pushes share one group that never cancels a running run; a dispatch replaces the one on its branch, profile and hang apart, and a focused dispatch and tag and scheduled runs are unique');
 });
 
 test('a shard reaches its deadline, and leaves a log, before the test step and job limits cancel it without one', () => {
