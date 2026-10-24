@@ -10,6 +10,7 @@ const { cachedFixture, useFixtureUserFile } = require('./helpers');
 const { gateFixture, gateEvidence } = require('./gate-helpers');
 const Archive = require('../lib/archive');
 const S = require('../lib/state');
+const { shellQuote } = require('../lib/gates/common');
 
 const MIB = 1024 * 1024;
 const sha256 = (data) => crypto.createHash('sha256').update(data).digest('hex');
@@ -140,8 +141,11 @@ test('a refused accept is an inbox item, and the orchestrator drops a stale cita
   const [entry] = inbox();
   assert.equal(entry.task, 'T1');
   assert.deepEqual(entry.paths.map((p) => [p.path, p.reason, p.cited_in]), [['fill.json', 'missing', ['a note']], ['runs', 'an empty directory', ['a note']]]);
-  assert.equal(entry.action.command, 'tower-crane accept T1');
-  assert.equal(entry.drop_citation, "tower-crane accept T1 --drop-citation fill.json --drop-citation runs --reason '<why>'");
+  // Windows quotes every word, so the expected lines go through the same quoting.
+  const line = (...argv) => argv.map(shellQuote).join(' ');
+  assert.equal(entry.action.command, line('tower-crane', 'accept', 'T1'));
+  assert.equal(entry.drop_citation, line('tower-crane', 'accept', 'T1', '--drop-citation', 'fill.json', '--drop-citation', 'runs', '--reason', '<why>'));
+  if (POSIX) assert.equal(entry.drop_citation, "tower-crane accept T1 --drop-citation fill.json --drop-citation runs --reason '<why>'");
 
   assert.match(h.run(['accept', 'T1', '--drop-citation', 'fill.json']).stderr, /needs --reason/);
   assert.match(h.run(['accept', 'T1', '--drop-citation', 'fill.json', '--reason', 'never written', '--agent', 'w-1']).stderr, /accept\.drop_citation is operational/);

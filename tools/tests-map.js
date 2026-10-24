@@ -22,9 +22,10 @@ function imports(file) {
     const target = [base, `${base}.js`, `${base}/index.js`].find((p) => files.includes(p));
     if (target) deps.add(target);
   }
-  // Fixtures and runner children passed as argv or preload paths do not use require.
-  for (const source of sources.filter((p) => p.startsWith('test/fixtures/')
-    || file === 'test/run.js' && p.startsWith('test/'))) {
+  // Fixtures passed as argv or preload paths do not use require. Children the runner starts
+  // by path (its shard watchdog and file progress) stay unmapped: no suite names them, so a
+  // change to one runs the full command.
+  for (const source of sources.filter((p) => p.startsWith('test/fixtures/'))) {
     if (text.includes(path.posix.basename(source))) deps.add(source);
   }
   return deps;

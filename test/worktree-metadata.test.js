@@ -143,8 +143,9 @@ test('two preparations overlap a gate removal without pruning their initializing
 const fs = require('node:fs');
 fs.writeFileSync(${JSON.stringify(ready)}, '');
 const deadline = performance.now() + 300000;
+const parent = process.ppid;
 while (!fs.existsSync(${JSON.stringify(release)})) {
-  if (performance.now() > deadline) process.exit(1);
+  if (performance.now() > deadline || process.ppid !== parent) process.exit(1);
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
 }
 `);
@@ -157,8 +158,9 @@ const name = path.basename(process.cwd());
 if (name === 'wt') process.exit(0);
 fs.writeFileSync(path.join(${JSON.stringify(h.base)}, name + '-ready'), '');
 const deadline = performance.now() + 300000;
+const parent = process.ppid;
 while (!fs.existsSync(${JSON.stringify(addRelease)})) {
-  if (performance.now() > deadline) process.exit(1);
+  if (performance.now() > deadline || process.ppid !== parent) process.exit(1);
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
 }
 `);

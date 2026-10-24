@@ -3,6 +3,7 @@
 Tower Crane keeps a project's plan and progress in plain files. The CLI is the state writer.
 
 - [Tasks and lifecycle](state/tasks.md)
+- [Submission history](state/tasks.md#submission-history)
 - [Gates](state/gates.md)
 - [Review](state/review.md)
 - [CI](state/ci.md)
@@ -39,6 +40,8 @@ Existing links use these anchors. Follow the link to the contract in its area.
 <a id="dispatch-lock"></a>[dispatch-lock](state/storage.md#dispatch-lock)
 
 <a id="projectjson"></a>[projectjson](state/storage.md#projectjson)
+
+<a id="presubmit"></a>[presubmit](state/storage.md#presubmit)
 
 <a id="local-ci-output"></a>[local-ci-output](state/ci.md#local-ci-output)
 
@@ -125,3 +128,5 @@ Existing links use these anchors. Follow the link to the contract in its area.
 <a id="flake-ledger"></a>[flake-ledger](state/gates.md#flake-ledger)
 
 <a id="scratch-archive"></a>[scratch-archive](state/storage.md#scratch-archive)
+
+<a id="docs-and-small-fix-rounds"></a>[docs and small fix rounds](state/review.md#docs-and-small-fix-rounds)

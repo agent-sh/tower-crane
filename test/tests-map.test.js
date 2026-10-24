@@ -48,11 +48,37 @@ function check(h) {
   return JSON.parse(result.stdout);
 }
 
+test('the checked-in import seed has valid paths and supplies CLI map entries', async (t) => {
+  const seed = JSON.parse(fs.readFileSync(path.join(ROOT, 'tools/tests-map.json'), 'utf8'));
+  assert.ok(seed && typeof seed === 'object' && !Array.isArray(seed));
+  const rows = [
+    ['checked-in seed', seed, true],
+    ['array instead of map', [], false],
+    ['escaping source', { ...seed, '../outside.js': [] }, false],
+    ['escaping suite', { ...seed, 'bin/tower-crane.js': ['../outside.test.js'] }, false],
+    ['suite glob', { ...seed, 'bin/tower-crane.js': ['test/*.test.js'] }, false],
+    ['scalar suite', { ...seed, 'bin/tower-crane.js': 'test/commands.test.js' }, false],
+  ];
+  for (const [name, value, valid] of rows) {
+    await t.test(name, () => {
+      assert.equal(require('../lib/tests-map').settingError(value) === null, valid);
+    });
+  }
+  assert.ok(Array.isArray(seed['bin/tower-crane.js']));
+  // A representative entry keeps the CLI argument within Windows' command-line limit.
+  const selected = { 'bin/tower-crane.js': seed['bin/tower-crane.js'] };
+  const h = makeRepo(t);
+  h.init(['--tests-map', JSON.stringify(selected)]);
+  assert.deepEqual(h.json(['project', 'show']).tests.map, selected);
+});
+
 test('mapped head suites preserve scoped proof and policy-bound evidence through the CLI', (t) => {
   const h = fixture(t);
   assert.deepEqual(h.json(['project', 'show']).tests.map, map);
   assert.match(h.ok(['project', 'show']), /tests.map:/);
   const receipt = check(h);
+  assert.deepEqual(receipt.receipt.tests_unselected, ['test/value.test.js']);
+  assert.match(receipt.summary, /Unselected tests: test\/value\.test\.js/);
   const runs = receipt.commands.filter((c) => c.command !== 'git');
   assert.equal(receipt.receipt.head_mode, 'mapped');
   assert.deepEqual(receipt.receipt.head_tests, ['test/mapped.test.js', 'test/value.test.js']);
@@ -75,6 +101,20 @@ test('mapped head suites preserve scoped proof and policy-bound evidence through
   check(h);
   h.ok(['project', 'set', '--ci-required', '[]']);
   assert.equal(h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'tests').ok, false);
+});
+
+test('mapped selection overlays declarations at submitted head and keeps policy-bound evidence', (t) => {
+  const h = fixture(t, { '**/*.md': [] });
+  const before = h.readState('project.json');
+  fs.writeFileSync(path.join(h.repo, 'tests-map.declared.json'), '{"value.js":["test/value.test.js"]}\n');
+  h.git(['add', '.']);
+  h.git(['commit', '-qm', 'declare new source']);
+  h.ok(['submit', 'T1', '--sha', h.git(['rev-parse', 'HEAD']), '--agent', 'worker']);
+  const result = check(h);
+  assert.equal(result.receipt.head_mode, 'mapped', result.summary);
+  assert.deepEqual(result.receipt.head_tests, ['test/value.test.js']);
+  assert.deepEqual(h.readState('project.json'), before);
+  assert.equal(h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'tests').ok, true);
 });
 
 for (const [reason, settings, flags] of [
@@ -763,7 +803,7 @@ test('repository seed maps docs contract checks from docs and CLI source paths',
   }
 });
 
-test('incremental runner helpers select their consumers and unknown helpers retain full coverage', () => {
+test('runner helpers and unknown helpers retain full coverage', () => {
   const { select } = require('../lib/tests-incremental');
   const { globToRegExp, testMatcher } = require('../lib/gates/tests');
   const isTestFile = testMatcher({ tests: { paths: ['test/*.test.js', 'test/gates/*.test.js'] } }).match;
@@ -771,8 +811,8 @@ test('incremental runner helpers select their consumers and unknown helpers reta
   const available = new Set(['test', 'test/gates'].flatMap(dir => fs.readdirSync(path.join(ROOT, dir))
     .map(file => `${dir}/${file}`)).filter(isTestFile));
   for (const [file, mode] of [
-    ['test/shard-watchdog.js', 'incremental'],
-    ['test/file-progress.js', 'incremental'],
+    ['test/shard-watchdog.js', 'full'],
+    ['test/file-progress.js', 'full'],
     ['test/unmapped-runner-helper.js', 'full'],
     ['test/gates/unmapped-helper.js', 'full'],
     ['test/helpers/unmapped-helper.js', 'full'],
@@ -823,7 +863,7 @@ test('incremental seed selects directory readers for every delta status and nest
   assert.deepEqual(uncovered, []);
 });
 
-test('incremental CLI rejects fragment, suite, fixture and runner defects through their readers', async (t) => {
+test('incremental CLI rejects fragment, suite and fixture defects through their readers, and runner defects through a full run', async (t) => {
   const seed = Object.fromEntries(Object.entries(require('../tools/tests-map.json'))
     .filter(([source]) => source.includes('*') || ['test/shard-watchdog.js', 'test/file-progress.js'].includes(source)));
   const atomic = fs.readFileSync(path.join(ROOT, 'test/atomic-file.test.js'), 'utf8');
@@ -900,9 +940,13 @@ test('directory reader contracts', () => {
       const run = h.run(['check', 'tests', 'T1', '--agent', 'worker', '--json']);
       const result = JSON.parse(run.stdout);
       assert.equal(run.code, 1, `${file}: ${run.stderr}\n${run.stdout}`);
-      assert.equal(result.receipt.head_mode, 'incremental');
-      assert.equal(result.receipt.incremental_from, h.fullSha);
-      assert.ok(result.receipt.head_tests.includes(reader), file);
+      // No suite names a runner helper, so a change to one runs the full command.
+      if (reader === 'test/shard.test.js') assert.equal(result.receipt.head_mode, 'full', file);
+      else {
+        assert.equal(result.receipt.head_mode, 'incremental');
+        assert.equal(result.receipt.incremental_from, h.fullSha);
+        assert.ok(result.receipt.head_tests.includes(reader), file);
+      }
       assert.match(result.summary, error);
     });
   }
