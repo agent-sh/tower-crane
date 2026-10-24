@@ -2743,7 +2743,7 @@ options:
   --decision-delegation JSON owner only: JSON booleans orchestrator_technical and orchestrator_escalated_questions (both default true); false keeps those answers with the owner; null clears
   --publish-policy JSON    owner-required, set once: {"conditions": [review_clean, full_suite, main_ci_green]} under which the orchestrator publishes without a per-release ask; null clears
   --review-policy JSON     operational (orchestrator or owner): review diff limits, minimum reviewer rung, churn threshold and canonical model prices; null clears the policy
-  --governor JSON          operational (orchestrator or owner): host governor lines for this project's admissions {defer_at, stop_at, psi_memory_defer, psi_memory_stop, psi_cpu_defer, load_defer, others_window_min, growth_window_min, growth_samples_min, expected_mb}; null restores the defaults
+  --governor JSON          operational (orchestrator or owner): host governor lines for this project's admissions {defer_at, stop_at, psi_memory_defer, psi_memory_stop, psi_cpu_defer, load_defer, load_saturated, others_window_min, growth_window_min, growth_samples_min, expected_mb}; null restores the defaults
   --research-min-sources N owner-required: minimum distinct cited pages for research (default 10)
   --archive-retention-days DAYS operational (orchestrator or owner): days a task archive is kept after accept or cancel (default 30); null restores default
 
@@ -3143,7 +3143,7 @@ options:
   --decision-delegation JSON owner only: JSON booleans orchestrator_technical and orchestrator_escalated_questions (both default true); false keeps those answers with the owner; null clears
   --publish-policy JSON    owner-required, set once: {"conditions": [review_clean, full_suite, main_ci_green]} under which the orchestrator publishes without a per-release ask; null clears
   --review-policy JSON     operational (orchestrator or owner): review diff limits, minimum reviewer rung, churn threshold and canonical model prices; null clears the policy
-  --governor JSON          operational (orchestrator or owner): host governor lines for this project's admissions {defer_at, stop_at, psi_memory_defer, psi_memory_stop, psi_cpu_defer, load_defer, others_window_min, growth_window_min, growth_samples_min, expected_mb}; null restores the defaults
+  --governor JSON          operational (orchestrator or owner): host governor lines for this project's admissions {defer_at, stop_at, psi_memory_defer, psi_memory_stop, psi_cpu_defer, load_defer, load_saturated, others_window_min, growth_window_min, growth_samples_min, expected_mb}; null restores the defaults
   --research-min-sources N owner-required: minimum distinct cited pages for research (default 10)
   --archive-retention-days DAYS operational (orchestrator or owner): days a task archive is kept after accept or cancel (default 30); null restores default
   --broker-verbs JSON      owner-required: {NAME: {argv, source, mounts?, resources?, timeout_sec, outputs?, params?, delegate?}} host actions granted tasks run through the state broker; commit sources are pinned at approval; null removes them
