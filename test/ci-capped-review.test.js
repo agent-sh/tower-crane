@@ -33,6 +33,7 @@ function fixture(t) {
   });
   const { sha } = h;
   return {
+    state: h.state,
     check({ policy = POLICY, runs = [run('Revuto', APP, 2, CAP, 'failure')], suites = [suite(APP, 2, 'failure')], ci = {}, build = true } = {}) {
       const project = h.readState('project.json');
       project.ci = { ...ci, ...(policy === null ? {} : { capped_review: policy }) };
@@ -60,6 +61,8 @@ function fixture(t) {
         ...(evidence.worker_failure ? { worker_failure: true } : {}),
         ...(evidence.pending ? { pending: true } : {}),
         ...(evidence.not_running ? { not_running: true } : {}),
+        ...(evidence.ci_started_at ? { ci_started_at: evidence.ci_started_at } : {}),
+        ...(evidence.ci_completed_at ? { ci_completed_at: evidence.ci_completed_at } : {}),
       });
       assert.equal(evidence.source, 'check ci');
       assert.ok(Array.isArray(evidence.commands));
@@ -78,6 +81,20 @@ test('configured review cap passes the real CLI gate and is named in recorded ev
     assert.deepEqual(r.capped_review, ['Revuto (revuto-review)']);
     assert.equal(r.confirmed_failure, undefined, 'a cap is not a confirmed failure');
   }
+});
+
+test('check ci records when the CI it waited for started and completed, leaving the capped review out', (t) => {
+  const h = fixture(t);
+  const at = (minute) => `2026-10-20T10:${minute}:00Z`;
+  const r = h.check({ build: false, runs: [
+    { ...run('build', 'github-actions', 1), started_at: at('05'), completed_at: at('30') },
+    { ...run('Revuto', APP, 2, CAP, 'failure'), started_at: at('01'), completed_at: at('50') },
+  ] });
+  assert.equal(r.code, 0, r.summary);
+  assert.deepEqual([r.ci_started_at, r.ci_completed_at], [at('05'), at('30')]);
+  const log = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  const event = log.findLast((e) => e.cmd === 'check ci');
+  assert.deepEqual([event.detail.ci_started_at, event.detail.ci_completed_at], [at('05'), at('30')]);
 });
 
 test('a capped review cannot satisfy the requirement for a CI run', (t) => {

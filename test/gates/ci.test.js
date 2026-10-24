@@ -563,6 +563,26 @@ test('a run still in progress: not ok', async () => {
   assert.match(r.summary, /not completed: e2e \(in_progress\)/);
 });
 
+test('the gate records when the judged check runs started and, once none is pending or one failed, completed', async () => {
+  const timed = (name, started, completed, conclusion = 'success', status = 'completed') => ({ ...run(name, conclusion, status),
+    started_at: `2026-10-20T10:${started}:00Z`, completed_at: completed == null ? null : `2026-10-20T10:${completed}:00Z` });
+  const cap = { ci: { capped_review: [{ app: 'revuto-review', pattern: 'review limit' }] } };
+  const review = { ...timed('Revuto', '00', '59', 'failure', 'completed'), app: 'revuto-review', output: { title: 'reached the review limit' } };
+  // A capped review is not CI the task waits for, so its earlier start and later end do not count.
+  const green = await gate.run(ctx(github({ runs: [timed('build', '05', '20'), timed('lint', '03', '09'), review], suites: GREEN_SUITES }), {}, cap));
+  assert.equal(green.ok, true, green.summary);
+  assert.deepEqual([green.ci_started_at, green.ci_completed_at], ['2026-10-20T10:03:00Z', '2026-10-20T10:20:00Z']);
+  const pending = await gate.run(ctx(github({ runs: [timed('build', '05', null, null, 'in_progress'), timed('lint', '03', '09')], suites: GREEN_SUITES })));
+  assert.equal(pending.pending, true);
+  assert.deepEqual([pending.ci_started_at, pending.ci_completed_at], ['2026-10-20T10:03:00Z', undefined]);
+  const failed = await gate.run(ctx(github({ runs: [timed('build', '05', null, null, 'in_progress'), timed('lint', '03', '09', 'failure')], suites: GREEN_SUITES })));
+  assert.equal(failed.confirmed_failure, true);
+  assert.deepEqual([failed.ci_started_at, failed.ci_completed_at], ['2026-10-20T10:03:00Z', '2026-10-20T10:09:00Z']);
+  // Runs without times, as from an older gh read, record nothing.
+  const untimed = await gate.run(ctx(github({ runs: GREEN_RUNS, suites: GREEN_SUITES })));
+  assert.deepEqual([untimed.ci_started_at, untimed.ci_completed_at], [undefined, undefined]);
+});
+
 test('a suite that is queued or failed: not ok even when the listed runs are green', async () => {
   // A second workflow of the same CI app has its suite but no runs yet.
   const queued = await gate.run(ctx(github({ runs: GREEN_RUNS, suites: [...GREEN_SUITES, suite('github-actions', null, 'queued', 0)] })));
