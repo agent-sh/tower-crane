@@ -570,7 +570,7 @@ for (const pauseMs of [0, 350]) {
 test(`the suite profile runs a baseline commit from a worktree it removes afterwards (pause ${pauseMs} ms)`, { skip: process.platform !== 'linux' && 'CPU comes from /proc' }, (t) => {
   const h = makeRepo(t);
   // The runner and what it loads, so the repository's own suite runs at both commits.
-  for (const file of ['scripts/suite-profile.js', 'test/run.js', 'test/signals.js', 'test/atomic-file.js', 'test/global-setup.js', 'test/host.js', 'test/repo-seed.js', 'test/tmp-root.js',
+  for (const file of ['scripts/suite-profile.js', 'lib/scratch-root.js', 'test/run.js', 'test/signals.js', 'test/atomic-file.js', 'test/global-setup.js', 'test/host.js', 'test/repo-seed.js', 'test/tmp-root.js',
     'test/fixtures/user-config-guard.js', 'test/fixtures/report-guard.js', 'test/fixtures/no-fsync.js']) {
     fs.mkdirSync(path.dirname(path.join(h.repo, file)), { recursive: true });
     fs.copyFileSync(path.join(ROOT, file), path.join(h.repo, file));

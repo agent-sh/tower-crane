@@ -18,6 +18,7 @@ const { waitUntil, childClosed } = require('./signals');
 const A = require('../lib/agents');
 const GateProbe = require('./fixtures/gate-probe');
 const { runtimeProbe, assertRuntimeEntries } = require('./runtime-entries');
+const { configureClaudeCache } = require('./claude-probe-cache');
 
 const uid = typeof process.getuid === 'function' ? process.getuid() : null;
 const runDir = uid === null ? null : `/run/user/${uid}`;
@@ -27,8 +28,9 @@ const skip = process.env.TOWER_CRANE_LIVE_CLAUDE !== '1' ? 'set TOWER_CRANE_LIVE
 // The owner's claude login. spawn links its credentials into each agent's home,
 // so a live agent starts logged in only when its repository's user config is this dir.
 const claudeConfig = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
-function login(h) {
+function login(t, h) {
   h.env.CLAUDE_CONFIG_DIR = claudeConfig;
+  configureClaudeCache(t, h.env);
   return h;
 }
 
@@ -84,7 +86,7 @@ if (process.env.TOWER_CRANE_LIVE_CLAUDE === '1' || process.env.TOWER_CRANE_LIVE_
 }
 
 test('a sandboxed claude command cannot connect to a unix socket in a denied directory', { skip, timeout: 300000 }, async (t) => {
-  const h = login(makeRepo(t));
+  const h = login(t, makeRepo(t));
   h.init();
   h.ok(['task', 'add', '--title', 'Socket probe', '--acceptance', 'no connection']);
   const sock = path.join(runDir, `tower-crane-probe-${process.pid}.sock`);
@@ -112,7 +114,7 @@ test('a sandboxed claude command cannot connect to a unix socket in a denied dir
 // The runtime directory stays denied but the bus socket, so a socket made
 // there while the command runs is out of reach.
 test('in a real claude sandbox with sandbox.session_bus, a command connects to the bus socket and not to a socket made in the runtime directory after spawn', { skip: process.env.TOWER_CRANE_LIVE_CLAUDE !== '1' && 'set TOWER_CRANE_LIVE_CLAUDE=1 to run against the real claude CLI', timeout: 300000 }, async (t) => {
-  const h = login(makeRepo(t));
+  const h = login(t, makeRepo(t));
   h.init();
   h.ok(['task', 'add', '--title', 'Bus probe', '--acceptance', 'bus reachable']);
   // The bus is a socket in a runtime directory of the test's own, so the
@@ -170,7 +172,7 @@ test('in a real claude sandbox with sandbox.session_bus, a command connects to t
 });
 
 test('in a real claude sandbox a forged state edit fails and the CLI writes through the broker', { skip: process.env.TOWER_CRANE_LIVE_CLAUDE !== '1' && 'set TOWER_CRANE_LIVE_CLAUDE=1 to run against the real claude CLI', timeout: 300000 }, async (t) => {
-  const h = login(makeRepo(t));
+  const h = login(t, makeRepo(t));
   h.init();
   h.ok(['task', 'add', '--title', 'Forge probe', '--acceptance', 'only the broker writes']);
   const events = path.join(h.state, 'events.jsonl');
@@ -342,7 +344,7 @@ test('in a real codex sandbox a resumed agent reaches its broker after the agent
 });
 
 test('in a real claude sandbox the agent\'s tower-crane still answers after the dispatching checkout is retired', { skip, timeout: 600000 }, async (t) => {
-  const h = login(makeRepo(t));
+  const h = login(t, makeRepo(t));
   h.init();
   h.ok(['task', 'add', '--title', 'Retired engine probe', '--acceptance', 'the CLI answers']);
   const dir = results(h);
@@ -447,14 +449,13 @@ for (const runtime of ['with', 'without']) test(`a real claude agent's commands 
 });
 
 // claude's sandbox hides /tmp and allows back only what the agent needs
-// there. The parent of a PATH entry of /tmp is /, and a caller's TMPDIR of
-// /tmp is where claude makes its proxy sockets; neither is allowed back, so
-// a command reads neither a file planted in /tmp nor one in the home outside
-// its grants. The fixture's cache root is too deep for claude's own TMPDIR,
-// so the agent keeps the caller's.
+// there. The parent of a PATH entry of /tmp is /, which is not allowed back,
+// and a caller's TMPDIR of /tmp is not kept: the agent starts with its own.
+// So a command reads neither a file planted in /tmp nor one in the home
+// outside its grants.
 for (const route of ['PATH', 'TMPDIR']) {
   test(`in a real claude sandbox with ${route === 'PATH' ? '/tmp on PATH' : 'the caller\'s TMPDIR at /tmp'}, a command reads neither a file planted in /tmp nor one in the home outside its grants`, { skip, timeout: 300000 }, async (t) => {
-    const h = login(makeRepo(t));
+    const h = login(t, makeRepo(t));
     h.init();
     h.ok(['task', 'add', '--title', 'Tmp grant probe', '--acceptance', 'nothing planted is read']);
     const out = path.join(results(h), 'tmp-grant-probe.json');
@@ -476,7 +477,7 @@ for (const route of ['PATH', 'TMPDIR']) {
     const env = route === 'PATH' ? { ...h.env, PATH: `${h.env.PATH || process.env.PATH}${path.delimiter}/tmp` } : { ...h.env, TMPDIR: '/tmp', TMP: '/tmp', TEMP: '/tmp' };
     const r = await h.runAsync(['spawn', '--role', 'small', '--task', 'T1', '--wait'], { env });
     assert.equal(r.code, 0, `${r.stderr}\n${agentLog(h)}`);
-    assert.match(r.stdout, /claude's sandbox keeps \/tmp hidden: the (PATH directory|caller's TMPDIR) \/tmp is \/tmp itself, so it is not allowed back/);
+    if (route === 'PATH') assert.match(r.stdout, /claude's sandbox keeps \/tmp hidden: the PATH directory \/tmp is \/tmp itself, so it is not allowed back/);
     const settings = JSON.parse(fs.readFileSync(path.join(h.state, 'homes', 'small-T1-1', 'settings.json'), 'utf8'));
     const box = settings.sandbox.filesystem;
     assert.ok(!box.allowRead.includes('/') && !box.allowRead.includes(fs.realpathSync('/tmp')), box.allowRead.join(' '));
@@ -484,7 +485,7 @@ for (const route of ['PATH', 'TMPDIR']) {
     assert.ok(fs.existsSync(out), `the probe ran\n${agentLog(h)}`);
     const seen = JSON.parse(fs.readFileSync(out, 'utf8'));
     console.log(`claude tmp grant probe, ${route}: ${JSON.stringify(seen)}`);
-    if (route === 'TMPDIR') assert.ok(seen.tmpdir === '/tmp' || seen.tmpdir?.startsWith('/tmp/'), `the agent keeps the caller's TMPDIR: ${seen.tmpdir}`);
+    assert.ok(seen.tmpdir && seen.tmpdir !== '/tmp' && !seen.tmpdir.startsWith('/tmp/'), `the agent's commands get a TMPDIR of their own, not the caller's: ${seen.tmpdir}`);
     assert.match(seen.tmp, /^ERR /, 'a file planted in /tmp is unreadable');
     assert.match(seen.home, /^ERR /, 'a file in the home outside the grants is unreadable');
   });
@@ -537,9 +538,7 @@ function assertNoPushCredential(seen, label) {
 // root is deeper, and with the caller's TMPDIR hidden no command reaches the
 // proxy. Removed with the test.
 function shortCache(t) {
-  const dir = fs.mkdtempSync(path.join(os.homedir(), '.cache', 'tcl-'));
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
-  return dir;
+  return configureClaudeCache(t, {});
 }
 
 function assertNetwork(seen, label) {
@@ -682,7 +681,7 @@ for (const harness of ['claude', 'codex']) {
       input: `Sandbox probe set up by the owner. Run exactly this one command with your command tool, then reply with its exit code and stop. It waits up to two minutes for a signal file; let it finish. Do not use tower-crane.\n\n${node} -e '${script}'\n`,
     });
     pinLiveRung(h, harness, 'small');
-    const env = { ...h.env, HOME: home, USERPROFILE: home, CLAUDE_CONFIG_DIR: '', CODEX_HOME: '', XDG_CACHE_HOME: path.join(h.base, 'cache') };
+    const env = { ...h.env, HOME: home, USERPROFILE: home, CLAUDE_CONFIG_DIR: '', CODEX_HOME: '', XDG_CACHE_HOME: harness === 'claude' ? shortCache(t) : path.join(h.base, 'cache') };
     let done = false;
     const run = h.runAsync(['spawn', '--role', 'small', '--task', 'T1', '--wait'], { env }).finally(() => { done = true; });
     // The command's own signal; the spawn ending first means it never ran.
@@ -933,7 +932,7 @@ process.exit(r.status ?? 1);
 // the bash sandbox does not apply, and with Bash. A token beside the stored
 // SKILL.md, never in the prompt, shows which reads returned the file.
 test('in a real claude sandbox a worker reads the SKILL.md path it is told to read with the Read tool and with Bash', { skip: process.env.TOWER_CRANE_LIVE_CLAUDE !== '1' && 'set TOWER_CRANE_LIVE_CLAUDE=1 to run against the real claude CLI', timeout: 400000 }, async (t) => {
-  const h = login(makeRepo(t));
+  const h = login(t, makeRepo(t));
   h.init();
   h.ok(['task', 'add', '--title', 'Skill read probe', '--acceptance', 'reports']);
   const dir = results(h);
@@ -997,7 +996,7 @@ test('in a real codex sandbox the first git and gh on PATH are the agent\'s shim
 });
 
 test('in a real claude sandbox the first git and gh on PATH are the agent\'s shims, and the shim refuses a push to another task\'s branch', { skip: process.env.TOWER_CRANE_LIVE_CLAUDE !== '1' && 'set TOWER_CRANE_LIVE_CLAUDE=1 to run against the real claude CLI', timeout: 300000 }, async (t) => {
-  const h = login(makeRepo(t));
+  const h = login(t, makeRepo(t));
   h.init();
   h.ok(['task', 'add', '--title', 'Shim probe', '--acceptance', 'git and gh are the shims']);
   const out = path.join(results(h), 'shim-probe.json');

@@ -270,7 +270,9 @@ reaction that later waits for an executor gets a second record with
 `executors`. Queued notifications for accepted, unmerged PR
 tasks run first, in the order of their current `accept` events. This includes
 older notifications that now run a merge and any merged-tree test the merge
-needs. Running reactions are never preempted.
+needs. Running reactions are never preempted. The task of a merge pause,
+armed or holding, goes ahead of them too: its notifications run before every
+other queued one, merges included ([Merge pause](#merge-pause)).
 The merge line runs under whichever reaction drains it, often one for a task
 that already merged, so a head check ranks by the accepted task it checks,
 not by that reaction's own task: it takes a free executor ahead of every
@@ -348,7 +350,8 @@ head check is running, listed in merge-line order as `merge waits: TASK since
 AT, behind WHAT`, with JSON `merge_waits: [{id, since, behind}]`. `since` is
 the task's own current `accept` event's time. A linked stack is one entry of
 the line, and each of its unblocked members is listed with what holds the
-entry. `behind` is the first that holds: a blocked member of the same entry
+entry. `behind` is the first that holds: a holding merge pause (`the merge pause
+for T5 until T`), a blocked member of the same entry
 (`T1 merge blocked: REASON`), a `suite` deferral
 of the host governor (`the host governor: REASON`), a head check waiting for
 an executor (`a gate executor: N of M in use: ...`, the leases held now),
@@ -383,8 +386,8 @@ or `merged` event; this call still records its reservation and release.
 The merge queue takes the head of the line's reservation
 with source `queue:<uuid>` around its merge, unless its own process
 already holds it. Stack head checks ignore `automation`,
-`automation queued`, `automation reconcile` and `gates prioritize` events,
-which change no task state.
+`automation queued`, `automation reconcile`, `gates prioritize`, `merge pause`
+and `merge pause end` events, which change no task state.
 An accepted PR already merged remotely without a local merge receipt goes
 through the merge gate's confirmation path. It records the matching
 accepted head and the PR's merge
@@ -526,6 +529,14 @@ records `cpu`, its CPU weight ([CPU shares](containment.md#cpu-shares)). An ok c
 evidence; it never changes `evidence`.
 
 A timed-out head check also records `infrastructure_failure: true` and the same `timeout` detail as gate evidence. It stops that queue entry with its timeout summary, keeps the task accepted and performs no merge or rework. The next queue pass reruns it once for the same task, head, revision, base tip, command and timeout budget. The queue reservation serializes concurrent requests; later queued reactions reuse the rerun's result, including another timeout. That rerun's `head check` records `rerun_of`, the first timeout's event source. Reuse records one `head check shared` event per result with `{sha, revision, base_sha, command, source, ok, summary}` and `infrastructure_failure: true` for a timed-out result; `source` names the rerun's event. A changed head, revision, base, command or timeout budget starts a fresh check. Successful checks remain reusable after a budget change.
+
+## Merge pause
+
+`merge pause ID --minutes N --reason R` (operational, [Authority](decisions.md#authority)) records a `merge pause` event with `reason`, `minutes`, `holding` (whether the task was submitted or accepted then) and `authority`. The pause is armed until the task's next `submit`, or holds at once when `holding` is true. While it holds, the merge line takes only the entry that carries the task or sits below it in its stack; other accepted tasks wait, listed `behind the merge pause for ID until T`, and a manual `merge` of one of them refuses. Armed or holding, the task's queued notifications run before every other notification, merges included ([events.jsonl](storage.md#eventsjsonl)).
+
+The pause ends when the task merges, is cancelled or has a `rework` after the pause started holding (a failed gate or review, a conflict or a person's send-back), or `minutes` after it started holding. The end is computed on each read; the wait host's refill pass records it as `merge pause end` with `why` (`merged`, `cancelled`, `reworked` or `deadline`), `set_at`, `since`, `until` and `reason`, and appends an `automation reconcile` for each accepted, unmerged PR task so the held merges run. The refill timer wakes at the deadline. One pause holds at a time: a second task refuses until the first is cleared or ended, and setting it again for the same task restarts it. `merge pause ID --clear` records `clear: true` and `authority`; clearing a holding pause also records its `merge pause end` with `why: "cleared"` and the same reconciles. A new pause that replaces one whose end no refill pass recorded yet records that end first, so its held merges run too. `--minutes` has no default; the orchestrator sizes it to the task's gates and review.
+
+`status` shows `merge pause: ID holds other merges until T: REASON`, or `ID armed: from its next submit it holds other merges for N min: REASON`; JSON `merge_pause` is `{task, reason, minutes, set_at, by, phase, since, until}` or null once it ended.
 
 ## Gate events
 
