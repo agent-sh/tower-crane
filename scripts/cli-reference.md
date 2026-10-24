@@ -1202,7 +1202,7 @@ Task messages older than 24 h stop appearing once their task is cancelled or acc
 
 ### Repeated review failures
 
-When two failed independent reviews identify blocking findings at the same normalized file path, `claim`, `ready` and worker `spawn` (including `--dry-run`, explicit rungs and `--ready`) hold the task. `inbox` reports a `review_redesign` item naming the paths and the ruling needed, instead of offering another `rework_ready` dispatch. The count survives rework revisions and ordinary acceptance edits; failures at the same SHA and revision count once per area, whichever reviewers recorded them.
+When two failed independent reviews identify blocking findings at the same normalized file path, `claim`, `ready` and worker `spawn` (including `--dry-run`, explicit rungs and `--ready`) hold the task. `inbox` reports a `review_redesign` item to the orchestrator naming the paths, both failed reviews (`sha` and first blocking `finding`), the open tasks that wait on it and the two commands that clear it, instead of offering another `rework_ready` dispatch; `status` lists the held tasks under `needs orchestrator:`, urgent first, with how long each has waited. The count survives rework revisions and ordinary acceptance edits; failures at the same SHA and revision count once per area, whichever reviewers recorded them.
 
 The orchestrator or owner resolves the hold in one of two ways:
 

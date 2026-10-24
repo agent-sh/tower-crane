@@ -49,6 +49,48 @@ test('repeated review blocks claim, spawn previews, real spawn and ready batches
   assert.ok(item.action.argv.includes('scope-ruling'));
 });
 
+test('a held task is an orchestrator inbox item and a status line until a ruling clears it', (t) => {
+  const h = setup(t);
+  h.ok(['task', 'add', '--title', 'Retry metrics', '--acceptance', 'Metrics count retries', '--dep', 'T1']);
+  h.ok(['task', 'add', '--title', 'Store keys', '--acceptance', 'Keys persist']);
+  h.ok(['brief', 'set', 'T3', '-'], { input: 'Persist keys.\n' });
+  h.ok(['task', 'update', 'T3', '--priority', 'urgent', '--agent', 'orchestrator']);
+  for (const digit of ['c', 'd']) {
+    h.ok(['claim', 'T3', '--agent', 'worker']);
+    h.ok(['submit', 'T3', '--sha', digit.repeat(40), '--agent', 'worker']);
+    h.ok(['evidence', 'T3', '--type', 'review', '--fail', '--sha', digit.repeat(40), '--revision', h.revision('T3'),
+      '--summary', 'One blocking defect', '--findings', JSON.stringify([{ kind: 'defect', path: 'lib/store.js', claim: `lost key ${digit}` }])]);
+    h.ok(['rework', '--from-review', 'T3', '--agent', 'orchestrator']);
+  }
+  const held = () => h.json(['inbox', '--agent', 'orchestrator']).items.filter((i) => i.kind === 'review_redesign');
+  const item = held().find((i) => i.task === 'T1');
+  assert.equal(item.addressed_to, 'orchestrator');
+  assert.deepEqual(item.areas, ['lib/retry.js']);
+  assert.deepEqual(item.reviews.map((r) => [r.sha, r.finding]), [
+    ['a'.repeat(40), '1 blocking finding: lib/retry.js:12 - Duplicate delivery'],
+    ['b'.repeat(40), '1 blocking finding: lib/retry.js:12 - Duplicate delivery'],
+  ]);
+  assert.deepEqual(item.commands, [
+    "tower-crane task update T1 --acceptance '<closed item>' --closed-acceptance",
+    "tower-crane task note T1 '<design change>' --kind scope-ruling",
+  ]);
+  assert.deepEqual(item.dependents, ['T2']);
+  assert.equal(item.since, item.reviews[1].at);
+  assert.deepEqual(held().find((i) => i.task === 'T3').reviews.map((r) => r.finding), ['lib/store.js: lost key c', 'lib/store.js: lost key d']);
+  assert.match(h.ok(['status']), /^needs orchestrator: T3 \[urgent\] lib\/store\.js, waiting \d+m; T1 lib\/retry\.js, waiting \d+m, blocks T2$/m);
+  const status = h.json(['status']).needs_orchestrator;
+  assert.deepEqual(status.map((r) => [r.id, r.priority, r.dependents]), [['T3', 'urgent', []], ['T1', 'normal', ['T2']]]);
+  assert.ok(status.every((r) => r.waited_ms >= 0 && r.commands.length === 2));
+
+  h.ok(['task', 'note', 'T3', 'Store keys in one table', '--kind', 'scope-ruling', '--agent', 'orchestrator']);
+  assert.deepEqual(held().map((i) => i.task), ['T1']);
+  assert.match(h.ok(['status']), /^needs orchestrator: T1 lib\/retry\.js, waiting \d+m, blocks T2$/m);
+  h.ok(['task', 'update', 'T1', '--acceptance', 'Only retry HTTP 503', '--closed-acceptance', '--agent', 'orchestrator']);
+  assert.deepEqual(held(), []);
+  assert.doesNotMatch(h.ok(['status']), /needs orchestrator/);
+  assert.deepEqual(h.json(['status']).needs_orchestrator, []);
+});
+
 test('only a scope ruling or explicit closed acceptance clears the repeated-review gate', (t) => {
   const h = setup(t);
   h.ok(['task', 'note', 'T1', 'Keep patching', '--agent', 'worker']);
