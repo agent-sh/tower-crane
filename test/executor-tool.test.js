@@ -53,6 +53,9 @@ function oldTool(h) {
   }, { dir });
 }
 
+// A refusal check prints the whole result, so a signal or failed launch is not read as a refusal.
+const dump = (r) => JSON.stringify({ code: r.code, signal: r.signal ?? null, error: r.error?.message ?? null, stdout: r.stdout, stderr: r.stderr });
+
 // The project's newest engine record names the current tool once this runs.
 function engineRecord() {
   return { at: new Date().toISOString(), agent: 'orchestrator', cmd: 'check tests', task: 'T1', detail: { tool: Tool.current() } };
@@ -125,7 +128,7 @@ test('an executor on an older tool leaves queued work for a current one; receipt
   h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha, '--ok', '--agent', 'reviewer']);
   const old = oldTool(h);
   const waited = old(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
-  assert.equal(waited.code, 2, waited.stderr);
+  assert.equal(waited.code, 2, dump(waited));
   assert.match(waited.stderr, /this tool \(0\.0\.0 a79075ad\) is behind the project's engine/);
   assert.deepEqual(h.logs().filter((e) => e.cmd === 'automation'), [], 'the old executor took no reaction');
   assert.deepEqual(h.readState('tasks.json').tasks[0].evidence.map((e) => e.type), ['ci', 'review']);
@@ -135,7 +138,7 @@ test('an executor on an older tool leaves queued work for a current one; receipt
   assert.ok(queued.every((e) => e.detail.tool.version === OLD.version && e.detail.engine_tool.sha === Tool.current().sha));
   for (const args of [['check', 'tests', 'T1'], ['accept', 'T1'], ['merge', '--accepted'], ['spawn', '--task', 'T1']]) {
     const r = old([...args, '--agent', 'orchestrator']);
-    assert.equal(r.code, 1, `${args.join(' ')}: ${r.stderr}`);
+    assert.equal(r.code, 1, `${args.join(' ')}: ${dump(r)}`);
     assert.match(r.stderr, /refused: this tool \(0\.0\.0 a79075ad\) is behind the project's engine/, args.join(' '));
   }
   assert.equal(h.readState('tasks.json').tasks[0].status, 'submitted');
@@ -163,7 +166,7 @@ test('an older tool\'s review spawn refuses before routing a failed review and l
     '--findings', JSON.stringify([{ kind: 'defect', path: 'lib/x.js', claim: 'broken' }]), '--agent', 'reviewer']);
   const before = h.readState('tasks.json').tasks[0];
   const r = oldTool(h)(['spawn', '--role', 'review', '--task', 'T1', '--agent', 'orchestrator']);
-  assert.equal(r.code, 1, r.stdout + r.stderr);
+  assert.equal(r.code, 1, dump(r));
   assert.match(r.stderr, /T1: spawn refused: this tool \(0\.0\.0 a79075ad\) is behind the project's engine/);
   assert.doesNotMatch(r.stdout, /sent back for rework/);
   const after = h.readState('tasks.json').tasks[0];
@@ -184,7 +187,8 @@ test('a supervisor whose agent exits runs only its own task\'s reactions; the wa
   const other = h.logs().findLast((e) => e.cmd === 'submit' && e.task === 'T2');
   fs.appendFileSync(path.join(h.state, 'events.jsonl'), `${JSON.stringify({ at: new Date().toISOString(), agent: 'orchestrator',
     cmd: 'automation queued', task: 'T2', detail: { source: other.id, executors: 2 } })}\n`);
-  assert.equal((await h.runAsync(['spawn', '--task', 'T1', '--wait', '--agent', 'orchestrator'])).code, 0);
+  const spawned = await h.runAsync(['spawn', '--task', 'T1', '--wait', '--agent', 'orchestrator']);
+  assert.equal(spawned.code, 0, dump(spawned));
   await waitOnRepo(h, () => h.readState('tasks.json').tasks[0].evidence.some((e) => e.type === 'merge' && e.ok),
     () => JSON.stringify(h.logs().slice(-10)));
   // Both supervisors, the worker's and the reviewer's it dispatched, exit.
