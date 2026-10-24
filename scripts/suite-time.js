@@ -1,21 +1,24 @@
 'use strict';
 
-// Both CI proofs run the whole suite under the tests gate's deadline. Each
-// prints its wall time against that deadline and warns while there is still
-// headroom, so a slow trend shows up before a run times out.
+// Proofs measure a fixed set independently of the project's full-suite gate.
 
 const cp = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const { readText } = require('./text');
 
-// The one source for the suite deadline. check:shared holds the proof jobs'
-// workflow timeouts and the project's configured tests gate timeout to it.
+// A clone's full-suite gate keeps its own deadline.
 const DEADLINE_MIN = 45;
+// Brokers and workers create scratch and nested gates; ladder covers the swap's
+// documented-defaults assertion. Keep complete files at three file workers.
+const PROOF_FILES = ['test/ladder.test.js', 'test/broker.test.js', 'test/spawn.test.js', 'test/gates/tests.test.js'];
+// The local sizing run took 133.5 s; 10 minutes leaves 4.5 times that budget.
+// Its two worker-shim refusals still need host verification (docs/testing.md).
+const PROOF_DEADLINE_MIN = 10;
 const WARN_SHARE = 0.75;
 // Setup time around the suite runs: the model swap proof runs the suite once;
 // the gate scratch proof reruns it on the base when the head fails.
-const JOB_TIMEOUTS = { 'model-swap': DEADLINE_MIN + 5, 'gate-scratch': 2 * DEADLINE_MIN + 10 };
+const JOB_TIMEOUTS = { 'model-swap': PROOF_DEADLINE_MIN + 5, 'gate-scratch': 2 * PROOF_DEADLINE_MIN + 10 };
 
 function suiteTime(ms, deadlineMin = DEADLINE_MIN) {
   const share = ms / (deadlineMin * 60000);
@@ -66,7 +69,7 @@ function checkSuiteDeadline(root, env = process.env, warn = (line) => console.er
   for (const [job, minutes] of workflow === null ? [] : Object.entries(JOB_TIMEOUTS)) {
     const actual = jobTimeout(workflow, job);
     if (actual !== String(minutes)) {
-      found.push(`.github/workflows/ci.yml job ${job} has timeout-minutes ${actual ?? 'unset'}; DEADLINE_MIN ${DEADLINE_MIN} in scripts/suite-time.js sets it to ${minutes}`);
+      found.push(`.github/workflows/ci.yml job ${job} has timeout-minutes ${actual ?? 'unset'}; PROOF_DEADLINE_MIN ${PROOF_DEADLINE_MIN} in scripts/suite-time.js sets it to ${minutes}`);
     }
   }
   const file = projectFile(root, env);
@@ -80,4 +83,4 @@ function checkSuiteDeadline(root, env = process.env, warn = (line) => console.er
   if (found.length) throw new Error(found.join('\n'));
 }
 
-module.exports = { suiteTime, reportSuiteTime, checkSuiteDeadline, DEADLINE_MIN, WARN_SHARE, JOB_TIMEOUTS };
+module.exports = { suiteTime, reportSuiteTime, checkSuiteDeadline, DEADLINE_MIN, PROOF_FILES, PROOF_DEADLINE_MIN, WARN_SHARE, JOB_TIMEOUTS };

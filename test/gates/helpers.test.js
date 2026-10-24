@@ -52,7 +52,8 @@ test('gate fixtures ignore inherited state and Git repository paths', async (t) 
         const root = path.join(dir, 'repo');
         const sha = initRepo(root, { 'fixture.txt': 'scratch only\\n' });
         const lock = lockPath({ root, commonDir: path.join(root, '.git') });
-        assert.ok(lock.startsWith(root + path.sep), lock);
+        // lockPath names the lock by the repository's real path, and the temp root can be a symlink.
+        assert.ok(lock.startsWith(fs.realpathSync.native(root) + path.sep), lock);
         withWorktree({}, root, sha, (checkout) => {
           assert.equal(fs.readFileSync(path.join(checkout, 'fixture.txt'), 'utf8'), 'scratch only\\n');
           assert.ok(checkout.startsWith(dir + path.sep), checkout);

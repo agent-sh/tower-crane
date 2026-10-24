@@ -11,7 +11,7 @@ const C = require('../lib/containment');
 const { cachedFixture } = require('./helpers');
 const probe = require('../scripts/probe-keeper-cpu');
 
-test('keeper CPU probe rejects shared, ancestor, sibling and occupied targets', (t) => {
+test('keeper CPU probe rejects shared, ancestor, sibling and occupied targets', { skip: process.platform !== 'linux' && 'Linux cgroups' }, (t) => {
   const caller = '/sys/fs/cgroup/caller.scope';
   let current;
   let members;
@@ -41,7 +41,7 @@ test('keeper CPU probe rejects shared, ancestor, sibling and occupied targets', 
   }
 });
 
-test('keeper CPU probe removes its private group after success, error and timeout', (t) => {
+test('keeper CPU probe removes its private group after success, error and timeout', { skip: process.platform !== 'linux' && 'Linux cgroups' }, (t) => {
   const group = '/sys/fs/cgroup/caller.scope/keeper-cpu-abc123';
   const removed = [];
   t.mock.method(C, 'currentGroup', () => path.dirname(group));
@@ -131,7 +131,7 @@ test('a failed Linux page-size query is retried without caching invalid RSS unit
   sampler.close();
 });
 
-test('cgroup keepers read only cgroup membership, including nested groups', (t) => {
+test('cgroup keepers read only cgroup membership, including nested groups', { skip: process.platform !== 'linux' && 'Linux cgroups' }, (t) => {
   const group = '/fake-cgroup';
   const files = {
     [`${group}/cgroup.events`]: 'populated 1\n',
@@ -355,7 +355,7 @@ test('CLI watchdog survives a failed sample but stops after consecutive failures
   }
 });
 
-test('cgroup keeper ticks use population without any host process scan', async (t) => {
+test('cgroup keeper ticks use population without any host process scan', { skip: process.platform !== 'linux' && 'Linux cgroups' }, async (t) => {
   const exitCode = process.exitCode;
   t.after(() => { process.exitCode = exitCode; });
   const group = '/fake-keeper-cgroup';

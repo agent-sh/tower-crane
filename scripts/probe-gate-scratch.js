@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const cp = require('node:child_process');
-const { suiteTime, reportSuiteTime, DEADLINE_MIN } = require('./suite-time');
+const { suiteTime, reportSuiteTime, PROOF_FILES, PROOF_DEADLINE_MIN } = require('./suite-time');
 
 const ROOT = path.resolve(__dirname, '..');
 const BIN = path.join(ROOT, 'bin', 'tower-crane.js');
@@ -12,7 +12,7 @@ const BIN = path.join(ROOT, 'bin', 'tower-crane.js');
 // The gate bounds each suite run. A failing head runs the suite again on the
 // base for the failing names, so the probe outlasts two runs and still gets
 // the gate's report naming the failures.
-const TESTS_MIN = DEADLINE_MIN;
+const TESTS_MIN = PROOF_DEADLINE_MIN;
 
 function contents(root) {
   return fs.readdirSync(root, { recursive: true }).sort();
@@ -26,25 +26,28 @@ const scratch = (entries) => entries.filter((entry) => entry.split(path.sep)[0] 
 
 // A separate state exercises the real gate without changing the project's tasks.
 function probe({ root = ROOT, cache, command, environment = process.env } = {}) {
+  const representative = !command;
   if (!command && (environment.TOWER_CRANE_SANDBOX === '1' || environment.TOWER_CRANE_BROKER)) {
     throw new Error('the complete gate scratch proof must run on the host, outside the worker sandbox');
   }
   cache ||= environment.TOWER_CRANE_TEST_TMP || path.join(os.homedir(), '.cache', 'tower-crane-proof');
-  command ||= 'node test/run.js --test-concurrency=3';
+  command ||= `node test/run.js --test-concurrency=3 ${PROOF_FILES.join(' ')}`;
   fs.mkdirSync(cache, { recursive: true });
   const run = fs.mkdtempSync(path.join(cache, 'gate-scratch-proof-'));
   const outer = path.join(run, 'outer');
   const gates = path.join(run, 'gates');
   const state = path.join(run, 'state');
   const env = { ...environment };
-  // Host readings describe the machine, independently of the probe's fresh state.
+  // A worker's granted socket leaf is the short root its nested brokers reach.
   for (const key of Object.keys(env)) {
-    if (key.startsWith('TOWER_CRANE_') && key !== 'TOWER_CRANE_HOST_ROOT'
+    if (key.startsWith('TOWER_CRANE_') && !['TOWER_CRANE_HOST_ROOT', 'TOWER_CRANE_SOCKET_DIR'].includes(key)
       || key.startsWith('TC_TEST_') || key === 'NODE_TEST_CONTEXT') delete env[key];
   }
-  // Tests use an isolated governor; host measurements still use the real host.
-  // A fake host made here is written inside the try below, so the run's removal covers it.
-  const fakeHost = !environment.TOWER_CRANE_HOST_ROOT && (environment.NODE_TEST_CONTEXT || process.env.NODE_TEST_CONTEXT);
+  // The representative proof checks cleanup, not admission. Its enclosing host
+  // gate already reserves resources, so another real reservation can defer it.
+  // Custom commands retain real admission; supplied host readings always win.
+  const fakeHost = !environment.TOWER_CRANE_HOST_ROOT
+    && (representative || environment.NODE_TEST_CONTEXT || process.env.NODE_TEST_CONTEXT);
   if (environment.TOWER_CRANE_HOST_ROOT) env.TOWER_CRANE_HOST_ROOT = environment.TOWER_CRANE_HOST_ROOT;
   else if (fakeHost) env.TOWER_CRANE_HOST_ROOT = path.join(run, 'host');
   Object.assign(env, {
@@ -91,7 +94,7 @@ function probe({ root = ROOT, cache, command, environment = process.env } = {}) 
     const checked = call(['check', 'tests', id]);
     // A passing head runs the suite once, so this is its wall time; a failing
     // head adds the base rerun, and the proof fails anyway.
-    result.suite_time = suiteTime(performance.now() - started);
+    result.suite_time = suiteTime(performance.now() - started, TESTS_MIN);
     result.gate = checked.data;
     result.exit = checked.status;
     result.stderr = checked.stderr;

@@ -58,7 +58,9 @@ listener. Concurrent consumers serialize reactions per task using audited
 event receipts and drain queued notifications. Accepted tasks' merges run
 first, in acceptance order. The orchestrator can move a submitted task's
 queued gate work ahead of older submitted work with `gates prioritize`
-([state](state.md#eventsjsonl)).
+([state](state.md#eventsjsonl)). Priority survives rework and resubmission
+until acceptance, cancellation or `--clear`. Prioritized tasks run in
+first-request order unless an explicit `--rank` changes it.
 Supervisors use the dispatcher's command PATH and an explicit trusted
 authorization context. Unknown mergeability and transport errors remain
 retryable at startup. A remote merge completed before its local receipt

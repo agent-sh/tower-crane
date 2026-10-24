@@ -52,9 +52,15 @@ function buildQueue(h) {
   fs.writeFileSync(suite, `const fs = require('node:fs'), path = require('node:path');
 const gh = JSON.parse(fs.readFileSync(${JSON.stringify(h.env.AUTOMATION_GITHUB)}, 'utf8'));
 fs.appendFileSync(${JSON.stringify(h.suiteLog)}, JSON.stringify({ pr7: gh.prs['7'].state }) + '\\n');
-// A gate run that fails once, as gates did for tasks accepted before evidence.
-const failOnce = ${JSON.stringify(path.join(h.base, 'fail-once'))};
-if (fs.existsSync(failOnce)) { fs.rmSync(failOnce); process.exit(1); }
+// Gate runs that fail, as gates did for tasks accepted before evidence; the file holds how many.
+const failRuns = ${JSON.stringify(path.join(h.base, 'fail-runs'))};
+if (fs.existsSync(failRuns)) {
+  // read-published: only this script rewrites the count, one gate run at a time.
+  const left = Number(fs.readFileSync(failRuns, 'utf8')) - 1;
+  if (left > 0) fs.writeFileSync(failRuns, String(left));
+  else fs.rmSync(failRuns);
+  process.exit(1);
+}
 // One run moves main while it runs, as another merge landing would.
 if (fs.existsSync(${JSON.stringify(path.join(h.base, 'move-main-once'))})) {
   fs.rmSync(${JSON.stringify(path.join(h.base, 'move-main-once'))});
@@ -116,7 +122,7 @@ test('main moves: a mergeable PR keeps its evidence and merges after one head-of
 // Crucial mode (tests.crucial, tests.expensive and tests.map): the head of the line runs what the
 // tests gate selects for the change it brings onto main, never the full suite. A run-only task's
 // tests gate selects nothing, so its head check runs the full command as before.
-for (const [mode, crucial] of [['prove', true], ['run-only', false]]) test(`in crucial mode with tests.mode ${mode} the head check runs ${crucial ? 'the crucial and mapped suites of the change' : 'the full command'}`, (t) => {
+for (const [mode, crucial, addedOnBase] of [['prove', true, false], ['run-only', false, false], ['prove', true, true]]) test(`in crucial mode with tests.mode ${mode} the head check runs ${crucial ? 'the crucial and mapped suites of the change' : 'the full command'}${addedOnBase ? ' including a crucial file added on base' : ''}`, (t) => {
   const h = setup(t);
   const log = path.join(h.base, 'suite-argv.jsonl');
   const suite = path.join(h.base, 'suite.js');
@@ -137,6 +143,17 @@ for (const f of files) require(path.resolve(f));
   fs.appendFileSync(path.join(h.repo, 'README.md'), 'Independent base update.\n');
   h.git(['add', 'README.md']);
   h.git(['commit', '-qm', 'advance main']);
+  if (addedOnBase) {
+    fs.mkdirSync(path.join(h.repo, 'test'), { recursive: true });
+    fs.writeFileSync(path.join(h.repo, 'test/new.test.js'), `require('node:fs').appendFileSync(${JSON.stringify(path.join(h.base, 'new-ran'))}, 'x');\n`);
+    h.git(['add', '.']);
+    h.git(['commit', '-qm', 'new crucial suite']);
+    h.ok(['project', 'set', '--tests-crucial', '["test/value.test.js","test/new.test.js"]']);
+    const gate = h.json(['check', 'tests', 'T1', '--agent', 'worker']);
+    assert.equal(gate.ok, true, gate.summary);
+    assert.equal(gate.receipt.crucial_skipped[0].path, 'test/new.test.js');
+    assert.equal(fs.existsSync(path.join(h.base, 'new-ran')), false, 'the task gate skips the new base suite');
+  }
   const runs = fs.readFileSync(log, 'utf8').trim().split('\n').length;
   h.reviewer('T1', 'reviewer');
   h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha, '--ok', '--agent', 'reviewer']);
@@ -151,10 +168,12 @@ for (const f of files) require(path.resolve(f));
     return;
   }
   assert.equal(check.detail.head_mode, 'crucial');
-  assert.deepEqual(check.detail.head_tests, ['test/value.test.js']);
-  assert.equal(check.detail.command, `${node} ${shellQuote('test/value.test.js')}`);
-  assert.deepEqual(fs.readFileSync(log, 'utf8').trim().split('\n').slice(runs).map(JSON.parse), [['test/value.test.js']],
+  const expected = addedOnBase ? ['test/new.test.js', 'test/value.test.js'] : ['test/value.test.js'];
+  assert.deepEqual(check.detail.head_tests, expected);
+  assert.equal(check.detail.command, `${node} ${expected.map(shellQuote).join(' ')}`);
+  assert.deepEqual(fs.readFileSync(log, 'utf8').trim().split('\n').slice(runs).map(JSON.parse), [expected],
     'the head check named its suites; a full run names none');
+  if (addedOnBase) assert.equal(fs.readFileSync(path.join(h.base, 'new-ran'), 'utf8'), 'x', 'the merged-tree check ran the new suite once');
 });
 
 test('the head check runs the suite on a clean checkout of the merge', (t) => {
@@ -471,7 +490,8 @@ test('an accepted PR that already merged without current evidence is confirmed a
   acceptBoth(h);
   // T1 is a legacy task: its tests evidence no longer passes and its PR
   // landed on GitHub before tower-crane recorded merge evidence.
-  fs.writeFileSync(path.join(h.base, 'fail-once'), '');
+  // The run and its one rerun both fail, so the evidence does not pass.
+  fs.writeFileSync(path.join(h.base, 'fail-runs'), '2');
   h.run(['check', 'tests', 'T1', '--agent', 'orchestrator']);
   assert.equal(h.json(['task', 'show', 'T1']).gates.ok, false);
   const github = h.github();

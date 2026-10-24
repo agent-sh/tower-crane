@@ -4,6 +4,7 @@ const cp = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const { check } = require('./cli-docs');
+const { check: checkDocLinks } = require('./doc-links');
 const { fragments, released } = require('./changelog');
 const { normalizeText, readText } = require('./text');
 const { checkTestWaits } = require('./test-waits');
@@ -105,6 +106,7 @@ function main(args) {
     else base = args[++i];
   }
   check(root);
+  checkDocLinks(root);
   checkStdinReads(root);
   checkTestWaits(root);
   checkFakeAgentEnvs(root);

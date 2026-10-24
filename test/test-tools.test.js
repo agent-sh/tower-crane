@@ -10,6 +10,7 @@ const { makeRepo, ROOT, detachedAlive, pinLiveRung } = require('./helpers');
 const { tempRoot, liveRoot } = require('./tmp-root');
 const { HUNG_TEST_MS, killGroup } = require('./signals');
 const { socketDir } = require('./socket-dir');
+const { readPublished } = require('./atomic-file');
 
 test('test temp roots prefer explicit overrides and otherwise use the user cache on each platform', () => {
   const home = path.join(ROOT, 'fixture-home');
@@ -169,58 +170,75 @@ test('the CLI helper retains launch errors alongside the exit status and signal'
   }
 });
 
-test('the test runner emits one capped concurrency value, including repeated and split options', (t) => {
+// A child_process.spawn the runner's file runners go to: each logs its argv,
+// and none ends until the runner has started every file it will start at once.
+const FAKE_CHILD = `
+  const { EventEmitter } = require('node:events');
+  const fake = (onStart) => (command, args, options) => {
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.kill = () => {};
+    onStart(child, args, options);
+    return child;
+  };
+`;
+
+test('the test runner runs its files no more at once than one capped concurrency value, including repeated and split options', (t) => {
   const h = makeRepo(t);
   const runner = path.join(ROOT, 'test/run.js');
+  const files = Array.from({ length: 40 }, (_, i) => `test/f${String(i).padStart(2, '0')}.test.js`);
   for (const [cores, options, expected] of [
-    [32, ['--test-concurrency=4', 'test/claim.test.js', '--test-concurrency=999'], 31],
-    [24, ['--test-concurrency=8', 'test/claim.test.js'], 8],
-    [24, ['test/claim.test.js'], 4],
-    [3, ['--test-concurrency=999', 'test/claim.test.js', '--test-concurrency', '999'], 2],
-    [32, ['--test-concurrency=4', '--test-concurrency', '2', 'test/claim.test.js'], 2],
-    [1, ['test/claim.test.js'], 1],
+    [32, ['--test-concurrency=4', ...files, '--test-concurrency=999'], 31],
+    [24, ['--test-concurrency=8', ...files], 8],
+    [24, files, 4],
+    [3, ['--test-concurrency=999', ...files, '--test-concurrency', '999'], 2],
+    [32, ['--test-concurrency=4', '--test-concurrency', '2', ...files], 2],
+    [1, files, 1],
   ]) {
-    const probe = `
+    // The first batch: every file started before the first one ends.
+    const probe = `${FAKE_CHILD}
       require('node:os').availableParallelism = () => ${cores};
-      require('node:child_process').spawn = (command, args) => {
-        console.log(JSON.stringify(args));
-        const child = new (require('node:events').EventEmitter)();
-        process.nextTick(() => child.emit('exit', 0, null));
-        return child;
-      };
+      let batch = null;
+      require('node:child_process').spawn = fake((child, args) => {
+        if (!batch) {
+          batch = [];
+          setImmediate(() => console.log(JSON.stringify(batch)));
+        }
+        batch.push(args);
+        setImmediate(() => child.emit('close', 0, null));
+      });
     `;
     const preload = path.join(h.base, 'runner-probe.js');
     fs.writeFileSync(preload, probe);
     const r = cp.spawnSync(process.execPath, ['--require', preload, runner, ...options], { env: h.env, encoding: 'utf8' });
     assert.equal(r.status, 0, r.stderr);
-    const args = JSON.parse(r.stdout);
-    assert.deepEqual(args.filter((arg) => arg.startsWith('--test-concurrency')), [`--test-concurrency=${expected}`]);
-    assert.ok(args.includes('--test-timeout=300000'), 'runner and signal waits share the hung-test backstop');
-    assert.ok(args.includes(`--require=${path.join(ROOT, 'test', 'fixtures', 'report-guard.js')}`), 'every test file loads the report guard');
-    assert.deepEqual(args.filter((arg) => !arg.startsWith('--')), ['test/claim.test.js']);
+    const batch = JSON.parse(r.stdout.split('\n')[0]);
+    assert.equal(batch.length, expected, `${cores} cores, ${options.filter((o) => !o.startsWith('test/')).join(' ')}`);
+    for (const args of batch) {
+      assert.deepEqual(args.filter((arg) => arg.startsWith('--test-concurrency')), [], 'each file runner runs one file');
+      assert.ok(args.includes('--test-timeout=300000'), 'runner and signal waits share the hung-test backstop');
+      assert.ok(args.includes(`--require=${path.join(ROOT, 'test', 'fixtures', 'report-guard.js')}`), 'every test file loads the report guard');
+      assert.equal(args.filter((arg) => !arg.startsWith('--')).length, 1);
+    }
   }
-  // With one worker each file takes a band of its own, longest first, so
-  // node --test's sort of the paths starts them longest first.
+  // With one worker the files start one at a time, longest measured first.
   const preload = path.join(h.base, 'runner-order.js');
-  fs.writeFileSync(preload, `
+  fs.writeFileSync(preload, `${FAKE_CHILD}
     require('node:os').availableParallelism = () => 2;
-    require('node:child_process').spawn = (command, args) => {
+    require('node:child_process').spawn = fake((child, args) => {
       console.log(JSON.stringify(args));
-      const child = new (require('node:events').EventEmitter)();
-      process.nextTick(() => child.emit('exit', 0, null));
-      return child;
-    };
+      process.nextTick(() => child.emit('close', 0, null));
+    });
   `);
-  const files = ['test/accept.test.js', 'test/claim.test.js', 'test/isolation.test.js', 'test/events.test.js'];
-  const r = cp.spawnSync(process.execPath, ['--require', preload, runner, ...files], { cwd: ROOT, env: h.env, encoding: 'utf8' });
+  const order = ['test/accept.test.js', 'test/claim.test.js', 'test/isolation.test.js', 'test/events.test.js'];
+  const r = cp.spawnSync(process.execPath, ['--require', preload, runner, ...order], { cwd: ROOT, env: h.env, encoding: 'utf8' });
   assert.equal(r.status, 0, r.stderr);
   // Each platform's own table decides: isolation is long on Linux, short on Windows.
-  const longest = require('./run').longestFirst(files);
-  assert.notDeepEqual(longest, [...files].sort(), 'the measured order differs from the sorted one');
-  const passed = JSON.parse(r.stdout).filter((arg) => !arg.startsWith('--'));
-  const named = (list) => list.map((arg) => path.relative(ROOT, path.resolve(ROOT, arg)).split(path.sep).join('/'));
-  assert.deepEqual(named(passed), files, 'each file keeps its place');
-  assert.deepEqual(named([...passed].sort()), longest);
+  const longest = require('./run').longestFirst(order);
+  assert.notDeepEqual(longest, [...order].sort(), 'the measured order differs from the sorted one');
+  const started = r.stdout.trim().split('\n').map((line) => JSON.parse(line).filter((arg) => !arg.startsWith('--'))[0]);
+  assert.deepEqual(started, longest);
 });
 
 test('each test run gets a private runtime directory for its sockets and removes it, so no test broker sweeps the real one', { skip: process.platform === 'win32' && 'Windows brokers use named pipes' }, (t) => {
@@ -233,14 +251,12 @@ test('each test run gets a private runtime directory for its sockets and removes
   fs.mkdirSync(live, { mode: 0o700 });
   fs.writeFileSync(path.join(live, 'owner.json'), '{}');
   const probe = path.join(h.base, 'runtime-probe.js');
-  fs.writeFileSync(probe, `
-    require('node:child_process').spawn = (command, args, options) => {
+  fs.writeFileSync(probe, `${FAKE_CHILD}
+    require('node:child_process').spawn = fake((child, args, options) => {
       const dir = options.env.XDG_RUNTIME_DIR;
       console.log(JSON.stringify({ dir, mode: require('node:fs').statSync(dir).mode & 0o777, host: options.env.TOWER_CRANE_HOST_RUNTIME_DIR }));
-      const child = new (require('node:events').EventEmitter)();
-      process.nextTick(() => child.emit('exit', 0, null));
-      return child;
-    };
+      process.nextTick(() => child.emit('close', 0, null));
+    });
   `);
   // Runs that died without cleaning up: only one whose runner provably exited
   // in this pid namespace goes. Inside a sandbox a live host run's pid is missing.
@@ -294,16 +310,14 @@ test('a test run stopped by a signal stops its tests and still removes its priva
   const h = makeRepo(t);
   const real = fs.realpathSync(socketDir(t));
   const probe = path.join(h.base, 'runtime-probe.js');
-  fs.writeFileSync(probe, `
-    require('node:child_process').spawn = (command, args, options) => {
-      const child = new (require('node:events').EventEmitter)();
+  fs.writeFileSync(probe, `${FAKE_CHILD}
+    require('node:child_process').spawn = fake((child, args, options) => {
       // The runner waits on its tests until they end, as on a real child.
       const running = setInterval(() => {}, 1000);
-      child.kill = (signal) => process.nextTick(() => { clearInterval(running); child.emit('exit', null, signal); });
+      child.kill = (signal) => process.nextTick(() => { clearInterval(running); child.emit('close', null, signal); });
       // Printed once the runner's start-up code, its signal handlers included, has run.
       process.nextTick(() => console.log(JSON.stringify({ dir: options.env.XDG_RUNTIME_DIR })));
-      return child;
-    };
+    });
   `);
   const env = { ...h.env, XDG_RUNTIME_DIR: real };
   delete env.TOWER_CRANE_SOCKET_DIR;
@@ -409,6 +423,36 @@ test('live Claude probes use the requested provider and environment file without
   assert.equal(project.ladder.review.profile, 'fixture-main');
   assert.equal(project.ladder.review.provider, undefined);
   assert.equal(project.ladder.review.env_file, undefined);
+  assert.equal(project.ladder.review.credential, undefined);
+});
+
+// spawn no longer links the codex .env, where a Bedrock profile's bearer
+// token sat, so a live Bedrock codex rung reads it through a credential.
+test('a live codex probe on Bedrock reads the codex home .env token through an env-store credential', (t) => {
+  const saved = Object.fromEntries(['CODEX_HOME', 'TOWER_CRANE_LIVE_PROFILE'].map((key) => [key, process.env[key]]));
+  t.after(() => { for (const [key, value] of Object.entries(saved)) {
+    if (value === undefined) delete process.env[key]; else process.env[key] = value;
+  } });
+  for (const [profile, provider, env, credential] of [
+    ['bedrock', 'amazon-bedrock', 'AWS_BEARER_TOKEN_BEDROCK=fake-bearer\n', 'live-codex-bedrock'],
+    ['bedrock', 'amazon-bedrock', null, undefined],
+    ['bedrock', 'amazon-bedrock', 'OTHER=1\n', undefined],
+    ['plain', 'openai', 'AWS_BEARER_TOKEN_BEDROCK=fake-bearer\n', undefined],
+  ]) {
+    const h = makeRepo(t);
+    h.init();
+    const home = path.join(h.base, 'codex-home');
+    fs.mkdirSync(home);
+    fs.writeFileSync(path.join(home, `${profile}.config.toml`), `model_provider = "${provider}"\n`);
+    if (env !== null) fs.writeFileSync(path.join(home, '.env'), env);
+    Object.assign(process.env, { CODEX_HOME: home, TOWER_CRANE_LIVE_PROFILE: profile });
+    pinLiveRung(h, 'codex');
+    const label = `${profile} ${JSON.stringify(env)}`;
+    assert.equal(h.readState('project.json').ladder.small.credential, credential, label);
+    const user = fs.existsSync(h.env.TOWER_CRANE_CONFIG) ? JSON.parse(readPublished(h.env.TOWER_CRANE_CONFIG, 'utf8')) : {};
+    assert.deepEqual(user.credentials, credential && { [credential]: { store: 'env', env_file: path.join(home, '.env'), var: 'AWS_BEARER_TOKEN_BEDROCK' } }, label);
+    if (credential) assert.match(h.ok(['credentials', 'check', credential]), /env file/, label);
+  }
 });
 
 test('the suite profile sums leaf tests per file and marks tests that ran beside each other', () => {
@@ -478,13 +522,22 @@ test('the suite profile compares the medians of interleaved baseline and head ru
   assert.match(files.text, /^median of 1: CPU seconds \(file processes\) head 3999\.0 vs baseline 4999\.0/m, 'without a cgroup the file processes are summed');
 });
 
-test('the suite profile records each test of a real run with its CPU', { skip: process.platform !== 'linux' && 'CPU comes from /proc' }, (t) => {
+// Wall deadlines cannot guarantee CPU work when the scheduler pauses a process.
+function profileCpuWork(pauseMs) {
+  return `const start = process.cpuUsage();
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ${pauseMs}); // wait-allow: the profile measures CPU work and pauses
+    let used;
+    do { used = process.cpuUsage(start); } while (used.user + used.system < 400000);`;
+}
+
+for (const pauseMs of [0, 350]) {
+test(`the suite profile records each test of a real run with its CPU (pause ${pauseMs} ms)`, { skip: process.platform !== 'linux' && 'CPU comes from /proc' }, (t) => {
   const h = makeRepo(t);
   const fixture = path.join(h.base, 'profiled.test.js');
   fs.writeFileSync(fixture, `
 const assert = require('node:assert/strict');
 require('node:test')('waits', () => { assert.equal(Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 400), 'timed-out'); }); // wait-allow: the profile measures a timer wait
-require('node:test')('spins', () => { const end = Date.now() + 400; let n = 0; while (Date.now() < end) n++; assert.ok(n > 0); }); // wait-allow: the profile measures CPU work
+require('node:test')('spins', () => { ${profileCpuWork(pauseMs)} });
 `);
   const out = path.join(h.base, 'profile.json');
   // This checkout stands in for the baseline, so the verdict is a coin toss; the exit follows it.
@@ -511,8 +564,10 @@ require('node:test')('spins', () => { const end = Date.now() + 400; let n = 0; w
   assert.match(r.stdout, /^serial tests: .* waiting$/m);
   assert.deepEqual(fs.readdirSync(h.base).filter((name) => name.startsWith('suite-profile-')), [], 'the record directory is removed');
 });
+}
 
-test('the suite profile runs a baseline commit from a worktree it removes afterwards', { skip: process.platform !== 'linux' && 'CPU comes from /proc' }, (t) => {
+for (const pauseMs of [0, 350]) {
+test(`the suite profile runs a baseline commit from a worktree it removes afterwards (pause ${pauseMs} ms)`, { skip: process.platform !== 'linux' && 'CPU comes from /proc' }, (t) => {
   const h = makeRepo(t);
   // The runner and what it loads, so the repository's own suite runs at both commits.
   for (const file of ['scripts/suite-profile.js', 'test/run.js', 'test/signals.js', 'test/atomic-file.js', 'test/global-setup.js', 'test/host.js', 'test/repo-seed.js', 'test/tmp-root.js',
@@ -527,8 +582,8 @@ test('the suite profile runs a baseline commit from a worktree it removes afterw
   h.git(['add', '.']);
   h.git(['commit', '-qm', 'baseline suite']);
   const baseline = h.git(['rev-parse', 'HEAD']);
-  // The head's test spins, so its file CPU is the larger whatever the load.
-  one("const end = Date.now() + 400; let n = 0; while (Date.now() < end) n++; require('node:assert/strict').ok(n > 0);"); // wait-allow: the profile measures CPU work
+  // The head spends 400 ms of CPU, so its file CPU is larger under contention too.
+  one(profileCpuWork(pauseMs));
   const out = path.join(h.base, 'profile.json');
   const r = cp.spawnSync(process.execPath, [path.join(h.repo, 'scripts', 'suite-profile.js'), '--test-concurrency=1', '--baseline', baseline, '--json', out, 'test/one.test.js'],
     { cwd: h.repo, env: { ...h.env, TOWER_CRANE_TEST_TMP: h.base, TOWER_CRANE_SANDBOX: '0' }, encoding: 'utf8', timeout: 300000 });
@@ -542,3 +597,4 @@ test('the suite profile runs a baseline commit from a worktree it removes afterw
   assert.deepEqual(h.git(['worktree', 'list', '--porcelain']).split('\n').filter((line) => line.startsWith('worktree ')).length, 1, 'the baseline worktree is removed');
   assert.deepEqual(fs.readdirSync(h.base).filter((name) => name.startsWith('suite-baseline-')), [], 'its directory is removed');
 });
+}

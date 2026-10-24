@@ -14,8 +14,26 @@ const events = (h) => require('../lib/state').readEvents(h.state);
 const recordedSpend = (h) => h.readState('tasks.json').tasks[0].spend;
 const liveEntries = (h) => (recordedSpend(h).entries || []).filter((e) => e.live);
 
-// The runner's timeout reports only the test, so an aborted wait names itself,
-// the last events and the end of the dispatch log, where the supervisor writes.
+// What the fixture shows of a stuck wait: the last events, whether the
+// supervisor and harness still run, the state lock's holder, and the end of
+// the dispatch log, where the supervisor writes, and of the supervisor trace.
+function fixtureState(h) {
+  try {
+    const log = events(h);
+    const spawned = log.findLast((e) => e.cmd === 'spawn')?.detail;
+    const alive = (pid) => { try { killPid(pid, 0); return 'alive'; } catch (e) { return e.code || e.message; } };
+    const lock = path.join(h.state, 'lock');
+    const holders = fs.existsSync(lock) ? fs.readdirSync(lock).map((n) => fs.readFileSync(path.join(lock, n), 'utf8')).join(' ') : 'none';
+    return `last events: ${log.slice(-12).map((e) => e.cmd).join(', ')}; supervisor ${spawned?.monitor_pid} ${spawned ? alive(spawned.monitor_pid) : '-'}; `
+      + `harness ${spawned?.pid} ${spawned?.pid ? alive(spawned.pid) : '-'}, done: ${fs.existsSync(h.done)}; state lock: ${holders}; `
+      + `dispatch log ends: ${spawned ? fs.readFileSync(spawned.log, 'utf8').slice(-2000) : '(none)'}; `
+      // read-published: the trace is only appended to, never replaced
+      + `trace ends: ${fs.existsSync(h.trace) ? fs.readFileSync(h.trace, 'utf8').split('\n').slice(-60).join('\n') : '(none)'}`;
+  } catch (e) { return `fixture unreadable: ${e.message}`; }
+}
+
+// The runner's timeout reports only the test, so an aborted wait names itself
+// and what the fixture shows.
 function until(t, h, fn, message, stream) {
   return waitOnRepo(h, fn, message, {
     signal: t.signal,
@@ -24,20 +42,7 @@ function until(t, h, fn, message, stream) {
       return () => stream.off('data', probe);
     }),
   }).catch((error) => {
-    if (t.signal.aborted) {
-      let seen;
-      try {
-        const log = events(h);
-        const spawned = log.findLast((e) => e.cmd === 'spawn')?.detail;
-        const alive = (pid) => { try { killPid(pid, 0); return 'alive'; } catch (e) { return e.code || e.message; } };
-        const lock = path.join(h.state, 'lock');
-        const holders = fs.existsSync(lock) ? fs.readdirSync(lock).map((n) => fs.readFileSync(path.join(lock, n), 'utf8')).join(' ') : 'none';
-        seen = `last events: ${log.slice(-12).map((e) => e.cmd).join(', ')}; supervisor ${spawned?.monitor_pid} ${spawned ? alive(spawned.monitor_pid) : '-'}; `
-          + `harness ${spawned?.pid} ${spawned?.pid ? alive(spawned.pid) : '-'}, done: ${fs.existsSync(h.done)}; state lock: ${holders}; `
-          + `dispatch log ends: ${spawned ? fs.readFileSync(spawned.log, 'utf8').slice(-2000) : '(none)'}`;
-      } catch (e) { seen = `fixture unreadable: ${e.message}`; }
-      process.stderr.write(`${message}: still waiting when the test was aborted; ${seen}\n`);
-    }
+    if (t.signal.aborted) process.stderr.write(`${message}: still waiting when the test was aborted; ${fixtureState(h)}\n`);
     throw error;
   });
 }
@@ -63,13 +68,14 @@ function setup(t, harness, supervision = {}) {
     JSON.stringify({ usage_ms: 500, stall_ms: 60000, ...supervision })]);
   const bin = path.join(h.base, 'bin');
   h.done = path.join(h.base, 'done');
+  h.trace = path.join(h.base, 'live-trace');
   h.liveEnv = (extra = {}) => ({
     PATH: bin + path.delimiter + (h.env.PATH || h.env.Path || ''),
-    NODE_OPTIONS: `--require "${STUB}"`, LIVE_DONE: h.done, ...extra,
+    NODE_OPTIONS: `--require "${STUB}"`, LIVE_DONE: h.done, LIVE_TRACE: h.trace, ...extra,
   });
   return h;
 }
 
 const exited = (h, agent) => events(h).some((e) => e.cmd === 'spawn exit' && e.detail.agent === agent && e.detail.code !== undefined);
 
-module.exports = { events, recordedSpend, liveEntries, until, viewClock, setup, exited };
+module.exports = { events, recordedSpend, liveEntries, fixtureState, until, viewClock, setup, exited };

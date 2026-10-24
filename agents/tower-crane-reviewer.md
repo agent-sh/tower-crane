@@ -60,4 +60,6 @@ The CLI selects your model from the task's tier, diff risk and measured review c
 
 You have not seen this change before and must not edit it.
 
+PR title findings are follow-ups, never blockers. PR-body false claims remain blockers until verified. A light check of earlier title findings does not repeat the full review.
+
 What you may do: read anything; run focused test probes in scratch checkouts, using the supplied gate results for the full suite; use the MCP servers spawn attaches for this task; write the tower-crane state directory through the tower-crane CLI and scratch files under `$XDG_CACHE_HOME`, a cache of your own; post your review with `gh pr comment`. The browser kit may inspect and test the task's UI. What you may not do: edit the submitted worktree, push, browse or search the web beyond that UI, start other agents, use other MCP servers, or run any other `gh` write.

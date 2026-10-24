@@ -42,25 +42,59 @@ test('longestFirst starts the longest measured files first and keeps sorted orde
   assert.deepEqual(longestFirst(files, durations), ['b', 'd', 'new', 'a', 'c']);
   assert.deepEqual(files, ['d', 'c', 'b', 'a', 'new'], 'the input is not reordered');
   assert.deepEqual(longestFirst(['y', 'x'], {}), ['x', 'y'], 'an empty table keeps the sorted order');
-  assert.deepEqual(startOrder(['b', 'a'], 1, durations), ['b', 'a'], 'two files for one worker both start at once');
 });
 
-test('startOrder spells the longest files so that node --test sorts them first, one band per worker', () => {
-  const durations = { a: 1, b: 9, c: 1, d: 5, e: 3, f: 2 };
-  const files = ['f', 'e', 'd', 'c', 'b', 'a', 'new'];
-  const named = (cwd, order) => order.map((f) => path.relative(cwd, path.resolve(cwd, f)));
-  // Each `../` step up from the working directory is a band, then absolute paths, then plain ones.
-  for (const [depth, workers, sorted] of [
-    [3, 1, ['b', 'd', 'e', 'new', 'a', 'c', 'f']],
-    [2, 1, ['b', 'd', 'e', 'a', 'c', 'f', 'new']],
-    [1, 1, ['b', 'd', 'a', 'c', 'e', 'f', 'new']],
-    [2, 2, ['b', 'd', 'e', 'new', 'a', 'f', 'c']],
-    [1, 3, ['b', 'd', 'e', 'a', 'f', 'new', 'c']],
+test('startOrder puts unmeasured files before measured files without changing shard costs', () => {
+  for (const [name, files, durations, expected] of [
+    ['one unlisted file', ['b', 'new', 'a', 'c'], { a: 9, b: 1, c: 2 }, ['new', 'a', 'c', 'b']],
+    ['several unlisted files', ['z', 'b', 'a', 'new'], { a: 9, b: 1 }, ['new', 'z', 'a', 'b']],
+    ['one worker and two files', ['a', 'new'], { a: 9 }, ['new', 'a']],
+    ['zero is measured', ['a', 'z', 'b'], { a: 0, b: 9 }, ['z', 'b', 'a']],
+    ['invalid costs are unmeasured', ['e', 'a', 'd', 'c', 'b'],
+      { a: 9, b: NaN, c: -1, d: Infinity, e: '1' }, ['b', 'c', 'd', 'e', 'a']],
+    ['measured ties', ['c', 'a', 'b'], { a: 2, b: 9, c: 2 }, ['b', 'a', 'c']],
+    ['no table', ['z', 'a', 'b'], {}, ['a', 'b', 'z']],
+    ['no files', [], { a: 9 }, []],
   ]) {
-    const cwd = path.resolve('/', ...Array.from({ length: depth }, (_, i) => `dir${i}`));
-    const order = startOrder(files, workers, durations, cwd);
-    assert.deepEqual(named(cwd, order), files, `depth ${depth}, ${workers} workers: each file keeps its place`);
-    assert.deepEqual(named(cwd, [...order].sort()), sorted, `depth ${depth}, ${workers} workers`);
+    const original = [...files];
+    assert.deepEqual(startOrder(files, durations), expected, name);
+    assert.deepEqual(files, original, `${name}: input order is preserved`);
+    const shards = [1, 2].map((i) => shardFiles(files, i, 2, durations));
+    assert.deepEqual([1, 2].map((i) => shardFiles(startOrder(files, durations), i, 2, durations)),
+      shards, `${name}: launch order does not change shard allocation`);
+  }
+});
+
+test('the runner starts an unmeasured file first with one worker, sharded or unsharded', (t) => {
+  const h = makeRepo(t);
+  const durations = { [FIXTURES[0]]: 100, [FIXTURES[1]]: 1, [FIXTURES[2]]: 10 };
+  for (const name of ['file-durations.cjs', 'file durations.cjs', 'nested\\file-durations.cjs']) {
+    const hook = path.join(h.base, name);
+    fs.mkdirSync(path.dirname(hook), { recursive: true });
+    fs.writeFileSync(hook, `
+const fs = require('node:fs');
+const read = fs.readFileSync;
+fs.readFileSync = function (file, ...args) {
+  if (String(file) === ${JSON.stringify(path.join(ROOT, 'test', 'durations.json'))}) {
+    return JSON.stringify({ [process.platform]: ${JSON.stringify(durations)} });
+  }
+  return read.call(this, file, ...args);
+};
+`);
+    for (const shard of ['', '1/1']) {
+      // An argv path keeps backslashes that NODE_OPTIONS treats as escapes.
+      const result = cp.spawnSync(process.execPath, ['--require', hook, path.join(ROOT, 'test', 'run.js'),
+        '--test-concurrency=1', '--test-reporter=tap', ...FIXTURES], {
+        cwd: ROOT, env: { ...h.env, TOWER_CRANE_TEST_GRANT: '', TC_TEST_SHARD: shard },
+        encoding: 'utf8', timeout: HUNG_TEST_MS,
+      });
+      const variant = `${name}: ${shard || 'unsharded'}`;
+      assert.equal(result.status, 0, `${variant}: ${result.stderr}${result.stdout}`);
+      const expected = [FIXTURES[3], FIXTURES[0], FIXTURES[2], FIXTURES[1]];
+      const titles = [...result.stdout.matchAll(/^# Subtest: (.+)$/gm)].map(([, name]) => name);
+      assert.deepEqual(titles, ['shard d', 'shard a', 'shard c', 'shard b'], variant);
+      if (shard) assert.deepEqual([...result.stdout.matchAll(/^file started: (.+)$/gm)].map(([, file]) => file), expected, variant);
+    }
   }
 });
 
@@ -71,6 +105,47 @@ test('every shard count covers the real suite with each file in exactly one shar
       const shards = Array.from({ length: total }, (_, i) => shardFiles(files, i + 1, total, fileDurations(platform)));
       assert.deepEqual(shards.flat().sort(), files, `${platform}: ${total} shards run every file once`);
       for (const shard of shards) assert.ok(shard.length > 0, `${platform}: ${total} shards leave none empty`);
+    }
+  }
+});
+
+test('the long files that hit the shard deadline have timing entries on both CI platforms', () => {
+  for (const platform of ['linux', 'win32']) {
+    const durations = fileDurations(platform);
+    for (const file of ['test/reviewer-refill.test.js', 'test/stack-parent.test.js']) {
+      assert.ok(Number.isFinite(durations[file]) && durations[file] > 0,
+        `${platform}: ${file} must have a cost instead of the unknown-file median`);
+    }
+  }
+});
+
+test('cgroup keeper guard cases run in the shard proof on host and non-Linux platforms', (t) => {
+  const h = makeRepo(t);
+  const hook = path.join(h.base, 'cgroup-platform.cjs');
+  fs.writeFileSync(hook, `
+if (process.env.T503_CGROUP_PLATFORM) {
+  Object.defineProperty(process, 'platform', { value: process.env.T503_CGROUP_PLATFORM });
+}
+`);
+  const titles = [
+    'cgroup keepers read only cgroup membership, including nested groups',
+    'cgroup keeper ticks use population without any host process scan',
+  ];
+  // A cheap platform guard must be checked even when its standalone file is queued last.
+  for (const platform of [process.platform, 'win32', 'darwin'].filter((value, index, values) => values.indexOf(value) === index)) {
+    const result = cp.spawnSync(process.execPath, [
+      '--require', hook, '--test', '--test-reporter=tap',
+      `--test-name-pattern=${titles.join('|')}`, path.join(ROOT, 'test', 'containment-sampling.test.js'),
+    ], {
+      cwd: ROOT, env: { ...h.env, T503_CGROUP_PLATFORM: platform },
+      encoding: 'utf8', timeout: HUNG_TEST_MS,
+    });
+    assert.equal(result.status, 0, `${platform}: ${result.stderr}${result.stdout}`);
+    for (const title of titles) {
+      const line = result.stdout.split('\n').find((value) => /^ok \d+ - /.test(value) && value.includes(title));
+      assert.ok(line, `${platform}: ${title} was reported`);
+      assert.equal(line.includes('# SKIP Linux cgroups'), platform !== 'linux', `${platform}: ${title}`);
+      t.diagnostic(`${platform}: ${line}`);
     }
   }
 });
@@ -95,27 +170,30 @@ test('the durations refresh maps each logged title to the file that declares it'
     ...declarations('test/b.test.js', "test(failing ? 'b fails' : `b passes on ${platform}`, { skip: false }, () => {});\n"
       + "test(`case ${n} of ${'a'}`, () => {});\n"),
   ];
-  const log = [
-    '2026-10-15T09:41:54.3802186Z ##[group]Run npm run check:shared',
-    '2026-10-15T09:41:54.4802186Z ✔ plain title (9000ms)',
-    '2026-10-15T09:41:54.5802186Z ##[group]Run npm test',
-    '2026-10-15T09:41:55.0000000Z ✔ plain title (1000ms)',
-    '2026-10-15T09:41:55.0000000Z ✔ case 1 of a (2000ms)',
-    '2026-10-15T09:41:55.0000000Z ✖ case 2 of a (3000ms)',
-    '2026-10-15T09:41:55.0000000Z   ✔ inner (500ms)',
-    '2026-10-15T09:41:55.0000000Z ✔ suite of a (4000ms)',
-    '2026-10-15T09:41:55.0000000Z ✔ b passes on win32 (5000ms)',
-    '2026-10-15T09:41:55.0000000Z ﹣ b fails (1ms) # SKIP',
-    '2026-10-15T09:41:55.0000000Z ✔ a title no file declares (7000ms)',
-    '2026-10-15T09:41:56.0000000Z ✖ failing tests:',
-    '2026-10-15T09:41:56.0000000Z ✖ case 2 of a (3000ms)',
-    '2026-10-15T09:41:57.0000000Z ##[group]Run foreach ($attempt in 1..10) {',
-    '2026-10-15T09:41:57.0000000Z ✔ plain title (9000ms)',
-  ].join('\r\n');
-  const { times, unmatched } = fileTimes(log, declared);
-  // `case ${n} of a` in a.test.js has more literal text than b.test.js's `case ${n} of ${'a'}`.
-  assert.deepEqual(times, { 'test/a.test.js': 10, 'test/b.test.js': 5.001 });
-  assert.equal(unmatched, 7);
+  // Linux and macOS run the step bare; Windows runs it under its shard guard.
+  for (const step of ['npm test', 'pwsh -NoProfile -File scripts/shard-guard.ps1 npm test']) {
+    const log = [
+      '2026-10-15T09:41:54.3802186Z ##[group]Run npm run check:shared',
+      '2026-10-15T09:41:54.4802186Z ✔ plain title (9000ms)',
+      `2026-10-15T09:41:54.5802186Z ##[group]Run ${step}`,
+      '2026-10-15T09:41:55.0000000Z ✔ plain title (1000ms)',
+      '2026-10-15T09:41:55.0000000Z ✔ case 1 of a (2000ms)',
+      '2026-10-15T09:41:55.0000000Z ✖ case 2 of a (3000ms)',
+      '2026-10-15T09:41:55.0000000Z   ✔ inner (500ms)',
+      '2026-10-15T09:41:55.0000000Z ✔ suite of a (4000ms)',
+      '2026-10-15T09:41:55.0000000Z ✔ b passes on win32 (5000ms)',
+      '2026-10-15T09:41:55.0000000Z ﹣ b fails (1ms) # SKIP',
+      '2026-10-15T09:41:55.0000000Z ✔ a title no file declares (7000ms)',
+      '2026-10-15T09:41:56.0000000Z ✖ failing tests:',
+      '2026-10-15T09:41:56.0000000Z ✖ case 2 of a (3000ms)',
+      '2026-10-15T09:41:57.0000000Z ##[group]Run foreach ($attempt in 1..10) {',
+      '2026-10-15T09:41:57.0000000Z ✔ plain title (9000ms)',
+    ].join('\r\n');
+    const { times, unmatched } = fileTimes(log, declared);
+    // `case ${n} of a` in a.test.js has more literal text than b.test.js's `case ${n} of ${'a'}`.
+    assert.deepEqual(times, { 'test/a.test.js': 10, 'test/b.test.js': 5.001 }, step);
+    assert.equal(unmatched, 7, step);
+  }
 });
 
 test('TC_TEST_SHARD makes the runner run only the files of the shard it names', () => {
