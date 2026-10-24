@@ -455,7 +455,7 @@ for (const runtime of ['with', 'without']) test(`a real claude agent's commands 
 // outside its grants.
 for (const route of ['PATH', 'TMPDIR']) {
   test(`in a real claude sandbox with ${route === 'PATH' ? '/tmp on PATH' : 'the caller\'s TMPDIR at /tmp'}, a command reads neither a file planted in /tmp nor one in the home outside its grants`, { skip, timeout: 300000 }, async (t) => {
-    const h = login(makeRepo(t));
+    const h = login(t, makeRepo(t));
     h.init();
     h.ok(['task', 'add', '--title', 'Tmp grant probe', '--acceptance', 'nothing planted is read']);
     const out = path.join(results(h), 'tmp-grant-probe.json');
