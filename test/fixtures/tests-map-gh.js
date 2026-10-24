@@ -4,6 +4,7 @@ const path = require('node:path');
 const { updateJson, writeAtomic } = require('../atomic-file');
 const args = process.argv.slice(2);
 const file = process.env.TC_MAP_GITHUB;
+// gh runs once per call, sometimes side by side, so the call log is changed under updateJson's lock.
 const data = updateJson(file, (current) => {
   current.calls.push(args);
   return current;
