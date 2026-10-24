@@ -61,6 +61,7 @@ test('a merge sends another conflicting PR to rework with real filenames and pre
   const task = h.readState('tasks.json').tasks[1];
   assert.equal(task.status, 'rework');
   assert.match(task.notes.at(-1).text, /conflicts with main: value\.js/);
+  assert.equal(h.logs().findLast((e) => e.task === 'T2' && e.cmd === 'rework').detail.cause, 'conflict_base');
   assert.match(fs.readFileSync(path.join(h.state, 'briefs', 'T2.md'), 'utf8'), /value\.js/);
   assert.equal(h.git(['status', '--porcelain']), before);
   assert.equal(h.git(['rev-parse', 'HEAD']), other);

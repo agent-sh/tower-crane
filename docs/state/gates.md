@@ -396,9 +396,10 @@ unmerged task below it, extended up its stack by the accepted, linked tasks
 directly above it; entries are ordered by their bottom task's latest
 `accept` event at the current sha and revision.
 `head check` records the head-of-line suite run on the entry's top task:
-`{sha, revision, base_sha, command, members, ok, summary, commands}`, plus
+`{sha, revision, base_sha, command, members, ok, summary, commands, started_at}`, plus
 `head_mode: "crucial"` and `head_tests` when crucial mode selected the suites, where
-`base_sha` is the `project.base` tip merged into the head, `members` lists
+`base_sha` is the `project.base` tip merged into the head, `started_at` is when
+the suite started, once the executor and the host governor admitted it, `members` lists
 the entry's task ids bottom up and `commands` lists the Git and shell
 executions with their status. A suite that ran in a contained command also
 records `cpu`, its CPU weight ([CPU shares](containment.md#cpu-shares)). An ok check at the same sha, revision,

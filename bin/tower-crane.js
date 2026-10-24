@@ -253,8 +253,10 @@ async function main(argv) {
     }
     // The machine's credential store is no project's state: these commands
     // need no state directory and no identity, and refuse a task process.
-    if (cmd.stateless) {
-      const res = await cmd.run({ cwd: process.cwd(), env: process.env, json: !!globals.json, flags: own, pos: parsed.pos });
+    // A log-only view reads the event log itself, without identity, lease or lock.
+    if (cmd.stateless || cmd.logOnly) {
+      const res = await cmd.run({ cwd: process.cwd(), env: process.env, json: !!globals.json, flags: own, pos: parsed.pos,
+        ...(cmd.logOnly ? { stateDir: S.locateStateDir(globals.state, process.env, process.cwd()) } : {}) });
       if (globals.json) out(JSON.stringify(res.data, null, 2));
       else out(res.text);
       return res.code || 0;

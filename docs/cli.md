@@ -1020,6 +1020,8 @@ The token protects against foreign web origins and against local processes that 
 | | |
 | `inbox [--ack ITEM]... [--ack-before TIME [--kind KIND]] [--json]` | orchestrator or owner: read state once for current failed software gates and inspect PR heads, mergeability, uncapped revuto failures and inline comments, and open CodeQL alerts on the submitted head or its verified current PR merge commit. The host follower refreshes GitHub observations, including CI runs on the project base, at most once a minute; foreground inbox reads use the cache and summarize unread data in one `github_pending` item: a failed or cancelled push, schedule or dispatch run that no later run of its workflow turned green is a `main_ci_failed` item with its failing jobs and test names, and a test that fails again after a green run is a `main_ci_flaky` item; both resolve by opening a task or naming the open one, and clear on a green run. A ready or rework task without a brief gets a `brief_missing` item, resolved by `brief set`, in place of its `ready` or `rework_ready` item. Work the host governor deferred or stopped is a `governor_deferred` or `governor_stopped` item with its reason; both clear on their own. Returns typed `items` with `action.command` and `action.argv`, plus live gate `executors`, the `gate_queue` in drain order, and `owner` with the closing owner line (`owner: nothing needed` unless a crisis is open or a decision or hold waits on the owner). Failed reviews include the full latest Tower Crane comment at the submitted SHA and `finding_count`; fetch errors remain explicit. Failed gates include their summary and test diagnostics; audited confirmed code failures resolve through rework, while pending checks and observation failures offer a gate rerun. Remotely merged accepted heads remain actionable with `merge --accepted` until their audited local merge receipt exists. Stale software gates on an open mergeable accepted PR resolve with `check GATE ID` before merge. GitHub failures are explicit items. `--ack ITEM` acknowledges a handled message, stall, decision answer, owner comment or missing review exit; repeat it to acknowledge several items in one locked write and one event. `--ack-before TIME` acknowledges every matching item at or before the timestamp, optionally filtered by `--kind`, in one locked write and one event with the count and cutoff. Task messages and decision answers older than 24 h disappear when their tasks are cancelled or accepted and merged; their history remains. Task and GitHub findings clear only when their condition clears |
 | | |
+| `metrics [--since 7d\|ISO] [--until ISO] [--by day] [--claimed-after ISO]` | efficiency of the tasks merged in the window (an ok `merge` event at or after `--since` and before `--until`), each with its whole history: merges per day; gate runs per merged task by gate (tests, clean, review, ci, head check) with governor deferrals and tests-gate wall time; reworks per merged task and reworks raised in the window by cause, with the share Tower Crane caused; tokens per merged task (p50, p90, sum) by role, rung and harness, with the spend entries that have no tokens counted apart, never as zero; lead-time phases (queued, working, waiting for gates, gating, reviewing, rework waiting, accepted to merged) and the waiting share; submits per merged task and first-pass time. `--claimed-after` keeps only tasks first claimed at or after that time and reports how many it excluded. Read-only and lock-free: it streams `events.jsonl` up to its size at start, leaves out a torn last line and writes nothing. `--json` names every definition |
+| | |
 | `render` | write `sketch.md` (Mermaid graph plus tables) and `sketch.html`, the board as a read-only snapshot, from the state as it stands when the command starts; a sketch another process already published from later state is kept (`--json` `published: false`) |
 | | |
 | `serve [--port P]` | serve the live board and a Settings view on 127.0.0.1 (default port 4747; 0 picks a free one) and update open pages over server-sent events when the state changes. Pages are rendered from the state on each request. As the owner it also prints a one-time link to open in the browser that will write (`--json` prints `{ url, state, open }`; `open` is `url` for other identities). Exits 1 if the port is in use |
@@ -1044,6 +1046,21 @@ original turn once admissible.
 `ci log` passes `--allow-escape-sequences` to `gh api` so colored runner logs can be fetched. Before a log is saved or its failing tests are printed, terminal sequences (including CSI and OSC), bare ESC, and other control characters are removed. Tabs and newlines are preserved. Failed-job log excerpts in `submit` receive the same cleanup, as do check output, annotations and alerts from `ci checks`, in both text and JSON output.
 
 The bench commands only read state; docs/bench.md holds the labeling rules and the measured results.
+
+### metrics
+
+`metrics` reports how efficiently merged work went through Tower Crane, from `events.jsonl` alone. It needs no identity and takes no lease or lock: it reads the log up to its size when it starts, decodes only the event types it uses, leaves out a torn last line and writes nothing, so it runs beside a busy `wait` host and inside a sandbox that can read the log. On a 160 MB log it takes about half a second and under 150 MB of memory. It also reads `project.json` for the base branch, and falls back to `main` without it.
+
+The window holds the tasks with an ok `merge` event at or after `--since` (default `7d`; also `12h`, `30m` or an ISO time) and before `--until` (default now). Each counts with its whole history, also from before `--since`. `--claimed-after ISO` narrows every number to the cohort of tasks first claimed at or after that time; the output names the cohort and how many merged tasks and window reworks it left out. Days are local days of the process time zone (`TZ`), named in the output. Percentiles are nearest rank: the value at position `ceil(p * n)` in ascending order.
+
+- Merges: ok `merge` events, one per task and sha.
+- Gate runs per merged task: tests, clean and ci count `check` events with a verdict (a ci poll still pending is not one), review counts review evidence and head_check counts `head check` events. Governor deferrals count gate runs the host governor deferred or stopped and deferred review dispatches. Tests wall time sums the tests gate runs from `running` to `done`. No receipt records CPU time yet, so `tests_cpu_ms` is null with its coverage.
+- Reworks per merged task, and every rework raised in the window, by cause (see [Rework causes](state/tasks.md#rework-causes)). An event without `cause` is classified from its reason and the failed check of the same head. A tests or head_check rework whose every failing test failed in another task, not its stack parent or child, within 24 hours is `cross_task`. A head check rework has a culprit when a failing test file it names is one the task changed (from its latest tests gate receipt). The Tower Crane share counts conflict_base, conflict_parent, stack_sync, coverage_gap, base_failure, timeout, infrastructure, cross_task and head_check without a culprit.
+- Tokens per merged task: the final entry of each spawn source (the last `spend` or `spend live` event) and every manual entry, split by worker, reviewer and other (agent name prefix), rung and harness. Percentiles cover tasks with no live entry and no entry of unknown tokens; `known_lower_bound` sums the known entries of every merged task. Entries without tokens are counted apart (live, spawn, manual), never as zero; a manual report of minutes alone claims no tokens and leaves a task complete.
+- Lead time from the first `task add` to the first ok merge in the window, in phases that add up to it: queued (until a claim, before any submit), working (claim to submit, release or rework), waiting for gates (submitted, not covered by a gate run or reviewer session: the gate queue, governor deferrals and pending CI), gating (tests, clean and final-review gate runs, and head checks that record `started_at`), reviewing (reviewer sessions not already gating), rework waiting (after a rework or a release that follows a submit, until the next claim) and accepted to merged (accepted, not gating). The waiting share is queued, waiting for gates, rework waiting and accepted to merged over the lead time.
+- Submits per merged task, and first-pass time from the first claim to the first submit.
+
+`--by day` adds a row per day with merges, reworks raised, how many Tower Crane caused and the known tokens of the tasks merged that day. `--json` returns the same numbers with a `definitions` object naming each one, and the log read (`bytes`, `lines`, `parsed`, `unreadable`, `torn_last_line`).
 
 The board is one HTML document with five rooms (Now, Review, Plan, Spend, History) and a sheet per task; docs/design.md is its design. serve gives each room a path (`/`, `/review`, `/plan`, `/spend`, `/history`) and the snapshot a fragment (`#now`, `#review`, ...); a task sheet is `#T7` over whichever room is open. The URL decides the room: nothing remembered in the browser overrides it, and a room fragment on a served page (`/#plan`) opens that room and becomes its path. `sketch.html` loads nothing from the network: no fonts, scripts, styles or images outside the file, and its inline script makes no request. Every room and task sheet opens by its link with scripts disabled. Links in evidence (`--ref`) open only when clicked. The snapshot has no token and no forms; where serve would offer a write, it shows the CLI command. The script adds local times, keyboard keys (`n`, `r`, `p`, `s`, `h`, Escape), copy buttons, a theme switch (follow the system, light, dark; kept in the browser) and a digest of what changed since the browser last showed the board, kept in the browser's local storage and never in the state directory. The snapshot embeds the newest 400 events for History.
 
@@ -1483,6 +1500,7 @@ Views:
   ci checks        non-green check output, annotations, open code-scanning alerts and revuto inline findings at the task's current PR head
   ci log           one CI job's log from the task's PR head, written under the task scratch while the run is still going; --failed-tests names the failing tests
   inbox            actionable state and GitHub findings with resolving commands
+  metrics          efficiency of merged tasks: merges, gate runs, rework causes, tokens, lead-time phases and submits, from the event log
   render           write sketch.md and sketch.html (self-contained, no network)
   serve            serve the sketch and a Settings view for the ladder and task tiers on 127.0.0.1; pages reload when the state changes
   status           one screen: counts, ready tasks, gate queue, open decisions, owner tasks, spend, expired leases, exited spawned claims
@@ -2693,6 +2711,29 @@ options:
   --subject S              commit subject (default: task title)
   --body B                 commit body (default: task acceptance lines; empty allowed)
   --method M               squash (ordinary default), merge or rebase; linked stacks use merge commits and rebase has no commit text options
+
+global options:
+  --state DIR              state directory (default: TOWER_CRANE_STATE, then .tower-crane/ in the main checkout)
+  --agent NAME             who is acting (default: TOWER_CRANE_AGENT; task processes cannot use owner; fallback needs an interactive terminal outside a task)
+  --json                   machine output on stdout
+  --help                   show help
+```
+
+</details>
+
+<details>
+<summary>tower-crane metrics --help</summary>
+
+```text
+usage: tower-crane metrics [--since 7d|ISO] [--until ISO] [--by day] [--claimed-after ISO]
+
+efficiency of merged tasks: merges, gate runs, rework causes, tokens, lead-time phases and submits, from the event log
+
+options:
+  --since AGE|ISO          window start: a relative age (7d, 12h, 30m) or an ISO time (default 7d)
+  --until ISO              window end (default now)
+  --by day                 add a row per local day: merges, reworks raised, how many Tower Crane caused, tokens
+  --claimed-after ISO      cohort: count only tasks whose first claim is at or after this time, in every metric
 
 global options:
   --state DIR              state directory (default: TOWER_CRANE_STATE, then .tower-crane/ in the main checkout)
