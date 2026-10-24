@@ -88,7 +88,7 @@ if (env.HOOK_KEEP_SPAWN_DIRS) {
 if (env.HOOK_NO_START_TICKS) {
   const write = fs.writeFileSync;
   fs.writeFileSync = function markerWithoutStartTicks(file, data, ...args) {
-    if (typeof file === 'string' && /[\\/]lock\.\d+\.[0-9a-f]{16}\.new[\\/][0-9a-f]{16}$/.test(file) && typeof data === 'string') {
+    if (typeof file === 'string' && /[\\/][^\\/]+\.\d+\.[0-9a-f]{16}\.new[\\/][0-9a-f]{16}$/.test(file) && typeof data === 'string') {
       const marker = JSON.parse(data);
       delete marker.start_ticks;
       data = JSON.stringify(marker);
@@ -130,6 +130,20 @@ if (env.HOOK_CLOCK_FILE) {
   global.Date = class extends DateClass {
     constructor(...args) { super(...(args.length ? args : [clock()])); }
     static now() { return clock(); }
+  };
+  // A state lock whose holder cannot be identified (on Windows, when its creation time cannot be
+  // read) is judged by its marker's age against Date.now(). A new marker carries the file system's
+  // time, so against this clock every held lock would look as far gone as the clock is ahead and
+  // be broken under its holder. A marker this process writes carries this clock's time instead,
+  // as refreshMarkedLock in lib/state.js stamps one with new Date().
+  const writeFile = fs.writeFileSync;
+  fs.writeFileSync = function clockedMarker(file, ...rest) {
+    const out = writeFile.call(this, file, ...rest);
+    if (typeof file === 'string' && /[\\/][^\\/]+\.\d+\.[0-9a-f]{16}\.new[\\/][0-9a-f]{16}$/.test(file)) {
+      const now = new Date();
+      fs.utimesSync(file, now, now);
+    }
+    return out;
   };
 }
 
