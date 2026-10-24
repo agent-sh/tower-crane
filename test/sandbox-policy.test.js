@@ -1,0 +1,438 @@
+'use strict';
+
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const { spawnSync } = require('node:child_process');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const { cachedFixture } = require('./helpers');
+const P = require('../lib/sandbox-policy');
+const TOML = require('../lib/toml');
+
+const NO_STUBS = process.platform === 'win32' && 'harness stubs are shebang scripts';
+const as = (agent) => ({ env: { TOWER_CRANE_AGENT: agent } });
+const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+const task = (h, id) => h.readState('tasks.json').tasks.find((x) => x.id === id);
+// A Unix socket left at dir/name, as an ssh agent or X server leaves one. A
+// child binds it by a relative name, since a temp path can pass the socket
+// path length limit.
+function socketAt(dir, name) {
+  fs.mkdirSync(dir, { recursive: true });
+  const r = spawnSync(process.execPath, ['-e', `require('node:net').createServer().listen(${JSON.stringify(name)}, () => process.exit(0))`], { cwd: dir, encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  return path.join(dir, name);
+}
+
+test('policy paths, owner-only classes and narrowing, as a variant table', { skip: process.platform === 'win32' && 'the rows name POSIX paths and links' }, (t) => {
+  const base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'tc-sandbox-policy-')));
+  const shut = path.join(base, 'link-target', 'shut');
+  t.after(() => {
+    if (fs.existsSync(shut)) fs.chmodSync(path.join(shut, 'inner'), 0o755);
+    fs.rmSync(base, { recursive: true, force: true });
+  });
+  const home = path.join(base, 'home');
+  const project = path.join(base, 'repo');
+  const runtime = path.join(base, 'runtime');
+  for (const d of [home, project, runtime, path.join(base, 'link-target')]) fs.mkdirSync(d, { recursive: true });
+  fs.symlinkSync(path.join(home, '.ssh'), path.join(base, 'link-target', 'keys'));
+  // A dangling link in the middle of a path: ~/.aws does not exist yet.
+  fs.symlinkSync(path.join(home, '.aws'), path.join(base, 'link-target', 'mid'));
+  // Under a policy path, directories that hold a socket at any depth or a link to one.
+  const agent = socketAt(path.join(base, 'link-target', 'ssh-agent', 'deep'), 'agent.1');
+  fs.mkdirSync(path.join(base, 'link-target', 'x11'));
+  fs.symlinkSync(agent, path.join(base, 'link-target', 'x11', 'X0'));
+  fs.mkdirSync(path.join(base, 'link-target', 'plain', 'sub'), { recursive: true });
+  fs.writeFileSync(path.join(base, 'link-target', 'plain', 'sub', 'file'), '');
+  const state = path.join(project, '.tower-crane');
+  const ownerConfig = path.join(base, 'owner-config');
+  const r = P.roots({ home, project, stateDir: state, env: { XDG_RUNTIME_DIR: runtime }, settings: { env_file: '~/secrets.env', owner_config_dir: ownerConfig } });
+  const policy = { version: 3, orchestrator_may_grant: { read: ['~/docs/*'], write: ['<project>/out/**', `${base}/link-target/**`, '~/**', `${runtime}/**`, '/run/**'] }, owner_only: P.OWNER_ONLY };
+  const rows = [
+    [{ field: 'write', value: `${project}/out` }, null],
+    [{ field: 'write', value: 'out/a/b' }, null],
+    [{ field: 'write', value: `${project}/outs` }, 'outside the sandbox policy'],
+    [{ field: 'read', value: '~/docs/guide' }, null],
+    [{ field: 'read', value: '~/docs/guide/deep' }, null],
+    // A write glob also grants reads; a read glob never grants writes.
+    [{ field: 'read', value: `${project}/out/x` }, null],
+    [{ field: 'write', value: '~/docs/guide' }, null],
+    [{ field: 'write', value: `${project}/src` }, 'outside the sandbox policy'],
+    [{ field: 'write', value: path.join(base, 'elsewhere') }, 'outside the sandbox policy'],
+    // ~/** lists them, yet credential stores and what holds them stay the owner's.
+    [{ field: 'write', value: '~/.ssh' }, 'credentials stays owner-only'],
+    [{ field: 'read', value: '~/.config/gh/hosts.yml' }, 'credentials stays owner-only'],
+    [{ field: 'write', value: '~' }, 'credentials stays owner-only'],
+    [{ field: 'write', value: '~/secrets.env' }, 'credentials stays owner-only'],
+    [{ field: 'write', value: path.join(ownerConfig, 'other') }, 'credentials stays owner-only'],
+    // What spawn refuses whoever grants it, whatever the policy lists:
+    // stores the sandbox hides, and writes over the state directory or the worktrees root.
+    [{ field: 'write', value: path.join(state, 'homes') }, `spawn refuses a path inside ${state}/homes, which the sandbox hides`],
+    [{ field: 'read', value: path.join(state, 'brokers', 'w', 'token') }, `spawn refuses a path inside ${state}/brokers, which the sandbox hides`],
+    [{ field: 'read', value: path.join(state, 'ci-artifacts') }, `spawn refuses a path inside ${state}/ci-artifacts, which the sandbox hides`],
+    [{ field: 'read', value: path.join(ownerConfig, 'owner', 'key') }, `spawn refuses a path inside ${ownerConfig}/owner, which the sandbox hides`],
+    [{ field: 'write', value: ownerConfig }, `spawn refuses a path that holds ${ownerConfig}/owner, which the sandbox hides`],
+    [{ field: 'write', value: path.join(state, 'project.json') }, `spawn refuses a write path inside or holding the state directory ${state}`],
+    [{ field: 'write', value: '.tower-crane/tasks.json' }, `spawn refuses a write path inside or holding the state directory ${state}`],
+    [{ field: 'write', value: project }, `spawn refuses a path that holds ${state}/homes, which the sandbox hides`],
+    [{ field: 'write', value: `${project}-worktrees` }, `spawn refuses a write path that holds the worktrees root ${project}-worktrees`],
+    [{ field: 'read', value: '~' }, `spawn refuses a read path that is or holds the user's home ${home}`],
+    [{ field: 'read', value: '/' }, `spawn refuses a read path that is or holds the user's home ${home}`],
+    // A read of the state directory, or of what holds a store, is spawn's to allow.
+    [{ field: 'read', value: path.join(state, 'project.json') }, 'outside the sandbox policy'],
+    [{ field: 'read', value: project }, 'credentials stays owner-only'],
+    [{ field: 'write', value: `${project}-worktrees/T1-a` }, 'outside the sandbox policy'],
+    // A link inside a granted directory is judged where it leads.
+    [{ field: 'write', value: `${base}/link-target/keys` }, 'credentials stays owner-only'],
+    // So is a link in the middle of the path, one whose target does not exist yet included.
+    [{ field: 'write', value: `${base}/link-target/mid/credentials` }, 'credentials stays owner-only'],
+    [{ field: 'read', value: `${base}/link-target/keys/id_ed25519` }, 'credentials stays owner-only'],
+    [{ field: 'write', value: '~/work' }, null],
+    [{ field: 'write', value: path.join(runtime, 'bus') }, 'session_bus stays owner-only'],
+    [{ field: 'write', value: path.join(runtime, 'docker.sock') }, 'sockets stays owner-only'],
+    [{ field: 'write', value: '/run/docker.sock' }, 'sockets stays owner-only'],
+    [{ field: 'read', value: '/var/run' }, 'sockets stays owner-only'],
+    [{ field: 'read', value: agent }, 'sockets stays owner-only'],
+    [{ field: 'read', value: `${base}/link-target/ssh-agent` }, 'sockets stays owner-only'],
+    [{ field: 'write', value: `${base}/link-target/x11` }, 'sockets stays owner-only'],
+    [{ field: 'write', value: `${base}/link-target/plain` }, null],
+    [{ field: 'domains', value: 'example.com' }, 'network stays owner-only'],
+    [{ field: 'session_bus', value: true }, 'session_bus stays owner-only'],
+  ];
+  // A directory the walk cannot read may hold a socket; root reads it anyway.
+  if (process.getuid?.() !== 0) {
+    fs.mkdirSync(path.join(shut, 'inner'), { recursive: true });
+    fs.chmodSync(path.join(shut, 'inner'), 0o000);
+    rows.push([{ field: 'write', value: shut }, 'sockets stays owner-only']);
+    // A path under a directory nobody can search cannot be resolved, so it counts as outside.
+    rows.push([{ field: 'write', value: path.join(shut, 'inner', 'sub') }, `${path.join(shut, 'inner', 'sub')} cannot be resolved (EACCES), so it counts as outside the sandbox policy`]);
+  }
+  for (const [item, why] of rows) assert.equal(P.refusal(policy, item, r), why, JSON.stringify(item));
+  assert.equal(P.refusal(null, { field: 'write', value: '~/work' }, r), 'no sandbox policy is set');
+
+  for (const [glob, p, match] of [
+    ['/a/**', '/a', true], ['/a/**', '/a/b/c', true], ['/a/*', '/a/b', true], ['/a/*', '/a/b/c', false],
+    ['/a/**/z', '/a/z', true], ['/a/**/z', '/a/b/c/z', true], ['/a/b', '/a/b', true], ['/a/b', '/a/b/c', false],
+    ['/a/?', '/a/b', true], ['/a/?', '/a/bc', false], ['/a.b/*', '/aXb/c', false], ['/**', '/x/y', true],
+  ]) assert.equal(P.patternRegExp(glob, r).test(p), match, `${glob} ${p}`);
+
+  const before = P.parse(JSON.stringify({ orchestrator_may_grant: { read: ['~/a'], write: ['~/b', '~/c'] } }));
+  assert.deepEqual(P.widens(before, P.parse('{"orchestrator_may_grant":{"write":["~/c"]}}')), [], 'removing paths narrows');
+  assert.deepEqual(P.widens(before, null), [], 'clearing narrows');
+  assert.deepEqual(P.widens(before, P.parse('{"orchestrator_may_grant":{"read":["~/a","~/d"]}}')), ['read ~/d']);
+  assert.deepEqual(P.widens(null, before), ['read ~/a', 'write ~/b', 'write ~/c'], 'a new policy widens');
+  assert.deepEqual(P.parse('{"orchestrator_may_grant":{},"owner_only":["network"]}').owner_only, P.OWNER_ONLY, 'every class stays listed');
+  for (const bad of ['{"orchestrator_may_grant":{"sockets":["/run/docker.sock"]}}', '{"orchestrator_may_grant":{"write":["relative"]}}',
+    '{"orchestrator_may_grant":{"write":["~/a"]},"owner_only":["paths"]}', '{"orchestrator_may_grant":{},"version":4}', '[]']) {
+    assert.throws(() => P.parse(bad), /--sandbox-policy/, bad);
+  }
+});
+
+// A codex stand-in that saves the filesystem rules its profile grants.
+function writeCodexStub(bin, out) {
+  fs.writeFileSync(path.join(bin, 'codex'), [
+    `#!${process.execPath}`, "'use strict';",
+    'const fs = require("node:fs"), path = require("node:path");',
+    `fs.writeFileSync(${JSON.stringify(out)}, fs.readFileSync(path.join(process.env.CODEX_HOME, "config.toml"), "utf8"));`,
+    'console.log(JSON.stringify({ type: "thread.started", thread_id: "grant" }));', '',
+  ].join('\n'), { mode: 0o755 });
+}
+
+// The paths the agent's sandbox writes.
+const writable = (out) => Object.entries(TOML.parse(fs.readFileSync(out, 'utf8')).permissions['tower-crane'].filesystem)
+  .filter(([p, access]) => access === 'write' && !p.startsWith(':')).map(([p]) => p);
+
+// Each probe relaunches a task's worker; the owner lifts the respawn cap a
+// stand-in's exit without a submit counts toward.
+function releaseExited(h, id) {
+  const t = h.json(['task', 'show', id]);
+  if (t.claim) h.ok(['release', id, '--agent', t.claim.agent, '--reason', 'worker exited']);
+  if (t.needs_owner?.startsWith('worker exited without submitting')) h.ok(['owner-done', id]);
+}
+
+test('the orchestrator grants paths inside the owner\'s policy to one task, audited; outside it, owner-only classes and widening the policy stay the owner\'s; narrowing revokes at the next dispatch', { skip: NO_STUBS }, (t) => {
+  const h = cachedFixture(t, 'sandbox policy', (h) => {
+    h.init();
+    h.ok(['task', 'add', '--title', 'Needs a cache', '--acceptance', 'done']);
+    h.ok(['task', 'add', '--title', 'Other work', '--acceptance', 'done']);
+    for (const id of ['T1', 'T2']) h.ok(['brief', 'set', id, '-'], { input: 'probe' });
+    h.ok(['ladder', 'set', 'medium', '--harness', 'codex', '--profile', 'fixture-main', '--clear', 'model', '--clear', 'effort', '--clear', 'args']);
+  });
+  const bin = path.join(h.base, 'bin');
+  fs.mkdirSync(bin);
+  const out = path.join(h.base, 'config.toml');
+  writeCodexStub(bin, out);
+  const env = { ...h.env, PATH: `${bin}${path.delimiter}${process.env.PATH}`, CODEX_HOME: '' };
+  const writes = (id) => {
+    releaseExited(h, id);
+    h.ok(['spawn', '--task', id, '--wait'], { env });
+    return writable(out);
+  };
+  const grants = path.join(fs.realpathSync(h.base), 'grants');
+  const cache = path.join(grants, 'cache');
+  const other = path.join(grants, 'other');
+  fs.mkdirSync(cache, { recursive: true });
+  fs.mkdirSync(other, { recursive: true });
+  const docs = path.join(fs.realpathSync(h.env.HOME), 'docs');
+  fs.mkdirSync(docs, { recursive: true });
+  const decisions = () => h.readState('decisions.json').decisions;
+
+  // Without a policy the orchestrator's grant is the owner's to make.
+  const early = h.run(['task', 'update', 'T1', '--sandbox', JSON.stringify({ write: [cache] })], as('orchestrator'));
+  assert.equal(early.code, 1, early.stderr);
+  assert.match(early.stderr, /sandbox is owner-required; opened D1/);
+  assert.match(decisions()[0].why, /no sandbox policy is set/);
+  assert.equal(task(h, 'T1').sandbox_grants, undefined);
+
+  const policy = { orchestrator_may_grant: { read: ['~/docs/**'], write: [`${grants}/**`, '~/**', '/run/**'] } };
+  // The orchestrator cannot set or widen the policy itself; a worker cannot touch it.
+  const widen = h.run(['project', 'set', '--sandbox-policy', JSON.stringify(policy)], as('orchestrator'));
+  assert.equal(widen.code, 1, widen.stderr);
+  assert.match(widen.stderr, /sandbox\.policy is owner-required; opened D2/);
+  assert.equal(h.readState('project.json').sandbox_policy, undefined);
+  assert.match(h.run(['project', 'set', '--sandbox-policy', 'null'], as('worker-T1-1')).stderr, /only the orchestrator or the owner/);
+  assert.equal(h.run(['project', 'set', '--sandbox-policy', '{"orchestrator_may_grant":{"sockets":["/run/docker.sock"]}}']).code, 2, 'sockets are never grantable');
+
+  h.ok(['project', 'set', '--sandbox-policy', JSON.stringify(policy)]);
+  const set = h.readState('project.json').sandbox_policy;
+  assert.equal(set.version, 1);
+  assert.deepEqual(set.owner_only, P.OWNER_ONLY);
+  assert.equal(decisions()[1].status, 'answered', 'the owner making the change answers the orchestrator\'s request');
+  const sameAgain = h.run(['project', 'set', '--sandbox-policy', JSON.stringify({ orchestrator_may_grant: { ...policy.orchestrator_may_grant, write: [...policy.orchestrator_may_grant.write, '/srv/**'] } })], as('orchestrator'));
+  assert.equal(sameAgain.code, 1, 'adding a path to the policy is still the owner\'s');
+
+  // Inside the policy: the orchestrator grants a write path and a read path to T1 alone.
+  h.ok(['task', 'update', 'T1', '--sandbox', JSON.stringify({ write: [cache], read: ['~/docs/guides'] })], as('orchestrator'));
+  const granted = task(h, 'T1');
+  assert.deepEqual(granted.sandbox_grants.map(({ field, value, by, role, policy_version }) => ({ field, value, by, role, policy_version })), [
+    { field: 'read', value: '~/docs/guides', by: 'orchestrator', role: 'orchestrator', policy_version: 1 },
+    { field: 'write', value: cache, by: 'orchestrator', role: 'orchestrator', policy_version: 1 },
+  ]);
+  const log = events(h);
+  const audit = log.findLast((e) => e.cmd === 'setting');
+  assert.deepEqual(audit.detail.settings, { 'sandbox.grant': 'operational' });
+  assert.equal(audit.detail.actor, 'orchestrator');
+  const grant = log.findLast((e) => e.cmd === 'sandbox grant');
+  assert.equal(grant.task, 'T1');
+  assert.deepEqual(grant.detail, { by: 'orchestrator', role: 'orchestrator', policy_version: 1, granted: [{ field: 'read', value: '~/docs/guides' }, { field: 'write', value: cache }], removed: [] });
+  const evidence = granted.evidence.findLast((e) => e.type === 'sandbox');
+  assert.equal(evidence.agent, 'orchestrator');
+  assert.match(evidence.summary, new RegExp(`sandbox granted: read ~/docs/guides, write ${cache} under sandbox policy v1`));
+  assert.match(h.ok(['task', 'show', 'T1']), new RegExp(`sandbox widenings:\\n  - read ~/docs/guides by orchestrator under sandbox policy v1\\n  - write ${cache} by orchestrator under sandbox policy v1`));
+  assert.match(h.ok(['status']), new RegExp(`sandbox widenings: T1 read ~/docs/guides by orchestrator under sandbox policy v1, write ${cache}`));
+  assert.equal(h.run(['evidence', 'T1', '--type', 'sandbox', '--ok']).code, 1, 'sandbox evidence comes only with a grant');
+  assert.ok(writes('T1').includes(cache), 'T1\'s dispatch writes the granted path');
+  assert.ok(!writes('T2').includes(cache), 'T2\'s sandbox does not widen');
+
+  // Outside the policy: refused, nothing changes, and the owner gets the decision.
+  const outside = path.join(fs.realpathSync(h.base), 'elsewhere');
+  const before = task(h, 'T1').sandbox_grants;
+  const refused = h.run(['task', 'update', 'T1', '--sandbox', JSON.stringify({ write: [cache, outside], read: ['~/docs/guides'] })], as('orchestrator'));
+  assert.equal(refused.code, 1, refused.stderr);
+  assert.match(refused.stderr, /sandbox is owner-required; opened D\d+/);
+  const d3 = decisions().at(-1);
+  assert.deepEqual(d3.escalation, { settings: ['sandbox'], change: { task: 'T1', sandbox: { write: [cache, outside], read: ['~/docs/guides'] } } });
+  assert.match(d3.why, new RegExp(`write ${outside} \\(outside the sandbox policy\\)`));
+  assert.deepEqual(task(h, 'T1').sandbox_grants, before);
+
+  // Owner-only classes stay the owner's even where the policy's paths list them.
+  for (const [sandbox, cls] of [
+    [{ write: ['~/.ssh'] }, 'credentials'], [{ write: ['/run/docker.sock'] }, 'sockets'],
+    [{ domains: ['example.com'] }, 'network'], [{ session_bus: true }, 'session_bus'],
+  ]) {
+    const r = h.run(['task', 'update', 'T2', '--sandbox', JSON.stringify(sandbox)], as('orchestrator'));
+    assert.equal(r.code, 1, `${cls}: ${r.stderr}`);
+    assert.match(r.stderr, /sandbox is owner-required; opened D\d+/);
+    assert.match(decisions().at(-1).why, new RegExp(`${cls} stays owner-only`));
+    assert.equal(task(h, 'T2').sandbox_grants, undefined);
+  }
+
+  // A worker's credential ask for items inside the policy goes to the orchestrator; one outside stays the owner's.
+  const asked = h.ok(['ask', '--kind', 'credential', '--setting', 'sandbox', '--sandbox', JSON.stringify({ write: [other] }), '--question', 'May I write the other cache?', '--blocks', 'T2'], as('worker-T2-1'));
+  assert.match(asked, /routed to the orchestrator: the requested sandbox items lie inside sandbox policy v1/);
+  const routed = decisions().at(-1);
+  assert.equal(routed.technical, true);
+  assert.equal(routed.escalation, undefined);
+  assert.deepEqual(routed.routed, { to: 'orchestrator', sandbox_policy: 1, items: [{ field: 'write', value: other }], asked_kind: 'credential' });
+  h.ok(['answer', routed.id, '--choice', 'yes'], as('orchestrator'));
+  const held = h.ok(['ask', '--kind', 'credential', '--setting', 'sandbox', '--sandbox', JSON.stringify({ write: ['~/.ssh'] }), '--question', 'May I write my keys?', '--blocks', 'T2'], as('worker-T2-1'));
+  assert.doesNotMatch(held, /routed/);
+  assert.deepEqual(decisions().at(-1).escalation.settings, ['sandbox']);
+  assert.equal(h.run(['answer', decisions().at(-1).id, '--choice', 'no'], as('orchestrator')).code, 1, 'only the owner answers it');
+  h.ok(['answer', decisions().at(-1).id, '--choice', 'no']);
+
+  // A rung grant inside the policy is the orchestrator's too, and recorded as policy-backed.
+  h.ok(['ladder', 'set', 'medium', '--sandbox', JSON.stringify({ write: [other] })], as('orchestrator'));
+  assert.deepEqual(h.readState('project.json').sandbox_grants.map(({ rung, field, value, policy_version }) => ({ rung, field, value, policy_version })),
+    [{ rung: 'medium', field: 'write', value: other, policy_version: 1 }]);
+  assert.ok(writes('T2').includes(other));
+
+  // The orchestrator may narrow the policy. What the narrower policy no longer covers is revoked.
+  h.ok(['project', 'set', '--sandbox-policy', JSON.stringify({ orchestrator_may_grant: { read: ['~/docs/**'], write: ['~/**', '/run/**'] } })], as('orchestrator'));
+  assert.equal(h.readState('project.json').sandbox_policy.version, 2);
+  assert.deepEqual(task(h, 'T1').sandbox_grants.map((g) => g.value), ['~/docs/guides'], 'the read grant stays inside the narrower policy');
+  const revoke = events(h).filter((e) => e.cmd === 'sandbox revoke');
+  assert.deepEqual(revoke.map((e) => [e.task, e.detail.revoked.map((i) => i.value)]), [['T1', [cache]], [null, [other]]]);
+  assert.match(task(h, 'T1').evidence.findLast((e) => e.type === 'sandbox').summary, /sandbox revoked: write .*, no longer inside the sandbox policy/);
+  assert.equal(h.readState('project.json').ladder.medium.sandbox, undefined);
+  assert.ok(!writes('T1').includes(cache), 'T1\'s next dispatch writes the path no more');
+  assert.ok(!writes('T2').includes(other), 'nor does the rung\'s');
+});
+
+test('a policy init sets is logged, so the next policy after a clear takes a new version', (t) => {
+  const policy = { orchestrator_may_grant: { write: ['<project>/target/**'] } };
+  const h = cachedFixture(t, 'sandbox policy at init', (h) => h.init(['--sandbox-policy', JSON.stringify(policy)]));
+  assert.equal(h.readState('project.json').sandbox_policy.version, 1);
+  assert.deepEqual(events(h).filter((e) => e.cmd === 'sandbox policy').map((e) => e.detail.version), [1]);
+  h.ok(['project', 'set', '--sandbox-policy', 'null']);
+  h.ok(['project', 'set', '--sandbox-policy', JSON.stringify(policy)]);
+  assert.equal(h.readState('project.json').sandbox_policy.version, 2, 'v1, which init set, stays taken after the clear');
+});
+
+// Two briefed tasks on a codex medium rung.
+function driftFixture(h) {
+  h.init();
+  h.ok(['task', 'add', '--title', 'Needs a cache', '--acceptance', 'done']);
+  h.ok(['task', 'add', '--title', 'Needs a scratch dir', '--acceptance', 'done']);
+  for (const id of ['T1', 'T2']) h.ok(['brief', 'set', id, '-'], { input: 'probe' });
+  h.ok(['ladder', 'set', 'medium', '--harness', 'codex', '--profile', 'fixture-main', '--clear', 'model', '--clear', 'effort', '--clear', 'args']);
+}
+
+test('a grant the policy backs is left out of a dispatch once it falls outside, even before the policy changes', { skip: NO_STUBS }, (t) => {
+  const h = cachedFixture(t, 'sandbox drift', driftFixture);
+  const bin = path.join(h.base, 'bin');
+  fs.mkdirSync(bin);
+  const out = path.join(h.base, 'config.toml');
+  writeCodexStub(bin, out);
+  const env = { ...h.env, PATH: `${bin}${path.delimiter}${process.env.PATH}`, CODEX_HOME: '' };
+  const grants = path.join(fs.realpathSync(h.base), 'grants');
+  const cache = path.join(grants, 'cache');
+  fs.mkdirSync(grants, { recursive: true });
+  h.ok(['project', 'set', '--sandbox-policy', JSON.stringify({ orchestrator_may_grant: { write: [`${grants}/**`] } })]);
+  h.ok(['task', 'update', 'T1', '--sandbox', JSON.stringify({ write: [cache] })], as('orchestrator'));
+  // The granted path now leads to a credential store, as an agent with the parent's write could make it.
+  const keys = path.join(fs.realpathSync(h.env.HOME), '.ssh');
+  fs.mkdirSync(keys, { recursive: true });
+  fs.symlinkSync(keys, cache);
+  const started = h.ok(['spawn', '--task', 'T1', '--wait'], { env });
+  assert.match(started, new RegExp(`sandbox grants the policy no longer backs were left out: T1 write ${cache}`));
+  const allow = writable(out);
+  assert.ok(!allow.includes(keys) && !allow.includes(cache), 'the agent does not get the store');
+  assert.match(h.ok(['task', 'show', 'T1']), /write .* by orchestrator under sandbox policy v1 \(revoked: no longer inside the policy\)/);
+
+  // A directory that holds a socket is refused at the grant, and one that
+  // comes to hold one after it is left out of the next dispatch.
+  const agentDir = path.join(grants, 'ssh-agent');
+  socketAt(agentDir, 'agent.1');
+  const refused = h.run(['task', 'update', 'T2', '--sandbox', JSON.stringify({ read: [agentDir] })], as('orchestrator'));
+  assert.equal(refused.code, 1, refused.stderr);
+  assert.match(h.readState('decisions.json').decisions.at(-1).why, /sockets stays owner-only/);
+  const scratch = path.join(grants, 'scratch');
+  fs.mkdirSync(scratch);
+  h.ok(['task', 'update', 'T2', '--sandbox', JSON.stringify({ write: [scratch] })], as('orchestrator'));
+  socketAt(path.join(scratch, 'tmux'), 'default');
+  const later = h.ok(['spawn', '--task', 'T2', '--wait'], { env });
+  assert.match(later, new RegExp(`sandbox grants the policy no longer backs were left out: T2 write ${scratch}`));
+  assert.ok(!writable(out).includes(scratch), 'the agent does not get the socket');
+});
+
+test('a path spawn refuses is refused at every grant and ask, whoever makes it, and left out of a dispatch it comes to fall in', { skip: NO_STUBS }, (t) => {
+  const h = cachedFixture(t, 'sandbox drift', driftFixture);
+  const bin = path.join(h.base, 'bin');
+  fs.mkdirSync(bin);
+  const out = path.join(h.base, 'config.toml');
+  writeCodexStub(bin, out);
+  const env = { ...h.env, PATH: `${bin}${path.delimiter}${process.env.PATH}`, CODEX_HOME: '' };
+  const repo = fs.realpathSync(h.repo);
+  const state = path.join(repo, '.tower-crane');
+  const worktrees = `${repo}-worktrees`;
+  // The natural policy over the checkout's parent covers all of these.
+  h.ok(['project', 'set', '--sandbox-policy', JSON.stringify({ orchestrator_may_grant: { write: [`${path.dirname(repo)}/**`] } })]);
+  const decisions = () => h.readState('decisions.json').decisions.length;
+  const opened = decisions();
+  for (const [sandbox, why] of [
+    [{ write: [path.join(state, 'project.json')] }, 'inside or holding the state directory'],
+    [{ write: [repo] }, `that holds ${state}/homes`],
+    [{ write: [worktrees] }, 'that holds the worktrees root'],
+    [{ read: [path.join(state, 'brokers', 'token')] }, `inside ${state}/brokers`],
+    [{ read: ['~'] }, 'that is or holds the user\'s home'],
+  ]) {
+    for (const [args, opts] of [
+      [['task', 'update', 'T1', '--sandbox', JSON.stringify(sandbox)], as('orchestrator')],
+      [['task', 'update', 'T1', '--sandbox', JSON.stringify(sandbox)], {}],
+      [['ladder', 'set', 'medium', '--sandbox', JSON.stringify(sandbox)], as('orchestrator')],
+      [['ladder', 'set', 'medium', '--sandbox', JSON.stringify(sandbox)], {}],
+      [['ask', '--kind', 'credential', '--setting', 'sandbox', '--sandbox', JSON.stringify(sandbox), '--question', 'May I?', '--blocks', 'T1'], as('worker-T1-1')],
+    ]) {
+      const label = `${args.slice(0, 2).join(' ')} as ${opts.env?.TOWER_CRANE_AGENT || 'owner'}: ${JSON.stringify(sandbox)}`;
+      const r = h.run(args, opts);
+      assert.equal(r.code, 1, `${label}: ${r.stderr}`);
+      assert.match(r.stderr, new RegExp(`spawn refuses a ((write|read) )?path ${why.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}.*no grant makes spawn take it`), label);
+    }
+  }
+  assert.equal(decisions(), opened, 'nobody is asked to approve what spawn refuses');
+  assert.equal(task(h, 'T1').sandbox_grants, undefined);
+  assert.equal(h.readState('project.json').ladder.medium.sandbox, undefined);
+
+  // A granted path that comes to lead into the state directory is left out, so the task still dispatches.
+  const cache = path.join(path.dirname(repo), 'grants', 'cache');
+  fs.mkdirSync(path.dirname(cache), { recursive: true });
+  h.ok(['task', 'update', 'T1', '--sandbox', JSON.stringify({ write: [cache] })], as('orchestrator'));
+  fs.symlinkSync(state, cache);
+  const started = h.ok(['spawn', '--task', 'T1', '--wait'], { env });
+  assert.match(started, new RegExp(`sandbox grants the policy no longer backs were left out: T1 write ${cache}`));
+  assert.ok(!writable(out).some((p) => p === cache || p === state), 'the agent does not get the state directory');
+});
+
+// Found in review 2026-10-22: one policy-backed grant under a directory that
+// became unsearchable made every status, task show, dispatch and narrowing
+// project set exit 1 with EACCES. Such a grant cannot be judged, so it
+// counts as outside: it is left out of the dispatch and revoked by a policy
+// change, and every command goes on.
+test('a policy-backed grant under a directory nobody can search counts as outside: status, task show, dispatch and narrowing still work', { skip: (NO_STUBS || process.platform === 'win32' || process.getuid?.() === 0) && 'needs POSIX permissions and a user root does not bypass' }, (t) => {
+  const h = cachedFixture(t, 'sandbox policy unsearchable', (h) => {
+    h.init();
+    h.ok(['task', 'add', '--title', 'Needs a cache', '--acceptance', 'done']);
+    h.ok(['brief', 'set', 'T1', '-'], { input: 'probe' });
+    h.ok(['ladder', 'set', 'medium', '--harness', 'codex', '--profile', 'fixture-main', '--clear', 'model', '--clear', 'effort', '--clear', 'args']);
+  });
+  const bin = path.join(h.base, 'bin');
+  fs.mkdirSync(bin);
+  const out = path.join(h.base, 'config.toml');
+  writeCodexStub(bin, out);
+  const env = { ...h.env, PATH: `${bin}${path.delimiter}${process.env.PATH}`, CODEX_HOME: '' };
+  const grants = path.join(fs.realpathSync(h.base), 'grants');
+  const cache = path.join(grants, 'cache');
+  const sub = path.join(cache, 'sub');
+  fs.mkdirSync(sub, { recursive: true });
+  h.ok(['project', 'set', '--sandbox-policy', JSON.stringify({ orchestrator_may_grant: { write: [`${grants}/**`, '/srv/**'] } })]);
+  h.ok(['task', 'update', 'T1', '--sandbox', JSON.stringify({ write: [sub] })], as('orchestrator'));
+  fs.chmodSync(cache, 0o000);
+  // The fixture's cleanup runs before a later t.after, so the mode comes back here.
+  try {
+    unsearchable(h, env, out, grants, sub);
+  } finally {
+    fs.chmodSync(cache, 0o755);
+  }
+});
+
+function unsearchable(h, env, out, grants, sub) {
+  h.ok(['status']);
+  assert.match(h.ok(['task', 'show', 'T1']), new RegExp(`write ${sub} by orchestrator under sandbox policy v1 \\(revoked: no longer inside the policy\\)`));
+  const spawned = h.run(['spawn', '--task', 'T1', '--wait'], { env });
+  assert.equal(spawned.code, 0, spawned.stderr);
+  assert.match(spawned.stdout + spawned.stderr, new RegExp(`sandbox grants the policy no longer backs were left out: T1 write ${sub}`));
+  assert.ok(!writable(out).includes(sub), 'the dispatch leaves the grant out');
+
+  // Narrowing works and revokes the grant it can no longer judge.
+  h.ok(['project', 'set', '--sandbox-policy', JSON.stringify({ orchestrator_may_grant: { write: [`${grants}/**`] } })], as('orchestrator'));
+  assert.equal(task(h, 'T1').sandbox_grants, undefined);
+  const revoke = events(h).findLast((e) => e.cmd === 'sandbox revoke');
+  assert.equal(revoke.task, 'T1');
+  assert.deepEqual(revoke.detail.revoked, [{ field: 'write', value: sub, policy_version: 1 }]);
+  // A new grant there is outside too: the owner's decision, not the orchestrator's.
+  const again = h.run(['task', 'update', 'T1', '--sandbox', JSON.stringify({ write: [sub] })], as('orchestrator'));
+  assert.equal(again.code, 1, again.stderr);
+  assert.match(again.stderr, /sandbox is owner-required; opened D\d+/);
+  assert.match(h.readState('decisions.json').decisions.at(-1).why, /cannot be resolved \(EACCES\), so it counts as outside the sandbox policy/);
+}

@@ -1,0 +1,1 @@
+- Automation test fixtures wait for complete appended event records, avoiding JSON parse failures while an owner or gate writes its log.
