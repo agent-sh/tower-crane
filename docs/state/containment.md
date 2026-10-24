@@ -156,7 +156,9 @@ original process-count/RSS bound after the launcher exits. A cap or monitoring
 failure still stops the whole retained attempt. With cgroups, fleet memory pressure retains
 the per-attempt boundary, including after a keeper takes over.
 Gate commands own everything
-they start, including nested supervisors, and retain their complete cleanup.
+they start, including nested supervisors, and retain their complete cleanup:
+the gate kills a command's whole cgroup after it ends and waits until it is
+empty ([gate containment](storage.md#gate-containment)).
 In cgroup mode the keeper polls `cgroup.events` for population and reads
 `cgroup.procs` in that group and its nested groups. It does not scan `/proc`
 on each tick.
