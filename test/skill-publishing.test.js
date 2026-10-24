@@ -27,6 +27,7 @@ test('worker instructions keep base merges conditional and publication at submit
   assert.match(rework, /Keep every rework fix local until resubmit/);
   assert.match(rework, /push and update the PR once, immediately before resubmitting/);
   assert.doesNotMatch(work, /Fix the blocking ones, push|fix them, push,|Do it after the PR exists/);
+  assert.match(work, /ci dispatch.*the head your last submit published.*never push only to dispatch it/);
   const review = fs.readFileSync(path.join(ROOT, 'skills/tower-crane-review/SKILL.md'), 'utf8');
   assert.match(review, /Workers check the local diff before publishing once at submit/);
 });
