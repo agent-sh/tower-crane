@@ -23,7 +23,7 @@ cp.spawn = (file, args = [], opts = {}) => {
   const at = scope.findIndex((arg, n) => arg === '-p' && scope[n + 1].startsWith('CPUWeight='));
   const [, , settings, target, unit, command, ...rest] = args.slice(separator + 1);
   fs.appendFileSync(process.env.TC_FAKE_SCOPE_LOG, JSON.stringify({ settings: JSON.parse(settings), target, unit, slice,
-    cpu_weight: at < 0 ? undefined : Number(scope[at + 1].slice('CPUWeight='.length)) }) + '\n');
+    cpu_weight: at < 0 ? undefined : Number(scope[at + 1].slice('CPUWeight='.length)), argv: [command, ...rest] }) + '\n');
   // A group the launcher accepts as this unit's scope; it has no cgroup files, so its counters read zero.
   writeAtomic(opts.env.TOWER_CRANE_CONTAINMENT_REPORT, JSON.stringify({ unit, group: `/sys/fs/cgroup/fake/${slice}/${unit}` }));
   const env = { ...opts.env, TOWER_CRANE_SCOPED: '1', NODE_OPTIONS: opts.env.TOWER_CRANE_CONTAINMENT_NODE_OPTIONS };

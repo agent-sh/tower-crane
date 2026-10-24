@@ -132,6 +132,28 @@ test('Windows and macOS launches record that the weight was not applied', (t) =>
     '400 nested in /sys/fs/cgroup/agents.slice/orchestrator.scope');
 });
 
+// A gate context that names no state directory has no project slice to go in,
+// so its command gets no boost in the caller's slice.
+test('gate commands carry the gate weight only with the state directory that places them in their project\'s slice', async () => {
+  const stateDir = path.join(TMP_ROOT, 'state');
+  for (const [label, ctx, call, expected] of [
+    ['shell without a state directory', {}, 'shell', {}],
+    ['shell with a project weight but no state directory', { project: { gates: { cpu_weight: 700 } } }, 'shell', {}],
+    ['shell at the default weight', { stateDir }, 'shell', { cpuWeight: C.GATE_WEIGHT, stateDir }],
+    ['shell at a set weight', { stateDir, project: { gates: { cpu_weight: 700 } } }, 'shell', { cpuWeight: 700, stateDir }],
+    ['process tree without a state directory', {}, 'tree', {}],
+    ['process tree at a set weight', { stateDir, project: { gates: { cpu_weight: 700 } } }, 'tree', { cpuWeight: 700, stateDir }],
+    ['plain exec', { stateDir }, 'exec', {}],
+  ]) {
+    let seen;
+    const gc = { root: TMP_ROOT, ...ctx, exec: async (cmd, args, opts) => { seen = opts; return { status: 0, stdout: '', stderr: '' }; } };
+    if (call === 'shell') await G.shell(gc, 'true');
+    else await G.exec(gc, 'true', [], call === 'tree' ? { processTree: true } : {});
+    assert.deepEqual({ cpuWeight: seen.cpuWeight, stateDir: seen.stateDir },
+      { cpuWeight: expected.cpuWeight, stateDir: expected.stateDir }, label);
+  }
+});
+
 function project(t) {
   const h = cachedFixture(t, 'project-slices', (h) => {
     h.init();
