@@ -1,17 +1,15 @@
 'use strict';
 
 const path = require('node:path');
-const { updateJson, writeAtomic } = require('../atomic-file');
+const { writeAtomic, updateJson } = require('../atomic-file');
 const args = process.argv.slice(2);
 const file = process.env.TC_MAP_GITHUB;
-const data = updateJson(file, (state) => {
-  state.calls.push(args);
-  return state;
-});
+// gh runs once per call, sometimes side by side, so the call log is changed under updateJson's lock.
+const data = updateJson(file, (state) => { state.calls.push(args); return state; });
 if (data.fail) {
   if (data.supersedingPoll) {
-    const { file: receiptFile, receipt } = data.supersedingPoll;
-    writeAtomic(receiptFile, JSON.stringify(receipt));
+    const { file, receipt } = data.supersedingPoll;
+    writeAtomic(file, JSON.stringify(receipt));
     writeAtomic(process.env.HOOK_CLOCK_FILE, String(Date.parse(receipt.read_at)));
   }
   console.error('GitHub unavailable');
