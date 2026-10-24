@@ -136,7 +136,8 @@ The evidence entry is `{ "type": "final-review", "ok", "sha", "revision", "sourc
 
 `automation` events record `{source, phase}` keyed by the triggering event
 ID, or a stable digest for older records without IDs.
-`running` adds the reaction's `pid`, `host` and Linux `start_ticks` and `pidns`.
+`running` adds the reaction's `pid`, `host`, Linux `start_ticks`, `pidns` and
+`tool`, the executor's `{sha, version, committed}` ([Executor tool](tasks.md#executor-tool)).
 On Windows, running reaction, `executor`, `gate run` and `merge queue` receipts also
 record `created`, the process's creation time in UTC epoch milliseconds, when
 it can be read, or `seen`, the recording time, otherwise. A different process
@@ -150,7 +151,10 @@ without `created` retain PID signal probing.
 `done` deduplicates completed work. `executor` records a reaction that reached CPU
 work while every executor was busy, or while an older reaction already waited
 for one, with the gate as `kind` and the wait as `error`; its source stays
-owed. `deferred` keeps unknown or moved heads,
+owed. `stale` records a reaction whose gate, accept or merge refused
+because a newer engine tool was recorded while it ran, with that tool as
+`engine_tool`; its source stays queued and owed for a current executor.
+`deferred` keeps unknown or moved heads,
 unknown mergeability and failed merge attempts retryable; `error` records
 an exception. Terminal receipts include `error`, null without an exception.
 Startup can retry deferred or errored work without a new lifecycle event.
@@ -255,7 +259,8 @@ ran records its outcome either way, so moved heads still go to rework.
 Stopped steps record no deferral; the next refresh retries them.
 `automation queued` records a blocked notification's source, with
 `executors` set to the cap when it waits for an executor rather than for
-another reaction of the same task. A source first queued behind its task's
+another reaction of the same task, or `tool` and `engine_tool` when the executor
+that read it runs a tool behind the project's engine tool. A source first queued behind its task's
 reaction that later waits for an executor gets a second record with
 `executors`. Queued notifications for accepted, unmerged PR
 tasks run first, in the order of their current `accept` events. This includes
