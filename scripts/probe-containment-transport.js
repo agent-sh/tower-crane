@@ -6,6 +6,14 @@ const os = require('node:os');
 const path = require('node:path');
 const C = require('../lib/containment');
 
+// containment caches the manager probe per runtime, PATH and bus, and two cases can
+// share that key, so each case loads it afresh and dials the manager itself.
+const containment = require.resolve('../lib/containment');
+function fresh() {
+  delete require.cache[containment];
+  return require(containment);
+}
+
 assert.equal(process.platform, 'linux', 'this host probe requires Linux with a user manager');
 const uid = process.getuid();
 const runtime = process.env.XDG_RUNTIME_DIR || `/run/user/${uid}`;
@@ -29,9 +37,10 @@ try {
     ['runtime present, no session bus', runtime, undefined],
     ['custom runtime, stale bus', custom, 'unix:path=/nonexistent/t423-stale-bus'],
   ]) {
+    const F = fresh();
     const env = { ...process.env, [C.MARK]: '', XDG_RUNTIME_DIR: dir, DBUS_SESSION_BUS_ADDRESS: bus };
-    assert.equal(C.canScope(env), true, `${name}: real user manager must retain kernel scopes`);
-    const plan = C.launchPlan(process.execPath, ['-e', ''], {
+    assert.equal(F.canScope(env), true, `${name}: real user manager must retain kernel scopes`);
+    const plan = F.launchPlan(process.execPath, ['-e', ''], {
       env, resources: { tasks_max: 64, memory_max_bytes: 512 * 1024 ** 2 },
     });
     assert.equal(plan.kernel, true, name);

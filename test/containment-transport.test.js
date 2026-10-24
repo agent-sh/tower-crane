@@ -120,10 +120,21 @@ test('the host transport probe passes on a private peer and fails without one', 
   });
   const ok = await run(peer.root);
   assert.equal(ok.status, 0, ok.stderr);
-  for (const name of ['runtime unset, stale bus', 'runtime empty, stale bus', 'runtime present, no session bus', 'custom runtime, stale bus']) {
+  const cases = ['runtime unset, stale bus', 'runtime empty, stale bus', 'runtime present, no session bus', 'custom runtime, stale bus'];
+  for (const name of cases) {
     assert.match(ok.stdout, new RegExp(`${name}: canScope=true, systemd-run scope planned`));
   }
-  assert.ok(peer.calls.length >= 4, `${ok.stdout}${JSON.stringify(peer.calls)}`);
+  // The hook prints a dial line before the case it serves, so each case and the
+  // host caller check must dial once, and every dial must reach the peer.
+  const dials = {};
+  let pending = 0;
+  for (const line of ok.stdout.split('\n')) {
+    if (line.startsWith('dial: ')) pending++;
+    const name = /^(.*): canScope=true/.exec(line)?.[1];
+    if (name) { dials[name] = pending; pending = 0; }
+  }
+  assert.deepEqual(dials, Object.fromEntries([...cases, 'host caller'].map(name => [name, 1])), ok.stdout);
+  assert.equal(peer.calls.length, cases.length + 1, `${ok.stdout}${JSON.stringify(peer.calls)}`);
   assert.ok(peer.calls.every(call => call.member === 'Get' || call.member === 'GetEnvironment'), JSON.stringify(peer.calls));
   const failed = await run(missing);
   assert.notEqual(failed.status, 0, failed.stdout);
