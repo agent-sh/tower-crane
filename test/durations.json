@@ -308,7 +308,7 @@
     "test/spawn-startup.test.js": 73.3,
     "test/spawn.test.js": 445.1,
     "test/stack-merge.test.js": 513.1,
-    "test/stack-parent.test.js": 1219.4,
+    "test/stack-parent.test.js": 1953.3,
     "test/stack-retire.test.js": 861.2,
     "test/stack-sync.test.js": 224.7,
     "test/stack.test.js": 649,
