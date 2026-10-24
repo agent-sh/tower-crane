@@ -1062,19 +1062,6 @@ test('a monitor closing after the agent\'s next spawn started leaves that spawn 
     // What a codex agent's sandbox wrote in its own broker directory.
     fs.writeFileSync(path.join(where, 'agent-file'), 'x');
     const inode = fs.statSync(where).ino;
-    if (i === 0) {
-      // A start that fails before its file names it leaves the earlier broker its file and directory.
-      const before = fs.readFileSync(job.broker, 'utf8');
-      const write = fs.writeFileSync;
-      t.mock.method(fs, 'writeFileSync', (p, ...rest) => {
-        if (path.dirname(String(p)) === where && String(p).endsWith('.new')) throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' });
-        return write(p, ...rest);
-      });
-      await assert.rejects(B.start(job), /ENOSPC/);
-      t.mock.restoreAll();
-      assert.equal(fs.readFileSync(job.broker, 'utf8'), before, `${label}: the failed start keeps the earlier broker's file`);
-      assert.equal(fs.statSync(where).ino, inode, `${label}: and its directory`);
-    }
     const second = await B.start(job);
     let closed = false;
     t.after(() => closed || second.close());
@@ -1100,6 +1087,51 @@ test('a monitor closing after the agent\'s next spawn started leaves that spawn 
   }
   assert.deepEqual(h.readState('tasks.json').tasks[0].notes.map((n) => n.text), [['codex'], ...unixRows].map((r) => `after resume ${r.join('+')}`));
   assert.deepEqual(fs.readdirSync(brokers).filter((n) => n.endsWith('.lock')), [], 'every broker lock is released');
+});
+
+// prune asks dead() about a broker file in a directory a codex agent writes.
+// A link there is not followed and a FIFO is not waited on: either reads as
+// no broker record, so the directory is not called dead.
+test('dead() reads a broker file only as a plain file: a link the agent made is not followed and a FIFO does not block', { skip: process.platform === 'win32' && 'no FIFO or plain symlink on Windows' }, (t) => {
+  const s = scratch(t);
+  const where = path.join(s.base, 'brokers', 'worker-T1-1');
+  fs.mkdirSync(where, { recursive: true });
+  const file = path.join(where, B.FILE);
+  // A port nothing listens on: a plain record naming it is dead.
+  const record = path.join(s.base, 'record.json');
+  fs.writeFileSync(record, `${JSON.stringify({ host: '127.0.0.1', port: 1, token: 'x' })}\n`);
+  fs.copyFileSync(record, file);
+  assert.equal(B.dead(file), true, 'a plain record of a refused address is dead');
+  fs.rmSync(file);
+  fs.symlinkSync(record, file);
+  assert.equal(B.dead(file), false, 'a link is not followed');
+  fs.rmSync(file);
+  require('node:child_process').execFileSync('mkfifo', [file]);
+  const started = Date.now();
+  assert.equal(B.dead(file), false, 'a FIFO reads as no record');
+  assert.ok(Date.now() - started < 5000, 'without waiting for a writer');
+});
+
+// A start writes its broker file whole, by a rename. One that fails before
+// that file names it leaves the earlier broker of the agent its file and its
+// directory.
+test('a start that fails before its broker file names it leaves the earlier broker its file and directory', async (t) => {
+  const s = scratch(t);
+  const job = { ...s.job, harness: 'codex', broker_harnesses: ['codex'], broker: path.join(s.base, 'brokers', 'worker-T1-1', B.FILE) };
+  const first = await B.start(job);
+  t.after(() => first.close());
+  const where = path.dirname(job.broker);
+  const before = fs.readFileSync(job.broker, 'utf8');
+  const inode = fs.statSync(where).ino;
+  const write = fs.writeFileSync;
+  t.mock.method(fs, 'writeFileSync', (p, ...rest) => {
+    if (path.dirname(String(p)) === where && String(p).endsWith('.new')) throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' });
+    return write(p, ...rest);
+  });
+  await assert.rejects(B.start(job), /ENOSPC/);
+  t.mock.restoreAll();
+  assert.equal(fs.readFileSync(job.broker, 'utf8'), before, 'the failed start keeps the earlier broker\'s file');
+  assert.equal(fs.statSync(where).ino, inode, 'and its directory');
 });
 
 // Closing a Unix server unlinks its path, whoever listens there now. An
@@ -1157,7 +1189,7 @@ test('an earlier monitor closing while the agent\'s next broker starts on the sa
   assert.equal(r.code, 0, r.stderr);
 });
 
-test('a broker for claude and codex routes listens on both, and an agent that cannot use the socket uses TCP',{ skip: process.platform === 'win32' && 'Windows uses a named pipe for both' }, async (t) => {
+test('a broker for claude and codex routes listens on both, and an agent that cannot use the socket uses TCP', { skip: process.platform === 'win32' && 'Windows uses a named pipe for both' }, async (t) => {
   const h = makeRepo(t);
   h.init();
   h.ok(['task', 'add', '--title', 'routes', '--acceptance', 'noted']);

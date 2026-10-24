@@ -341,7 +341,7 @@ test('in a real codex sandbox a resumed agent reaches its broker after the agent
   assert.equal(h.readState('tasks.json').tasks[0].notes.find((n) => n.text === 'after-resume')?.agent, agent);
 });
 
-test('in a real claude sandbox the agent\'s tower-crane still answers after the dispatching checkout is retired',{ skip, timeout: 600000 }, async (t) => {
+test('in a real claude sandbox the agent\'s tower-crane still answers after the dispatching checkout is retired', { skip, timeout: 600000 }, async (t) => {
   const h = login(makeRepo(t));
   h.init();
   h.ok(['task', 'add', '--title', 'Retired engine probe', '--acceptance', 'the CLI answers']);
