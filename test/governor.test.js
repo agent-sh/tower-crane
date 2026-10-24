@@ -120,6 +120,26 @@ test('under CPU weights pressure defers, not load, until load saturates the host
   assert.match(budget({ load: 20, cpu_some: 5, weights: true }).reasons.join('; '), /^saturated load: 20 on 8 cores is at or over 16$/);
 });
 
+test('a test-thread lease resolves CPU weights before it takes the registry lock', { skip: process.platform !== 'linux' && 'CPU weights are probed on Linux' }, (t) => {
+  // A real host: the first answer spawns loginctl, systemctl and systemd-run, seconds that must not hold the lock.
+  const C = require('../lib/containment');
+  const cache = fs.mkdtempSync(path.join(TMP_ROOT, 'weights-lock-'));
+  t.after(() => fs.rmSync(cache, { recursive: true, force: true }));
+  // A PATH of its own keeps a weights answer an earlier test resolved in this process out of it.
+  const env = { ...process.env, XDG_CACHE_HOME: cache, PATH: `${process.env.PATH}${path.delimiter}${cache}` };
+  delete env.TOWER_CRANE_HOST_ROOT;
+  const lock = G.registryLock(env);
+  const probes = [];
+  t.mock.method(C, 'cpuWeighted', () => {
+    probes.push(fs.existsSync(lock));
+    return false;
+  });
+  const lease = G.testLease({ env }, { requested: 2 });
+  lease.refresh();
+  lease.release();
+  assert.deepEqual(probes, [false], 'one probe per process, outside the lock');
+});
+
 test('status says which signal defers: cpu pressure under weights, load without them, and saturated load either way', (t) => {
   const h = makeRepo(t);
   h.init();
