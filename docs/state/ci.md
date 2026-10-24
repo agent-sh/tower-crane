@@ -47,7 +47,11 @@ required runs have not appeared, or GitHub is computing mergeability. It
 prints `PENDING` and does not consume an infrastructure retry. The checks are
 read even while mergeability is UNKNOWN, so completed failures take precedence
 over pending runs and over unknown mergeability. Pending CI with no run queued
-or in progress also records `not_running: true`. The trusted `wait` host
+or in progress also records `not_running: true`. Each hosted CI entry and its
+`check ci` event record `ci_started_at`, the earliest `started_at` of the
+judged check runs (capped reviews and ignored apps left out), once one has
+started, and `ci_completed_at`, their latest `completed_at`, once none is
+pending or one has failed. `tower-crane metrics` times the CI wait from them. The trusted `wait` host
 schedules reconciliation of pending CI once per minute without a completion
 notification, reusing current tests and cleanup passes. It skips a task whose
 reaction is running or whose earlier reconcile is still queued, unless that
