@@ -77,6 +77,8 @@ Existing links use these anchors. Follow the link to the contract in its area.
 
 <a id="already-merged-hotfixes"></a>[already-merged-hotfixes](state/tasks.md#already-merged-hotfixes)
 
+<a id="native-landings"></a>[native-landings](state/tasks.md#native-landings)
+
 <a id="research-sources"></a>[research-sources](state/tasks.md#research-sources)
 
 <a id="ready-and-blocked"></a>[ready-and-blocked](state/tasks.md#ready-and-blocked)
@@ -128,6 +130,8 @@ Existing links use these anchors. Follow the link to the contract in its area.
 <a id="gate-reruns"></a>[gate-reruns](state/gates.md#gate-reruns)
 
 <a id="flake-ledger"></a>[flake-ledger](state/gates.md#flake-ledger)
+
+<a id="base-failures"></a>[base-failures](state/gates.md#base-failures)
 
 <a id="scratch-archive"></a>[scratch-archive](state/storage.md#scratch-archive)
 
