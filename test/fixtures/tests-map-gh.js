@@ -4,7 +4,8 @@ const path = require('node:path');
 const { writeAtomic, updateJson } = require('../atomic-file');
 const args = process.argv.slice(2);
 const file = process.env.TC_MAP_GITHUB;
-const data = updateJson(file, (d) => { d.calls.push(args); return d; });
+// gh runs once per call, sometimes side by side, so the call log is changed under updateJson's lock.
+const data = updateJson(file, (state) => { state.calls.push(args); return state; });
 if (data.fail) {
   if (data.supersedingPoll) {
     const { file, receipt } = data.supersedingPoll;
