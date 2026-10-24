@@ -49,6 +49,14 @@ const reviewerSpawns = (h) => events(h).filter((e) => e.cmd === 'spawn' && e.tas
 async function reviewerExited(h) {
   const agents = reviewerSpawns(h).map((e) => e.detail.agent);
   await waitOnRepo(h, () => agents.every((a) => events(h).some((e) => e.cmd === 'spawn exit' && e.detail.agent === a)));
+  // The exit receipt precedes automation, which must not consume the next verdict.
+  await waitOnRepo(h, () => {
+    const log = events(h);
+    return agents.every((a) => {
+      const exit = log.findLast((e) => e.cmd === 'spawn exit' && e.detail.agent === a);
+      return log.some((e) => e.cmd === 'automation' && e.detail.source === exit.id && e.detail.phase === 'done');
+    });
+  });
 }
 
 // After a reviewer exits its monitor advances the task too, so either accept may win.
@@ -177,12 +185,27 @@ test('other kinds need only a review from another agent', async (t) => {
   acceptAfterReview(h);
 });
 
-for (const retry of ['unchanged', 'override', 'head', 'revision']) {
-  test(`accept does not repeat a failed review without a new input: ${retry}`, async (t) => {
+for (const [retry, delayed] of [['unchanged', false], ['override', false], ['head', false], ['revision', false], ['unchanged', true]]) {
+  test(`accept does not repeat a failed review without a new input: ${retry}${delayed ? ', delayed exit reaction' : ''}`, async (t) => {
     const h = submitted(t, [], 'docs');
     silentReviewer(h);
-    assert.equal(h.json(['accept', 'T1', '--agent', 'orchestrator']).review_pending, true);
+    const preload = path.join(h.base, 'delayed-review-exit.js');
+    if (delayed) fs.writeFileSync(preload, `const path = require('node:path');
+if (path.basename(process.argv[1] || '') === 'spawn-monitor.js') {
+  const automation = require(path.join(path.dirname(process.argv[1]), 'automation.js'));
+  const consume = automation.consume;
+  automation.consume = async (...args) => {
+    await new Promise(resolve => setTimeout(resolve, 500)); // wait-allow: widen the gap between the exit receipt and its reaction
+    return consume(...args);
+  };
+}
+`);
+    assert.equal(h.json(['accept', 'T1', '--agent', 'orchestrator'],
+      delayed ? { pre: ['--require', preload] } : {}).review_pending, true);
     await reviewerExited(h);
+    const exit = events(h).findLast((e) => e.cmd === 'spawn exit' && e.detail.agent === reviewerSpawns(h)[0].detail.agent);
+    assert.ok(events(h).some((e) => e.cmd === 'automation' && e.detail.source === exit.id && e.detail.phase === 'done'),
+      'the reviewer exit reaction finishes before the next verdict is recorded');
     const reviewer = reviewerSpawns(h)[0].detail.agent;
     h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', h.sha, '--agent', reviewer,
       '--summary', '1 blocker: value.md:1 - missing behavior',
