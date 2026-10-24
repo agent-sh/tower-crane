@@ -12,6 +12,34 @@ const { waitUntil, killPid } = require('../signals');
 const NODE = quote(process.execPath);
 const CMD = `${NODE} run-tests.js`;
 
+test('coverage scratch uses the gate private directory or cache overrides and never falls back on failure', (t) => {
+  const base = scratch('coverage-root-table');
+  t.after(() => fs.rmSync(base, { recursive: true, force: true }));
+  const cache = path.join(base, 'cache');
+  const override = path.join(base, 'override');
+  const privateTmp = path.join(base, 'private');
+  const sentinel = path.join(base, 'sentinel');
+  fs.mkdirSync(sentinel);
+  for (const [settings, expected] of [
+    [{ TMPDIR: privateTmp, TOWER_CRANE_TMP: override }, privateTmp],
+    [{ TOWER_CRANE_TMP: override }, override],
+    [{}, path.join(cache, 'tower-crane')],
+    [{ TOWER_CRANE_SANDBOX: '1', TMP: privateTmp }, privateTmp],
+    [{ TOWER_CRANE_SANDBOX: '1', TMP: '', TEMP: privateTmp }, privateTmp],
+  ]) {
+    const env = { XDG_CACHE_HOME: cache, LOCALAPPDATA: cache, TMP: sentinel, TEMP: sentinel, ...settings };
+    const dir = gate.coverageScratch(env);
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+    assert.equal(path.dirname(dir), expected);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  const file = path.join(base, 'not-a-directory');
+  fs.writeFileSync(file, 'unchanged');
+  assert.throws(() => gate.coverageScratch({ TMPDIR: file }), /EEXIST|ENOTDIR/);
+  assert.equal(fs.readFileSync(file, 'utf8'), 'unchanged');
+  assert.deepEqual(fs.readdirSync(sentinel), []);
+});
+
 // A tiny project whose runner requires every test/*.test.js and exits 1 if any throws.
 const BASE = {
   'run-tests.js': `const fs = require('fs');
@@ -137,8 +165,8 @@ test('host-only commands run beside the ordinary command, and its failure still 
 const path = require('node:path');
 require('node:test')('${own} meets ${other}', async () => {
   fs.writeFileSync(path.join(${JSON.stringify(dir)}, '${own}'), 'here');
-  const deadline = Date.now() + 30000; // wait-allow: run in turn, the other file never starts, so this bounds the failing case
-  while (!fs.existsSync(path.join(${JSON.stringify(dir)}, '${other}')) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20)); // wait-allow: the other file's marker is the event under test
+  const deadline = Date.now() + 30000, parent = process.ppid; // wait-allow: run in turn, the other file never starts, so this bounds the failing case
+  while (!fs.existsSync(path.join(${JSON.stringify(dir)}, '${other}')) && Date.now() < deadline && process.ppid === parent) await new Promise((r) => setTimeout(r, 20)); // wait-allow: the other file's marker is the event under test
   require('node:assert/strict').ok(fs.existsSync(path.join(${JSON.stringify(dir)}, '${other}')), '${other} ran at the same time');
 });
 `;
@@ -640,11 +668,15 @@ test('a skipped changed host-only test cannot prove code, and host_env reaches i
 
 test('a test that fails without the change and passes with it: ok', async () => {
   const sha = task({ 'lib/add.js': FIX, 'test/add.test.js': ADD_TEST });
-  const r = await gate.run(ctx(sha));
+  const context = { ...ctx(sha), stateDir: path.join(tmp, 'state') };
+  const r = await gate.run(context);
   assert.equal(r.ok, true, r.summary);
   assert.equal(r.sha, sha);
   assert.match(r.summary, /run-tests\.js` at [0-9a-f]+: exit 0/);
   assert.match(r.summary, /1 non-test file reverted .*lib\/add\.js.*: exit 1/);
+  assert.deepEqual(r.receipt.test_logs.map((r) => r.phase), ['head', 'reverted']);
+  assert.match(fs.readFileSync(path.join(context.stateDir, r.receipt.test_logs[0].log), 'utf8'), /ok add.test.js/);
+  assert.match(fs.readFileSync(path.join(context.stateDir, r.receipt.test_logs[1].log), 'utf8'), /not ok add.test.js/);
   assertCleanedUp();
 });
 
@@ -760,7 +792,7 @@ test('a failing test reruns once: one that then passes is flaky with both runs, 
     ['fails twice', { times: 2 }, { ok: false, flaky: false, runs: 2, counted: 1, rerun: ['test/flaky.test.js'], note: /Rerun: reran test\/flaky\.test\.js once in the same checkout: exit 1; the failure stands\. Failing on the rerun: sometimes fails\./ }],
     ['fails once under the full suite command', { times: 1, head: 'suite' }, { ok: true, flaky: true, runs: 2, counted: 2, rerun: [], note: unnamed }],
     // The first part's flaky failure stops the chain, so only a whole rerun reaches the broken part.
-    ['fails once before a part that always fails', { times: 1, head: 'chain' }, { ok: false, flaky: false, runs: 2, counted: 0, broken: 1, rerun: [], note: new RegExp(`${unnamed.source}: exit 1; the failure stands\\. Failing on the rerun: test/broken\\.test\\.js`) }],
+    ['fails once before a part that always fails', { times: 1, head: 'chain' }, { ok: false, flaky: false, runs: 2, counted: 0, broken: 1, rerun: [], note: new RegExp(`${unnamed.source}: exit 1; the failure stands\\. Failing on the rerun: test[\\\\/]broken\\.test\\.js`) }],
     ['fails once with no file selector', { times: 1, head: 'suite', selector: false }, { ok: true, flaky: true, runs: 2, counted: 2, rerun: [], note: whole('the pinned runner has no file selector \\(gates\\.tests_proof_cmd with \\{tests\\}\\)') }],
     // A failure printed before the kept tail would go unnamed, so the whole command reruns.
     ['fails once with its output cut', { times: 1, cut: true }, { ok: true, flaky: true, runs: 2, counted: 2, rerun: [], note: whole("the first run's output was cut to its last \\d+ characters") }],
@@ -836,11 +868,11 @@ test('deleting a test is not a test for the change', async () => {
   assert.match(r.summary, /no test covers this change/);
 });
 
-test('a docs task that changes no test: ok once the command passes', async () => {
+test('a docs-only task skips the suite; a mixed change still runs it', async () => {
   const sha = task({ 'README.md': '# app\n' });
   const r = await gate.run(ctx(sha, { kind: 'docs' }));
   assert.equal(r.ok, true, r.summary);
-  assert.match(r.summary, /exit 0/);
+  assert.match(r.summary, /docs only; no suite ran/);
   const broken = task({ 'README.md': '# app\n', 'lib/mul.js': 'module.exports = () => 0;\n' });
   assert.equal((await gate.run(ctx(broken, { kind: 'docs' }))).ok, false);
   assertCleanedUp();
@@ -1229,7 +1261,7 @@ test('run-only accepts Rust inline tests in source files, and still fails a fail
 });
 
 test('none mode needs no command but still verifies the submitted sha; prove and run-only need one; malformed policy fails first', async () => {
-  const sha = task({ 'README.md': '# none\n' });
+  const sha = task({ 'lib/add.js': FIX });
   const byKind = { tests: { by_kind: { docs: 'none', ops: 'none' } }, gates: {} };
   for (const kind of ['docs', 'ops']) {
     const r = await gate.run(ctx(sha, { kind, args: { cmd: undefined }, project: byKind }));
@@ -1268,9 +1300,12 @@ test('expensive prove needs a pinned scoped command that passes at head, fails a
     assert.equal(r.ok, false);
     assert.match(r.summary, message);
   }
-  const r = await gate.run(ctx(sha, { project: expensive(`${NODE} proof.js {tests}`) }));
+  const context = { ...ctx(sha, { project: expensive(`${NODE} proof.js {tests}`) }), stateDir: path.join(tmp, 'scoped-state') };
+  const r = await gate.run(context);
   assert.equal(r.ok, true, r.summary);
   assert.match(r.summary, /kept a scoped proof/);
+  assert.deepEqual(r.receipt.test_logs.map((r) => r.phase), ['head', 'scoped', 'reverted']);
+  assert.match(fs.readFileSync(path.join(context.stateDir, r.receipt.test_logs[2].log), 'utf8'), /AssertionError/);
   assertCleanedUp();
 });
 

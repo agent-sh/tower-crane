@@ -1,0 +1,1 @@
+- Scratch defaults and coverage isolation contracts follow the split state docs and CLI command modules. Generated CLI help retains the cache root and the ladder keeps the shared-stash restrictions.

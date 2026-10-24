@@ -114,6 +114,15 @@ poll();
   return { stalled, release };
 }
 
+// Another task holds an executor on this host for as long as the test process
+// lives; the returned function releases it.
+function holdExecutor(h, task = 'T9') {
+  const lease = 'cpu:held';
+  const write = (detail) => StateFiles.appendLog(h.state, JSON.stringify({ at: new Date().toISOString(), agent: 'orchestrator', cmd: 'executor', task, detail }) + '\n');
+  write({ lease, phase: 'running', kind: 'tests', pid: process.pid });
+  return () => write({ lease, phase: 'done' });
+}
+
 function configureHarness(h, { rules = false } = {}) {
   const home = path.join(h.base, 'home');
   fs.mkdirSync(home, { recursive: true });
@@ -202,4 +211,4 @@ poll();
   return h;
 }
 
-module.exports = { setup, attach, holdSuite, configureHarness, refillFixture, ghStub, harness, MERGEABILITY_PAUSE };
+module.exports = { setup, attach, holdSuite, holdExecutor, configureHarness, refillFixture, ghStub, harness, MERGEABILITY_PAUSE };

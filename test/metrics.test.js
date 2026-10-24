@@ -20,7 +20,8 @@ function ev(min, cmd, task, detail = {}, agent = 'orchestrator') {
 
 // Five tasks with known phases, causes and spend. T2 fails T1's flaky test
 // first, which makes T1's tests rework cross_task. T4 was first claimed
-// before the cohort time, T5 is never merged.
+// before the cohort time, T5 is never merged. T1's CI ran from its submit to
+// four minutes before its check, T3's CI check carries no timing.
 function history() {
   const flaky = 'tests failed at a1: Head suite mode full: tests.map is not pinned.\n`node test/run.js` at a1: exit 1.\nFailing tests:\n- flaky one (12.5ms)\nOutput tail (last 40 lines):\nnot ok';
   return [
@@ -67,10 +68,11 @@ function history() {
     ev(160, 'claim', 'T4', { from: 'rework' }, 'worker-T4-1'),
     ev(170, 'spawn exit', 'T1', { role: 'reviewer', agent: 'reviewer-T1-1', code: 0 }),
     ev(170, 'evidence', 'T1', { type: 'review', ok: true, sha: 'a2' }, 'reviewer-T1-1'),
+    ev(165, 'check ci', 'T3', { type: 'ci', ok: true, sha: 'c5' }),
     ev(170, 'accept', 'T3', { sha: 'c5' }),
     ev(170, 'submit', 'T4', { sha: 'd2' }, 'worker-T4-1'),
-    ev(175, 'check ci', 'T1', { type: 'ci', ok: false, sha: 'a2', pending: true }),
-    ev(175, 'check ci', 'T1', { type: 'ci', ok: true, sha: 'a2' }),
+    ev(168, 'check ci', 'T1', { type: 'ci', ok: false, sha: 'a2', pending: true, ci_started_at: at(150) }),
+    ev(175, 'check ci', 'T1', { type: 'ci', ok: true, sha: 'a2', ci_started_at: at(150), ci_completed_at: at(174) }),
     ev(176, 'check clean', 'T1', { type: 'clean', ok: true, sha: 'a2' }),
     ev(180, 'accept', 'T1', { sha: 'a2' }),
     ev(180, 'accept', 'T4', { sha: 'd2' }),
@@ -145,19 +147,22 @@ test('metrics reports merges, causes, the Tower Crane share, tokens and phases f
   assert.deepEqual([all.merges.tasks, all.merges.total], [4, 4]);
   const causes = (r) => Object.fromEntries(Object.entries(r.by_cause).filter(([, n]) => n));
   assert.deepEqual(causes(all.reworks.merged_tasks), { conflict_base: 2, conflict_parent: 1, stack_sync: 1, coverage_gap: 1, cross_task: 1, review: 1 });
-  assert.deepEqual([all.reworks.merged_tasks.tc_caused, all.reworks.merged_tasks.tc_share], [6, 0.857]);
-  assert.deepEqual([all.reworks.raised_in_window.total, all.reworks.raised_in_window.by_cause.manual, all.reworks.raised_in_window.tc_share], [8, 1, 0.75]);
+  // cross_task is neither Tower Crane's nor the task's: the three buckets split every rework.
+  const split = (r) => [r.tc_caused, r.tc_share, r.unattributed, r.unattributed_share, r.task_caused, r.task_share];
+  assert.deepEqual(split(all.reworks.merged_tasks), [5, 0.714, 1, 0.143, 1, 0.143]);
+  assert.deepEqual([all.reworks.raised_in_window.total, all.reworks.raised_in_window.by_cause.manual], [8, 1]);
+  assert.deepEqual(split(all.reworks.raised_in_window), [5, 0.625, 1, 0.125, 2, 0.25]);
   assert.deepEqual(all.cohort, { claimed_after: null, excluded_merged_tasks: 0, excluded_reworks_raised: 0 });
 
   assert.deepEqual(cohort.cohort, { claimed_after: '2026-10-20T00:00:00.000Z', excluded_merged_tasks: 1, excluded_reworks_raised: 1 });
   assert.deepEqual([cohort.merges.tasks, cohort.merges.total], [3, 3]);
-  assert.deepEqual(cohort.by_day, [{ day: '2026-10-20', merges: 3, reworks: 7, tc_caused: 5, tokens_known: 10000 }]);
+  assert.deepEqual(cohort.by_day, [{ day: '2026-10-20', merges: 3, reworks: 7, tc_caused: 4, unattributed: 1, tokens_known: 10000 }]);
   const m = cohort.reworks.merged_tasks;
-  assert.deepEqual([m.total, m.tc_caused, m.by_cause.conflict_parent, m.per_task.p50, m.per_task.p90], [6, 5, 0, 1, 4]);
-  assert.deepEqual([cohort.reworks.raised_in_window.total, cohort.reworks.raised_in_window.tc_caused], [7, 5]);
+  assert.deepEqual([m.total, m.tc_caused, m.unattributed, m.task_caused, m.by_cause.conflict_parent, m.per_task.p50, m.per_task.p90], [6, 4, 1, 1, 0, 1, 4]);
+  assert.deepEqual([cohort.reworks.raised_in_window.total, cohort.reworks.raised_in_window.tc_caused], [7, 4]);
 
   const g = cohort.gate_runs;
-  assert.deepEqual(['tests', 'clean', 'review', 'ci', 'head_check'].map((k) => g.per_task[k].sum), [2, 1, 1, 1, 1]);
+  assert.deepEqual(['tests', 'clean', 'review', 'ci', 'head_check'].map((k) => g.per_task[k].sum), [2, 1, 1, 2, 1]);
   assert.equal(g.governor_deferrals.tests, 1);
   assert.equal(g.tests_wall_ms.per_task.sum, 20 * MIN);
   assert.deepEqual(g.tests_cpu_ms, { value: null, runs_recorded: 0, runs: 1 });
@@ -172,16 +177,25 @@ test('metrics reports merges, causes, the Tower Crane share, tokens and phases f
   assert.deepEqual([l.total.p50, l.total.p90, l.total.sum], [210 * MIN, 300 * MIN, 640 * MIN]);
   assert.equal(Object.values(l.phases).reduce((n, p) => n + p.sum, 0), l.total.sum, 'phases add up to the lead time');
   assert.deepEqual(Object.fromEntries(Object.entries(l.phases).map(([k, v]) => [k, v.sum / MIN])),
-    { queued: 35, working: 195, waiting_for_gates: 140, gating: 30, reviewing: 10, rework_waiting: 70, accepted_to_merged: 160 });
+    { queued: 35, working: 195, waiting_for_gates: 126, ci_waiting: 14, gating: 30, reviewing: 10, rework_waiting: 70, accepted_to_merged: 160 });
+  // T1's CI from its submit at 150 to 174, less its review from 160 to 170, is its own phase.
+  assert.deepEqual([l.phases.ci_waiting.p50, l.phases.ci_waiting.p90], [0, 14 * MIN]);
   assert.equal(l.waiting_share, 0.633);
+  assert.deepEqual(l.waiting_parts, { queued: 0.055, waiting_for_gates: 0.197, ci_waiting: 0.022, rework_waiting: 0.109, accepted_to_merged: 0.25 });
+  assert.deepEqual(l.ci_timing, { tasks_timed: 1, tasks_without_timing: 1 });
   assert.deepEqual([cohort.submits.per_task.p50, cohort.submits.per_task.p90, cohort.submits.per_task.mean], [2, 5, 3]);
   assert.deepEqual([cohort.submits.first_pass_ms.p50, cohort.submits.first_pass_ms.p90], [45 * MIN, 60 * MIN]);
   assert.ok(cohort.definitions.tc_caused && cohort.definitions.phases.gating);
 
   assert.match(text, /^cohort: first claim at or after 2026-10-20T00:00:00\.000Z; excluded 1 merged tasks and 1 reworks raised$/m);
   assert.match(text, /^merged: 3 tasks, 3 merges/m);
-  assert.match(text, /^tc caused +5 \(83%\) +5 \(71%\)$/m);
-  assert.match(text, /^cross_task \(tc\) +1 +1$/m);
+  assert.match(text, /^tc caused +4 \(67%\) +4 \(57%\)$/m);
+  assert.match(text, /^unattributed +1 \(17%\) +1 \(14%\)$/m);
+  assert.match(text, /^task caused +1 \(17%\) +2 \(29%\)$/m);
+  assert.match(text, /^cross_task \(unattributed\) +1 +1$/m);
+  assert.match(text, /^ci_waiting +0m +14m +14m$/m);
+  assert.match(text, /^waiting share: 63% \(queued 5%, waiting_for_gates 20%, ci_waiting 2%, rework_waiting 11%, accepted_to_merged 25%\)$/m);
+  assert.match(text, /^CI timing: 1 merged tasks timed, 1 without timing/m);
 });
 
 test('rework causes from reason text when an event records none', () => {
@@ -226,7 +240,7 @@ test('a head check rework has a culprit only when a failing test file is one the
     const r = M.report(dir, { since: B - MIN, until: B + 60 * MIN });
     assert.equal(r.reworks.merged_tasks.by_cause.head_check, 2);
     assert.deepEqual(r.reworks.merged_tasks.head_check_culprit, { yes: 1, no: 1 });
-    assert.equal(r.reworks.merged_tasks.tc_caused, 1);
+    assert.deepEqual([r.reworks.merged_tasks.tc_caused, r.reworks.merged_tasks.unattributed, r.reworks.merged_tasks.task_caused], [0, 1, 1]);
     assert.deepEqual(M.failures(failing('test/a.test.js')), { names: ['boom'], files: ['test/a.test.js'] });
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
@@ -251,6 +265,27 @@ test('a failing test shared only with a task of the same stack is not cross_task
     ]);
     const r = M.report(dir, { since: B - MIN, until: B + 60 * MIN });
     assert.deepEqual([r.reworks.merged_tasks.by_cause.head_check, r.reworks.merged_tasks.by_cause.cross_task], [2, 1]);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('CI no check saw complete waits until the task leaves that head, since unchanged pending rechecks write no event', () => {
+  const dir = fs.mkdtempSync(path.join(TMP_ROOT, 'metrics-'));
+  try {
+    writeLog(path.join(dir, 'events.jsonl'), [
+      ev(0, 'task add', 'T1'), ev(1, 'claim', 'T1'), ev(2, 'submit', 'T1', { sha: 's1' }),
+      // The only pending entry at s1: later rechecks read the same result and record nothing.
+      ev(3, 'check ci', 'T1', { type: 'ci', ok: false, sha: 's1', pending: true, ci_started_at: at(2) }),
+      ev(20, 'rework', 'T1', { reason: 'PR #1 conflicts with main: a.js.', sha: 's1', cause: 'conflict_base' }),
+      ev(21, 'claim', 'T1'), ev(25, 'submit', 'T1', { sha: 's2' }),
+      ev(30, 'check ci', 'T1', { type: 'ci', ok: true, sha: 's2', ci_started_at: at(25), ci_completed_at: at(29) }),
+      ev(30, 'accept', 'T1'), ev(31, 'merge', 'T1', { ok: true, sha: 's2' }),
+    ]);
+    const r = M.report(dir, { since: B - MIN, until: B + 60 * MIN });
+    const p = r.lead_time.phases;
+    assert.deepEqual([p.ci_waiting.sum, p.waiting_for_gates.sum], [22 * MIN, 1 * MIN]);
+    assert.deepEqual(r.lead_time.ci_timing, { tasks_timed: 1, tasks_without_timing: 0 });
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

@@ -877,7 +877,7 @@ process.exit(process.argv.includes('--fail') ? 1 : 0);
   }
 });
 
-test('receipt globs validate like artifact globs', () => {
+test('receipt and input globs validate like artifact globs', () => {
   const Local = require('../lib/ci-local');
   for (const [receipts, valid] of [
     [[], true], [['.local/checks/*.json', 'reports/**/*.json'], true],
@@ -886,6 +886,7 @@ test('receipt globs validate like artifact globs', () => {
     [['C:\\checks\\*.json'], false], [['a\\..\\b'], false], [['a\0b'], false],
   ]) {
     assert.equal(Local.valid({ command: ['node'], timeout: 5, receipts }), valid, JSON.stringify(receipts));
+    assert.equal(Local.valid({ command: ['node'], timeout: 5, inputs: receipts }), valid, JSON.stringify(receipts));
     for (const override of [{ command: ['node'], receipts }, { args: [], receipts }]) {
       assert.equal(Local.validOverride(override, { allowReceipts: true }), valid, JSON.stringify(override));
       assert.equal(Local.valid({ command: ['node'], timeout: 5, by_kind: { docs: override } }), false);
@@ -899,6 +900,43 @@ test('receipt globs validate like artifact globs', () => {
   }
   const policy = require('../lib/gate-commands').resolve({ tests: { map: {} }, ci: { local } }, 'tests').policy;
   assert.deepEqual(policy.ci_local, { command: ['node'], timeout: 5 });
+});
+
+// The paths a base move can change under a receipt that still stands: none the argv names as a
+// repository path or a directory above one, and none an `inputs` glob matches.
+test('local CI reads the repository paths its argv names and its inputs globs', () => {
+  const { reads } = require('../lib/ci-local');
+  const read = reads(['python3', './tools/check.py', 'test/', '--fast', '-x', '/usr/bin/env', 'C:\\ci.cmd', ''], ['package.json', 'config/**']);
+  for (const [file, expected] of [
+    ['tools/check.py', true], ['tools/check.pyc', false], ['tools/other.py', false],
+    ['test/a.test.js', true], ['test/deep/b.test.js', true], ['tests/a.test.js', false], ['test', true],
+    ['python3', true], ['--fast', false], ['usr/bin/env', false],
+    ['package.json', true], ['sub/package.json', false], ['config/ci/x.json', true], ['configs/x.json', false],
+    ['README.md', false],
+  ]) assert.equal(read(file), expected, file);
+  // Each row: the argv, a file it reads and a file it does not (null when it reads every file).
+  for (const [argv, yes, no] of [
+    [['pytest', '.'], 'lib/x.py', null],
+    [['ruff', 'check', './'], 'lib/x.py', null],
+    [['go', 'test', './...'], 'lib/x.go', null],
+    [['go', 'test', '...'], 'lib/x.go', null],
+    [['node', '--test', '.\\'], 'lib/x.js', null],
+    [['go', 'test', './pkg/...'], 'pkg/a/b.go', 'cmd/main.go'],
+    [['python', 'tools\\check.py'], 'tools/check.py', 'tools/other.py'],
+    [['python', '.\\tools\\check.py'], 'tools/check.py', 'tools/other.py'],
+    [['node', 'test/../lib/run.js'], 'lib/run.js', 'test/x.js'],
+    [['tool', '--config=ci/conf.toml'], 'ci/conf.toml', 'ci/other.toml'],
+    [['tool', '--root=.'], 'any/file', null],
+    [['tool', '--flag', '-'], null, 'flag'],
+    [['tool', '../outside', '..'], null, 'outside'],
+    [['node', '--test', 'test/**/*.test.js'], 'test/a/b.test.js', 'test/a/helper.js'],
+    [['eslint', 'src/*'], 'src/deep/x.js', 'lib/x.js'],
+  ]) {
+    const read = reads(argv, []);
+    if (yes) assert.equal(read(yes), true, `${argv.join(' ')} reads ${yes}`);
+    if (no) assert.equal(read(no), false, `${argv.join(' ')} does not read ${no}`);
+    else assert.equal(read('README.md'), !!yes, `${argv.join(' ')} reads README.md`);
+  }
 });
 
 test('task local CI overrides replace, inherit or disable receipt copies on pass and fail', (t) => {

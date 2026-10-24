@@ -1,0 +1,414 @@
+'use strict';
+
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const { refillFixture, setup } = require('./automation-helpers');
+const { fileWritten } = require('./signals');
+const { waitOnRepo } = require('./signals');
+const S = require('../lib/state');
+
+const leased = (h) => h.json(['status']).gate_executors.in_use.map((u) => u.task).sort();
+const leasedBy = (h, id) => h.logs().some((e) => e.cmd === 'executor' && e.task === id && e.detail.phase === 'running');
+
+async function busyExecutors(h, prepare = () => {}) {
+  const started = path.join(h.base, 'held-gates');
+  const release = path.join(h.base, 'release-gates');
+  const suite = path.join(h.base, 'tools', 'held-gate.js');
+  fs.mkdirSync(started);
+  fs.writeFileSync(release, '');
+  fs.writeFileSync(suite, `
+const fs = require('node:fs'), path = require('node:path');
+const StateFiles = require('./state-files');
+if (fs.existsSync(${JSON.stringify(release)})) process.exit(0);
+fs.writeFileSync(path.join(${JSON.stringify(started)}, String(process.pid)), '');
+const until = Date.now() + 60000; // wait-allow: the release file ends held gates; this bounds a failed test
+const poll = () => {
+  if (fs.existsSync(${JSON.stringify(release)})) process.exit(0);
+  if (Date.now() >= until) process.exit(1);
+  setTimeout(poll, 25); // wait-allow: probe cadence for the release file
+};
+poll();
+`);
+  h.ok(['project', 'set', '--tests-cmd', `node ${JSON.stringify(suite)}`, '--tests-mode', 'run-only',
+    '--executors', '4', '--agent', 'orchestrator']);
+  for (const id of ['T2', 'T3', 'T4']) {
+    if (h.readState('tasks.json').tasks.some((task) => task.id === id)) continue;
+    h.ok(['task', 'add', '--title', id, '--acceptance', 'works']);
+    h.ok(['task', 'update', id, '--status', 'cancelled']);
+  }
+  for (const id of ['T5', 'T6', 'T7', 'T8']) h.ok(['task', 'add', '--title', id, '--acceptance', 'works']);
+  prepare();
+  // Start only the four held gates; prepared reactions get their PRs back
+  // once every executor is occupied.
+  const saved = new Map(h.readState('tasks.json').tasks.filter((task) => task.pr).map((task) => [task.id, task.pr]));
+  const setPRs = (restore) => S.withLock(h.state, () => {
+    const tasks = h.readState('tasks.json');
+    for (const task of tasks.tasks) if (saved.has(task.id)) task.pr = restore ? saved.get(task.id) : null;
+    h.writeState('tasks.json', tasks);
+  });
+  if (saved.size) setPRs(false);
+  fs.rmSync(release);
+  const offset = StateFiles.logEnd(h.state);
+  for (const id of ['T5', 'T6', 'T7', 'T8']) {
+    h.ok(['claim', id, '--agent', 'worker']);
+    h.ok(['submit', id, '--sha', h.sha, '--agent', 'worker']);
+  }
+  h.ok(['project', 'set', '--paused', 'prepare busy executors']);
+  const hosts = Array.from({ length: 4 }, () => h.runAsync(['wait', '--after', String(offset),
+    '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']));
+  const finish = async () => {
+    fs.writeFileSync(release, '');
+    await Promise.all(hosts);
+  };
+  try {
+    await waitOnRepo(h, () => fs.readdirSync(started).length === 4, 'all four fake gates start');
+    assert.deepEqual(leased(h), ['T5', 'T6', 'T7', 'T8']);
+    if (saved.size) setPRs(true);
+  } catch (error) {
+    await finish();
+    throw error;
+  }
+  return finish;
+}
+
+async function watchQueued(h) {
+  const after = StateFiles.logEnd(h.state);
+  const result = await h.runAsync(['wait', '--after', String(after), '--types', 'never',
+    '--timeout', '3', '--agent', 'orchestrator']); // wait-allow: observe watcher retries while every fake gate remains held
+  assert.equal(result.code, 2, result.stderr);
+  const starts = new Map();
+  for (const e of h.logs()) {
+    if (e.cmd !== 'automation' || e.detail.phase !== 'running' || ['T5', 'T6', 'T7', 'T8'].includes(e.task)) continue;
+    starts.set(e.detail.source, (starts.get(e.detail.source) || 0) + 1);
+  }
+  assert.ok(starts.size, 'the watcher inspected a fast reaction and discovered a gate');
+  for (const [source, count] of starts) assert.equal(count, 1, `${source}: queued discovery must not repeatedly reserve on watcher wakes`);
+}
+
+test('a failed review reworks and dispatches while all four gate executors are busy', async (t) => {
+  const h = refillFixture(t);
+  for (const id of ['T2', 'T3', 'T4']) h.ok(['task', 'update', id, '--status', 'cancelled']);
+  const finish = await busyExecutors(h, () => h.submit());
+  try {
+    h.reviewer('T1', 'reviewer');
+    h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha,
+      '--fail', '--summary', 'lib/change.js:12 - handle the missing input', '--agent', 'reviewer']);
+    h.ok(['project', 'set', '--paused', '']);
+    h.consume();
+    await waitOnRepo(h, () => fs.existsSync(h.marker('T1')), 'failed review dispatches its rework',
+      { signal: AbortSignal.timeout(20000) }); // wait-allow: rework must dispatch before any held gate's 60 s limit
+    const task = h.readState('tasks.json').tasks.find((task) => task.id === 'T1');
+    assert.equal(task.status, 'in_progress');
+    assert.equal(task.revision, 2);
+    assert.equal(task.claim.from, 'rework');
+    assert.match(fs.readFileSync(`${h.marker('T1')}.prompt`, 'utf8'), /lib\/change.js:12/);
+    assert.equal(h.logs().some((e) => e.cmd === 'check tests'), false, 'none of the four held gates ended');
+    assert.equal(h.logs().some((e) => e.task === 'T1' && e.cmd === 'automation queued'), false);
+    assert.equal(h.logs().filter((e) => e.cmd === 'rework' && e.task === 'T1').length, 1);
+    const queue = h.json(['status']).gate_queue;
+    assert.deepEqual(leased(h), ['T5', 'T6', 'T7', 'T8']);
+    assert.deepEqual(queue.queued, []);
+  } finally {
+    await finish();
+  }
+});
+
+test('a merge queue preserves the next task suite after its originating task merges with every executor busy', async (t) => {
+  const h = refillFixture(t);
+  for (const id of ['T2', 'T3', 'T4']) h.ok(['task', 'update', id, '--status', 'cancelled']);
+  const finish = await busyExecutors(h, () => {
+    const github = h.github();
+    github.ci[h.sha] = 'success';
+    github.prs['8'] = { ...github.prs['7'] };
+    h.saveGithub(github);
+    h.ok(['task', 'add', '--title', 'next merge', '--acceptance', 'works']);
+    for (const [id, pr] of [['T1', '7'], ['T9', '8']]) {
+      h.ok(['claim', id, '--agent', 'worker']);
+      h.ok(['submit', id, '--sha', h.sha, '--pr', pr, '--agent', 'worker']);
+      for (const gate of ['tests', 'clean', 'ci']) h.ok(['check', gate, id, '--agent', 'orchestrator']);
+      h.reviewer(id, 'reviewer');
+      h.ok(['evidence', id, '--revision', h.revision(id), '--type', 'review', '--sha', h.sha, '--ok', '--agent', 'reviewer']);
+      h.ok(['accept', id, '--agent', 'orchestrator']);
+    }
+    h.git(['switch', 'main']);
+    fs.appendFileSync(path.join(h.repo, 'README.md'), 'Independent base update.\n');
+    h.git(['add', 'README.md']);
+    h.git(['commit', '-qm', 'advance main']);
+    const merged = h.github();
+    merged.prs['7'].state = 'MERGED';
+    merged.prs['7'].mergeCommit = { oid: h.sha };
+    h.saveGithub(merged);
+  });
+  try {
+    await watchQueued(h);
+    assert.ok(h.logs().some((e) => e.task === 'T1' && e.cmd === 'merge' && e.detail.ok));
+    assert.ok(h.json(['status']).gate_queue.queued.some((q) => q.id === 'T9'), 'the suite remains queued after the original notification becomes ineligible');
+    assert.equal(h.logs().some((e) => e.task === 'T9' && e.cmd === 'head check'), false);
+  } finally {
+    await finish();
+  }
+  assert.ok(h.logs().some((e) => e.task === 'T9' && e.cmd === 'head check' && e.detail.ok));
+  assert.ok(h.logs().some((e) => e.task === 'T9' && e.cmd === 'merge' && e.detail.ok), 'the releasing executors drain the next suite without another notification');
+});
+
+for (const discovery of ['accepted merge suite']) {
+  test(`a live watcher retains the executor requirement of a queued ${discovery}`, async (t) => {
+    const h = refillFixture(t);
+    for (const id of ['T2', 'T3', 'T4']) h.ok(['task', 'update', id, '--status', 'cancelled']);
+    const finish = await busyExecutors(h, () => {
+      const github = h.github();
+      github.ci[h.sha] = 'success';
+      h.saveGithub(github);
+      if (discovery === 'submitted local CI tree move') h.ok(['project', 'set', '--ci-local',
+        JSON.stringify({ command: [process.execPath, '-e', 'process.exit(0)'], timeout: 30 })]);
+      h.submit();
+      for (const gate of ['tests', 'clean', 'ci']) h.ok(['check', gate, 'T1', '--agent', 'orchestrator']);
+      if (discovery === 'accepted merge suite') {
+        h.reviewer('T1', 'reviewer');
+        h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha, '--ok', '--agent', 'reviewer']);
+        h.ok(['accept', 'T1', '--agent', 'orchestrator']);
+      }
+      h.git(['switch', 'main']);
+      fs.appendFileSync(path.join(h.repo, 'README.md'), 'Independent base update.\n');
+      h.git(['add', 'README.md']);
+      h.git(['commit', '-qm', 'advance main']);
+    });
+    try {
+      await watchQueued(h);
+      assert.ok(h.json(['status']).gate_queue.queued.some((q) => q.id === 'T1'));
+      assert.deepEqual(leased(h), ['T5', 'T6', 'T7', 'T8']);
+    } finally {
+      await finish();
+    }
+    assert.ok(h.logs().some((e) => e.task === 'T1' && e.cmd === (discovery === 'accepted merge suite' ? 'head check' : 'check ci') && e.detail.ok));
+  });
+}
+
+for (const reaction of ['review dispatch', 'body findings', 'accepted merge', 'merge suite', 'current local CI']) {
+  test(`${reaction} takes an executor only if a software gate is needed`, async (t) => {
+    const h = refillFixture(t);
+    for (const id of ['T2', 'T3', 'T4']) h.ok(['task', 'update', id, '--status', 'cancelled']);
+    const github = h.github();
+    github.ci[h.sha] = 'success';
+    h.saveGithub(github);
+    const finish = await busyExecutors(h, () => {
+      if (reaction === 'current local CI') h.ok(['project', 'set', '--ci-local',
+        JSON.stringify({ command: [process.execPath, '-e', 'process.exit(0)'], timeout: 30 })]);
+      h.submit();
+      for (const gate of ['tests', 'clean', 'ci']) h.ok(['check', gate, 'T1', '--agent', 'orchestrator']);
+      if (reaction !== 'review dispatch') {
+        h.reviewer('T1', 'reviewer');
+        h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha,
+          ...(reaction === 'body findings'
+            ? ['--fail', '--summary', 'PR body: false claim about validation', '--findings',
+              JSON.stringify([{ kind: 'false-claim', path: 'PR body', claim: 'false claim about validation' }])]
+            : ['--ok']), '--agent', 'reviewer']);
+      }
+      if (['accepted merge', 'merge suite'].includes(reaction)) h.ok(['accept', 'T1', '--agent', 'orchestrator']);
+      if (reaction === 'merge suite') {
+        h.git(['switch', 'main']);
+        fs.appendFileSync(path.join(h.repo, 'README.md'), 'Independent base update.\n');
+        h.git(['add', 'README.md']);
+        h.git(['commit', '-qm', 'advance main']);
+      }
+    });
+    try {
+      h.ok(['project', 'set', '--paused', '']);
+      // Native submitters request reviewer dispatch explicitly; record a tracked exit.
+      if (reaction === 'review dispatch') {
+        S.withLock(h.state, () => {
+          const at = new Date().toISOString();
+          const detail = { role: 'worker', agent: 'worker', pid: 99999999 };
+          StateFiles.appendLog(h.state, [
+            { at, agent: 'orchestrator', cmd: 'spawn', task: 'T1', detail },
+            { at, agent: 'orchestrator', cmd: 'spawn exit', task: 'T1', detail: { ...detail, code: 0 } },
+          ].map((e) => `${JSON.stringify(e)}\n`).join(''));
+        });
+      }
+      const before = h.logs().filter((e) => e.cmd === 'check tests').length;
+      const ciBefore = h.logs().filter((e) => e.cmd === 'check ci').length;
+      h.consume();
+      const log = h.logs();
+      const own = log.filter((e) => e.task === 'T1' && e.cmd === 'automation');
+      assert.ok(own.some((e) => e.detail.phase === 'running'), 'the task reservation starts at once');
+      if (reaction !== 'merge suite') assert.equal(leasedBy(h, 'T1'), false, 'a fast reaction takes no gate executor');
+      assert.equal(log.filter((e) => e.cmd === 'check tests').length, before, 'held executors prevent any new suite');
+      const queue = h.json(['status']).gate_queue;
+      assert.deepEqual(leased(h), ['T5', 'T6', 'T7', 'T8']);
+      if (reaction === 'merge suite') {
+        assert.ok(queue.queued.some((q) => q.id === 'T1'), 'a discovered merge suite joins the gate queue');
+        assert.ok(own.some((e) => ['queued', 'executor'].includes(e.detail.phase)), 'the merge suite waits for an executor');
+        assert.equal(h.github().calls.some((a) => a[1] === 'merge'), false);
+      } else {
+        assert.equal(queue.queued.some((q) => q.id === 'T1'), false, 'fast reactions stay out of the gate queue');
+        if (reaction === 'review dispatch') assert.ok(log.some((e) => e.task === 'T1' && e.cmd === 'spawn' && e.detail.role === 'reviewer'));
+        if (reaction === 'body findings') {
+          assert.equal(h.readState('tasks.json').tasks[0].status, 'submitted');
+          h.ok(['accept', 'T1', '--agent', 'orchestrator']);
+          assert.ok(h.logs().some((e) => e.task === 'T1' && e.cmd === 'spawn' && e.detail.role === 'reviewer'),
+            'an explicit body correction check dispatches while gate executors are occupied');
+          assert.equal(leased(h).includes('T1'), false);
+        }
+        if (reaction === 'accepted merge') assert.ok(log.some((e) => e.task === 'T1' && e.cmd === 'merge' && e.detail.ok));
+        if (reaction === 'current local CI') assert.equal(log.filter((e) => e.cmd === 'check ci').length, ciBefore);
+      }
+    } finally {
+      await finish();
+    }
+    if (reaction === 'merge suite') {
+      assert.ok(h.logs().some((e) => e.task === 'T1' && e.cmd === 'head check' && e.detail.ok), 'queued suite runs once an executor is free');
+      assert.ok(h.logs().some((e) => e.task === 'T1' && e.cmd === 'merge' && e.detail.ok));
+    }
+  });
+}
+
+const ciReviewCases = [
+  ...['hosted', 'local'].flatMap((provider) => ['success', 'failure', ...(provider === 'hosted' ? ['pending'] : [])]
+    .flatMap((result) => [false, true].map((busy) => ({ provider, result, busy, review: 'body' })))),
+  ...['code', 'mixed'].flatMap((review) => ['hosted', 'local']
+    .map((provider) => ({ provider, result: 'failure', busy: true, review }))),
+];
+for (const { provider, result, busy, review } of ciReviewCases) {
+  test(`CI completion honors ${review} review findings with ${provider} ${result} and ${busy ? 'busy' : 'free'} executors`, async (t) => {
+    const h = refillFixture(t);
+    for (const id of ['T2', 'T3', 'T4']) h.ok(['task', 'update', id, '--status', 'cancelled']);
+    const broken = path.join(h.base, 'ci-broken');
+    const prepare = () => {
+      const github = h.github();
+      github.ci[h.sha] = 'success';
+      h.saveGithub(github);
+      if (provider === 'local') {
+        const script = path.join(h.base, 'local-ci.js');
+        fs.writeFileSync(script, `process.exit(require('node:fs').existsSync(${JSON.stringify(broken)}) ? 1 : 0);\n`);
+        h.ok(['project', 'set', '--ci-local', JSON.stringify({ command: [process.execPath, script], timeout: 30 })]);
+      }
+      h.submit();
+      for (const gate of ['tests', 'clean', 'ci']) h.ok(['check', gate, 'T1', '--agent', 'orchestrator']);
+      h.reviewer('T1', 'reviewer');
+      const body = { kind: 'false-claim', path: 'PR body', claim: 'false claim' };
+      const code = { kind: 'defect', path: 'lib/change.js', claim: 'missing input handling' };
+      h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha,
+        '--fail', '--summary', 'blocking findings', '--findings',
+        JSON.stringify(review === 'body' ? [body] : review === 'code' ? [code] : [body, code]), '--agent', 'reviewer']);
+      if (!busy) h.ok(['project', 'set', '--paused', 'inspect CI completion']);
+    };
+    const finish = busy ? await busyExecutors(h, prepare) : (prepare(), async () => {});
+    const ci = () => h.logs().filter((e) => e.cmd === 'check ci' && e.task === 'T1');
+    const reviewers = () => h.logs().filter((e) => e.cmd === 'spawn' && e.task === 'T1' && e.detail.role === 'reviewer').length;
+    const before = ci().length;
+    const dispatched = reviewers();
+    if (provider === 'hosted') {
+      const github = h.github();
+      github.ci[h.sha] = result;
+      h.saveGithub(github);
+    } else if (result === 'failure') fs.writeFileSync(broken, '');
+    try {
+      h.ok(['ci', 'completed', 'T1', '--sha', h.sha, '--agent', 'orchestrator']);
+      if (review !== 'body') {
+        assert.equal(ci().length, before, 'code rework needs no CI query');
+        assert.equal(h.readState('tasks.json').tasks[0].status, 'rework');
+      } else if (busy && provider === 'local') {
+        assert.equal(ci().length, before, 'local CI waits for an executor');
+        assert.ok(h.json(['status']).gate_queue.queued.some((q) => q.id === 'T1'), 'the completion remains visible gate work');
+      } else {
+        assert.equal(ci().length, before + 1, 'the completion refreshes CI even though review failed');
+        assert.equal(ci().at(-1).detail.ok, result === 'success');
+        assert.equal(!!ci().at(-1).detail.pending, result === 'pending');
+        if (busy) assert.equal(h.json(['status']).gate_queue.queued.some((q) => q.id === 'T1'), false, 'hosted CI takes no executor');
+      }
+    } finally {
+      await finish();
+    }
+    if (review === 'body') {
+      assert.equal(ci().length, before + 1, 'queued completions drain after an executor frees');
+      assert.equal(ci().at(-1).detail.ok, result === 'success');
+      assert.equal(h.readState('tasks.json').tasks[0].status, 'submitted');
+      if (result !== 'success') {
+        const accept = h.run(['accept', 'T1', '--agent', 'orchestrator']);
+        assert.equal(accept.code, 1, accept.stderr);
+        assert.match(accept.stderr, /ci: latest ci .* (failed|pending)/);
+        assert.equal(reviewers(), dispatched, 'red or pending CI cannot dispatch the body correction check');
+      }
+    }
+  });
+}
+
+for (const status of ['submitted', 'accepted']) {
+test(`${status} body-only review findings do not hide a pending hosted CI reconciliation`, (t) => {
+  const h = refillFixture(t);
+  for (const id of ['T2', 'T3', 'T4']) h.ok(['task', 'update', id, '--status', 'cancelled']);
+  const github = h.github();
+  github.ci[h.sha] = 'success';
+  h.saveGithub(github);
+  h.submit();
+  for (const gate of ['tests', 'clean', 'ci']) h.ok(['check', gate, 'T1', '--agent', 'orchestrator']);
+  h.reviewer('T1', 'reviewer');
+  if (status === 'accepted') {
+    h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha, '--ok', '--agent', 'reviewer']);
+    h.ok(['accept', 'T1', '--agent', 'orchestrator']);
+  }
+  github.ci[h.sha] = 'pending';
+  h.saveGithub(github);
+  assert.equal(h.run(['check', 'ci', 'T1', '--agent', 'orchestrator']).code, 1);
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha,
+    '--fail', '--summary', 'false claim', '--findings',
+    JSON.stringify([{ kind: 'false-claim', path: 'PR body', claim: 'false claim' }]), '--agent', 'reviewer']);
+  github.ci[h.sha] = 'failure';
+  h.saveGithub(github);
+  h.consume();
+  const ci = h.logs().filter((e) => e.cmd === 'check ci' && e.task === 'T1');
+  assert.equal(ci.length, 3);
+  assert.equal(ci.at(-1).detail.ok, false);
+  assert.equal(!!ci.at(-1).detail.pending, false);
+});
+}
+
+test('a held gates retry --from-rework counts against the executor cap, so another task\'s gate waits', async (t) => {
+  const h = setup(t, { ci: 'pending' });
+  const broken = path.join(h.base, 'environment-broken');
+  const held = path.join(h.base, 'restore-held');
+  const release = path.join(h.base, 'restore-release');
+  fs.writeFileSync(broken, '');
+  const script = path.join(h.base, 'local-ci.js');
+  fs.writeFileSync(script, `
+const fs = require('node:fs');
+if (fs.existsSync(${JSON.stringify(broken)})) process.exit(1);
+if (fs.existsSync(${JSON.stringify(release)})) process.exit(0);
+fs.writeFileSync(${JSON.stringify(held)}, String(process.pid));
+const until = Date.now() + 60000; // wait-allow: the release file ends the held run; this bounds a failed test
+const poll = () => {
+  if (fs.existsSync(${JSON.stringify(release)})) process.exit(0);
+  if (Date.now() >= until) process.exit(1);
+  setTimeout(poll, 25); // wait-allow: probe cadence for the release file
+};
+poll();
+`);
+  h.ok(['project', 'set', '--executors', '1', '--rework-hold-min', '60',
+    '--ci-local', JSON.stringify({ command: [process.execPath, script], timeout: 90 }), '--agent', 'orchestrator']);
+  h.submit();
+  h.consume();
+  assert.equal(h.readState('tasks.json').tasks[0].status, 'rework');
+  assert.equal(h.logs().findLast((e) => e.cmd === 'rework').detail.gate, 'ci');
+  fs.rmSync(broken);
+  let child;
+  const restore = h.runAsync(['gates', 'retry', 'T1', '--from-rework', '--agent', 'orchestrator'], { onSpawn: (c) => { child = c; } });
+  try {
+    await fileWritten(held, { alive: child });
+    assert.deepEqual(leased(h), ['T1'], 'the restore\'s local CI holds the only executor');
+    h.ok(['task', 'add', '--title', 'Second', '--acceptance', 'it works']);
+    h.ok(['brief', 'set', 'T2', '-'], { input: '# Second\n\nImplement the acceptance.\n' });
+    h.ok(['claim', 'T2', '--agent', 'worker']);
+    h.ok(['submit', 'T2', '--sha', h.sha, '--agent', 'worker']);
+    h.consume();
+    assert.equal(h.logs().some((e) => e.task === 'T2' && e.cmd === 'check tests'), false, 'no second gate runs beside the restore');
+    assert.ok(h.logs().some((e) => e.task === 'T2' && e.cmd === 'automation' && e.detail.phase === 'executor'), 'T2 waits for the executor');
+  } finally {
+    fs.writeFileSync(release, '');
+    await restore;
+  }
+  assert.equal(h.readState('tasks.json').tasks[0].status, 'submitted');
+  h.consume();
+  assert.ok(h.logs().some((e) => e.task === 'T2' && e.cmd === 'check tests'), 'T2 runs once the restore frees the executor');
+});

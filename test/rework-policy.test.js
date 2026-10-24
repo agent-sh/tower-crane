@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
-const { cachedFixture } = require('./helpers');
+const { cachedFixture, makeRepo } = require('./helpers');
 const Reviews = require('../lib/review-findings');
 
 function setup(t) {
@@ -47,6 +47,48 @@ test('repeated review blocks claim, spawn previews, real spawn and ready batches
   assert.deepEqual(item.areas, ['lib/retry.js']);
   assert.match(item.reason, /two failed reviews/);
   assert.ok(item.action.argv.includes('scope-ruling'));
+});
+
+test('a held task is an orchestrator inbox item and a status line until a ruling clears it', (t) => {
+  const h = setup(t);
+  h.ok(['task', 'add', '--title', 'Retry metrics', '--acceptance', 'Metrics count retries', '--dep', 'T1']);
+  h.ok(['task', 'add', '--title', 'Store keys', '--acceptance', 'Keys persist']);
+  h.ok(['brief', 'set', 'T3', '-'], { input: 'Persist keys.\n' });
+  h.ok(['task', 'update', 'T3', '--priority', 'urgent', '--agent', 'orchestrator']);
+  for (const digit of ['c', 'd']) {
+    h.ok(['claim', 'T3', '--agent', 'worker']);
+    h.ok(['submit', 'T3', '--sha', digit.repeat(40), '--agent', 'worker']);
+    h.ok(['evidence', 'T3', '--type', 'review', '--fail', '--sha', digit.repeat(40), '--revision', h.revision('T3'),
+      '--summary', 'One blocking defect', '--findings', JSON.stringify([{ kind: 'defect', path: 'lib/store.js', claim: `lost key ${digit}` }])]);
+    h.ok(['rework', '--from-review', 'T3', '--agent', 'orchestrator']);
+  }
+  const held = () => h.json(['inbox', '--agent', 'orchestrator']).items.filter((i) => i.kind === 'review_redesign');
+  const item = held().find((i) => i.task === 'T1');
+  assert.equal(item.addressed_to, 'orchestrator');
+  assert.deepEqual(item.areas, ['lib/retry.js']);
+  assert.deepEqual(item.reviews.map((r) => [r.sha, r.finding]), [
+    ['a'.repeat(40), '1 blocking finding: lib/retry.js:12 - Duplicate delivery'],
+    ['b'.repeat(40), '1 blocking finding: lib/retry.js:12 - Duplicate delivery'],
+  ]);
+  assert.deepEqual(item.commands, [
+    "tower-crane task update T1 --acceptance '<closed item>' --closed-acceptance",
+    "tower-crane task note T1 '<design change>' --kind scope-ruling",
+  ]);
+  assert.deepEqual(item.dependents, ['T2']);
+  assert.equal(item.since, item.reviews[1].at);
+  assert.deepEqual(held().find((i) => i.task === 'T3').reviews.map((r) => r.finding), ['lib/store.js: lost key c', 'lib/store.js: lost key d']);
+  assert.match(h.ok(['status']), /^needs orchestrator: T3 \[urgent\] lib\/store\.js, waiting \d+m; T1 lib\/retry\.js, waiting \d+m, blocks T2$/m);
+  const status = h.json(['status']).needs_orchestrator;
+  assert.deepEqual(status.map((r) => [r.id, r.priority, r.dependents]), [['T3', 'urgent', []], ['T1', 'normal', ['T2']]]);
+  assert.ok(status.every((r) => r.waited_ms >= 0 && r.commands.length === 2));
+
+  h.ok(['task', 'note', 'T3', 'Store keys in one table', '--kind', 'scope-ruling', '--agent', 'orchestrator']);
+  assert.deepEqual(held().map((i) => i.task), ['T1']);
+  assert.match(h.ok(['status']), /^needs orchestrator: T1 lib\/retry\.js, waiting \d+m, blocks T2$/m);
+  h.ok(['task', 'update', 'T1', '--acceptance', 'Only retry HTTP 503', '--closed-acceptance', '--agent', 'orchestrator']);
+  assert.deepEqual(held(), []);
+  assert.doesNotMatch(h.ok(['status']), /needs orchestrator/);
+  assert.deepEqual(h.json(['status']).needs_orchestrator, []);
 });
 
 test('only a scope ruling or explicit closed acceptance clears the repeated-review gate', (t) => {
@@ -155,6 +197,13 @@ test('review failure counting distinguishes areas, verdicts, revisions and autho
     ['same file in two revisions', [failure('lib/a.js'), failure('lib/a.js', 2)], ['lib/a.js']],
     ['different files', [failure('lib/a.js'), failure('lib/b.js', 2)], []],
     ['passing review', [failure('lib/a.js'), failure('lib/a.js', 2, undefined, { ok: true })], []],
+    ['followups-only review', [failure('lib/a.js', 1, undefined, { followups_only: true }), failure('lib/a.js', 2)], []],
+    ['stored followups areas', [failure('lib/a.js', 1, undefined, { followups_only: true, areas: ['lib/a.js'] }),
+      failure('lib/a.js', 2)], []],
+    ['two followups-only reviews', [failure('lib/a.js', 1, undefined, { followups_only: true }),
+      failure('lib/a.js', 2, undefined, { followups_only: true })], []],
+    ['two real failures after followups', [failure('lib/a.js', 1, undefined, { followups_only: true }),
+      failure('lib/a.js', 2), failure('lib/a.js', 3)], ['lib/a.js']],
     ['untrusted reviewer', [failure('lib/a.js'), failure('lib/a.js', 2, undefined, { agent: 'stranger' })], []],
     ['separate heads', [failure('lib/a.js'), failure('lib/a.js', 1, 'b'.repeat(40))], ['lib/a.js']],
     ['ruling cutoff', [failure('lib/a.js'), failure('lib/a.js', 2)], [], 2],
@@ -194,4 +243,35 @@ test('review failure counting distinguishes areas, verdicts, revisions and autho
     detail: { role: 'reviewer', agent: 'reviewer-1', sha: 'b'.repeat(40), revision: 2 } }];
   assert.deepEqual(Reviews.repeatedAreas({ id: 'T1', evidence: moved }, movedEvents), ['lib/a.js'],
     'a failure at a new commit still counts');
+});
+
+test('followups-only evidence stays out of redesign, churn, escalation and narrowed re-review', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Retry handling', '--acceptance', 'Retries work', '--kind', 'docs']);
+  h.ok(['claim', 'T1', '--agent', 'builder']);
+  const first = 'a'.repeat(40);
+  h.ok(['submit', 'T1', '--sha', first, '--agent', 'builder']);
+  h.reviewer('T1', 'reviewer', first);
+  h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--followups-only', '--sha', first,
+    '--revision', '1', '--agent', 'reviewer', '--summary', 'lib/a.js:3 - consider simplifying later']);
+  const followups = h.json(['task', 'show', 'T1']);
+  assert.equal(followups.evidence.at(-1).areas, undefined);
+  const S = require('../lib/state');
+  const initial = S.loadState(h.state);
+  assert.equal(require('../lib/reviewer').reReview(initial, initial.tasks.tasks[0]), null);
+  assert.equal(require('../lib/escalation').failure(initial, initial.tasks.tasks[0]), null);
+  assert.equal(require('../lib/review-churn').count(initial.tasks.tasks[0], initial.events), 0);
+  for (const [index, digit] of ['b', 'c'].entries()) {
+    h.ok(['rework', 'T1', '--reason', 'Fix the implementation']);
+    h.ok(['claim', 'T1', '--agent', 'builder']);
+    const sha = digit.repeat(40);
+    h.ok(['submit', 'T1', '--sha', sha, '--agent', 'builder']);
+    h.reviewer('T1', `reviewer-${digit}`, sha);
+    h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', sha,
+      '--revision', h.revision(), '--agent', `reviewer-${digit}`, '--summary', 'lib/a.js:3 - duplicate delivery']);
+    const current = S.loadState(h.state);
+    assert.equal(require('../lib/review-churn').count(current.tasks.tasks[0], current.events), index + 1);
+    assert.equal(!!Reviews.redesign(current.tasks.tasks[0], current.events), index === 1);
+  }
 });

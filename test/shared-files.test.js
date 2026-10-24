@@ -9,6 +9,60 @@ const { ROOT } = require('./helpers');
 const { readText, escapeTableCell } = require('../scripts/text');
 const { fakeAgentEnvFindings } = require('../scripts/fake-agent-env');
 const { makeDocsRepo } = require('./docs-fixture');
+const { scratchFindings } = require('../scripts/check-shared-files');
+
+test('scratch lint catches inline, imported, renamed and computed system temp access', () => {
+  for (const code of [
+    'os.tmpdir()',
+    "require('node:os').tmpdir()",
+    'require("os").tmpdir()',
+    "(require('node:os')).tmpdir()",
+    "const { tmpdir } = require('node:os'); tmpdir();",
+    "const { tmpdir: allocate } = require('os'); allocate();",
+    "const { 'tmpdir': allocate } = require('node:os'); allocate();",
+    "const system = require('os'); const allocate = system.tmpdir; allocate();",
+    "const system = require('node:os'); system /* gap */ . tmpdir ();",
+    "require('node:os')['tmpdir']()",
+    'os["tmpdir"]()',
+    'os[`tmpdir`]()',
+    "const allocate = require('os')['tmpdir']; allocate();",
+    "import { tmpdir as allocate } from 'node:os'; allocate();",
+    "import * as system from 'os'; system.tmpdir();",
+    'os?.tmpdir?.()',
+    'const dir = `${os.tmpdir()}`;',
+  ]) assert.ok(scratchFindings(code).length, code);
+  for (const code of [
+    "require('node:os').homedir()",
+    "const { homedir: home } = require('os'); home();",
+    'commandRoot(env)',
+    "const flags = '-Djava.io.tmpdir=private';",
+    "const flag = `-Djava.io.tmpdir=${dir}`;",
+    '// the JVM uses java.io.tmpdir, which is set explicitly',
+  ]) assert.deepEqual(scratchFindings(code), [], code);
+});
+
+test('the shared check rejects system temp fallbacks in runtime and scripts', (t) => {
+  const f = fixture(t);
+  f.change();
+  for (const [dir, source, extension = 'js'] of [
+    ['lib', 'os.tmpdir()'],
+    ['bin', 'os . tmpdir (\n)'],
+    ['scripts', "const dir = '/tmp';"],
+    ['lib', 'const dir = "/tmp/child";'],
+    ['scripts', 'const dir = `/tmp/${name}`;'],
+    ['lib', 'os.tmpdir()', 'cjs'],
+    ['scripts', 'mkdir "/tmp/work"', 'sh'],
+    ['lib', "const root = require('node:os').tmpdir();"],
+  ]) {
+    const file = `${dir}/scratch-fallback.${extension}`;
+    f.write(file, source);
+    const rejected = f.check();
+    assert.equal(rejected.status, 1, source);
+    assert.match(rejected.stderr, /scratch-fallback\.(?:js|cjs|sh):.*scratch-root/);
+    fs.rmSync(path.join(f.h.repo, file));
+  }
+  assert.equal(f.check().status, 0);
+});
 
 test('the shared check rejects CLI-running fake fixtures without the env helper', (t) => {
   const lines = [
@@ -284,6 +338,23 @@ test('the shared file check enforces sorted single-line command entries with spa
   assert.match(adjacent.stderr, /blank line/);
 });
 
+test('the shared file check rejects unbounded spin loops in test and lib, and a fixture loop without a parent check', (t) => {
+  const f = fixture(t);
+  f.change();
+  fs.mkdirSync(path.join(f.h.repo, 'test', 'fixtures'), { recursive: true });
+  f.write('test/fixtures/busy.js', "const fs = require('node:fs');\nwhile (!fs.existsSync(process.argv[2])) { Math.sqrt(Math.random()); }\n"); // spin-allow: lint fixture
+  f.write('lib/poll.js', "module.exports = (ok, cell) => { while (!ok()) Atomics.wait(cell, 0, 0, 10); };\n"); // spin-allow: lint fixture
+  const rejected = f.check();
+  assert.equal(rejected.status, 1);
+  assert.match(rejected.stderr, /test\/fixtures\/busy\.js:2 spin loop has no deadline and no parent check/);
+  assert.match(rejected.stderr, /lib\/poll\.js:1 wait loop has no deadline; give it a deadline, or \/\/ spin-allow: reason/);
+  f.write('test/fixtures/busy.js', "const fs = require('node:fs');\nconst parent = process.ppid, deadline = Date.now() + 300000;\n"
+    + "while (!fs.existsSync(process.argv[2])) { if (process.ppid !== parent || Date.now() > deadline) process.exit(1); }\n"); // spin-allow: lint fixture
+  f.write('lib/poll.js', "module.exports = (ok, cell, signal) => { while (!ok()) { signal.throwIfAborted(); Atomics.wait(cell, 0, 0, 10); } };\n"); // spin-allow: lint fixture
+  const accepted = f.check();
+  assert.equal(accepted.status, 0, accepted.stderr);
+});
+
 test('the shared file check rejects bare stdin reads in lib and bin, and points to readStdin', (t) => {
   const f = fixture(t);
   f.change();
@@ -466,19 +537,21 @@ test('PR-body lifecycle instructions agree across orchestrator, reviewer and rew
     'commands/tower-crane-rework-from-review.md',
   ];
   const contract = [
-    ['automatic repair', /automation dispatches a body-only worker/i],
-    ['automatic light check', /automatically requests a light reviewer check/i],
+    ['automatic repair', /automation dispatches a worker restricted to the body and title/i],
+    ['verified carryover', /carries review, tests and CI without another reviewer or suite run/i],
     ['head and revision preserved', /same head and revision/i],
-    ['no race with repair', /body alone while automatic repair is pending or running/i],
-    ['two failures stop', /two consecutive [^\n]*review_body_stuck/i],
-    ['correct before accept', /correct the PR body before running `(?:tower-crane )?accept ID/i],
+    ['no race with repair', /metadata alone while automatic repair is pending or running/i],
+    ['unchanged repair stops', /unchanged named field.*review_body_stuck/i],
+    ['manual correction proof', /accept ID --metadata-fixed --reason R/i],
     ['manual fallback', /without a recorded PR or branch/i],
   ];
   const failures = [];
   for (const file of copies) {
     const text = readText(path.join(ROOT, file));
     for (const [rule, pattern] of contract) if (!pattern.test(text)) failures.push(`${file}: ${rule}`);
-    if (/the orchestrator corrects the body, then requests/i.test(text)) failures.push(`${file}: stale manual dispatch`);
+    if (/requests a light reviewer check|two consecutive failed light re-checks/i.test(text)) {
+      failures.push(`${file}: stale light-review dispatch`);
+    }
   }
   assert.deepEqual(failures, [], 'every plugin copy describes the implemented PR-body lifecycle');
 });

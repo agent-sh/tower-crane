@@ -7,11 +7,11 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { waitOnRepo, waitUntil } = require('./signals');
 const { BIN, cachedFixture } = require('./helpers');
-const { readPublished } = require('./atomic-file');
+const { readJsonLines } = require('./atomic-file');
 const { gateEvidence } = require('./gate-helpers');
 const { waitFor } = require('./canary');
 const { shellQuote } = require('../lib/gates/common');
-const { setup, holdSuite, configureHarness } = require('./automation-helpers');
+const { setup, holdSuite, configureHarness, refillFixture } = require('./automation-helpers');
 
 const OWNER = path.join(__dirname, 'fixtures', 'pr-owner.js');
 
@@ -419,7 +419,7 @@ for (const mixed of [false, true]) {
     for (const rung of ['easy', 'review']) h.ok(['ladder', 'set', rung, '--command', JSON.stringify([process.execPath, OWNER, BIN, '{prompt}'])]);
     Object.assign(h.env, { OWNER_HEADS: JSON.stringify([h.sha]), OWNER_LOG: path.join(h.base, 'owner.jsonl'), OWNER_CRASH_ON_FIX: '1' });
     // The owner appends while the test reads: only complete lines count.
-    const outcomes = () => (fs.existsSync(h.env.OWNER_LOG) ? readPublished(h.env.OWNER_LOG, 'utf8') : '').split('\n').filter((l) => l.endsWith('}')).map(JSON.parse);
+    const outcomes = () => fs.existsSync(h.env.OWNER_LOG) ? readJsonLines(h.env.OWNER_LOG) : [];
     const github = h.github();
     Object.assign(github.prs['7'], { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' });
     h.saveGithub(github);

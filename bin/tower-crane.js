@@ -293,15 +293,18 @@ async function main(argv) {
     if (process.env.TOWER_CRANE_BROKER && !require('../lib/broker').READS.has(cmd.name)) {
       const input = argv.includes('-') ? readStdin() : undefined;
       let forwarded = argv;
-      if (cmd.name === 'submit') {
-        const sha = require('../lib/tasks').resolveSubmitSha({ cwd: process.cwd(), env: process.env, stateDir: locate(),
-          pos: parsed.pos, flags: own }, own.sha);
+      let presubmit;
+      if (cmd.name === 'submit' && require('../lib/broker').serves(process.env.TOWER_CRANE_BROKER, locate())) {
+        const workerCtx = { cwd: process.cwd(), env: process.env, stateDir: locate(),
+          pos: parsed.pos, flags: own, agent: identity };
+        const sha = require('../lib/tasks').resolveSubmitSha(workerCtx, own.sha);
+        presubmit = await require('../lib/presubmit').prepare(workerCtx, sha);
         const tokens = [...resolved.lead, ...resolved.rest];
         const span = parsed.spans.find((s) => s.name === 'sha');
         tokens.splice(span.from, span.to - span.from + 1, '--sha', sha);
         forwarded = ['submit', ...tokens];
       }
-      const res = await require('../lib/broker').forward(process.env.TOWER_CRANE_BROKER, forwarded, locate(), input);
+      const res = await require('../lib/broker').forward(process.env.TOWER_CRANE_BROKER, forwarded, locate(), input, presubmit);
       if (res) {
         process.stdout.write(res.stdout || '');
         process.stderr.write(res.stderr || '');

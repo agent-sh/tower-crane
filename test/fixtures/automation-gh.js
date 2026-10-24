@@ -44,7 +44,7 @@ function answer(state) {
       return;
     }
     if (args[1] === 'merge') {
-      if (state.refuseMerge) {
+      if (state.refuseMerge || pr.refuseMerge) {
         refusal = 'merge refused by fixture policy';
         return;
       }
@@ -72,6 +72,17 @@ function answer(state) {
         ? { ...view, url: `https://github.com/${state.pushRepository}/pull/${args[2]}`,
           headRepository: { nameWithOwner: state.pushRepository } } : view;
       out = pr.invalidView ? '{' : JSON.stringify(destination);
+      // appendAfter writes its event once, on the first view after an event of its cmd.
+      if (state.appendAfter) {
+        // The log is in state.db; the append never waits for the state lock,
+        // which the command that called gh may hold.
+        const StateFiles = require('../state-files');
+        const dir = path.join(state.root, '.tower-crane');
+        if (StateFiles.readEvents(dir).some((e) => e.cmd === state.appendAfter.cmd)) {
+          StateFiles.appendLog(dir, `${JSON.stringify(state.appendAfter.event)}\n`, { locked: true });
+          delete state.appendAfter;
+        }
+      }
       if (state.becomeMergeableAfterView) {
         pr.mergeable = 'MERGEABLE';
         pr.mergeStateStatus = 'CLEAN';

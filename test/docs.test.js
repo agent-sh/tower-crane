@@ -10,6 +10,26 @@ const { makeDocsRepo } = require('./docs-fixture');
 const { anchors, links, check } = require('../scripts/doc-links');
 const { readText, normalizeText } = require('../scripts/text');
 
+test('scratch contracts agree across state areas, CLI prose and command help', (t) => {
+  const { scratchRoot } = require('../lib/scratch-root');
+  const name = path.posix.basename(scratchRoot({}, '/users/me', 'linux'));
+  for (const [file, pattern] of [
+    ['docs/state/storage.md', new RegExp(`\\$XDG_CACHE_HOME/${name}`)],
+    ['docs/state/containment.md', new RegExp(`then \`${name}\` under the user's cache`)],
+    ['scripts/cli-reference.md', new RegExp(`\`${name}\` under the user's cache`)],
+    ['docs/cli.md', new RegExp(`default ${name} under the user cache`)],
+    ['docs/state/tasks.md', /Agents do not inherit the dispatcher's Node runtime controls:[^\n]*`NODE_V8_COVERAGE`/],
+    ['docs/ladder.md', /each clears[^\n]*`NODE_V8_COVERAGE`/],
+  ]) {
+    assert.match(fs.readFileSync(path.join(ROOT, file), 'utf8'), pattern, file);
+  }
+  const h = makeDocsRepo(t);
+  const result = cp.spawnSync(process.execPath, [path.join(h.repo, 'bin', 'tower-crane.js'),
+    'project', 'set', '--help'], { cwd: h.repo, env: h.env, encoding: 'utf8', timeout: 300000 });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, new RegExp(`default ${name} under the user cache`));
+});
+
 test('documentation anchors and links handle Markdown variants in process', () => {
   const variants = [
     ['# tasks.json\n## Repeat\n## Repeat\n<a id="old"></a>', ['tasksjson', 'repeat', 'repeat-1', 'old']],

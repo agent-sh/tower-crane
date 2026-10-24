@@ -65,10 +65,10 @@ test('accept reruns local CI when the submitted head has no receipt', (t) => {
   assert.equal(evidence.at(-1).receipt.head_sha, next);
 });
 
-test('accept keeps a receipt on its pinned base while the base moves, and merge requires a fresh check', (t) => {
+test('accept keeps a receipt on its pinned base while the base moves, and merge requires a fresh check when the move changes the command', (t) => {
   const h = fixture(t);
   h.ok(['check', 'ci', 'T1']);
-  fs.writeFileSync(path.join(h.repo, 'later.txt'), 'later\n');
+  fs.appendFileSync(path.join(h.repo, 'ci.js'), '// later\n');
   h.git(['add', '.']);
   h.git(['commit', '-qm', 'base advances again']);
   assert.equal(h.json(['task', 'show', 'T1']).gates.ok, true, 'the receipt holds on the tree it checked');
@@ -78,7 +78,7 @@ test('accept keeps a receipt on its pinned base while the base moves, and merge 
   assert.equal(ci[0].receipt.base_sha, h.baseSha);
   const merge = h.run(['merge', 'T1']);
   assert.equal(merge.code, 1);
-  assert.match(merge.stderr, /local CI receipt base moved: main is [0-9a-f]+, checked base was [0-9a-f]+/);
+  assert.match(merge.stderr, /local CI receipt base moved: main is [0-9a-f]+, checked base was [0-9a-f]+, and the base changed ci\.js, which the task changes or the CI command reads/);
   assert.match(merge.stderr, /tower-crane check ci T1/);
   assert.doesNotMatch(merge.stderr, /tower-crane rework/);
 });
@@ -149,12 +149,19 @@ test('main moving during a local CI run leaves a valid receipt on the pinned tre
     'the rerun on the rewritten base replaces later.txt');
 });
 
-for (const changedTree of [true, false]) {
-  test(`merge refreshes a remote-only base advance with ${changedTree ? 'a changed' : 'the same'} tree`, (t) => {
+for (const [change, files, lands] of [
+  ['a change to the script the command runs', { 'ci.js': null }, false],
+  ['a disjoint change', { 'remote.txt': 'remote\n' }, true],
+  ['an empty commit', {}, true],
+]) {
+  test(`merge after a remote-only base advance with ${change} ${lands ? 'lands the receipt behind the tip' : 'needs a fresh check'}`, (t) => {
     const h = mergeFixture(t, { origin: true });
     h.ok(['check', 'ci', 'T1']);
     h.ok(['accept', 'T1']);
-    if (changedTree) fs.writeFileSync(path.join(h.upstream, 'remote.txt'), 'remote\n');
+    for (const [name, text] of Object.entries(files)) {
+      if (text === null) fs.appendFileSync(path.join(h.upstream, name), '// remote\n');
+      else fs.writeFileSync(path.join(h.upstream, name), text);
+    }
     h.git(['add', '.'], h.upstream);
     h.git(['commit', '--allow-empty', '-qm', 'remote advances'], h.upstream);
     const remote = h.git(['rev-parse', 'HEAD'], h.upstream);
@@ -162,10 +169,20 @@ for (const changedTree of [true, false]) {
     h.git(['config', 'remote.origin.fetch', '+refs/heads/other:refs/remotes/origin/other']);
     assert.equal(h.git(['rev-parse', 'origin/main']), h.baseSha);
     assert.equal(h.json(['task', 'show', 'T1']).gates.ok, true);
+    const checks = () => h.readState('tasks.json').tasks[0].evidence.filter((e) => e.type === 'ci').length;
 
+    if (lands) {
+      const merged = h.json(['merge', 'T1']);
+      assert.equal(merged.ok, true, merged.summary);
+      assert.equal(h.git(['rev-parse', 'origin/main']), remote, 'merge fetched the moved base');
+      assert.equal(checks(), 1, 'no fresh check');
+      assert.ok(merged.commands.some((c) => c.command === 'git' && c.args.includes('merge-tree') && c.args.includes(remote)),
+        'the trial merge onto the tip is in the command receipts');
+      return;
+    }
     const refused = h.run(['merge', 'T1']);
     assert.equal(refused.code, 1, refused.stdout);
-    assert.match(refused.stderr, /local CI receipt.*base.*moved/);
+    assert.match(refused.stderr, /local CI receipt.*base.*moved.*the base changed ci\.js/);
     assert.match(refused.stderr, /tower-crane check ci T1/);
     assert.doesNotMatch(refused.stderr, /tower-crane rework/);
     assert.equal(h.git(['rev-parse', 'origin/main']), remote);
@@ -403,6 +420,39 @@ test('local CI reruns a failure once on the same merge, and a base that moves me
     const ci = h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'ci');
     assert.equal(ci.ok, want.gate, `${name}: ${ci.reason}`);
     assert.equal(h.git(['worktree', 'list', '--porcelain']).match(/^worktree /gm).length, 1, name);
+  }
+});
+
+// A run whose worktree cannot be set up has no exit to record: the gate fails with the setup's
+// own reason, for the first run and for the rerun.
+test('local CI reports a worktree it could not set up, for the first run and for the rerun', (t) => {
+  for (const [name, setup, want] of [
+    ['first run', (h) => { h.env.TOWER_CRANE_TMP = path.join(h.base, 'gate-tmp-file'); fs.writeFileSync(h.env.TOWER_CRANE_TMP, ''); },
+      { runs: 0, summary: /^cannot create a temporary directory under .*gate-tmp-file/ }],
+    // The second checkout's post-checkout hook fails, so only the rerun's worktree is refused.
+    // The gate's git runs only hooks from the user's own config.
+    ['rerun', (h) => {
+      const hooks = path.join(h.base, 'hooks');
+      const count = path.join(h.base, 'checkouts').replace(/\\/g, '/');
+      fs.mkdirSync(hooks);
+      fs.writeFileSync(path.join(hooks, 'post-checkout'), `#!/bin/sh\necho x >> '${count}'\n[ "$(wc -l < '${count}')" -lt 2 ]\n`, { mode: 0o755 });
+      h.git(['config', '--global', 'core.hooksPath', hooks.replace(/\\/g, '/')]);
+    }, { runs: 1, summary: /^local CI exit 1[\s\S]*\nRerun: could not rerun the whole command: could not create a worktree at [0-9a-f]+: .*post-checkout hook passes\.; the failure stands\.$/ }],
+  ]) {
+    const h = fixture(t, RERUN_SCRIPT);
+    fs.writeFileSync(`${h.log}.config`, JSON.stringify({ repo: h.repo, fail: 2, move: 0 }));
+    h.ok(['project', 'set', '--ci-local', JSON.stringify({ command: h.command, timeout: 5, receipts: ['.local/checks/*.json'] })]);
+    setup(h);
+    const r = h.run(['check', 'ci', 'T1']);
+    assert.equal(r.code, 1, `${name}: ${r.stdout}${r.stderr}`);
+    assert.doesNotMatch(r.stderr, /TypeError/, name);
+    const e = h.readState('tasks.json').tasks[0].evidence.at(-1);
+    assert.equal(e.ok, false, name);
+    assert.match(e.summary, want.summary, name);
+    // read-published: appended only, by one gate run at a time, and the gate has ended.
+    const runs = fs.existsSync(`${h.log}.runs`) ? fs.readFileSync(`${h.log}.runs`, 'utf8').length : 0;
+    assert.equal(runs, want.runs, `${name}: runs`);
+    if (want.runs) assert.deepEqual([e.receipt.rerun.exit, e.receipt.rerun.signal], [null, null], name);
   }
 });
 

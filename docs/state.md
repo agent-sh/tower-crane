@@ -41,6 +41,8 @@ Existing links use these anchors. Follow the link to the contract in its area.
 
 <a id="projectjson"></a>[projectjson](state/storage.md#projectjson)
 
+<a id="presubmit"></a>[presubmit](state/storage.md#presubmit)
+
 <a id="local-ci-output"></a>[local-ci-output](state/ci.md#local-ci-output)
 
 <a id="ladder"></a>[ladder](state/tasks.md#ladder)
@@ -101,6 +103,8 @@ Existing links use these anchors. Follow the link to the contract in its area.
 
 <a id="publish-policy"></a>[publish-policy](state/decisions.md#publish-policy)
 
+<a id="sandbox-policy"></a>[sandbox-policy](state/decisions.md#sandbox-policy)
+
 <a id="fallback-route-grants"></a>[fallback-route-grants](state/decisions.md#fallback-route-grants)
 
 <a id="native-crashes"></a>[native-crashes](state/tasks.md#native-crashes)
@@ -126,3 +130,5 @@ Existing links use these anchors. Follow the link to the contract in its area.
 <a id="flake-ledger"></a>[flake-ledger](state/gates.md#flake-ledger)
 
 <a id="scratch-archive"></a>[scratch-archive](state/storage.md#scratch-archive)
+
+<a id="docs-and-small-fix-rounds"></a>[docs and small fix rounds](state/review.md#docs-and-small-fix-rounds)
