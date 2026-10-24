@@ -67,6 +67,76 @@ function github(t) {
 
 const POLICY = JSON.stringify({ conditions: ['review_clean', 'full_suite', 'main_ci_green'] });
 
+test('standing publish full_suite requires a full run at the release head', (t) => {
+  for (const [name, mode, suites, allowed] of [
+    ['full', 'full', ['test/mapped.test.js'], true],
+    ['mapped', 'mapped', ['test/mapped.test.js'], false],
+    ['crucial', 'crucial', ['test/mapped.test.js'], false],
+    ['incremental selected', 'incremental', ['test/mapped.test.js'], false],
+    ['incremental empty', 'incremental', [], false],
+  ]) {
+    const h = github(t);
+    h.git(['switch', 'main']);
+    fs.mkdirSync(path.join(h.repo, 'test'), { recursive: true });
+    fs.mkdirSync(path.join(h.repo, 'tools'), { recursive: true });
+    fs.writeFileSync(path.join(h.repo, 'test/mapped.test.js'), "require('node:test')('mapped', () => {});\n");
+    const map = { 'docs/**': suites, 'value.js': ['test/mapped.test.js'], '**/*.md': [] };
+    fs.writeFileSync(path.join(h.repo, 'tools/tests-map.json'), JSON.stringify(map));
+    h.git(['add', '.']);
+    h.git(['commit', '-qm', 'release suite map']);
+    h.git(['switch', 'fixture-change']);
+    h.git(['merge', '--no-edit', 'main']);
+    const updateHead = () => {
+      h.sha = h.git(['rev-parse', 'HEAD']);
+      const data = JSON.parse(fs.readFileSync(h.env.INBOX_GITHUB, 'utf8'));
+      data.prs[7].headRefOid = h.sha;
+      fs.writeFileSync(h.env.INBOX_GITHUB, JSON.stringify(data));
+      h.mainCI('success');
+    };
+    updateHead();
+    h.ok(['project', 'set', '--tests-expensive', 'true',
+      '--tests-cmd', `${shellQuote(process.execPath)} --test test/*.test.js`,
+      '--tests-proof-cmd', `${shellQuote(process.execPath)} --test {tests}`,
+      '--tests-host-only', 'null', '--publish-policy', '{"conditions":["full_suite"]}',
+      ...(mode === 'mapped' || mode === 'crucial' ? ['--tests-map', JSON.stringify(map)] : []),
+      ...(mode === 'mapped' ? ['--ci-required', '["test"]'] : []),
+      ...(mode === 'crucial' ? ['--tests-crucial', '["test/value.test.js"]'] : [])]);
+    const id = h.release();
+    h.ok(['accept', id]);
+    const fullSha = h.sha;
+    if (mode === 'incremental') {
+      assert.equal(h.json(['task', 'show', id]).evidence.findLast(e => e.type === 'tests').receipt.head_mode, 'full', name);
+      h.ok(['rework', id, '--reason', 'release docs resubmission']);
+      h.ok(['claim', id, '--agent', `worker-${id}`]);
+      fs.mkdirSync(path.join(h.repo, 'docs'), { recursive: true });
+      fs.writeFileSync(path.join(h.repo, 'docs/release.md'), 'Release documentation.\n');
+      h.git(['add', '.']);
+      h.git(['commit', '-qm', 'release docs']);
+      updateHead();
+      h.ok(['submit', id, '--sha', h.sha, '--pr', '7', '--agent', `worker-${id}`]);
+      h.reviewer(id, 'reviewer', h.sha);
+      h.ok(['evidence', id, '--revision', h.revision(id), '--type', 'review', '--ok', '--sha', h.sha, '--agent', 'reviewer']);
+      h.ok(['check', 'tests', id]);
+      h.ok(['check', 'ci', id]);
+      h.ok(['accept', id]);
+    }
+    const receipt = h.json(['task', 'show', id]).evidence.findLast(e => e.type === 'tests').receipt;
+    assert.equal(receipt.head_mode, mode, name);
+    if (mode === 'incremental') {
+      assert.equal(receipt.incremental_from, fullSha, name);
+      assert.deepEqual(receipt.head_tests, suites, name);
+    }
+    const result = h.run(['ask', '--setting', 'publish', '--change', JSON.stringify({ task: id }),
+      '--agent', 'orchestrator'], orchestrator);
+    assert.equal(result.code, allowed ? 0 : 1, `${name}: ${result.stdout}\n${result.stderr}`);
+    if (allowed) assert.match(result.stdout, /go ahead/, name);
+    else {
+      assert.match(result.stderr, new RegExp(`full_suite: .*${mode}.*not the full suite`), name);
+      assert.equal(h.readState('decisions.json').decisions.at(-1).status, 'open', name);
+    }
+  }
+});
+
 test('publish keeps completed nongreen verdicts while their runs are being rerun', (t) => {
   for (const conclusion of ['failure', 'cancelled', 'timed_out']) {
     const h = github(t);
