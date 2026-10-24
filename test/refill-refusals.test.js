@@ -221,7 +221,8 @@ const st = S.loadState(ctx.stateDir);
 assert.match(Spawn.readyRefusal(ctx, st, T.getTask(st, 'T2')), /holds its own changes|child has its own commits/);
 assert.ok(require(${JSON.stringify(path.resolve(__dirname, '../lib/inbox'))}).dispatchable(st, true).some(t => t.id === 'T2'));
 R.deferredDispatches = () => [{ id: 'T1' }];
-R.softwareReport = () => ({ ok: true });
+// Refill dispatches a deferred reviewer once the gates review dispatch needs pass.
+R.dispatchReport = () => ({ ok: true });
 const holders = T.workerHolders;
 const calls = [];
 Spawn.spawn = async dispatch => {
