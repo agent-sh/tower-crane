@@ -449,11 +449,10 @@ for (const runtime of ['with', 'without']) test(`a real claude agent's commands 
 });
 
 // claude's sandbox hides /tmp and allows back only what the agent needs
-// there. The parent of a PATH entry of /tmp is /, and a caller's TMPDIR of
-// /tmp is where claude makes its proxy sockets; neither is allowed back, so
-// a command reads neither a file planted in /tmp nor one in the home outside
-// its grants. The fixture's cache root is too deep for claude's own TMPDIR,
-// so the agent keeps the caller's.
+// there. The parent of a PATH entry of /tmp is /, which is not allowed back,
+// and a caller's TMPDIR of /tmp is not kept: the agent starts with its own.
+// So a command reads neither a file planted in /tmp nor one in the home
+// outside its grants.
 for (const route of ['PATH', 'TMPDIR']) {
   test(`in a real claude sandbox with ${route === 'PATH' ? '/tmp on PATH' : 'the caller\'s TMPDIR at /tmp'}, a command reads neither a file planted in /tmp nor one in the home outside its grants`, { skip, timeout: 300000 }, async (t) => {
     const h = login(makeRepo(t));
@@ -478,7 +477,7 @@ for (const route of ['PATH', 'TMPDIR']) {
     const env = route === 'PATH' ? { ...h.env, PATH: `${h.env.PATH || process.env.PATH}${path.delimiter}/tmp` } : { ...h.env, TMPDIR: '/tmp', TMP: '/tmp', TEMP: '/tmp' };
     const r = await h.runAsync(['spawn', '--role', 'small', '--task', 'T1', '--wait'], { env });
     assert.equal(r.code, 0, `${r.stderr}\n${agentLog(h)}`);
-    assert.match(r.stdout, /claude's sandbox keeps \/tmp hidden: the (PATH directory|caller's TMPDIR) \/tmp is \/tmp itself, so it is not allowed back/);
+    if (route === 'PATH') assert.match(r.stdout, /claude's sandbox keeps \/tmp hidden: the PATH directory \/tmp is \/tmp itself, so it is not allowed back/);
     const settings = JSON.parse(fs.readFileSync(path.join(h.state, 'homes', 'small-T1-1', 'settings.json'), 'utf8'));
     const box = settings.sandbox.filesystem;
     assert.ok(!box.allowRead.includes('/') && !box.allowRead.includes(fs.realpathSync('/tmp')), box.allowRead.join(' '));
@@ -486,7 +485,7 @@ for (const route of ['PATH', 'TMPDIR']) {
     assert.ok(fs.existsSync(out), `the probe ran\n${agentLog(h)}`);
     const seen = JSON.parse(fs.readFileSync(out, 'utf8'));
     console.log(`claude tmp grant probe, ${route}: ${JSON.stringify(seen)}`);
-    if (route === 'TMPDIR') assert.ok(seen.tmpdir === '/tmp' || seen.tmpdir?.startsWith('/tmp/'), `the agent keeps the caller's TMPDIR: ${seen.tmpdir}`);
+    assert.ok(seen.tmpdir && seen.tmpdir !== '/tmp' && !seen.tmpdir.startsWith('/tmp/'), `the agent's commands get a TMPDIR of their own, not the caller's: ${seen.tmpdir}`);
     assert.match(seen.tmp, /^ERR /, 'a file planted in /tmp is unreadable');
     assert.match(seen.home, /^ERR /, 'a file in the home outside the grants is unreadable');
   });
