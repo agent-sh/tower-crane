@@ -568,6 +568,10 @@ for (const [order, verdict] of [['review first', 'fail'], ['review first', 'ok']
     if (order === 'review first') {
       const packet = fs.readFileSync(path.join(h.state, 'reviews', `${task.id}-${h.sha}.md`), 'utf8');
       assert.match(packet, /The tests gate runs after this review passes/);
+      // The gate results leave the deferred tests gate out instead of showing it failed.
+      const gates = JSON.parse(packet.split('## Gate results\n\n')[1].split('\n\n')[0]);
+      assert.deepEqual(gates.map((g) => g.type).filter((type) => type === 'tests'), []);
+      assert.ok(gates.length > 0 && gates.every((g) => g.ok), JSON.stringify(gates));
     }
   });
 }
