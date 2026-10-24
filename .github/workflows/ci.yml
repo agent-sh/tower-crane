@@ -136,12 +136,12 @@ jobs:
           path: ${{ runner.temp }}/coverage/tests-coverage-map.json
           if-no-files-found: error
 
-  # Joins the three shard maps into tests-coverage-map.json, which `tower-crane tests map refresh
+  # Joins the available shard maps into tests-coverage-map.json, which `tower-crane tests map refresh
   # --from-run RUN_ID` pins as tests.map after each daily run.
   coverage-map:
     name: coverage map
     needs: test
-    if: ${{ !cancelled() && !inputs.profile && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+    if: ${{ always() && !inputs.profile && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

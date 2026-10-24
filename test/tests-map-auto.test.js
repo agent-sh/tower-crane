@@ -49,13 +49,13 @@ function setup(t) {
   return h;
 }
 
-test('automation refreshes green scheduled and manual coverage once, preserving declared entries', (t) => {
-  for (const event of ['schedule', 'workflow_dispatch']) {
+test('automation refreshes scheduled and manual coverage once, preserving declared and unmeasured entries', (t) => {
+  for (const [event, conclusion] of [['schedule', 'success'], ['workflow_dispatch', 'failure']]) {
     const h = setup(t);
-    h.save({ ...h.github(), runs: [h.runData({ event })] });
+    h.save({ ...h.github(), runs: [h.runData({ event, conclusion })] });
     const pass = h.pass();
     assert.deepEqual(h.readState('project.json').tests.map, {
-      '**/*.md': [], 'data.json': [SUITE], 'new.js': [SUITE],
+      '**/*.md': [], 'data.json': [SUITE], 'gone.js': [SUITE], 'new.js': [SUITE], 'old.js': [SUITE],
     }, JSON.stringify({ stderr: pass.stderr, calls: h.github().calls }));
     const refresh = h.refreshes().at(-1);
     assert.deepEqual([refresh.detail.run, refresh.detail.sha, refresh.detail.automatic, refresh.agent], [42, HEAD, true, 'orchestrator']);
@@ -72,13 +72,11 @@ test('automation refreshes green scheduled and manual coverage once, preserving 
   }
 });
 
-test('automation rejects red, incomplete, older, divergent and missing coverage runs', (t) => {
+test('automation rejects incomplete, older, divergent and missing coverage runs', (t) => {
   for (const [name, patch] of [
-    ['red', { run: { conclusion: 'failure' } }],
     ['incomplete', { run: { status: 'in_progress', conclusion: null } }],
     ['push', { run: { event: 'push' } }],
     ['other branch', { run: { head_branch: 'feature' } }],
-    ['same sha', { run: { head_sha: BASE } }],
     ['older sha', { comparison: 'behind' }],
     ['divergent sha', { comparison: 'diverged' }],
     ['missing artifact', { artifacts: [] }],
@@ -124,7 +122,7 @@ for (const [name, receipt, correction, candidate, ignored] of [
   ['file pin after automatic refresh', 'automatic', 'file', {}, true],
   ['changed map after manual run refresh', 'manual', 'changed', {}, true],
   ['older unused run after a correction', 'automatic', 'changed', { id: 41, head_sha: 'c'.repeat(40) }, true],
-  ['same-SHA new run after a correction', 'automatic', 'changed', { id: 43 }, true],
+  ['same-SHA new run after a correction', 'automatic', 'changed', { id: 43 }, false],
   ['earlier used run after a newer receipt', 'history', 'changed', {}, true],
   ['new run after a correction', 'automatic', 'changed', { id: 43, head_sha: 'c'.repeat(40) }, false],
 ]) {
@@ -136,12 +134,13 @@ for (const [name, receipt, correction, candidate, ignored] of [
       h.save({ ...h.github(), artifact: { sha: 'c'.repeat(40), tests: [SUITE], map: { 'new.js': [SUITE] } } });
       h.ok(['tests', 'map', 'refresh', '--from-run', '43']);
     }
-    const manual = correction === 'unchanged' ? h.readState('project.json').tests.map
+    let manual = correction === 'unchanged' ? h.readState('project.json').tests.map
       : { '**/*.md': [], 'data.json': [SUITE], 'new.js': ['test/other.test.js'] };
     if (correction === 'file') {
       const file = path.join(h.base, 'correction.json');
       fs.writeFileSync(file, JSON.stringify({ sha: BASE, tests: ['test/other.test.js'], map: { 'new.js': ['test/other.test.js'] } }));
       h.ok(['tests', 'map', 'refresh', '--file', file]);
+      manual = h.readState('project.json').tests.map;
     } else {
       if (correction === 'clear') {
         h.ok(['project', 'set', '--tests-map', 'null']);
@@ -153,13 +152,14 @@ for (const [name, receipt, correction, candidate, ignored] of [
       h.ok(['project', 'set', '--tests-map', JSON.stringify(manual)]);
     }
     const run = h.runData(candidate);
-    h.save({ ...h.github(), runs: [run], artifact: { sha: run.head_sha, tests: [SUITE], map: { 'new.js': [SUITE] } } });
+    h.save({ ...h.github(), comparison: name.startsWith('same-SHA') ? 'identical' : 'ahead',
+      runs: [run], artifact: { sha: run.head_sha, tests: [SUITE], map: { 'new.js': [SUITE] } } });
     const refreshes = h.refreshes().length;
     const downloads = h.github().calls.filter((a) => a[0] === 'run').length;
     h.advance(HOUR);
     h.pass();
     assert.deepEqual(h.readState('project.json').tests.map,
-      ignored ? manual : { '**/*.md': [], 'data.json': [SUITE], 'new.js': [SUITE] });
+      ignored ? manual : { '**/*.md': [], 'data.json': [SUITE], 'new.js': ['test/other.test.js', SUITE] });
     assert.equal(h.refreshes().length, refreshes + (ignored ? 0 : 1));
     assert.equal(h.github().calls.filter((a) => a[0] === 'run').length, downloads + (ignored ? 0 : 1));
     h.advance(HOUR);

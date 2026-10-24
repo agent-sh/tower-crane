@@ -87,14 +87,14 @@ function jobBlock(workflow, id) {
 
 // A job's `if:` under one event's github context and dispatch inputs. The workflow's conditions use
 // ==, !=, !, &&, ||, startsWith and cancelled(), whose JavaScript forms mean the same for these values.
-function runsOn(workflow, id, { inputs = {}, ...github }) {
+function runsOn(workflow, id, { inputs = {}, ...github }, cancelled = false) {
   const condition = /^ {4}if: (.+)$/m.exec(jobBlock(workflow, id))?.[1];
   if (!condition) return true;
   const value = (root, name) => JSON.stringify(name.split('.').slice(1).reduce((o, k) => o?.[k], root) ?? null);
   const js = condition.replace(/^"(.*)"$/, '$1').replace(/^\$\{\{\s*|\s*\}\}$/g, '')
     .replace(/github(?:\.[\w]+)+/g, (name) => value(github, name))
     .replace(/inputs(?:\.[\w]+)+/g, (name) => value(inputs, name));
-  return Function('startsWith', 'cancelled', `return (${js});`)((a, b) => String(a).startsWith(b), () => false);
+  return Function('startsWith', 'cancelled', 'always', `return (${js});`)((a, b) => String(a).startsWith(b), () => cancelled, () => true);
 }
 
 const REPO = 'agent-sh/tower-crane';
@@ -134,6 +134,9 @@ test('main pushes and same-repo PRs run only the shared check; fork PRs, tags, d
   }
   assert.match(jobBlock(workflow, 'coverage-map'), /node scripts\/tests-coverage-map\.js merge --out /);
   assert.match(jobBlock(workflow, 'coverage-map'), /name: tests-coverage-map\n/);
+  for (const event of ['schedule', 'manual run']) {
+    assert.equal(runsOn(workflow, 'coverage-map', EVENTS[event], true), true, `${event}: collect available maps after a cancelled shard`);
+  }
 });
 
 test('the matrix is all ten shards, beside the proofs and the repeat job', () => {

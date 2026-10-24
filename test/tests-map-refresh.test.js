@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { cachedFixture } = require('./helpers');
+const { cachedFixture, useFixtureUserFile } = require('./helpers');
 const Refresh = require('../lib/tests-map-refresh');
 
 const A = 'test/a.test.js';
@@ -12,8 +12,9 @@ const B = 'test/b.test.js';
 const old = { 'shared.js': [A, B], 'missing.js': [B], 'manual.js': [A], '**/*.md': [] };
 
 function fixture(t) {
-  return cachedFixture(t, 'map-refresh', (h) => {
-    h.init(['--repo', 'acme/app', '--tests-map', JSON.stringify(old), '--tests-paths', '["test/**"]']);
+  const h = cachedFixture(t, 'map-refresh', (h) => {
+    h.init(['--repo', 'acme/app', '--tests-paths', '["test/**"]']);
+    h.ok(['project', 'set', '--tests-map', JSON.stringify(old)]);
     fs.mkdirSync(path.join(h.repo, 'test'));
     for (const file of [A, B, 'test/unselected.test.js', 'test/helpers.js']) {
       fs.writeFileSync(path.join(h.repo, file), 'console.log("suite");\n');
@@ -22,7 +23,21 @@ function fixture(t) {
     h.git(['commit', '-qm', 'test files']);
     return { sha: h.git(['rev-parse', 'HEAD']) };
   });
+  useFixtureUserFile(t, h);
+  return h;
 }
+
+test('coverage replacement preserves missing suites and unmeasured declarations', () => {
+  for (const [name, tests, measured, expected] of [
+    ['missing shard', [A], { 'shared.js': [A] }, { ...old, 'shared.js': [A, B] }],
+    ['complete coverage replaces old suites', [A, B], { 'shared.js': [A] }, { ...old, 'shared.js': [A] }],
+    ['empty measured source', [A], { 'shared.js': [] }, { ...old, 'shared.js': [B] }],
+    ['absent sources', [A, B], {}, old],
+    ['new source', [A], { 'new.js': [A] }, { ...old, 'new.js': [A] }],
+  ]) {
+    assert.deepEqual(Refresh.mergeMap(old, { tests, map: measured }), expected, name);
+  }
+});
 
 test('refresh replaces measured coverage but keeps absent tests and manual sources', (t) => {
   const h = fixture(t);
@@ -64,7 +79,7 @@ test('automatic refresh selects the newest completed full base run with an artif
   for (const conclusion of ['success', 'failure', 'cancelled', 'timed_out']) {
     await t.test(conclusion, async (t) => {
       const h = fixture(t);
-      const fullRun = { head_sha: h.sha, created_at: new Date().toISOString() };
+      const fullRun = { head_sha: h.sha };
       const runs = [
         { id: 50, event: 'schedule', status: 'completed', head_branch: 'main', conclusion },
         { id: 60, event: 'workflow_dispatch', status: 'completed', head_branch: 'main', conclusion: 'failure' },
@@ -72,7 +87,7 @@ test('automatic refresh selects the newest completed full base run with an artif
         { id: 80, event: 'push', status: 'completed', head_branch: 'main' },
         { id: 90, event: 'workflow_dispatch', status: 'completed', head_branch: 'topic' },
         { id: 40, event: 'schedule', status: 'completed', head_branch: 'main', conclusion: 'success' },
-      ].map((run) => ({ ...fullRun, ...run }));
+      ].map((run) => ({ ...fullRun, ...run, created_at: new Date(Date.now() - (100 - run.id) * 1000).toISOString() }));
       const calls = [];
       const exec = async (cmd, args) => {
         calls.push(args);
@@ -94,7 +109,8 @@ test('automatic refresh selects the newest completed full base run with an artif
       assert.equal(await Refresh.automatic(ctx, st), true);
       assert.deepEqual(h.readState('project.json').tests.map['shared.js'], [A, B]);
       assert.deepEqual(h.readState('project.json').tests.map['manual.js'], [A]);
-      const event = h.logs().findLast((e) => e.cmd === 'tests map refresh');
+      const event = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)
+        .findLast((e) => e.cmd === 'tests map refresh');
       assert.equal(event.detail.run, 50);
       assert.equal(event.detail.conclusion, conclusion);
       assert.equal(await Refresh.automatic(ctx, require('../lib/state').loadState(h.state)), false);

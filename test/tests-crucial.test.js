@@ -313,7 +313,7 @@ fs.copyFileSync(${JSON.stringify(file)}, path.join(args[args.indexOf('-D') + 1],
   const pinned = p.json(['tests', 'map', 'refresh', '--from-run', '4242', '--agent', 'orchestrator']);
   assert.deepEqual(JSON.parse(fs.readFileSync(calls, 'utf8').trim()).slice(0, 7), ['run', 'download', '4242', '-R', 'acme/demo', '-n', 'tests-coverage-map']);
   assert.deepEqual({ run: pinned.run, sha: pinned.sha, declared: pinned.declared }, { run: 4242, sha: head, declared: 2 });
-  // Measured entries replace the pinned ones; the globs and files coverage cannot see stay as declared.
+  // Missing test coverage and files V8 cannot measure survive alongside declared globs.
   assert.deepEqual(p.readState('project.json').tests.map, {
     '**/*.md': [], 'docs/cli.md': ['test/other.test.js'], 'lib/gone.js': ['test/old.test.js'],
     'lib/merge.js': ['test/cli.test.js'], 'tool/runner.js': ['test/cli.test.js'],

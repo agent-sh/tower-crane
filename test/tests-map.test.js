@@ -54,6 +54,7 @@ test('mapped head suites preserve scoped proof and policy-bound evidence through
   assert.match(h.ok(['project', 'show']), /tests.map:/);
   const receipt = check(h);
   assert.deepEqual(receipt.receipt.tests_unselected, ['test/value.test.js']);
+  assert.match(receipt.summary, /Unselected tests: test\/value\.test\.js/);
   const runs = receipt.commands.filter((c) => c.command !== 'git');
   assert.equal(receipt.receipt.head_mode, 'mapped');
   assert.deepEqual(receipt.receipt.head_tests, ['test/mapped.test.js', 'test/value.test.js']);
