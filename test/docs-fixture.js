@@ -31,11 +31,10 @@ function makeDocsRepo(t, { crlfCheckout = false } = {}) {
     // Copies from a Windows checkout still need Git's normalized index form.
     h.git(['-c', 'core.autocrlf=input', 'add', '.']);
     const checkout = (autocrlf) => {
-      // A fresh destination applies checkout filters even when index stats match.
-      const staged = path.join(h.base, 'docs-checkout');
-      h.git(['-c', `core.autocrlf=${autocrlf}`, 'checkout-index', '--all', `--prefix=${staged}${path.sep}`]);
-      fs.cpSync(staged, h.repo, { recursive: true });
-      fs.rmSync(staged, { recursive: true, force: true });
+      // Deleted files pass through checkout filters even when index stats match.
+      // Git for Windows does not create a D:\ --prefix directory, so write in place.
+      for (const file of h.git(['ls-files', '-z']).split('\0').filter(Boolean)) fs.rmSync(path.join(h.repo, file));
+      h.git(['-c', `core.autocrlf=${autocrlf}`, 'checkout-index', '--all', '--force']);
     };
     if (crlfCheckout) {
       checkout('true');
