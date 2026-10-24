@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { cachedFixture } = require('./helpers');
 const { gateFixture } = require('./gate-helpers');
+const { readPublished, writeAtomic } = require('./atomic-file');
 
 const BASE = 'a'.repeat(40);
 const HEAD = 'b'.repeat(40);
@@ -18,7 +19,7 @@ function setup(t) {
     gateFixture(seed);
     seed.init(['--repo', 'acme/demo', '--base', 'main']);
     seed.env.HOOK_CLOCK_FILE = path.join(seed.base, 'clock');
-    fs.writeFileSync(seed.env.HOOK_CLOCK_FILE, String(Date.now()));
+    writeAtomic(seed.env.HOOK_CLOCK_FILE, String(Date.now()));
     seed.env.TC_MAP_GITHUB = path.join(seed.base, 'github.json');
     fs.writeFileSync(path.join(seed.base, 'tools', 'gh'),
       `#!${process.execPath}\nrequire(${JSON.stringify(path.join(__dirname, 'fixtures', 'tests-map-gh.js'))});\n`);
@@ -27,10 +28,10 @@ function setup(t) {
     fs.writeFileSync(file, JSON.stringify({ sha: BASE, tests: [SUITE], map: { 'old.js': [SUITE] } }));
     seed.ok(['tests', 'map', 'refresh', '--file', file]);
   });
-  h.now = () => Number(fs.readFileSync(h.env.HOOK_CLOCK_FILE, 'utf8'));
-  h.advance = (ms) => fs.writeFileSync(h.env.HOOK_CLOCK_FILE, String(h.now() + ms));
-  h.github = () => JSON.parse(fs.readFileSync(h.env.TC_MAP_GITHUB, 'utf8'));
-  h.save = (data) => fs.writeFileSync(h.env.TC_MAP_GITHUB, JSON.stringify(data));
+  h.now = () => Number(readPublished(h.env.HOOK_CLOCK_FILE, 'utf8'));
+  h.advance = (ms) => writeAtomic(h.env.HOOK_CLOCK_FILE, String(h.now() + ms));
+  h.github = () => JSON.parse(readPublished(h.env.TC_MAP_GITHUB, 'utf8'));
+  h.save = (data) => writeAtomic(h.env.TC_MAP_GITHUB, JSON.stringify(data));
   h.logs = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   h.refreshes = () => h.logs().filter((e) => e.cmd === 'tests map refresh');
   h.pass = (inbox = false) => {
@@ -195,7 +196,7 @@ for (const [name, delay, reserved, polls] of [
     const receipt = h.readState('tests-map-cache.json');
     assert.equal(Date.parse(receipt.read_at), start + (polls ? delay : reserved));
     delete h.env.TC_MAP_POLL_DELAY;
-    fs.writeFileSync(h.env.HOOK_CLOCK_FILE, String(Date.parse(receipt.read_at) + HOUR - 1));
+    writeAtomic(h.env.HOOK_CLOCK_FILE, String(Date.parse(receipt.read_at) + HOUR - 1));
     h.pass();
     assert.equal(h.github().calls.length, polls, 'the locked reservation owns the full hourly interval');
   });
