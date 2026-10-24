@@ -290,8 +290,8 @@ test('shared checks reject readiness budgets and require a reason on allowed tim
   const run = () => cp.spawnSync(process.execPath, [path.join(h.repo, 'scripts/check-shared-files.js')], {
     cwd: h.repo, env: h.env, encoding: 'utf8',
   });
-  const baseline = run();
-  assert.equal(baseline.status, 0, baseline.stdout + baseline.stderr);
+  const clean = run();
+  assert.equal(clean.status, 0, clean.stdout + clean.stderr);
   fs.writeFileSync(bad, 'const deadline = Date.now() + 1000;\n'); // wait-allow: rejected lint fixture
   const rejected = run();
   assert.equal(rejected.status, 1, rejected.stdout + rejected.stderr);

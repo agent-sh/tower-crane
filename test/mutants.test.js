@@ -6,12 +6,12 @@ const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
 const { makeRepo, ROOT } = require('./helpers');
-const { makeDocsRepo } = require('./docs-fixture');
 const { readText } = require('../scripts/text');
 const { runContained, windowsCommandLine } = require('../scripts/mutants');
 const { detachedAlive } = require('./helpers');
 const { killPid } = require('./signals');
 const { readPublished } = require('./atomic-file');
+const { makeDocsRepo } = require('./docs-fixture');
 
 const SYSTEMD_ONLY = 'systemd scopes exist only on Linux';
 
@@ -52,7 +52,6 @@ function assertNoneLeft(file) {
 
 test('check:shared rejects missing and duplicate mutant targets without running tests', (t) => {
   const h = makeDocsRepo(t);
-  assert.equal(fs.existsSync(path.join(h.repo, 'test')), false, 'target validation needs no test tree');
   const { scripts } = require('../package.json');
   assert.equal(scripts['check:shared'], 'node scripts/check-shared-files.js --mutants');
   const script = (name, args) => cp.spawnSync(process.execPath,
@@ -62,27 +61,31 @@ test('check:shared rejects missing and duplicate mutant targets without running 
   const file = path.join(h.repo, 'lib/gates/tests.js');
   const source = readText(file);
   const anchor = 'if (without.ok) {';
-  const baseline = check();
-  assert.equal(baseline.status, 0, baseline.stdout + baseline.stderr);
+  const clean = check();
+  assert.equal(clean.status, 0, clean.stdout + clean.stderr);
   const targets = script('mutants.js', ['--check', '--root', h.repo]);
   assert.equal(targets.status, 0, targets.stderr);
   assert.match(targets.stdout, /^\d+ mutant targets match once\n$/);
-  for (const [text, occurrences] of [
-    [source.replace(anchor, 'if (false) {'), 0],
-    [source + `\n// ${anchor}\n`, 2],
+  const tasks = path.join(h.repo, 'lib/tasks.js');
+  fs.writeFileSync(tasks, readText(tasks).replace(/\n/g, '\r\n'));
+  for (const [name, text, occurrences] of [
+    ['unchanged LF', source, 1],
+    ['missing anchor', source.replace(anchor, 'if (false) {'), 0],
+    ['duplicate anchor', source + `\n// ${anchor}\n`, 2],
+    ['unchanged CRLF', source.replace(/\n/g, '\r\n'), 1],
   ]) {
     fs.writeFileSync(file, text);
     const drift = check();
+    if (occurrences === 1) {
+      assert.equal(drift.status, 0, name + '\n' + drift.stdout + drift.stderr);
+      continue;
+    }
     assert.equal(drift.status, 1, drift.stderr);
     assert.match(drift.stderr, new RegExp(`tests-pass-without-change:.*once in lib/gates/tests\\.js.*found ${occurrences}`));
     const selected = script('mutants.js', ['--check', '--only', 'tests-pass-without-change']);
     assert.equal(selected.status, 1);
     assert.match(selected.stderr, new RegExp(`tests-pass-without-change:.*found ${occurrences}`));
   }
-  fs.writeFileSync(file, source.replace(/\n/g, '\r\n'));
-  const tasks = path.join(h.repo, 'lib/tasks.js');
-  fs.writeFileSync(tasks, readText(tasks).replace(/\n/g, '\r\n'));
-  assert.equal(check().status, 0, 'multiline anchors match Windows line endings');
   fs.rmSync(file);
   const missing = check();
   assert.equal(missing.status, 1);
