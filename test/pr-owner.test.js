@@ -41,8 +41,8 @@ function ownerFixture(t, env = {}) {
   return h;
 }
 
-// The engine: a wait that runs every reaction and refills the worker slot,
-// until the owner's worker exits; then it is stopped. A merge retires the
+// Acceptance can finish after an idle owner exits, so the engine stays
+// alive until both conditions hold. A merge retires the
 // task's worktree, and the supervisor stops the owner then if its wait --own
 // has not ended it first.
 async function runEngine(h) {
@@ -51,8 +51,9 @@ async function runEngine(h) {
   for (const stream of [engine.stdout, engine.stderr]) stream.on('data', (d) => { output += d; });
   const closed = new Promise((resolve) => engine.on('close', resolve));
   try {
-    await waitUntil(() => h.workers().length && h.logs().some((e) => e.cmd === 'spawn exit' && e.detail.agent === h.workers()[0].detail.agent),
-      { paths: [h.base], alive: engine, what: () => `the owner exits; engine output: ${output}` });
+    await waitUntil(() => h.task().status === 'accepted' && h.workers().length
+      && h.logs().some((e) => e.cmd === 'spawn exit' && e.detail.agent === h.workers()[0].detail.agent),
+      { paths: [h.base], alive: engine, what: () => `the task is accepted and the owner exits; engine output: ${output}` });
   } finally {
     engine.kill('SIGINT');
     await closed;
@@ -127,43 +128,56 @@ test('a review that fails only on PR-body claims gets its body fixer while the o
   assert.equal(h.logs().filter((e) => e.cmd === 'rework' || e.cmd === 'claim' && e.detail.handover).length, 0);
 });
 
-test('an owner idle past its limit exits, and the next failure dispatches a new worker as before', async (t) => {
-  const h = ownerFixture(t);
-  // The first head's tests wait for the release, so the owner idles meanwhile.
-  const release = path.join(h.base, 'release');
-  const suite = path.join(h.base, 'tools', 'value-suite.js');
-  fs.writeFileSync(suite, `const fs = require('node:fs');
-const end = Date.now() + 60000; // wait-allow: the test writes the release once the owner exited; the minute only ends a fixture whose test failed
-const poll = () => (fs.existsSync(${JSON.stringify(release)}) || Date.now() >= end ? finish() : setTimeout(poll, 50)); // wait-allow: probe cadence only; the release file and the minute bound it
-const finish = () => {
-  if (fs.readFileSync('value.js', 'utf8').includes('1')) {
-    console.log('not ok 1 - the value is fixed');
-    process.exit(1);
-  }
-};
-poll();
-`);
-  h.ok(['project', 'set', '--owner-idle-minutes', '0.05']);
-  const engine = h.spawnCli(['wait', '--types', 'never', '--timeout', '600', '--agent', 'orchestrator']);
-  let output = '';
-  for (const stream of [engine.stdout, engine.stderr]) stream.on('data', (d) => { output += d; });
-  const closed = new Promise((resolve) => engine.on('close', resolve));
-  const until = (check, what) => waitUntil(check, { paths: [h.base], alive: engine, what: () => `${what}; engine output: ${output}` });
-  const exited = (n) => h.workers().length >= n && h.logs().some((e) => e.cmd === 'spawn exit' && e.detail.agent === h.workers()[n - 1].detail.agent);
-  try {
-    await until(() => exited(1), 'the idle owner exits');
-    assert.deepEqual(h.outcomes().map((o) => [o.outcome, o.reason]), [['exit', 'idle']]);
-    fs.writeFileSync(release, '');
-    await until(() => exited(2), 'a new worker fixes the failure');
-  } finally {
-    engine.kill('SIGINT');
-    await closed;
-  }
-  assert.equal(h.workers().length, 2, 'the failure after the idle exit dispatched a new worker');
-  assert.equal(h.logs().filter((e) => e.cmd === 'claim' && e.detail.handover).length, 0, 'nothing went back to the exited owner');
-  assert.equal(h.task().status, 'accepted');
-  assert.equal(h.task().sha, h.fix);
-});
+for (const row of [
+  { name: 'unheld fixed gate', holdFixed: false },
+  { name: 'fixed gate held past replacement exit', holdFixed: true },
+]) {
+  test(`an owner idle past its limit exits, and the next failure dispatches a new worker as before (${row.name})`, async (t) => {
+    const h = ownerFixture(t);
+    // The first head's tests wait for the release, so the owner idles meanwhile.
+    const release = path.join(h.base, 'release');
+    const fixedRelease = row.holdFixed ? path.join(h.base, 'fixed-release') : release;
+    const suite = path.join(h.base, 'tools', 'value-suite.js');
+    fs.writeFileSync(suite, `const fs = require('node:fs');
+  const end = Date.now() + 60000; // wait-allow: the test writes the release once the owner exited; the minute only ends a fixture whose test failed
+  const failed = fs.readFileSync('value.js', 'utf8').includes('1');
+  const release = failed ? ${JSON.stringify(release)} : ${JSON.stringify(fixedRelease)};
+  const poll = () => (fs.existsSync(release) || Date.now() >= end ? finish() : setTimeout(poll, 50)); // wait-allow: probe cadence only; the release file and the minute bound it
+  const finish = () => {
+    if (failed) {
+      console.log('not ok 1 - the value is fixed');
+      process.exit(1);
+    }
+  };
+  poll();
+  `);
+    h.ok(['project', 'set', '--owner-idle-minutes', '0.05']);
+    const engine = h.spawnCli(['wait', '--types', 'never', '--timeout', '600', '--agent', 'orchestrator']);
+    let output = '';
+    for (const stream of [engine.stdout, engine.stderr]) stream.on('data', (d) => { output += d; });
+    const closed = new Promise((resolve) => engine.on('close', resolve));
+    const until = (check, what) => waitUntil(check, { paths: [h.base], alive: engine, what: () => `${what}; engine output: ${output}` });
+    const exited = (n) => h.workers().length >= n && h.logs().some((e) => e.cmd === 'spawn exit' && e.detail.agent === h.workers()[n - 1].detail.agent);
+    try {
+      await until(() => exited(1), 'the idle owner exits');
+      assert.deepEqual(h.outcomes().map((o) => [o.outcome, o.reason]), [['exit', 'idle']]);
+      fs.writeFileSync(release, '');
+      await until(() => exited(2), 'a new worker fixes the failure');
+      if (row.holdFixed) {
+        assert.equal(h.task().status, 'submitted', 'replacement exit precedes the held gate completion');
+        fs.writeFileSync(fixedRelease, '');
+      }
+      await until(() => h.task().status === 'accepted', 'the fixed head is accepted after the replacement exits');
+    } finally {
+      engine.kill('SIGINT');
+      await closed;
+    }
+    assert.equal(h.workers().length, 2, 'the failure after the idle exit dispatched a new worker');
+    assert.equal(h.logs().filter((e) => e.cmd === 'claim' && e.detail.handover).length, 0, 'nothing went back to the exited owner');
+    assert.equal(h.task().status, 'accepted');
+    assert.equal(h.task().sha, h.fix);
+  });
+}
 
 // A worker spawn of the owner fixture without a PR, for checks that need no gates.
 function ownerSpawn(h, id) {

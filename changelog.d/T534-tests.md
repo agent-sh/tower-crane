@@ -1,0 +1,2 @@
+- PR-owner integration tests wait for acceptance after worker exit and cover a passing gate held past the replacement owner's idle exit.
+- Test-map GitHub fixtures publish shared JSON and clock updates atomically.

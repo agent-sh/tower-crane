@@ -1,24 +1,25 @@
 'use strict';
 
-const fs = require('node:fs');
 const path = require('node:path');
+const { updateJson, writeAtomic } = require('../atomic-file');
 const args = process.argv.slice(2);
 const file = process.env.TC_MAP_GITHUB;
-const data = JSON.parse(fs.readFileSync(file, 'utf8'));
-data.calls.push(args);
-fs.writeFileSync(file, JSON.stringify(data));
+const data = updateJson(file, (state) => {
+  state.calls.push(args);
+  return state;
+});
 if (data.fail) {
   if (data.supersedingPoll) {
-    const { file, receipt } = data.supersedingPoll;
-    fs.writeFileSync(file, JSON.stringify(receipt));
-    fs.writeFileSync(process.env.HOOK_CLOCK_FILE, String(Date.parse(receipt.read_at)));
+    const { file: receiptFile, receipt } = data.supersedingPoll;
+    writeAtomic(receiptFile, JSON.stringify(receipt));
+    writeAtomic(process.env.HOOK_CLOCK_FILE, String(Date.parse(receipt.read_at)));
   }
   console.error('GitHub unavailable');
   process.exit(1);
 }
 const print = (value) => console.log(JSON.stringify(value));
 if (args[0] === 'run' && args[1] === 'download') {
-  fs.writeFileSync(path.join(args[args.indexOf('-D') + 1], 'tests-coverage-map.json'), JSON.stringify(data.artifact));
+  writeAtomic(path.join(args[args.indexOf('-D') + 1], 'tests-coverage-map.json'), JSON.stringify(data.artifact));
 } else if (args[0] === 'api') {
   const endpoint = args[1];
   if (endpoint.includes('/actions/runs?')) {
