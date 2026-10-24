@@ -827,6 +827,10 @@ test('incremental CLI rejects fragment, suite, fixture and runner defects throug
   const seed = Object.fromEntries(Object.entries(require('../tools/tests-map.json'))
     .filter(([source]) => source.includes('*') || ['test/shard-watchdog.js', 'test/file-progress.js'].includes(source)));
   const atomic = fs.readFileSync(path.join(ROOT, 'test/atomic-file.test.js'), 'utf8');
+  assert.ok(atomic.includes("test('fixtures publish the files they write through writeAtomic'"),
+    'the CLI regression must use the repository publication reader');
+  assert.ok(atomic.includes('function secondArgument('),
+    'the CLI regression must use the repository write-call parser');
   const producer = atomic.match(/test\('fixtures publish the files they write through writeAtomic',[\s\S]*?\n\}\);/)[0];
   const argument = atomic.match(/function secondArgument\([\s\S]*?\n\}/)[0];
   for (const [file, content, error, reader] of [
