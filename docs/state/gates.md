@@ -116,8 +116,18 @@ The evidence entry is `{ "type": "final-review", "ok", "sha", "revision", "sourc
 
 `automation` events record `{source, phase}` keyed by the triggering event
 ID, or a stable digest for older records without IDs.
-`running` adds the reaction's `pid`, `host` and Linux `start_ticks` and `pidns`. `done`
-deduplicates completed work. `executor` records a reaction that reached CPU
+`running` adds the reaction's `pid`, `host` and Linux `start_ticks` and `pidns`.
+On Windows, running reaction, `executor`, `gate run` and `merge queue` receipts also
+record `created`, the process's creation time in UTC epoch milliseconds, when
+it can be read, or `seen`, the recording time, otherwise. A different process
+at the same PID ends a receipt whose `created` no longer matches. An unreadable
+creation time keeps that holder unobservable and busy while its PID still
+responds. As for state lock holders, matching creation-time reads may be reused
+for the lock's stale
+interval; a mismatch stays known for that PID and creation time. Older receipts
+without `created` retain PID signal probing.
+
+`done` deduplicates completed work. `executor` records a reaction that reached CPU
 work while every executor was busy, or while an older reaction already waited
 for one, with the gate as `kind` and the wait as `error`; its source stays
 owed. `deferred` keeps unknown or moved heads,
