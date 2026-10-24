@@ -427,12 +427,11 @@ test('the wait host serves events and drains a signal while another dispatch hol
   const host = h.runAsync(['wait', '--follow', '--types', 'worker-message', '--agent', 'orchestrator'], {
     hooks: { HOOK_DISPATCH_WAITING: looked },
     onSpawn: (c) => {
-      child = c;
+      child = h.stopAtCleanup(c);
       c.stdout.on('data', (d) => { out += d; });
       c.on('close', () => { closed = true; });
     },
   });
-  t.after(() => { if (!closed) child.kill('SIGKILL'); });
   const rows = () => out.split('\n').filter(Boolean).map((line) => JSON.parse(line));
   await waitFor(looked, { what: 'the refill looks at the held dispatch lock' });
   const sent = Date.now();

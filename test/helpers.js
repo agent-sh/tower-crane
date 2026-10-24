@@ -539,6 +539,20 @@ function context(t, base, options = {}) {
     },
     // Steps that must run before the directory goes, such as stopping processes that poll in it.
     teardown: [],
+    // A child the test started and leaves running, such as a follower: cleanup
+    // kills it and waits for its exit before the directory goes. Windows
+    // removes no file a live process holds open, and a CLI holds state.db
+    // open until it exits. A `t.after` kill runs after this cleanup, which
+    // the test registered first. Returns the child.
+    stopAtCleanup: (child) => {
+      ctx.teardown.push(async () => {
+        if (child.exitCode !== null || child.signalCode !== null) return;
+        const exited = new Promise((resolve) => child.once('exit', resolve));
+        child.kill('SIGKILL');
+        await exited;
+      });
+      return child;
+    },
     cleanup: async ({ monitorGraceMs } = {}) => {
       let strayOwnerDirs = [];
       const seen = new Set();

@@ -97,8 +97,7 @@ test('the default wait wakes on every owner event and skips bookkeeping', async 
 test('wait --follow includes complete decision answers and keeps other wakes id-only', async (t) => {
   const h = setup(t);
   h.ok(['ask', '--kind', 'technical', '--question', 'which way?', '--option', 'left', '--option', 'right', '--blocks', 'T1', '--agent', 'worker']);
-  const p = cp.spawn(process.execPath, [BIN, 'wait', '--observe', '--follow', '--agent', 'orchestrator'], { cwd: h.repo, env: h.env });
-  t.after(() => p.kill());
+  const p = h.stopAtCleanup(cp.spawn(process.execPath, [BIN, 'wait', '--observe', '--follow', '--agent', 'orchestrator'], { cwd: h.repo, env: h.env }));
   let out = '';
   p.stdout.on('data', (d) => { out += d; });
   const lines = () => out.split('\n').filter(Boolean).map(JSON.parse);
@@ -129,8 +128,7 @@ for (const point of ['staged', 'landed']) {
     test(`a follower started ${started} of a writer killed ${point === 'staged' ? 'before' : 'after'} its commit delivers what landed and what follows`, async (t) => {
       const h = setup(t);
       const follow = () => {
-        const p = cp.spawn(process.execPath, [BIN, 'wait', '--observe', '--follow', '--agent', 'orchestrator'], { cwd: h.repo, env: h.env });
-        t.after(() => p.kill());
+        const p = h.stopAtCleanup(cp.spawn(process.execPath, [BIN, 'wait', '--observe', '--follow', '--agent', 'orchestrator'], { cwd: h.repo, env: h.env }));
         let out = '';
         p.stdout.on('data', (d) => { out += d; });
         return { p, ids: () => out.split('\n').filter(Boolean).map((line) => JSON.parse(line).id).filter(Boolean) };
@@ -186,8 +184,7 @@ fs.readFileSync = function (...args) { hold(); return readFileSync.apply(this, a
 const execFileSync = cp.execFileSync;
 cp.execFileSync = function (...args) { hold(); return execFileSync.apply(this, args); };
 `);
-  const p = cp.spawn(process.execPath, ['--require', preload, BIN, 'wait', '--observe', '--follow', '--after', 'now', '--agent', 'orchestrator'], { cwd: h.repo, env: h.env });
-  t.after(() => p.kill());
+  const p = h.stopAtCleanup(cp.spawn(process.execPath, ['--require', preload, BIN, 'wait', '--observe', '--follow', '--after', 'now', '--agent', 'orchestrator'], { cwd: h.repo, env: h.env }));
   let out = '';
   let err = '';
   let exit = null;
@@ -325,13 +322,10 @@ function engine(t, h, { appendPause } = {}) {
       }
     }
   };
-  const children = [];
   let followerReady = null;
-  t.after(() => { for (const p of children) p.kill(); });
   async function* spawn({ argv }) {
     assert.equal(argv[0], 'node');
-    const p = cp.spawn(process.execPath, argv.slice(1), { cwd: h.repo, env: h.env });
-    children.push(p);
+    const p = h.stopAtCleanup(cp.spawn(process.execPath, argv.slice(1), { cwd: h.repo, env: h.env }));
     followerReady = readyLine(p);
     // A follower the test never waits on may exit before its ready line.
     followerReady.catch(() => {});
