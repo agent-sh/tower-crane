@@ -406,6 +406,8 @@ jobs:
           FOCUSED_TESTS: ${{ inputs.tests }}
           TOWER_CRANE_TEST_TMP: ${{ runner.temp }}/tower-crane-tests
           TC_TEST_SHARD_LOG_DIR: ${{ runner.temp }}/shard-log
+          # A single bucket keeps every named file and enables the runner's per-file progress log.
+          TC_TEST_SHARD: '1/1'
           TC_TEST_SHARD_DEADLINE_MIN: 36
           TC_SHARD_GUARD_DEADLINE_MIN: 38
           TC_SHARD_GUARD_MAX_PROCESSES: 1000

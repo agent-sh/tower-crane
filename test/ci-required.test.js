@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
 const vm = require('node:vm');
-const { BIN, cachedFixture } = require('./helpers');
+const { BIN, cachedFixture, makeRepo } = require('./helpers');
 const { gateFixture } = require('./gate-helpers');
 const { HUNG_TEST_MS } = require('./signals');
 
@@ -151,10 +151,11 @@ test('focused dispatch selects its runners and skips every other job, including 
   assert.match(focused, /^ {8}timeout-minutes: 40$/m);
   assert.match(focused, /TOWER_CRANE_TEST_TMP: \$\{\{ runner\.temp \}\}\/tower-crane-tests/);
   assert.match(focused, /TC_TEST_SHARD_LOG_DIR: \$\{\{ runner\.temp \}\}\/shard-log/);
+  assert.match(focused, /TC_TEST_SHARD: '1\/1'/);
   assert.match(focused, /TC_TEST_SHARD_DEADLINE_MIN: 36/);
   assert.match(focused, /TC_SHARD_GUARD_DEADLINE_MIN: 38/);
   assert.match(focused, /if: always\(\)\n {8}uses: actions\/upload-artifact@[\s\S]*path: \$\{\{ runner\.temp \}\}\/shard-log/);
-  assert.doesNotMatch(focused, /TC_TEST_SHARD:|TC_TEST_COVERAGE_DIR:|npm test|check:shared/);
+  assert.doesNotMatch(focused, /TC_TEST_COVERAGE_DIR:|npm test|check:shared/);
   const matrix = /^ {8}os: \$\{\{ (.+) \}\}$/m.exec(focused)?.[1];
   assert.ok(matrix, 'focused runner matrix comes from the os input');
   for (const [os, expected] of [
@@ -226,26 +227,40 @@ test('focused dispatch validates every path before starting exactly the named fi
   }
 });
 
-test('the focused step starts the real runner for one file and refuses a mixed invalid list before running', () => {
+test('the focused step logs every named file for one or several files and refuses a mixed invalid list before running', (t) => {
   const root = path.resolve(__dirname, '..');
+  const h = makeRepo(t);
   const focused = jobBlock(readWorkflow(root), 'focused');
   const script = /node <<'NODE'\n([\s\S]*?)\n {10}NODE/.exec(focused)[1].replace(/^ {10}/gm, '');
+  const shard = /TC_TEST_SHARD: '([^']+)'/.exec(focused)?.[1] || '';
   for (const [input, status] of [
     ['test/gates/ci.test.js', 0],
+    ['test/gates/ci.test.js test/workflow-if.test.js', 0],
     ['test/gates/ci.test.js test/../outside.test.js', 1],
   ]) {
+    const logDir = path.join(h.base, `log-${input.split(/\s+/).length}-${status}`);
     const result = cp.spawnSync(process.execPath, ['-e', script], {
-      cwd: root, env: { ...process.env, FOCUSED_TESTS: input }, encoding: 'utf8', timeout: HUNG_TEST_MS,
+      cwd: root, env: { ...process.env, FOCUSED_TESTS: input, TOWER_CRANE_TEST_TMP: h.base,
+        TC_TEST_SHARD: shard, TC_TEST_SHARD_LOG_DIR: logDir },
+      encoding: 'utf8', timeout: HUNG_TEST_MS,
     });
     assert.equal(result.status, status, result.stdout + result.stderr);
     if (status === 0) {
       assert.match(result.stdout, /hotfix checks only push workflows/);
       assert.match(result.stdout, /ℹ fail 0/);
-      const count = [...fs.readFileSync(path.join(root, 'test/gates/ci.test.js'), 'utf8').matchAll(/^test\(/gm)].length;
-      assert.match(result.stdout, new RegExp(`ℹ tests ${count}\\n`), 'only the named file contributes tests');
+      const files = input.split(/\s+/);
+      const count = files.reduce((sum, file) => sum + [...fs.readFileSync(path.join(root, file), 'utf8').matchAll(/^test\(/gm)].length, 0);
+      assert.match(result.stdout, new RegExp(`ℹ tests ${count}\\n`), 'only the named files contribute tests');
+      const progress = fs.readFileSync(path.join(logDir, 'progress.log'), 'utf8');
+      for (const state of ['started', 'ended']) {
+        const logged = [...progress.matchAll(new RegExp(`^file ${state}: (.+)$`, 'gm'))]
+          .map((m) => path.relative(root, m[1].trim()).split(path.sep).join('/')).sort();
+        assert.deepEqual(logged, [...files].sort(), `the artifact records every file ${state}`);
+      }
     } else {
       assert.match(result.stderr, /Each path must be a literal/);
       assert.doesNotMatch(result.stdout, /tower-crane: test\/|ℹ tests/);
+      assert.ok(!fs.existsSync(logDir), 'invalid input never starts the runner or its logging');
     }
   }
 });
