@@ -1,0 +1,1 @@
+- Preserve fresh child output when an overdue command timeout runs after its data callback. Stale output, quiet children and on-time deadlines keep their timeout behavior.
