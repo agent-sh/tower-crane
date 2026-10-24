@@ -829,7 +829,7 @@ test('finite nested fork storm fails the gate command and leaves another attempt
     process.execPath, [HARNESS, 'nested-storm', 'unused'], {
     resources: { tasks_max: systemd ? 32 : 4, memory_max_bytes: memory }, timeout: 10000, // wait-allow: finite resource probe deadline
   });
-  assert.equal(result.resource_reason, 'resource-tasks-max', result.stderr);
+  assert.equal(result.resource_reason, 'resource-tasks-max', `exit ${result.status}: ${diagnostics(result)}`);
   assert.equal(result.error?.code, 'resource-tasks-max');
   assert.equal(result.ok, false);
   assert.equal(sibling.exitCode, null);
