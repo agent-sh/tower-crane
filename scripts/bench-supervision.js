@@ -7,12 +7,14 @@
 // the probe times how long its monitor takes to exit.
 //
 //   node scripts/bench-supervision.js [--compare REF] [--targets] [--windows N] [--window-s S] [--profile DIR]
+//     [--warmup-s S] [--log-mb MB] [--log-lines N] [--tasks N]
 //
 // --compare REF runs the same load on REF's tree first (git archive of the
 // merge base of HEAD and REF), so both columns come from one host and load.
 // --targets exits 1 when this tree misses the lines T507 set: an idle monitor
 // under 1% of a core and 150 MB, the follow loop under 5% of a core, and the
-// monitor gone within two minutes of its agent's exit.
+// monitor gone within two minutes of its agent's exit. The last four flags
+// shrink the load so a test can run the whole probe in seconds.
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -27,11 +29,11 @@ const flag = (name, fallback) => {
 const WINDOWS = Number(flag('--windows', 3));
 const WINDOW_MS = Number(flag('--window-s', 60)) * 1000;
 // Past the supervisor's first usage sample, 30 s after launch, so no window holds an event.
-const WARMUP_MS = 40000;
+const WARMUP_MS = Number(flag('--warmup-s', 40)) * 1000;
 const EXIT_BOUND_MS = 120000;
-const LOG_BYTES = 116 * 1024 * 1024;
-const LOG_LINES = 135000;
-const FILLER_TASKS = 500;
+const LOG_BYTES = Number(flag('--log-mb', 116)) * 1024 * 1024;
+const LOG_LINES = Number(flag('--log-lines', 135000));
+const FILLER_TASKS = Number(flag('--tasks', 500));
 if (process.platform !== 'linux') throw new Error('the probe reads /proc; run it on Linux');
 const cache = process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache');
 const ROOT = path.resolve(__dirname, '..');
@@ -192,13 +194,17 @@ function summary(result) {
 async function compare(ref) {
   const head = cp.execFileSync('git', ['rev-parse', 'HEAD'], { cwd: ROOT, encoding: 'utf8' }).trim();
   const base = cp.execFileSync('git', ['merge-base', 'HEAD', ref], { cwd: ROOT, encoding: 'utf8' }).trim();
+  // Both runs get the same load flags. The comparison and the targets stay with this run, and the
+  // base tree may predate the profiler preload.
+  const own = (a) => a === '--compare' || a === '--profile';
+  const load = args.filter((a, i) => !own(a) && !own(args[i - 1]) && a !== '--targets');
   const dir = fs.mkdtempSync(path.join(cache, 'tc-bench-base-'));
   try {
     cp.execFileSync('sh', ['-c', 'git archive "$1" | tar -x -C "$2"', 'sh', base, dir], { cwd: ROOT, stdio: ['ignore', 'ignore', 'inherit'] });
     fs.copyFileSync(__filename, path.join(dir, 'scripts', path.basename(__filename)));
     const rows = {};
     for (const [name, root] of [['before', dir], ['after', ROOT]]) {
-      const run = cp.spawnSync(process.execPath, [path.join(root, 'scripts', path.basename(__filename)), '--windows', String(WINDOWS), '--window-s', String(WINDOW_MS / 1000)],
+      const run = cp.spawnSync(process.execPath, [path.join(root, 'scripts', path.basename(__filename)), ...load],
         { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'], maxBuffer: 64 * 2 ** 20 });
       if (run.status !== 0) throw new Error(`${name} run exited ${run.status}`);
       rows[name] = JSON.parse(run.stdout.trim().split('\n').at(-1));
