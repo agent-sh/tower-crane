@@ -81,13 +81,15 @@ function titles(root = ROOT) {
 }
 
 // The top-level results of the `npm test` step in a job log, up to Node's repeated list of failures.
+// Windows runs that step under its shard guard (`pwsh -NoProfile -File scripts/shard-guard.ps1 npm test`).
+const TEST_STEP = /^##\[group\]Run (?:pwsh -NoProfile -File scripts\/shard-guard\.ps1 )?npm test$/;
 function results(log) {
   const out = [];
   let inStep = false;
   for (const line of log.split(/\r?\n/)) {
     const text = line.replace(/^\S+Z /, '');
     if (text.startsWith('##[group]Run ')) {
-      inStep = text === '##[group]Run npm test';
+      inStep = TEST_STEP.test(text);
       continue;
     }
     if (!inStep) continue;

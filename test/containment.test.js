@@ -428,6 +428,22 @@ test('a keeper reads its scope\'s Result before it resets the scope', { skip: pr
   }
 });
 
+// Windows has no process.getuid, and a keeper there watches its rows without a systemd scope.
+test('a watchdog keeper starts without a uid or runtime directory and ends with its work', async (t) => {
+  const exitCode = process.exitCode;
+  const getuid = Object.getOwnPropertyDescriptor(process, 'getuid');
+  const runtime = process.env.XDG_RUNTIME_DIR;
+  t.after(() => {
+    process.exitCode = exitCode;
+    if (getuid) Object.defineProperty(process, 'getuid', getuid);
+    if (runtime !== undefined) process.env.XDG_RUNTIME_DIR = runtime;
+  });
+  delete process.getuid;
+  delete process.env.XDG_RUNTIME_DIR;
+  await C.guardRemaining({ rows: [], limits: { tasks_max: 64, memory_max_bytes: memory } });
+  assert.equal(process.exitCode, exitCode);
+});
+
 test('launches reset their settled scope, and the next launch cleans up after a killed supervisor', {
   skip: process.platform !== 'linux' && 'Linux scope runner uses execve',
 }, (t) => {
@@ -829,7 +845,7 @@ test('finite nested fork storm fails the gate command and leaves another attempt
     process.execPath, [HARNESS, 'nested-storm', 'unused'], {
     resources: { tasks_max: systemd ? 32 : 4, memory_max_bytes: memory }, timeout: 10000, // wait-allow: finite resource probe deadline
   });
-  assert.equal(result.resource_reason, 'resource-tasks-max', result.stderr);
+  assert.equal(result.resource_reason, 'resource-tasks-max', `exit ${result.status}: ${diagnostics(result)}`);
   assert.equal(result.error?.code, 'resource-tasks-max');
   assert.equal(result.ok, false);
   assert.equal(sibling.exitCode, null);

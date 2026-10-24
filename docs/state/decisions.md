@@ -55,18 +55,22 @@ Workers, reviewers and every other identity are refused both. For an operational
 
 | Setting | Class | Changed by |
 | --- | --- | --- |
-| `gates.tests_cmd`, `gates.clean_cmd`, `gates.tests_proof_cmd` | operational | `project set --tests-cmd`, `--clean-cmd`, `--tests-proof-cmd`; gate self-pinning below |
+| `gates.tests_cmd`, `gates.clean_cmd`, `gates.docs_cmd`, `gates.tests_proof_cmd` | operational | `project set --tests-cmd`, `--clean-cmd`, `--docs-cmd`, `--tests-proof-cmd`; gate self-pinning below |
+| `review.attest_fix`, `review.metadata_fix` | operational | `accept --attest-fix SHA --reason R`, `accept --metadata-fixed --reason R`; the Controls page exposes both and the carryover write records their authority audit |
 | `gates.clean_paths` | operational | `project set --clean-paths`: read-only tool dependency paths for sandboxed agents |
 | `gates.executors` | operational | `project set --executors` |
 | `gates.tests_timeout_min`, `gates.clean_timeout_min`, `gates.host_probe_timeout_min` | operational | `project set --tests-timeout-min`, `--clean-timeout-min`, `--host-probe-timeout-min` |
 | `gates.tmp_root` | operational | `project set --tmp-root` |
 | `gates.rework_hold_min` | operational | `project set --rework-hold-min` |
+| `gates.presubmit` | operational | `project set --presubmit`: worker command before recording a submitted head; `presubmit retry` and `presubmit override` resolve refusals |
 | `gates.final_review` | operational | `project set --final-review`: the external reviewer command `accept` runs on the host |
+| `gates.cpu_weight`, `agents.cpu_weight` | operational | `project set --gates-cpu-weight`, `--agents-cpu-weight`: weights inside the project's own slice, so they take no CPU from another project |
 | `archive.retention_days` | operational | `project set --archive-retention-days` |
 | `gates.priority` | operational | `gates prioritize ID --reason R`: a task's queued submitted gate reactions run before older submitted work; accepted merges stay first |
 | `ci.required`, `ci.ignore_apps`, `ci.capped_review` | operational | `project set --ci-required`, `--ci-ignore-apps`, `--ci-capped-review` |
 | `ci.local` | operational | `project set --ci-local`, `task update --ci-local` |
 | `ci.dispatch` | operational | `project set --ci-dispatch` |
+| `ci.max_dispatches` | operational | `project set --ci-max-dispatches` |
 | `tests.paths`, `tests.keep`, `tests.host_only`, `tests.host_env`, `tests.mode`, `tests.by_kind`, `tests.expensive`, `tests.map`, `tests.crucial` | operational | `project set --tests-*`; `tests map refresh` also pins `tests.map` |
 | `limits.workers`, `limits.lease_minutes`, `limits.paused` | operational | `project set --workers`, `--lease-minutes`, `--paused REASON` (empty resumes) |
 | `limits.owners`, `limits.owner_idle_minutes` | operational | `project set --owners`, `--owner-idle-minutes` |
