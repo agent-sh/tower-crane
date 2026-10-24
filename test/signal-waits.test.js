@@ -7,7 +7,8 @@ const path = require('node:path');
 const cp = require('node:child_process');
 const net = require('node:net');
 const { EventEmitter } = require('node:events');
-const { makeRepo, ROOT } = require('./helpers');
+const { makeRepo } = require('./helpers');
+const { makeDocsRepo } = require('./docs-fixture');
 const { fileWritten, eventAppended, childExit, childClosed, portListening, waitUntil, killPid, killGroup } = require('./signals');
 const { waitFindings, spinFindings, killFindings, checkTestWaits } = require('../scripts/test-waits');
 
@@ -283,16 +284,15 @@ test('shared checks reject readiness budgets and require a reason on allowed tim
   const scoped = waitFindings('function short() {\nconst delay = 1000;\nuntil(check, "ready", delay);\n}\nfunction long() {\nconst delay = 300000;\nuntil(check, "ready", delay);\n}');
   assert.deepEqual(scoped.map((finding) => finding.line), [3]);
   assert.ok(waitFindings('await until(check, "// wait-allow: fake reason", 1000);').length); // wait-allow: rejected lint fixture
-  const h = makeRepo(t);
-  for (const dir of ['scripts', 'bin', 'lib', 'docs', 'changelog.d', 'skills', 'research']) {
-    fs.cpSync(path.join(ROOT, dir), path.join(h.repo, dir), { recursive: true });
-  }
+  const h = makeDocsRepo(t);
   fs.mkdirSync(path.join(h.repo, 'test'));
   const bad = path.join(h.repo, 'test', 'wait.test.js');
-  fs.writeFileSync(bad, 'const deadline = Date.now() + 1000;\n'); // wait-allow: rejected lint fixture
   const run = () => cp.spawnSync(process.execPath, [path.join(h.repo, 'scripts/check-shared-files.js')], {
     cwd: h.repo, env: h.env, encoding: 'utf8',
   });
+  const clean = run();
+  assert.equal(clean.status, 0, clean.stdout + clean.stderr);
+  fs.writeFileSync(bad, 'const deadline = Date.now() + 1000;\n'); // wait-allow: rejected lint fixture
   const rejected = run();
   assert.equal(rejected.status, 1, rejected.stdout + rejected.stderr);
   assert.match(rejected.stderr, /test\/wait.test.js:1 readiness deadline/);
