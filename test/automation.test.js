@@ -643,12 +643,12 @@ for (const waiting of ['runs', 'mergeability']) {
     const waiter = h.runAsync(['wait', '--types', 'never', '--timeout', '10', '--agent', 'orchestrator'], // wait-allow: the engine run ends at its own timeout
       { hooks: { HOOK_CLOCK_FILE: clock } });
     t.after(() => waiter);
-    let ended = false;
-    waiter.then(() => { ended = true; });
+    let ended = null;
+    waiter.then((r) => { ended = r; });
     // Readiness is the record; a waiter that ended first fails at once.
     const until = (probe) => waitOnRepo(h, () => {
       if (probe()) return true;
-      if (ended) throw new Error('the waiter ended before the CI check completed');
+      if (ended) throw new Error(`the waiter ended before the CI check completed: exit ${ended.code}\n${ended.stdout}${ended.stderr}`);
       return false;
     }, 'CI check completed');
     await until(() => reconciled() > before);
