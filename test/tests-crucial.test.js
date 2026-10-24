@@ -286,9 +286,9 @@ test('merges', () => {
     'every profile was folded and removed');
 
   const p = makeRepo(t);
-  p.git(['fetch', h.repo, head]);
   p.init(['--repo', 'acme/demo']);
   gateFixture(p);
+  p.git(['fetch', h.repo, head]);
   const declared = { '**/*.md': [], 'docs/cli.md': ['test/other.test.js'], 'lib/gone.js': ['test/old.test.js'] };
   p.ok(['project', 'set', '--tests-map', JSON.stringify(declared)]);
   const before = p.readState('project.json');
