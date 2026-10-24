@@ -1,0 +1,1 @@
+- Stack parent regressions verify that acceptance preserves a current failed submission before parent refresh, including review waivers. Reviewer dispatch still starts rework or refuses unavailable linked findings.
