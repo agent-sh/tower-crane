@@ -34,7 +34,7 @@ if (process.env.TEST_STACK_DIRTY_AFTER_MERGE) {
 function pause(ready, release) {
   // write-atomic: existence is the signal; no test reads the text.
   fs.writeFileSync(ready, 'ready');
-  const deadline = performance.now() + 300000;
+  const deadline = performance.now() + Number(process.env.TEST_STACK_POLL_HOLD_MS || 300000); // wait-allow: held queries use the test's release or hung-test guard, not a readiness budget
   while (!fs.existsSync(release)) {
     if (performance.now() > deadline) throw new Error('paused gh fixture was not released');
     if (process.ppid !== launcher) process.exit(1);

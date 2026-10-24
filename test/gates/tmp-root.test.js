@@ -72,11 +72,7 @@ if (gate === 'clean') console.log(JSON.stringify({ items: [] }));
   statusRoot(override, 'TOWER_CRANE_TMP');
   delete h.env.TOWER_CRANE_TMP;
 
-  // Unset, the gates use tc/g under the user's cache, not the OS temporary directory: /tmp is
-  // often a RAM-backed tmpfs, and some suites refuse to run there. When that cache is too deep for
-  // the scratch path, the root comes from the account's own cache, then the OS temporary
-  // directory. Each of the three is a fixture here, so the gate never writes or sweeps the real
-  // cache: TC_GATE_HOME is the account's home for lib/gate-tmp.js (test/fixtures/account-home.js).
+  // A deep cache must still hold the worktree; the caller's temp directory is a sentinel.
   h.ok(['project', 'set', '--tmp-root', 'null', '--agent', 'orchestrator']);
   assert.match(h.ok(['project', 'show']), /gates\.tmp_root: null/);
   const account = path.join(h.base, 'account');
@@ -85,30 +81,31 @@ if (gate === 'clean') console.log(JSON.stringify({ items: [] }));
   h.env.TC_GATE_HOME = account;
   for (const key of ['TMPDIR', 'TMP', 'TEMP']) h.env[key] = systemTmp;
   const userCache = process.platform === 'win32' ? h.env.LOCALAPPDATA : h.env.XDG_CACHE_HOME;
-  const cacheRoot = [userCache, path.join(account, '.cache')].map((base) => path.join(base, 'tc', 'g')).find(gateTmp.scratchFits);
-  const want = cacheRoot ? { root: cacheRoot, source: 'cache' } : { root: systemTmp, source: 'system' };
+  const want = { root: path.join(userCache, 'tower-crane'), source: 'cache' };
   statusRoot(want.root, want.source);
   const defaulted = h.run(['check', 'clean', 'T1', '--agent', 'orchestrator']);
   assert.equal(defaulted.code, 0, defaulted.stdout + defaulted.stderr);
   const ran = ranLog().at(-1).cwd;
   assert.ok(ran.startsWith(`${fs.realpathSync.native(want.root)}${path.sep}`), ran);
   assert.ok(ran.startsWith(`${fs.realpathSync.native(h.base)}${path.sep}`), ran);
-  if (want.source === 'cache') assert.ok(Buffer.byteLength(path.join(path.dirname(ran), 'tmp')) <= 62, ran);
+  assert.deepEqual(fs.readdirSync(systemTmp), []);
   assert.ok(!fs.existsSync(path.dirname(ran)));
   evidence = h.readState('tasks.json').tasks[0].evidence;
   assert.equal(evidence.findLast((e) => e.type === 'clean').tmp_root, want.root);
+  delete h.env.TMPDIR;
+  const unset = h.run(['check', 'clean', 'T1', '--agent', 'orchestrator']);
+  assert.equal(unset.code, 0, unset.stdout + unset.stderr);
+  assert.ok(ranLog().at(-1).cwd.startsWith(fs.realpathSync.native(want.root) + path.sep));
+  assert.deepEqual(fs.readdirSync(systemTmp), []);
 });
 
-// Full Chromium aborts with "Socket path too long" under a TMPDIR over 62 bytes.
-test('the default gate root keeps the scratch TMPDIR within 62 bytes', () => {
+test('the default gate root stays in the cache even when the path is deep', () => {
   const env = (cache) => (process.platform === 'win32' ? { LOCALAPPDATA: cache } : { XDG_CACHE_HOME: cache });
   const short = path.join(path.parse(process.cwd()).root, 'c');
-  assert.deepEqual(gateTmp.resolve({}, env(short)), { root: path.join(short, 'tc', 'g'), source: 'cache' });
-  assert.equal(Buffer.byteLength(gateTmp.scratchPath(path.join(short, 'tc', 'g'))), Buffer.byteLength(short) + 28);
+  assert.deepEqual(gateTmp.resolve({}, env(short)), { root: path.join(short, 'tower-crane'), source: 'cache' });
   const deep = path.join(path.parse(process.cwd()).root, 'd'.repeat(80));
   const fallback = gateTmp.resolve({}, env(deep));
-  assert.ok(!fallback.root.startsWith(deep), fallback.root);
-  assert.ok(Buffer.byteLength(gateTmp.scratchPath(fallback.root)) <= gateTmp.GATE_TMPDIR_MAX, fallback.root);
+  assert.deepEqual(fallback, { root: path.join(deep, 'tower-crane'), source: 'cache' });
   assert.equal(gateTmp.GATE_TMPDIR_MAX, 62);
 });
 
