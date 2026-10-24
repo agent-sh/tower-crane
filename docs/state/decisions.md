@@ -61,6 +61,7 @@ Workers, reviewers and every other identity are refused both. For an operational
 | `gates.tests_timeout_min`, `gates.clean_timeout_min`, `gates.host_probe_timeout_min` | operational | `project set --tests-timeout-min`, `--clean-timeout-min`, `--host-probe-timeout-min` |
 | `gates.tmp_root` | operational | `project set --tmp-root` |
 | `gates.rework_hold_min` | operational | `project set --rework-hold-min` |
+| `gates.presubmit` | operational | `project set --presubmit`: worker command before recording a submitted head; `presubmit retry` and `presubmit override` resolve refusals |
 | `gates.final_review` | operational | `project set --final-review`: the external reviewer command `accept` runs on the host |
 | `gates.cpu_weight`, `agents.cpu_weight` | operational | `project set --gates-cpu-weight`, `--agents-cpu-weight`: weights inside the project's own slice, so they take no CPU from another project |
 | `archive.retention_days` | operational | `project set --archive-retention-days` |
@@ -68,6 +69,7 @@ Workers, reviewers and every other identity are refused both. For an operational
 | `ci.required`, `ci.ignore_apps`, `ci.capped_review` | operational | `project set --ci-required`, `--ci-ignore-apps`, `--ci-capped-review` |
 | `ci.local` | operational | `project set --ci-local`, `task update --ci-local` |
 | `ci.dispatch` | operational | `project set --ci-dispatch` |
+| `ci.max_dispatches` | operational | `project set --ci-max-dispatches` |
 | `tests.paths`, `tests.keep`, `tests.host_only`, `tests.host_env`, `tests.mode`, `tests.by_kind`, `tests.expensive`, `tests.map`, `tests.crucial` | operational | `project set --tests-*`; `tests map refresh` also pins `tests.map` |
 | `limits.workers`, `limits.lease_minutes`, `limits.paused` | operational | `project set --workers`, `--lease-minutes`, `--paused REASON` (empty resumes) |
 | `limits.owners`, `limits.owner_idle_minutes` | operational | `project set --owners`, `--owner-idle-minutes` |

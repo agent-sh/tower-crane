@@ -20,11 +20,13 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 fs.mkdtempSync(path.join(os.tmpdir(), 'tower-crane-unremoved-'));
+// The gate runs this in <gate root>/tower-crane-XXXXXX/wt; its TOWER_CRANE_TMP is the gate's scratch.
+const gateRoot = path.resolve(process.cwd(), '..', '..');
 if (process.env.PROOF_LEAK === '1') {
-  fs.mkdirSync(path.resolve(process.env.TOWER_CRANE_TMP, '../outer/escaped'));
+  fs.mkdirSync(path.resolve(gateRoot, '../outer/escaped'));
 }
 if (process.env.PROOF_ROOT_ENTRY) {
-  const entry = path.join(process.env.TOWER_CRANE_TMP, process.env.PROOF_ROOT_ENTRY);
+  const entry = path.join(gateRoot, process.env.PROOF_ROOT_ENTRY);
   fs.mkdirSync(path.dirname(entry), { recursive: true });
   fs.writeFileSync(entry, '{}');
 }
