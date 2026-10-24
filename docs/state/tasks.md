@@ -535,6 +535,7 @@ The format is additive within schema 1. A pinned older tool reads and preserves 
 - `archive_grants`: optional task ids whose archives this task's worker may copy into its scratch with `task archive ID --into`; `task archive ID --grant` adds one.
 - `worktree`: optional path, branch, base, creation time and last observed head record; retirement adds `state` (`stale` or `removed`), a failure `reason` and any recovery `saved` path.
 - `superseded_by`: optional replacement task id; superseding stores status `cancelled`.
+- `landed`: optional, present on a task accepted by `task landed`: `{ "pr", "merge_sha", "head_sha", "base", "branch", "url", "merged_at", "merged_by", "checks", "reason", "recorded_at", "recorded_by" }`. See [Native landings](#native-landings).
 - `retiring`: null, or `{ "since": "...", "pid": 4242, "host": "...", "start_ticks": "...", "pidns": "pid:[4026531836]", "path": "...", "branch": "..." }` while the process that wrote it removes the task's worktree after a merge or cancel. `start_ticks` and `pidns` are set where the platform reports them. Claim, rework, submit and worktree preparation refuse the reserved task, path or branch while that process runs; a marker whose process has exited holds nothing, so a crash cannot strand the task. The removal clears the marker when it ends, whether or not it removed the worktree.
 - `submitted_by`: the agent that submitted the current `sha`. Submission clears `claim`; while the task is `submitted`, only this agent can replace the submitted head. A spawned worker whose submit took ownership goes on waiting on the task ([PR owners](#pr-owners)).
 - `sha`: null before submission and after a release moves the task to another PR, then the full lowercase commit SHA: 40 characters for SHA-1, 64 for SHA-256. Full IDs are accepted as given without a local lookup, since the commit may exist only in another checkout. Abbreviations are resolved by `submit` with `git rev-parse --verify <sha>^{commit}` in the task repository, first locally and then after fetching the supplied or recorded task branch from origin. A prefix that remains unknown or ambiguous, or resolves to a non-commit object, is refused. Sandboxed workers resolve before forwarding to the host broker, which accepts only the full SHA and runs no Git. Legacy abbreviated submitted SHAs remain stored as written and match evidence and active reviewer dispatches by prefix on read.
@@ -603,6 +604,47 @@ Tests and clean evidence and their audit events carry `gate_policy`: `{tests_cmd
 The CLI refuses manual software verdicts, and software receipts require matching records in tasks.json and events.jsonl. Plain files cannot stop a writer running as the same user from forging those records or an owner waiver. Command receipts show what ran; acceptance checks them and their recorded policy against the pinned commands. The reviewer checks that the configured runners verify the change.
 
 Research Claude fallback routes in the user file inherit the primary `web_mcp` unless they specify their own. The same `{name, command, args}` validation applies to an explicit fallback server. Other harnesses do not inherit it. A route combining an inherited or explicit web MCP with `mcp` is reported and skipped so only the web server loads.
+
+### Native landings
+
+`task landed ID --pr N [--sha MERGE_SHA] --reason R` records a PR the
+orchestrator merged on GitHub outside Tower Crane's merge path, after its own
+clean-context review and green PR checks. It is an orchestrator or owner
+command. It reads the PR once with `gh pr view` (state, merge commit, base,
+head branch and commit, `mergedAt`, `mergedBy` and `statusCheckRollup`) and
+runs no gate, no review dispatch and no merge.
+
+The PR must be `MERGED` into the project base. It must be the task's recorded
+`pr`, or its head branch must be the task's `branch` or `worktree.branch`; a
+PR or branch that another task not cancelled records is refused. `--sha`, when
+given, must equal the PR's merge commit. A task that is accepted, cancelled,
+a recorded hotfix, waiting on an owner ask (`needs_owner`), being retired, or
+with a running worker (stop it with `interrupt` first) is refused. Repeating
+the same record on the task it accepted changes nothing and exits 0.
+
+The task, from `todo`, `in_progress`, `submitted` or `rework`, becomes
+`accepted` at its current revision and displays `accepted (native)`. Its
+`sha` becomes the PR head, `pr` the PR number, and `branch` the PR branch when
+it had none. A claim is released. `landed` records `pr`, `merge_sha`,
+`head_sha`, `base`, `branch`, `url`, `merged_at`, `merged_by`, `checks` and
+`reason`, plus `recorded_at` and `recorded_by`. `checks` lists the PR's check
+conclusions at its head as read once: check runs as `{name, workflow?,
+conclusion}` and commit statuses as `{name, conclusion}`, with a pending
+run's status in place of a conclusion. A `task landed` event carries the same
+fields with `sha`, `revision`, `previous_status` and, for a released claim,
+`released: {agent, until}`. A note records the PR, merge commit and reason.
+
+The task gets `merge` evidence at its head and revision with
+`source: "task landed"`, `pr`, `merge_sha`, `ref` (the PR URL) and empty
+`commands`. It counts only with a `task landed` event by the orchestrator or
+owner for the same head, revision, PR and merge commit. With it, readers that
+ask whether a task merged see this one as merged: dependents unblock as for
+any accepted task, the merge queue skips it, and nothing redispatches it. The
+worktree is then retired as for a cancelled task, saving uncommitted and
+unmerged work. Status counts include `accepted_native` as a separate subset
+of `accepted`. Acceptance through a landing also retires the task's gate
+priority. `metrics` counts a landing as a merge and reports it apart; see
+[metrics](../cli.md#metrics).
 
 ### Research sources
 
