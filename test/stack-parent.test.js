@@ -99,11 +99,18 @@ for (const entry of ['accept', 'waived accept', 'review spawn']) {
       assert.equal(result.code, 1, result.stdout + result.stderr);
       assert.match(result.stdout + result.stderr, /current review FAIL/);
       const task = f.h.json(['task', 'show', 'T2']);
-      assert.equal(task.status, 'rework');
-      const rework = events(f).findLast((e) => e.task === 'T2' && e.cmd === 'rework');
-      assert.equal(rework.detail.from_review, true);
-      assert.equal(rework.detail.previous_revision, 1);
-      assert.equal(task.stack.parent_sha, f.sha, 'failed review is recovered before parent synchronization');
+      if (entry === 'review spawn') {
+        assert.equal(task.status, 'rework');
+        const rework = events(f).findLast((e) => e.task === 'T2' && e.cmd === 'rework');
+        assert.equal(rework.detail.from_review, true);
+        assert.equal(rework.detail.previous_revision, 1);
+      } else {
+        // accept returns the failed review to the orchestrator and leaves the task submitted.
+        assert.match(result.stdout, /full review already failed/);
+        assert.equal(task.status, 'submitted');
+        assert.equal(events(f).some((e) => e.task === 'T2' && e.cmd === 'rework'), false);
+      }
+      assert.equal(task.stack.parent_sha, f.sha, 'failed review is handled before parent synchronization');
       assert.equal(f.h.git(['rev-parse', 'HEAD'], top.wt.path), top.sha);
     });
   }
@@ -120,7 +127,10 @@ for (const entry of ['accept', 'review spawn']) {
       const result = reviewEntry(f, entry);
       assert.equal(result.code, 1, result.stdout + result.stderr);
       const task = f.h.json(['task', 'show', 'T2']);
-      if (kind === 'missing') {
+      if (entry === 'accept') {
+        assert.match(result.stdout, /full review already failed/);
+        assert.equal(task.status, 'submitted');
+      } else if (kind === 'missing') {
         assert.equal(task.status, 'submitted');
         assert.match(result.stderr, /linked review comment/);
       } else {
