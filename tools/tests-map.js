@@ -20,9 +20,11 @@ function imports(file) {
   for (const match of text.matchAll(/require\(['"](\.[^'"]+)['"]\)/g)) {
     const base = path.posix.normalize(path.posix.join(path.posix.dirname(file), match[1]));
     const target = [base, `${base}.js`, `${base}/index.js`].find((p) => files.includes(p));
-    if (target && target !== 'bin/tower-crane.js') deps.add(target);
+    if (target) deps.add(target);
   }
-  // Fixtures passed as argv or preload paths do not use require in the caller.
+  // Fixtures passed as argv or preload paths do not use require. Children the runner starts
+  // by path (its shard watchdog and file progress) stay unmapped: no suite names them, so a
+  // change to one runs the full command.
   for (const source of sources.filter((p) => p.startsWith('test/fixtures/'))) {
     if (text.includes(path.posix.basename(source))) deps.add(source);
   }
@@ -46,7 +48,32 @@ for (const suite of suites) {
 for (const file of ['bin/tower-crane.js', 'lib/commands.js', 'lib/state.js', 'lib/util.js', 'lib/project.js', 'lib/tasks.js', 'lib/authority.js', 'package.json', 'test/run.js', 'test/helpers.js', 'test/repo-seed.js']) {
   if (files.includes(file)) map[file] = new Set(suites);
 }
-map['**/*.md'] = new Set();
+// The CLI loads handlers by path and starts modules in child processes, beyond static imports.
+for (const source of sources.filter(p => /^(bin|lib|hooks)\//.test(p))) map[source] = new Set(suites);
+// Data read from disk has no executed ranges in V8 coverage.
+map['tools/model-literals.json'] = new Set(['test/model-config.test.js']);
+map['tools/tests-map.json'] = new Set(['test/tests-map.test.js']);
+// These readers enumerate their inputs, so literal import paths cannot find their coverage.
+map['changelog.d/**'] = new Set(['test/shared-files.test.js']);
+const jsChecks = ['test/atomic-file.test.js', 'test/shared-files.test.js'];
+// Lint readers supplement real helper coverage; an unknown helper still needs a full run.
+for (const source of sources.filter(p => p.startsWith('test/') && p.endsWith('.js'))) {
+  if (map[source].size) for (const suite of jsChecks) map[source].add(suite);
+}
+map['test/*.test.js'] = new Set(jsChecks);
+map['test/gates/*.test.js'] = new Set(jsChecks);
+map['test/fixtures/**/*.js'] = new Set(jsChecks);
+for (const name of ['a', 'b', 'c', 'd', 'hang', 'orphan']) {
+  const file = `test/fixtures/shard/${name}.test.js`;
+  if (files.includes(file)) map[file].add('test/shard.test.js');
+}
+map['**/*.json'] = new Set(['test/model-config.test.js']);
+map['test/fixtures/npm-pack/**'] = new Set(['test/package.test.js']);
+// npm discovers packed markdown at runtime, including files the test never names.
+map['**/*.md'] = new Set(['test/package.test.js']);
+const docsChecks = ['test/ci-required.test.js', 'test/docs.test.js', 'test/shared-files.test.js'];
+map['docs/**'] = new Set(docsChecks);
+map['scripts/cli-reference.md'] = new Set(docsChecks);
 // Unknown executable coverage remains unmapped and therefore runs the full suite.
 const pinned = Object.fromEntries(Object.entries(map).filter(([p, tests]) => tests.size || p === '**/*.md').sort(([a], [b]) => a.localeCompare(b)).map(([p, tests]) => [p, [...tests].sort()]));
 process.stdout.write(`{\n${Object.entries(pinned).map(([source, tests]) => `  ${JSON.stringify(source)}: ${JSON.stringify(tests)}`).join(',\n')}\n}\n`);
