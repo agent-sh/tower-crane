@@ -9,6 +9,7 @@ const crypto = require('node:crypto');
 const { cachedFixture, useFixtureUserFile } = require('./helpers');
 const { gateFixture, gateEvidence } = require('./gate-helpers');
 const Archive = require('../lib/archive');
+const { shellQuote } = require('../lib/gates/common');
 const S = require('../lib/state');
 
 const MIB = 1024 * 1024;
@@ -140,8 +141,10 @@ test('a refused accept is an inbox item, and the orchestrator drops a stale cita
   const [entry] = inbox();
   assert.equal(entry.task, 'T1');
   assert.deepEqual(entry.paths.map((p) => [p.path, p.reason, p.cited_in]), [['fill.json', 'missing', ['a note']], ['runs', 'an empty directory', ['a note']]]);
-  assert.equal(entry.action.command, 'tower-crane accept T1');
-  assert.equal(entry.drop_citation, "tower-crane accept T1 --drop-citation fill.json --drop-citation runs --reason '<why>'");
+  // Inbox commands are quoted for the platform's shell: cmd.exe on Windows.
+  const command = (...argv) => argv.map(shellQuote).join(' ');
+  assert.equal(entry.action.command, command('tower-crane', 'accept', 'T1'));
+  assert.equal(entry.drop_citation, command('tower-crane', 'accept', 'T1', '--drop-citation', 'fill.json', '--drop-citation', 'runs', '--reason', '<why>'));
 
   assert.match(h.run(['accept', 'T1', '--drop-citation', 'fill.json']).stderr, /needs --reason/);
   assert.match(h.run(['accept', 'T1', '--drop-citation', 'fill.json', '--reason', 'never written', '--agent', 'w-1']).stderr, /accept\.drop_citation is operational/);
