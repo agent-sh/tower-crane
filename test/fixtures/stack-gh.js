@@ -9,6 +9,8 @@ const now = Date.now;
 let skew = 0;
 Date.now = () => now() + skew;
 const BIN = path.join(__dirname, '..', '..', 'bin', 'tower-crane.js');
+// Its waits end once the process that started it is gone.
+const launcher = process.ppid;
 const { ownerKeyFile, ownerProject } = require('../../lib/authority');
 const { updateJson, readPublished, writeAtomic } = require('../atomic-file');
 
@@ -35,6 +37,7 @@ function pause(ready, release) {
   const deadline = performance.now() + 300000;
   while (!fs.existsSync(release)) {
     if (performance.now() > deadline) throw new Error('paused gh fixture was not released');
+    if (process.ppid !== launcher) process.exit(1);
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
   }
 }
@@ -283,6 +286,7 @@ cp.spawnSync = function stackGh(command, args, opts) {
       const deadline = performance.now() + 300000;
       while (!fs.existsSync(process.env.TEST_STACK_LINK_RELEASE)) {
         if (performance.now() > deadline) throw new Error('slow link fixture was not released');
+        if (process.ppid !== launcher) process.exit(1);
         Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
       }
     }
@@ -325,6 +329,7 @@ cp.spawnSync = function stackGh(command, args, opts) {
       const deadline = performance.now() + 300000;
       while (!fs.existsSync(process.env.TEST_STACK_SYNC_RELEASE)) {
         if (performance.now() > deadline) throw new Error('slow gh fixture was not released');
+        if (process.ppid !== launcher) process.exit(1);
         Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
       }
     }

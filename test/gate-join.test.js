@@ -21,8 +21,9 @@ function fixture(t) {
 const fs = require('node:fs');
 fs.appendFileSync(process.argv[2], 'run\\n');
 const deadline = performance.now() + 300000;
+const parent = process.ppid;
 while (!fs.existsSync(process.argv[3])) {
-  if (performance.now() > deadline) process.exit(1);
+  if (performance.now() > deadline || process.ppid !== parent) process.exit(1);
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
 }
 `);
@@ -186,8 +187,9 @@ function testsFixture(t) {
 const fs = require('node:fs');
 fs.appendFileSync(process.argv[2], 'run\\n');
 const deadline = performance.now() + 300000;
+const parent = process.ppid;
 while (!fs.existsSync(process.argv[3])) {
-  if (performance.now() > deadline) process.exit(1);
+  if (performance.now() > deadline || process.ppid !== parent) process.exit(1);
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
 }
 if (!fs.readFileSync('lib.js', 'utf8').includes('new')) process.exit(1);

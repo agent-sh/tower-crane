@@ -96,7 +96,7 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
         const marker = process.env.LIVE_PAUSE_FINAL;
         fs.writeFileSync(marker, '');
         const deadline = Date.now() + 300000;
-        while (!fs.existsSync(`${marker}.go`)) {
+        while (!fs.existsSync(`${marker}.go`)) { // spin-allow: preloaded into the CLI under test, which can be a detached supervisor whose dispatcher exits by design; the deadline bounds it
           if (Date.now() >= deadline) throw new Error('final sample was not released');
           Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
         }
