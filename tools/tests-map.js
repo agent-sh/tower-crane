@@ -22,8 +22,9 @@ function imports(file) {
     const target = [base, `${base}.js`, `${base}/index.js`].find((p) => files.includes(p));
     if (target) deps.add(target);
   }
-  // Fixtures passed as argv or preload paths do not use require in the caller.
-  for (const source of sources.filter((p) => p.startsWith('test/fixtures/'))) {
+  // Fixtures and runner children passed as argv or preload paths do not use require.
+  for (const source of sources.filter((p) => p.startsWith('test/fixtures/')
+    || file === 'test/run.js' && p.startsWith('test/'))) {
     if (text.includes(path.posix.basename(source))) deps.add(source);
   }
   return deps;
@@ -53,7 +54,15 @@ map['tools/model-literals.json'] = new Set(['test/model-config.test.js']);
 map['tools/tests-map.json'] = new Set(['test/tests-map.test.js']);
 // These readers enumerate their inputs, so literal import paths cannot find their coverage.
 map['changelog.d/**'] = new Set(['test/shared-files.test.js']);
-map['test/**'] = new Set(['test/shared-files.test.js']);
+const jsChecks = ['test/atomic-file.test.js', 'test/shared-files.test.js'];
+// Lint readers supplement real helper coverage; an unknown helper still needs a full run.
+for (const source of sources.filter(p => p.startsWith('test/') && p.endsWith('.js'))) {
+  if (map[source].size) for (const suite of jsChecks) map[source].add(suite);
+}
+map['test/*.test.js'] = new Set(jsChecks);
+map['test/gates/*.test.js'] = new Set(jsChecks);
+map['test/fixtures/**/*.js'] = new Set(jsChecks);
+map['test/fixtures/shard/**'] = new Set(['test/shard.test.js']);
 map['**/*.json'] = new Set(['test/model-config.test.js']);
 map['test/fixtures/npm-pack/**'] = new Set(['test/package.test.js']);
 // npm discovers packed markdown at runtime, including files the test never names.
