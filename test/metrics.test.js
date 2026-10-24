@@ -218,3 +218,25 @@ test('a head check rework has a culprit only when a failing test file is one the
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('a failing test shared only with a task of the same stack is not cross_task', () => {
+  const dir = fs.mkdtempSync(path.join(TMP_ROOT, 'metrics-'));
+  try {
+    const failing = 'full suite fails on PR #2 merged with main. exit 1. Last 40 lines:\n✖ failing tests:\n\ntest at test/s.test.js:3:1\n✖ stacked (4.2ms)';
+    const lower = (id) => [ev(0, 'task add', id), ev(1, 'claim', id), ev(2, 'submit', id),
+      ev(3, 'check tests', id, { type: 'tests', ok: false, sha: 'l', test_failure: { names: ['stacked'] } })];
+    const top = (id, related) => [ev(0, 'task add', id), ev(1, 'claim', id), ...related, ev(2, 'submit', id), ev(4, 'accept', id),
+      ev(5, 'rework', id, { reason: failing, sha: 't' }), ev(6, 'claim', id), ev(7, 'submit', id), ev(8, 'accept', id),
+      ev(9, 'merge', id, { ok: true, sha: 't2' })];
+    writeLog(path.join(dir, 'events.jsonl'), [
+      // T2 is stacked on T1 by its dispatch; T4 shares a head check with T3; T6 and T5 are unrelated.
+      ...lower('T1'), ...top('T2', [ev(1, 'stack dispatch', 'T2', { stack: { parent: 'T1', base: 'tower-crane/T1-x' } })]),
+      ...lower('T3'), ...top('T4', [ev(3, 'head check', 'T4', { ok: true, members: ['T3', 'T4'], summary: 'ok' })]),
+      ...lower('T5'), ...top('T6', []),
+    ]);
+    const r = M.report(dir, { since: B - MIN, until: B + 60 * MIN });
+    assert.deepEqual([r.reworks.merged_tasks.by_cause.head_check, r.reworks.merged_tasks.by_cause.cross_task], [2, 1]);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
