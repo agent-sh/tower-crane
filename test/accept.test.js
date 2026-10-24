@@ -1,12 +1,12 @@
 'use strict';
 
-const { waitOnRepo, killPid } = require('./signals');
+const { waitOnRepo, waitUntil } = require('./signals');
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { makeRepo, cachedFixture, BIN, ROOT } = require('./helpers');
+const { makeRepo, cachedFixture, detachedAlive, BIN, ROOT } = require('./helpers');
 const { gateFixture, gateEvidence } = require('./gate-helpers');
 const Actions = require('../lib/actions');
 const Reviewer = require('../lib/reviewer');
@@ -45,18 +45,13 @@ const events = (h) => {
 };
 const reviewerSpawns = (h) => events(h).filter((e) => e.cmd === 'spawn' && e.task === 'T1' && e.detail.role === 'reviewer');
 
-const gone = (pid) => {
-  try { killPid(pid, 0); return false; } catch (error) { if (error.code === 'ESRCH') return true; throw error; }
-};
-
 // The dispatched reviewer runs detached; the test must outlive it and its monitor.
-// The monitor reacts to the exit after recording it, and that reaction reworks a
-// task whose review failed, so evidence recorded before the monitor ends can race it.
+// The monitor reacts to the exit after recording it, so evidence written
+// before the monitor ends is for those reactions to act on.
 async function reviewerExited(h) {
   const spawns = reviewerSpawns(h);
   const agents = spawns.map((e) => e.detail.agent);
-  await waitOnRepo(h, () => spawns.every((s) => events(h).some((e) => e.cmd === 'spawn exit' && e.detail.agent === s.detail.agent)
-    && gone(s.detail.monitor_pid)));
+  await waitOnRepo(h, () => agents.every((a) => events(h).some((e) => e.cmd === 'spawn exit' && e.detail.agent === a)));
   // The exit receipt precedes automation, which must not consume the next verdict.
   await waitOnRepo(h, () => {
     const log = events(h);
@@ -65,6 +60,7 @@ async function reviewerExited(h) {
       return log.some((e) => e.cmd === 'automation' && e.detail.source === exit.id && e.detail.phase === 'done');
     });
   });
+  await waitUntil(() => spawns.every((s) => !detachedAlive({ pid: s.detail.monitor_pid })), { what: 'the reviewer monitors exit' });
 }
 
 // After a reviewer exits its monitor advances the task too, so either accept may win.
