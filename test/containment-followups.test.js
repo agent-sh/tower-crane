@@ -214,7 +214,10 @@ test('the governor retains the full scope through delayed registry attachment', 
       try { Governor.tick(env, project); }
       finally { clock.mock.restore(); }
       const measured = Governor.read(env).units.find(u => u.id === admitted.id);
-      assert.equal(measured.measured, 384 * 1024 ** 2, 'the full scope counts anonymous memory across child groups without page cache');
+      // The root is this test process, which runs outside the fake scope, so its own anonymous memory adds to it.
+      const own = Number(/^RssAnon:\s+(\d+)/m.exec(fs.readFileSync('/proc/self/status', 'utf8'))[1]) * 1024;
+      assert.ok(measured.measured > 384 * 1024 ** 2 && measured.measured <= 384 * 1024 ** 2 + 2 * own,
+        `the full scope counts anonymous memory across child groups without page cache, and the root outside it adds its own: ${measured.measured}`);
     }
   }
 });
@@ -295,7 +298,7 @@ test('CLI dry runs show the mandatory containment argv and scoped environment', 
   });
   const manager = path.join(__dirname, 'fixtures', 'containment-manager.js');
   const env = { NODE_OPTIONS: `--require ${JSON.stringify(manager)}`, TC_FAKE_MANAGER_LOG: path.join(h.base, 'manager') };
-  for (const [scope, executable] of [['{}', process.execPath], ['{"CPUQuota":"200%"}', 'systemd-run']]) {
+  for (const [scope, executable] of [['{}', 'systemd-run'], ['{"CPUQuota":"200%"}', 'systemd-run']]) {
     h.ok(['ladder', 'set', 'easy', '--scope', scope]);
     const result = h.json(['spawn', '--task', 'T1', '--dry-run'], { env });
     assert.equal(result.argv[0], executable);

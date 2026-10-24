@@ -8,6 +8,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { makeRepo, makeProjectRepo, cachedFixture, pinRung, BIN, runPty, PTY_AVAILABLE } = require('./helpers');
 const { gateFixture, gateEvidence, changeKind } = require('./gate-helpers');
+const { harnessArgv, scopeEnv } = require('./containment-plan');
 
 const prices = {
   'fixture-light': { input: 0.10, cache_write: 0.125, cache_read: 0.01, output: 0.50 },
@@ -102,8 +103,9 @@ function reviewPacket(h) {
 }
 
 function model(out) {
-  const flag = out.harness === 'claude' ? '--model' : out.argv.includes('-m') ? '-m' : out.argv.includes('-p') ? '-p' : '--model';
-  return out.argv[out.argv.indexOf(flag) + 1];
+  const argv = harnessArgv(out.argv);
+  const flag = out.harness === 'claude' ? '--model' : argv.includes('-m') ? '-m' : argv.includes('-p') ? '-p' : '--model';
+  return argv[argv.indexOf(flag) + 1];
 }
 
 function sample(h, name, input, cached, output, cacheWrite = 0) {
@@ -169,23 +171,26 @@ test('review contract extraction covers split and legacy state layouts', (t) => 
     { split: 'no heading', legacy: true, expected: 'LEGACY_CONTRACT' },
   ];
   fs.mkdirSync(path.join(h.repo, 'docs', 'state'), { recursive: true });
-  fs.writeFileSync(path.join(h.repo, 'docs', 'cli.md'), '## Gates\nCLI_CONTRACT\n\n## Next\nOUTSIDE_CLI\n');
-  for (const variant of variants) {
-    const gates = path.join(h.repo, 'docs', 'state', 'gates.md');
-    if (!variant.split) fs.rmSync(gates, { force: true });
-    else fs.writeFileSync(gates, variant.split === true
-      ? '# Gates\n\n### Acceptance gates\nSPLIT_CONTRACT\n```md\n## FENCED_HEADING\n```\n\n### Next\nOUTSIDE_STATE\n'
-      : '# Gates\n');
-    fs.writeFileSync(path.join(h.repo, 'docs', 'state.md'), variant.legacy
-      ? '# State\n\n### Acceptance gates\nLEGACY_CONTRACT\n\n## Next\nOUTSIDE_STATE\n'
-      : '# State\n\n[Acceptance gates](state/gates.md#acceptance-gates)\n');
-    const context = staticContext(h.repo, [], 'default', 'ROLE', {});
-    assert.ok(context.includes(variant.expected), JSON.stringify(variant));
-    assert.ok(context.includes('CLI_CONTRACT'));
-    assert.ok(!context.includes('OUTSIDE_STATE') && !context.includes('OUTSIDE_CLI'));
-    if (variant.split === true) {
-      assert.ok(context.includes('FENCED_HEADING'));
-      assert.ok(!context.includes('LEGACY_CONTRACT'));
+  for (const eol of ['\n', '\r\n']) {
+    const write = (file, text) => fs.writeFileSync(file, text.replace(/\n/g, eol));
+    write(path.join(h.repo, 'docs', 'cli.md'), '## Gates\nCLI_CONTRACT\n\n## Next\nOUTSIDE_CLI\n');
+    for (const variant of variants) {
+      const gates = path.join(h.repo, 'docs', 'state', 'gates.md');
+      if (!variant.split) fs.rmSync(gates, { force: true });
+      else write(gates, variant.split === true
+        ? '# Gates\n\n### Acceptance gates\nSPLIT_CONTRACT\n```md\n## FENCED_HEADING\n```\n\n### Next\nOUTSIDE_STATE\n'
+        : '# Gates\n');
+      write(path.join(h.repo, 'docs', 'state.md'), variant.legacy
+        ? '# State\n\n### Acceptance gates\nLEGACY_CONTRACT\n\n## Next\nOUTSIDE_STATE\n'
+        : '# State\n\n[Acceptance gates](state/gates.md#acceptance-gates)\n');
+      const context = staticContext(h.repo, [], 'default', 'ROLE', {});
+      assert.ok(context.includes(variant.expected), JSON.stringify({ ...variant, eol }));
+      assert.ok(context.includes('CLI_CONTRACT'));
+      assert.ok(!context.includes('OUTSIDE_STATE') && !context.includes('OUTSIDE_CLI'));
+      if (variant.split === true) {
+        assert.ok(context.includes('FENCED_HEADING'));
+        assert.ok(!context.includes('LEGACY_CONTRACT'));
+      }
     }
   }
   const root = path.join(__dirname, '..');
@@ -459,12 +464,13 @@ test('Codex profile builders share canonical identity with provider spend and pr
     ['medium', 'fixture-main', 'fixture-main', 'hard', 'fixture-large', 'fixture-large'],
   ]) {
     const h = setup(t, tier, provider, profile, { gated: true });
+    const scoped = scopeEnv(h);
     // A later self-reported model and ladder edit cannot rename the builder route.
     h.ok(['spend', 'T1', '--agent', h.builder, '--tokens', '1', '--rung', tier, '--model', 'wrong-model']);
-    assert.deepEqual([choice(h).review_rung, model(choice(h))], [tier, profile]);
+    assert.deepEqual([choice(h, scoped).review_rung, model(choice(h, scoped))], [tier, profile]);
     sample(h, provider, 1000000, 0, 0);
     sample(h, promotedProvider, 0, 0, 1);
-    const out = choice(h);
+    const out = choice(h, scoped);
     assert.deepEqual([out.review_rung, model(out)], [promotedTier, promotedModel]);
     const prompt = out.argv.find((arg) => arg.includes('## Task'));
     assert.ok(prompt.includes(`builder model ${provider}`), prompt);
@@ -530,9 +536,10 @@ test('Codex review pricing follows the user origin from a private caller home', 
   assert.equal(choice(h, userEnv).review_rung, 'hard');
   const privateEnv = { ...userEnv, HOME: privateHome, USERPROFILE: privateHome };
   assert.equal(choice(h, privateEnv).review_rung, 'hard');
-  const dispatch = h.json(['spawn', '--task', 'T1', '--dry-run'], { env: { ...h.reviewEnv, ...privateEnv } });
+  const dispatch = h.json(['spawn', '--task', 'T1', '--dry-run'], { env: { ...h.reviewEnv, ...privateEnv, ...scopeEnv(h) } });
   assert.equal(dispatch.harness, 'codex');
-  assert.equal(dispatch.argv[dispatch.argv.indexOf('-p') + 1], 'origin-review');
+  const argv = harnessArgv(dispatch.argv);
+  assert.equal(argv[argv.indexOf('-p') + 1], 'origin-review');
 });
 
 test('a stronger model wins only when its median priced review cost is no higher', (t) => {

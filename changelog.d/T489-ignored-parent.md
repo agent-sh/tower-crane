@@ -1,0 +1,1 @@
+- Preserve tracked files and Git metadata when saving a nested repository the parent ignores, including edits under generated directories and the active branch's refs and reflogs.
