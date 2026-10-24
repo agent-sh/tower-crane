@@ -163,6 +163,15 @@ test('the checked-in durations split Linux into three CI shards and Windows into
   }
 });
 
+// The tests of a file run in turn, so one long file sets its shard's floor: test/stack-parent.test.js,
+// 1839 s on Windows in run 39897049976, outlived its shard's deadline when it started late.
+test('no checked-in file takes more than 15 minutes of test time on any platform', () => {
+  for (const platform of ['linux', 'win32']) {
+    const long = Object.entries(fileDurations(platform)).filter(([, seconds]) => seconds > 15 * 60);
+    assert.deepEqual(long, [], `${platform}: split these files`);
+  }
+});
+
 test('the durations refresh maps each logged title to the file that declares it', () => {
   const declared = [
     ...declarations('test/a.test.js', "test('plain title', () => {});\nfor (const n of [1, 2]) test(`case ${n} of a`, () => {});\n"
@@ -170,27 +179,30 @@ test('the durations refresh maps each logged title to the file that declares it'
     ...declarations('test/b.test.js', "test(failing ? 'b fails' : `b passes on ${platform}`, { skip: false }, () => {});\n"
       + "test(`case ${n} of ${'a'}`, () => {});\n"),
   ];
-  const log = [
-    '2026-10-15T09:41:54.3802186Z ##[group]Run npm run check:shared',
-    '2026-10-15T09:41:54.4802186Z ✔ plain title (9000ms)',
-    '2026-10-15T09:41:54.5802186Z ##[group]Run npm test',
-    '2026-10-15T09:41:55.0000000Z ✔ plain title (1000ms)',
-    '2026-10-15T09:41:55.0000000Z ✔ case 1 of a (2000ms)',
-    '2026-10-15T09:41:55.0000000Z ✖ case 2 of a (3000ms)',
-    '2026-10-15T09:41:55.0000000Z   ✔ inner (500ms)',
-    '2026-10-15T09:41:55.0000000Z ✔ suite of a (4000ms)',
-    '2026-10-15T09:41:55.0000000Z ✔ b passes on win32 (5000ms)',
-    '2026-10-15T09:41:55.0000000Z ﹣ b fails (1ms) # SKIP',
-    '2026-10-15T09:41:55.0000000Z ✔ a title no file declares (7000ms)',
-    '2026-10-15T09:41:56.0000000Z ✖ failing tests:',
-    '2026-10-15T09:41:56.0000000Z ✖ case 2 of a (3000ms)',
-    '2026-10-15T09:41:57.0000000Z ##[group]Run foreach ($attempt in 1..10) {',
-    '2026-10-15T09:41:57.0000000Z ✔ plain title (9000ms)',
-  ].join('\r\n');
-  const { times, unmatched } = fileTimes(log, declared);
-  // `case ${n} of a` in a.test.js has more literal text than b.test.js's `case ${n} of ${'a'}`.
-  assert.deepEqual(times, { 'test/a.test.js': 10, 'test/b.test.js': 5.001 });
-  assert.equal(unmatched, 7);
+  // Linux and macOS run the step bare; Windows runs it under its shard guard.
+  for (const step of ['npm test', 'pwsh -NoProfile -File scripts/shard-guard.ps1 npm test']) {
+    const log = [
+      '2026-10-15T09:41:54.3802186Z ##[group]Run npm run check:shared',
+      '2026-10-15T09:41:54.4802186Z ✔ plain title (9000ms)',
+      `2026-10-15T09:41:54.5802186Z ##[group]Run ${step}`,
+      '2026-10-15T09:41:55.0000000Z ✔ plain title (1000ms)',
+      '2026-10-15T09:41:55.0000000Z ✔ case 1 of a (2000ms)',
+      '2026-10-15T09:41:55.0000000Z ✖ case 2 of a (3000ms)',
+      '2026-10-15T09:41:55.0000000Z   ✔ inner (500ms)',
+      '2026-10-15T09:41:55.0000000Z ✔ suite of a (4000ms)',
+      '2026-10-15T09:41:55.0000000Z ✔ b passes on win32 (5000ms)',
+      '2026-10-15T09:41:55.0000000Z ﹣ b fails (1ms) # SKIP',
+      '2026-10-15T09:41:55.0000000Z ✔ a title no file declares (7000ms)',
+      '2026-10-15T09:41:56.0000000Z ✖ failing tests:',
+      '2026-10-15T09:41:56.0000000Z ✖ case 2 of a (3000ms)',
+      '2026-10-15T09:41:57.0000000Z ##[group]Run foreach ($attempt in 1..10) {',
+      '2026-10-15T09:41:57.0000000Z ✔ plain title (9000ms)',
+    ].join('\r\n');
+    const { times, unmatched } = fileTimes(log, declared);
+    // `case ${n} of a` in a.test.js has more literal text than b.test.js's `case ${n} of ${'a'}`.
+    assert.deepEqual(times, { 'test/a.test.js': 10, 'test/b.test.js': 5.001 }, step);
+    assert.equal(unmatched, 7, step);
+  }
 });
 
 test('TC_TEST_SHARD makes the runner run only the files of the shard it names', () => {

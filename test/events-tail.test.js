@@ -759,3 +759,61 @@ test('a cut recorded during a read that starts past it sends the reader back for
   assert.ok(texts.includes(x.detail.text), `x was read: ${JSON.stringify(texts)}`);
   assert.ok(texts.includes('after x'));
 });
+
+// A spawn supervisor reads its task through S.taskView: that task's events,
+// read from the bytes appended since, and the task taken out of tasks.json.
+// After every change a log goes through, it must see what a full read sees.
+const viewFixture = () => cachedFixture(null, 'task-view', (h) => {
+  h.init();
+  for (const title of ['Viewed', 'Other']) h.ok(['task', 'add', '--title', title, '--acceptance', 'done']);
+  h.ok(['task', 'note', 'T1', 'first note']);
+  h.ok(['task', 'note', 'T2', 'other note']);
+});
+
+test('the task view matches a full read after appends, a cut, a log rewritten or replaced, and a partial last line', (t) => {
+  const h = viewFixture();
+  t.after(h.cleanup);
+  const log = path.join(h.state, 'events.jsonl');
+  const view = S.taskView(h.state, 'T1');
+  const line = `${JSON.stringify({ ...message('owner', 'orchestrator', 'written in two parts'), task: 'T1' })}\n`;
+  const lines = () => fs.readFileSync(log, 'utf8').split(/(?<=\n)/);
+  const steps = [
+    ['the first read', () => {}],
+    ['appends', () => {
+      h.ok(['task', 'note', 'T1', 'second note']);
+      h.ok(['task', 'note', 'T2', 'more of the other']);
+      h.ok(['msg', '--to', 'orchestrator', '--task', 'T1', 'about the viewed task']);
+    }],
+    ['a partial last line', () => fs.appendFileSync(log, line.slice(0, 40))],
+    ['the partial line completed', () => fs.appendFileSync(log, line.slice(40))],
+    ['a torn commit', () => tornCommit(h, { ...message('owner', 'orchestrator', 'torn first'), task: 'T1' })],
+    ['the cut its recovery records', () => {
+      recover(h);
+      h.ok(['task', 'note', 'T1', 'after the cut']);
+    }],
+    ['a shorter log written in place', () => {
+      fs.writeFileSync(log, lines().filter((l) => !l.includes('after the cut')).join(''));
+      h.ok(['task', 'note', 'T1', 'after the rewrite']);
+    }],
+    ['a log replaced by another file', () => {
+      fs.writeFileSync(`${log}.new`, lines().filter((l) => !l.includes('second note')).join(''));
+      fs.renameSync(`${log}.new`, log);
+    }],
+    ['a project budget, which needs every task', () => h.ok(['project', 'set', '--budget-tokens', '1000000'])],
+    ['the budget removed', () => h.ok(['project', 'set', '--budget-tokens', 'null'])],
+  ];
+  for (const [what, change] of steps) {
+    change();
+    const st = view.read();
+    const full = S.loadState(h.state, { fresh: true });
+    const budget = full.project.budget;
+    const all = budget?.tokens != null || budget?.hours != null;
+    assert.deepEqual(st.events, full.events.filter((e) => e.task === 'T1'), `${what}: events`);
+    assert.deepEqual(st.tasks.tasks, full.tasks.tasks.filter((task) => all || task.id === 'T1'), `${what}: tasks`);
+    assert.deepEqual(st.project, full.project, `${what}: project`);
+    assert.deepEqual(st.decisions, full.decisions, `${what}: decisions`);
+  }
+  // Each change reached the view: the completed line, the cut, the rewrite and the replacement.
+  assert.deepEqual(view.read().events.map((e) => e.detail.text).filter(Boolean),
+    ['first note', 'about the viewed task', 'written in two parts', 'after the rewrite']);
+});
