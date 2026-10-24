@@ -103,6 +103,8 @@ Existing links use these anchors. Follow the link to the contract in its area.
 
 <a id="publish-policy"></a>[publish-policy](state/decisions.md#publish-policy)
 
+<a id="sandbox-policy"></a>[sandbox-policy](state/decisions.md#sandbox-policy)
+
 <a id="fallback-route-grants"></a>[fallback-route-grants](state/decisions.md#fallback-route-grants)
 
 <a id="native-crashes"></a>[native-crashes](state/tasks.md#native-crashes)
