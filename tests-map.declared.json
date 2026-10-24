@@ -4,6 +4,7 @@
     "test/ci-required.test.js"
   ],
   "changelog.d/**": [],
+  "docs/**/*.json": [],
   "docs/cli.md": [
     "test/shared-files.test.js"
   ],
@@ -133,6 +134,10 @@
     "test/shard.test.js"
   ],
   "scripts/measure-*.js": [],
+  "test/*-measure.js": [],
+  "test/durations.json": [
+    "test/shard.test.js"
+  ],
   "test/fixtures/shard/**": [
     "test/shard.test.js"
   ],
