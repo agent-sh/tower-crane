@@ -8,6 +8,7 @@ const cp = require('node:child_process');
 const { ROOT } = require('./helpers');
 const { makeDocsRepo } = require('./docs-fixture');
 const { anchors, links, check } = require('../scripts/doc-links');
+const { readText, normalizeText } = require('../scripts/text');
 
 test('documentation anchors and links handle Markdown variants in process', () => {
   const variants = [
@@ -55,17 +56,22 @@ test('the eight state areas, compatibility redirects and every docs link resolve
 });
 
 test('the release workflow checks committed CLI output before regenerating and saving it', () => {
-  const workflow = fs.readFileSync(path.join(ROOT, '.github', 'workflows', 'release-docs.yml'), 'utf8');
-  assert.match(workflow, /release:\s*\n\s*types: \[published\]/);
-  assert.ok(workflow.indexOf('npm run docs:cli:check') < workflow.indexOf('npm run docs:cli\n'));
-  assert.ok(workflow.indexOf('npm run docs:cli:check') < workflow.indexOf('actions/upload-artifact'));
+  const source = readText(path.join(ROOT, '.github', 'workflows', 'release-docs.yml'));
+  for (const eol of ['\n', '\r\n']) {
+    const workflow = normalizeText(source.replace(/\n/g, eol));
+    assert.match(workflow, /release:\s*\n\s*types: \[published\]/);
+    const check = workflow.indexOf('npm run docs:cli:check');
+    const generate = workflow.indexOf('npm run docs:cli\n');
+    const upload = workflow.indexOf('actions/upload-artifact');
+    assert.ok(check >= 0 && check < generate && generate < upload, JSON.stringify(eol));
+  }
   const scripts = require('../package.json').scripts;
   assert.equal(scripts['docs:cli'], 'node scripts/cli-docs.js');
   assert.equal(scripts['docs:cli:check'], 'node scripts/cli-docs.js --check');
 });
 
 test('release documentation steps reject stale help and prose without overwriting the evidence', (t) => {
-  const workflow = fs.readFileSync(path.join(ROOT, '.github', 'workflows', 'release-docs.yml'), 'utf8');
+  const workflow = readText(path.join(ROOT, '.github', 'workflows', 'release-docs.yml'));
   const steps = [...workflow.matchAll(/^\s+- run: npm run (\S+)$/gm)].map((match) => match[1]);
   for (const variant of ['clean', 'help drift', 'prose drift']) {
     const h = makeDocsRepo(t);

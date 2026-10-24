@@ -6,8 +6,8 @@ const { cachedFixture, ROOT } = require('./helpers');
 const { links } = require('../scripts/doc-links');
 const { readText } = require('../scripts/text');
 
-function makeDocsRepo(t) {
-  return cachedFixture(t, 'docs-repo', (h) => {
+function makeDocsRepo(t, { crlfCheckout = false } = {}) {
+  return cachedFixture(t, `docs-repo:${crlfCheckout}`, (h) => {
     for (const name of ['bin', 'lib', 'scripts', 'docs', 'changelog.d', '.github', 'skills', 'agents', 'standards', 'commands']) {
       fs.cpSync(path.join(ROOT, name), path.join(h.repo, name), { recursive: true });
     }
@@ -28,6 +28,20 @@ function makeDocsRepo(t) {
         fs.copyFileSync(from, to);
       }
     }
+    // Copies from a Windows checkout still need Git's normalized index form.
+    h.git(['-c', 'core.autocrlf=input', 'add', '.']);
+    const checkout = (autocrlf) => {
+      // Deleted files pass through checkout filters even when index stats match.
+      // Git for Windows does not create a D:\ --prefix directory, so write in place.
+      for (const file of h.git(['ls-files', '-z']).split('\0').filter(Boolean)) fs.rmSync(path.join(h.repo, file));
+      h.git(['-c', `core.autocrlf=${autocrlf}`, 'checkout-index', '--all', '--force']);
+    };
+    if (crlfCheckout) {
+      checkout('true');
+      h.git(['-c', 'core.autocrlf=input', 'add', '.']);
+    }
+    checkout('false');
+    // Refresh the cached sizes recorded from the original CRLF copies.
     h.git(['add', '.']);
     h.git(['commit', '-qm', 'documentation fixture']);
   });

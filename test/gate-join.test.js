@@ -329,7 +329,8 @@ test('a holder without start ticks, past one command budget but inside its plann
   // As recorded on macOS: the same deadline span, started two command budgets ago.
   const at = Date.now() - 2 * MINUTES * 60000;
   const span = Date.parse(first.detail.deadline) - Date.parse(first.at);
-  const { start_ticks: _ticks, ...detail } = first.detail;
+  // The lease names the first run's process; a macOS one carries none of these to tell it by.
+  const { start_ticks: _ticks, pidns: _pidns, created: _created, seen: _seen, ...detail } = first.detail;
   const append = (e) => fs.appendFileSync(path.join(h.state, 'events.jsonl'), `${JSON.stringify(e)}\n`);
   append({ ...first, at: new Date(at).toISOString(), detail: { ...detail, source: 'gate:mac', pid: process.pid, host: os.hostname(), deadline: new Date(at + span).toISOString() } });
   let stderr = '';
