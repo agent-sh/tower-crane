@@ -130,8 +130,12 @@ test('a base-only head keeps tests, clean and review at the same revision and qu
 // head and dispatches reviewers beside the test's own dispatch. A
 // declared host probe runs again at the resolved head, whose receipt must hold it.
 const PROBE = 'node -e "process.exit(0)"';
-for (const [path_, probes] of [['resubmit', []], ['conflict rework', []], ['resubmit', [PROBE]]]) test(`a conflict-resolving head (${path_}${probes.length ? ', host probe' : ''}) is reviewed on the resolved hunks and tests only the resolved file`, (t) => {
+// Review first (the default order), the resolution review is dispatched before
+// the tests gate, which then runs the resolved file's tests.
+for (const [path_, probes, order] of [['resubmit', [], 'tests first'], ['conflict rework', [], 'tests first'], ['resubmit', [PROBE], 'tests first'],
+  ['resubmit', [], 'review first']]) test(`a conflict-resolving head (${path_}${probes.length ? ', host probe' : ''}, ${order}) is reviewed on the resolved hunks and tests only the resolved file`, (t) => {
   const h = gated(t, { probes });
+  if (order === 'review first') h.ok(['project', 'set', '--review-policy', '{"tests_first":false}']);
   const revision = Number(h.revision('T1'));
   const reviewed = h.readState('tasks.json').tasks[0].sha;
   upstream(h, true);
@@ -153,35 +157,53 @@ for (const [path_, probes] of [['resubmit', []], ['conflict rework', []], ['resu
   assert.deepEqual(task.carry.files, ['shared.txt']);
   assert.deepEqual([task.carry.from_revision, task.carry.revision], path_ === 'resubmit' ? [revision, revision] : [revision, revision + 1]);
   for (const type of ['tests', 'clean', 'review']) assert.equal(gate(h, type).ok, false, type);
-  h.ok(['check', 'tests', 'T1']);
-  const tests = h.readState('tasks.json').tasks[0].evidence.findLast((e) => e.type === 'tests');
-  assert.equal(tests.ok, true, tests.summary);
-  assert.equal(tests.sha, head);
-  assert.equal(tests.receipt.mode, 'resolved');
-  assert.deepEqual(tests.receipt.head_tests, ['test/shared.test.js']);
-  assert.deepEqual((tests.receipt.host_probes ?? []).map((r) => [r.command, r.status]), probes.map((cmd) => [cmd, 0]));
-  const ran = tests.commands.filter((c) => c.command !== 'git' && !probes.includes(c.command)).map((c) => c.command);
-  assert.equal(ran.length, 1, ran.join('\n'));
-  assert.match(ran[0], /test\/shared\.test\.js/);
-  assert.doesNotMatch(ran[0], /value\.test\.js/);
-  assert.equal(gate(h, 'tests').ok, true, 'the resolved run passes the tests gate');
-  for (const type of ['clean', 'ci']) h.ok(['check', type, 'T1']);
-  // A reviewer that only keeps its prompt; the dispatch writes the packet with the diff.
-  const out = path.join(h.base, 'resolution-review.txt');
-  const command = JSON.stringify([process.execPath, '-e', 'require("node:fs").writeFileSync(process.argv[1], process.argv[2])', out, '{prompt}']);
-  for (const name of ['easy', 'medium', 'hard', 'research', 'review']) {
-    h.ok(['ladder', 'set', name, '--harness', 'command', '--clear', 'model', '--clear', 'profile', '--clear', 'provider',
-      '--clear', 'effort', '--clear', 'args', '--command', command]);
+  const runTests = () => {
+    h.ok(['check', 'tests', 'T1']);
+    const tests = h.readState('tasks.json').tasks[0].evidence.findLast((e) => e.type === 'tests');
+    assert.equal(tests.ok, true, tests.summary);
+    assert.equal(tests.sha, head);
+    assert.equal(tests.receipt.mode, 'resolved');
+    assert.deepEqual(tests.receipt.head_tests, ['test/shared.test.js']);
+    assert.deepEqual((tests.receipt.host_probes ?? []).map((r) => [r.command, r.status]), probes.map((cmd) => [cmd, 0]));
+    const ran = tests.commands.filter((c) => c.command !== 'git' && !probes.includes(c.command)).map((c) => c.command);
+    assert.equal(ran.length, 1, ran.join('\n'));
+    assert.match(ran[0], /test\/shared\.test\.js/);
+    assert.doesNotMatch(ran[0], /value\.test\.js/);
+    assert.equal(gate(h, 'tests').ok, true, 'the resolved run passes the tests gate');
+  };
+  const review = () => {
+    // A reviewer that only keeps its prompt; the dispatch writes the packet with the diff.
+    const out = path.join(h.base, 'resolution-review.txt');
+    const command = JSON.stringify([process.execPath, '-e', 'require("node:fs").writeFileSync(process.argv[1], process.argv[2])', out, '{prompt}']);
+    for (const name of ['easy', 'medium', 'hard', 'research', 'review']) {
+      h.ok(['ladder', 'set', name, '--harness', 'command', '--clear', 'model', '--clear', 'profile', '--clear', 'provider',
+        '--clear', 'effort', '--clear', 'args', '--command', command]);
+    }
+    const dispatched = h.json(['spawn', '--task', 'T1', '--role', 'review', '--wait']);
+    assert.equal(dispatched.review_scope.resolution, true);
+    const prompt = fs.readFileSync(out, 'utf8');
+    assert.match(prompt, /## Review scope\n\nConflict resolution review/);
+    assert.match(prompt, new RegExp(`passed the review at ${reviewed}`));
+    const packet = fs.readFileSync(path.join(h.state, 'reviews', `T1-${head}.md`), 'utf8');
+    assert.match(packet, /diff --git a\/shared.txt b\/shared.txt/);
+    assert.match(packet, /^-<<<<<<< /m, 'the resolution removes the conflict markers');
+    for (const file of ['value.js', 'upstream.md', 'test/shared.test.js']) assert.ok(!packet.includes(`diff --git a/${file}`), file);
+    return dispatched;
+  };
+  if (order === 'tests first') {
+    runTests();
+    for (const type of ['clean', 'ci']) h.ok(['check', type, 'T1']);
+    review();
+    return;
   }
-  const dispatched = h.json(['spawn', '--task', 'T1', '--role', 'review', '--wait']);
-  assert.equal(dispatched.review_scope.resolution, true);
-  const prompt = fs.readFileSync(out, 'utf8');
-  assert.match(prompt, /## Review scope\n\nConflict resolution review/);
-  assert.match(prompt, new RegExp(`passed the review at ${reviewed}`));
+  for (const type of ['clean', 'ci']) h.ok(['check', type, 'T1']);
+  const dispatched = review();
   const packet = fs.readFileSync(path.join(h.state, 'reviews', `T1-${head}.md`), 'utf8');
-  assert.match(packet, /diff --git a\/shared.txt b\/shared.txt/);
-  assert.match(packet, /^-<<<<<<< /m, 'the resolution removes the conflict markers');
-  for (const file of ['value.js', 'upstream.md', 'test/shared.test.js']) assert.ok(!packet.includes(`diff --git a/${file}`), file);
+  assert.match(packet, /The tests gate runs after this review passes/);
+  assert.equal(gate(h, 'tests').ok, false, 'no suite ran before the resolution review');
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', head, '--ok', '--agent', dispatched.agent]);
+  assert.equal(gate(h, 'review').ok, true);
+  runTests();
 });
 
 // The resolved run is the pinned proof command over the selected tests, so a
