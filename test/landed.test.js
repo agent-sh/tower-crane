@@ -168,3 +168,42 @@ test('task landed refuses an owner ask, a cancelled task and a PR recorded on an
   assert.match(cancelled.stderr, /T1 is cancelled/);
   assert.equal(events(h).filter((e) => e.cmd === 'task landed').length, 0);
 });
+
+test('a rework after a native landing refuses the consumed PR, and a later gate acceptance does not show as native', (t) => {
+  const h = claimed(t);
+  assert.equal(landed(h, []).code, 0);
+  h.ok(['rework', 'T1', '--reason', 'the probe must report units']);
+  assert.equal(task(h).status, 'rework');
+  assert.equal(task(h).revision, 2);
+
+  // The same PR again, from a rerun of the reconciliation loop, would accept the task without the fix.
+  const before = events(h).length;
+  for (const args of [[], ['--sha', h.merge]]) {
+    const again = landed(h, args);
+    assert.equal(again.code, 1, again.stderr);
+    assert.match(again.stderr, /T1: PR #42 \(merge [0-9a-f]{7}\) already landed this task at revision 1, which was sent back since; the rework needs a new PR/);
+  }
+  // A new PR that merged the same commit is the same landing.
+  const sameMerge = h.run(['task', 'landed', 'T1', '--pr', '44', '--reason', 'r'], patch({ number: 44 }));
+  assert.equal(sameMerge.code, 1, sameMerge.stderr);
+  assert.match(sameMerge.stderr, /already landed this task at revision 1/);
+  assert.equal(events(h).length, before);
+  assert.equal(task(h).status, 'rework');
+
+  // Accepted again through the gates and merged by Tower Crane at the new revision:
+  // the earlier landing is history, not this acceptance.
+  const doc = h.readState('tasks.json');
+  const t1 = doc.tasks.find((x) => x.id === 'T1');
+  const head = 'c'.repeat(40);
+  Object.assign(t1, { status: 'accepted', sha: head });
+  t1.evidence.push({ type: 'merge', ok: true, sha: head, revision: 2, agent: 'owner', at: new Date().toISOString(), summary: 'merged', ref: null, source: 'merge', commands: [] });
+  h.writeState('tasks.json', doc);
+  assert.match(h.ok(['task', 'list']), /T1 +accepted +M code/);
+  assert.doesNotMatch(h.ok(['task', 'list']), /native/);
+  assert.equal(h.json(['status']).counts.accepted_native, 0);
+  const shown = h.ok(['task', 'show', 'T1']);
+  assert.match(shown, /status: accepted  kind/);
+  assert.match(shown, /earlier landing \(sent back since\): PR #42/);
+  const Landed = require('../lib/landed');
+  assert.equal(Landed.current(task(h)), null);
+});

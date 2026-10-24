@@ -620,7 +620,10 @@ PR or branch that another task not cancelled records is refused. `--sha`, when
 given, must equal the PR's merge commit. A task that is accepted, cancelled,
 a recorded hotfix, waiting on an owner ask (`needs_owner`), being retired, or
 with a running worker (stop it with `interrupt` first) is refused. Repeating
-the same record on the task it accepted changes nothing and exits 0.
+the same record on the task it accepted changes nothing and exits 0. A PR or
+merge commit that an earlier `task landed` event of the task already
+recorded is refused once the task has moved on, for example after `rework`:
+the rework asked for a change that PR does not hold, so it needs a new PR.
 
 The task, from `todo`, `in_progress`, `submitted` or `rework`, becomes
 `accepted` at its current revision and displays `accepted (native)`. Its
@@ -641,7 +644,12 @@ owner for the same head, revision, PR and merge commit. With it, readers that
 ask whether a task merged see this one as merged: dependents unblock as for
 any accepted task, the merge queue skips it, and nothing redispatches it. The
 worktree is then retired as for a cancelled task, saving uncommitted and
-unmerged work. Status counts include `accepted_native` as a separate subset
+unmerged work. A landing is current only while the task is accepted and its
+latest merge evidence at its head and revision is that landing's. A rework
+bumps the revision, so the old `landed` record stays as history (`task show`
+names it an earlier landing) and the task no longer shows `accepted (native)`,
+also after a later acceptance through the gates. Status counts include
+`accepted_native`, the tasks with a current landing, as a separate subset
 of `accepted`. Acceptance through a landing also retires the task's gate
 priority. `metrics` counts a landing as a merge and reports it apart; see
 [metrics](../cli.md#metrics).

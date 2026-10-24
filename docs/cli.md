@@ -404,7 +404,8 @@ worktree is retired, saving local work. No gate reruns and no review is
 dispatched. An accepted, cancelled or hotfix task, one with an owner ask and
 one with a running worker are refused, as is a PR merged elsewhere or
 recorded on another task. Repeating the same landing is a no-op, so a loop
-over many tasks can be rerun. Use `hotfix` instead when the merged change
+over many tasks can be rerun; after a `rework`, the PR or merge commit an
+earlier landing of the task used is refused, since the fix needs a new PR. Use `hotfix` instead when the merged change
 still needs Tower Crane's gates and an independent review. See
 [state.md](state.md#native-landings) for fields.
 
