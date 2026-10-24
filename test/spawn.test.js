@@ -822,7 +822,7 @@ require('node:fs').writeFileSync(${JSON.stringify(out)}, JSON.stringify({
 });
 
 test('agents drop dispatcher Node injection variables and keep explicit rung values on retries and fallbacks', (t) => {
-  const names = ['NODE_OPTIONS', 'NODE_PATH', 'NODE_REPL_EXTERNAL_MODULE', 'NODE_PRESERVE_SYMLINKS', 'NODE_PRESERVE_SYMLINKS_MAIN', 'NODE_COMPILE_CACHE'];
+  const names = ['NODE_OPTIONS', 'NODE_PATH', 'NODE_REPL_EXTERNAL_MODULE', 'NODE_PRESERVE_SYMLINKS', 'NODE_PRESERVE_SYMLINKS_MAIN', 'NODE_COMPILE_CACHE', 'NODE_V8_COVERAGE'];
   for (const source of ['dispatcher', 'env', 'env_file', 'fallback_dispatcher', 'fallback_env']) {
     const h = setup(t);
     const out = path.join(h.base, 'agent-env.json');
@@ -862,6 +862,7 @@ if (process.env.TOWER_CRANE_RETRY === '0' && !process.env.NODE_AGENT_FALLBACK) {
       NODE_PRESERVE_SYMLINKS: '1',
       NODE_PRESERVE_SYMLINKS_MAIN: '1',
       NODE_COMPILE_CACHE: path.join(h.base, 'compile-cache'),
+      NODE_V8_COVERAGE: path.join(h.base, 'dispatcher-coverage'),
     };
     if (source === 'env') h.ok(['ladder', 'set', 'medium', '--env', JSON.stringify(injection)]);
     if (source === 'env_file') {
@@ -881,16 +882,16 @@ if (process.env.TOWER_CRANE_RETRY === '0' && !process.env.NODE_AGENT_FALLBACK) {
     for (const [index, seen] of attempts.entries()) {
       assert.equal(seen.keep, 'kept', source);
       const explicit = source === 'env' || source === 'env_file' || (source === 'fallback_env' && index === 1);
-      assert.deepEqual(seen.injection, explicit ? injection : {}, source);
+      assert.deepEqual(seen.injection, explicit ? injection : { NODE_V8_COVERAGE: '' }, source);
     }
     assert.equal(fs.existsSync(marker), !['dispatcher', 'fallback_dispatcher'].includes(source), source);
   }
   const { cleanAgentEnv } = require('../lib/spawn-settings');
   for (const name of names) {
-    assert.deepEqual(cleanAgentEnv({ [name]: 'injected', KEEP: 'kept' }), { KEEP: 'kept' });
+    assert.deepEqual(cleanAgentEnv({ [name]: 'injected', KEEP: 'kept' }), { KEEP: 'kept', NODE_V8_COVERAGE: '' });
     const lower = name.toLowerCase();
     assert.deepEqual(cleanAgentEnv({ [lower]: 'injected', KEEP: 'kept' }),
-      process.platform === 'win32' ? { KEEP: 'kept' } : { [lower]: 'injected', KEEP: 'kept' });
+      process.platform === 'win32' ? { KEEP: 'kept', NODE_V8_COVERAGE: '' } : { [lower]: 'injected', KEEP: 'kept', NODE_V8_COVERAGE: '' });
   }
 });
 

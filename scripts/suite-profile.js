@@ -25,6 +25,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const { commandRoot } = require('../lib/scratch-root');
 
 const DIR_ENV = 'TC_SUITE_PROFILE_DIR';
 
@@ -305,7 +306,7 @@ if (baselineRef === '' || baselineRef === undefined) fail('--baseline takes a co
 if (!pass.some((a) => a.startsWith('--test-concurrency'))) pass.unshift(`--test-concurrency=${concurrency}`);
 // test/run.js caps the request at one below the core count, so the report names the workers that ran.
 const workers = Math.min(Math.max(1, require('node:os').availableParallelism() - 1), concurrency);
-const base = process.env.TOWER_CRANE_TEST_TMP || process.env.TMPDIR || require('node:os').tmpdir();
+const base = process.env.TOWER_CRANE_TEST_TMP || commandRoot();
 fs.mkdirSync(base, { recursive: true });
 
 function profileRun(tree) {
