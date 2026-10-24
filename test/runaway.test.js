@@ -147,11 +147,16 @@ test('rework causes count conflicts, review rounds and gate failures from the re
   const gate = rework({ reason: 'tests failed', gate: 'tests' });
   const suite = rework({ reason: 'full suite fails on PR #7 merged with main. exit 1' });
   const other = rework({ reason: 'owner asked for a rename' });
+  const parent = rework({ reason: "Merge T6's resubmitted head abc1234 into T7; resolve conflicts in: docs/state.md. Preserve the child commits, push and resubmit.", cause: 'conflict_parent' });
+  const ciConflict = rework({ reason: 'ci failed at abc1234: PR #7 is CONFLICTING with main', gate: 'ci', cause: 'conflict_base' });
+  const ciLegacy = rework({ reason: 'ci failed at abc1234: PR #7 is CONFLICTING with main', gate: 'ci' });
+  const relayed = rework({ reason: 'PR #7 conflicts with tower-crane/T6-x: lib/a.js. Merge the base, resolve these files and submit a new head.', cause: 'manual' });
   for (const [events, main, counts] of [
     [[conflict, structured, review], 'conflict', { conflict: 2, review: 1, gate: 0, other: 0 }],
     [[review, review, gate], 'review', { conflict: 0, review: 2, gate: 1, other: 0 }],
     [[gate, suite, other], 'gate', { conflict: 0, review: 0, gate: 2, other: 1 }],
     [[other], null, { conflict: 0, review: 0, gate: 0, other: 1 }],
+    [[parent, ciConflict, ciLegacy, relayed, gate], 'conflict', { conflict: 4, review: 0, gate: 1, other: 0 }],
     [[{ ...conflict, task: 'T8' }], null, { conflict: 0, review: 0, gate: 0, other: 0 }],
   ]) {
     const result = cause({ events }, { id: 'T7' });
@@ -197,4 +202,34 @@ test('a runaway spend trip opens one orchestrator decision with spend, revisions
   assert.match(d.question, /T4 has spent 60M tokens .*the hard L median of 10M; the rule is 5\.5 times\. Revision 4; main cause: conflict reworks \(2 of 3 reworks/);
   assert.match(h.ok(['status']), new RegExp(`open decisions: ${d.id} T4 has spent 60M tokens`));
   assert.equal(h.json(['task', 'show', 'T4']).claim.agent, 'worker', 'the running worker keeps its claim');
+});
+
+test('a stacked child sent back for parent conflicts gets the merge-pause option when it runs away', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  const sha = h.git(['rev-parse', 'HEAD']);
+  for (let i = 0; i < 3; i++) {
+    const id = h.ok(['task', 'add', '--title', `Done ${i}`, '--size', 'L', '--tier', 'hard', '--acceptance', 'done', '--kind', 'docs']).match(/T\d+/)[0];
+    h.ok(['claim', id, '--agent', `w-${i}`]);
+    h.ok(['spend', id, '--tokens', '10000000', '--agent', `w-${i}`]);
+    h.ok(['submit', id, '--sha', sha, '--agent', `w-${i}`]);
+    h.reviewer(id, `r-${i}`, sha);
+    h.ok(['evidence', id, '--revision', h.revision(id), '--type', 'review', '--ok', '--sha', sha, '--agent', `r-${i}`]);
+    h.ok(['accept', id]);
+  }
+  h.ok(['task', 'add', '--title', 'Child', '--size', 'L', '--tier', 'hard', '--acceptance', 'done', '--kind', 'docs']);
+  for (const reason of ["Merge T1's resubmitted head abc1234 into T4; resolve conflicts in: docs/state.md. Preserve the child commits, push and resubmit.",
+    "Merge T1's resubmitted head def5678 into T4; resolve conflicts in: docs/state.md. Preserve the child commits, push and resubmit.", 'tests failed']) {
+    h.ok(['claim', 'T4', '--agent', 'worker']);
+    h.ok(['submit', 'T4', '--sha', sha, '--agent', 'worker']);
+    h.ok(['rework', 'T4', '--reason', reason, '--agent', 'orchestrator']);
+  }
+  h.ok(['claim', 'T4', '--agent', 'worker']);
+  h.ok(['spend', 'T4', '--tokens', '60000000', '--agent', 'worker']);
+  h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
+  const [d] = h.readState('decisions.json').decisions;
+  assert.ok(d, 'the runaway opens a decision');
+  assert.equal(d.runaway.cause, 'conflict');
+  assert.deepEqual(d.runaway.reworks, { conflict: 2, review: 0, gate: 0, other: 1 });
+  assert.deepEqual(d.options, ['merge pause', 'keep working', 'split', 'cancel']);
 });
