@@ -302,8 +302,9 @@ of the host governor (`the host governor: REASON`), a head check waiting for
 an executor (`a gate executor: N of M in use: ...`, the leases held now),
 either one read from the reaction's receipt or from the queue's deferred
 record written after that `accept`, an earlier entry with no blocked member
-(`T3 ahead in the merge line`), pending CI at its head (`GitHub
-checks`), else `the next merge queue pass`. A stacked task outside the line,
+(`T3 ahead in the merge line`), else `the next merge queue pass`. Pending
+CI at an accepted head fails the ci gate, so that task is `merge blocked`,
+not a merge wait. A stacked task outside the line,
 whose lower task is not accepted or not linked to it, is listed after the
 line as behind its nearest unmerged lower task (`T1 under it in its stack`).
 Automatic state changes and evidence use `agent: orchestrator` and

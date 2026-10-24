@@ -930,6 +930,28 @@ test('status lists each stacked merge wait with its own acceptance and its stack
   }
 });
 
+test('pending CI at an accepted head is a merge blocker, not a merge wait', () => {
+  const A = require('../lib/automation');
+  const sha = 'a'.repeat(40);
+  const at = new Date(Date.UTC(2026, 9, 23, 8, 2)).toISOString();
+  const review = { type: 'review', source: 'review', agent: 'owner', sha, revision: 1, ok: true };
+  const gate = { type: 'ci', source: 'check ci', commands: [], sha, revision: 1 };
+  for (const [name, ci, blocked] of [
+    ['pending', { ok: false, pending: true, summary: 'CI not green: running' }, /^ci: latest ci at aaaaaaa pending: CI not green: running$/],
+    ['stalled', { ok: false, pending: true, stalled: true, summary: 'CI stalled' }, /^ci: latest ci at aaaaaaa stalled: CI stalled$/],
+  ]) {
+    const entry = { ...gate, agent: 'orchestrator', ...ci };
+    const task = { id: 'T4', status: 'accepted', kind: 'docs', size: 'S', tier: 'easy', sha, revision: 1, pr: 7, evidence: [review, entry] };
+    const events = [{ id: 'accept-T4', task: 'T4', cmd: 'accept', at, detail: { sha, revision: 1 } },
+      { task: 'T4', cmd: 'check ci', agent: 'orchestrator', at, detail: { ...gate, ...ci } }];
+    const st = { project: {}, tasks: { tasks: [task] }, events };
+    const blockers = A.mergeBlockers(st);
+    assert.deepEqual(blockers.map((b) => b.id), ['T4'], name);
+    assert.match(blockers[0].reason, blocked, name);
+    assert.deepEqual(A.mergeWaits(st, blockers), [], name);
+  }
+});
+
 test('accepted merges take the next executor in acceptance order before queued submitted gates', async (t) => {
   const h = setup(t);
   const events = path.join(h.state, 'events.jsonl');
