@@ -91,7 +91,7 @@ Local CI adds `receipt` to its evidence and event detail. Both copies must match
 
 `source_digest` is a SHA-256 restatement of the tree for consumers that do not trust SHA-1, computed from its tracked paths, modes and object IDs, including source blob IDs. It is fully determined by `tree_hash`. The runner computes both identities before execution and refuses tracked-source changes. The base it reads at the start pins the merged tree: a base that moves while the command runs leaves the result on that tree, so a check that takes hours completes on a busy base. The command runs in a temporary worktree checked out clean at `merge_sha`, a commit of the merged tree whose parents are `base_sha` and `head_sha`, so a check that requires a clean tree passes. Its author and committer are `Tower Crane <tower-crane@localhost>` at the newer parent's commit time, so the same base and head give the same commit. No ref names it and nothing is pushed. A failing execution still records its exit, signal and duration.
 
-With `ci.local` configured, an ok CI gate needs a local receipt with exit 0, no signal, nonnegative duration, the resolved argv and timeout, and a matching successful command receipt. The receipt's `variant` is `default`, `kind:KIND` or `task:ID`, matching the selected default, kind mapping or task override. A different or missing variant fails even when argv and timeout are identical. A receipt carried across a base move (`narrows`, [base moves](ci.md#base-moves)) instead needs the receipt it narrows to pass these checks on its own tree, an audited exit-0 run of the configured `ci.overlap` argv on both bases and the head, and its `steps` to equal the hook's `shared`: none for `keep`, else a passing run of `rerun_cmd` with those steps. The full head SHA must match the submitted head. The tree hash and source digest must match the head merged with the selected base, or with the receipt's `base_sha` while the selected base still contains it: a receipt stays valid on its pinned merged tree while the base moves forward. A selected base that no longer contains `base_sha`, such as a force-pushed one, invalidates it with a reason that names the checked base. The latest audited evidence is checked by acceptance, merge and task gate reports. A different head fails even if the tree is identical. A changed merge result at an unchanged head fails acceptance and task gate reports only when the selected base no longer contains `base_sha`; merge and the merge queue also require the base to equal `base_sha`, as below. A base move with the same merged tree and source digest preserves the receipt for acceptance and task gate reports too, including when a lower dependency lands with changes the checked head already contains. Reports keep each unmerged task's last pinned result in `local-ci-pin-cache.json` in the state directory, keyed by `base_sha`, the selected base and the head, all commit ids, so they run `merge-tree` and `ls-tree` for the pinned base once per base move; a cache that cannot be read or written, as in a sandbox, only means the next report computes it again. Changing the resolved variant, command or timeout, or switching CI modes, invalidates its earlier pass. Changing an unselected mapping has no effect. Invalid local policy or task overrides fail closed. Base selection follows dispatch using existing local and origin refs without fetching during `check ci`, acceptance or task reports; metadata queries each have a 60 s deadline. The origin/base pin is a separate merge precondition. Before merge validates a local receipt, it fetches origin's base with a 60 s timeout and requires that tip to equal the receipt's `base_sha`. Fetch failures refuse before GitHub merge. On a moved base with `ci.overlap` set, merge asks the hook once per task, as `check ci` would but running no local CI command ([base moves](ci.md#base-moves)): a `keep` verdict records the receipt carried to the fetched base, and the merge reads state again and goes on. Any other answer records nothing and refuses with the reason, naming the shared steps `check ci` will run or why it will rerun everything. Without the hook, a moved base refuses as before; either way it needs `tower-crane check ci ID` again. Without origin, the base the receipt checks select must equal `base_sha` the same way, and merge reads it through its own git commands, so its command receipts show the read. Once the latest audited merge evidence for the current head and revision is successful, reports retain the recorded CI result without validating it against later base changes, and repeated merges skip the fetch. An unaudited merge marker cannot bypass validation. No hosted API is needed for local CI. The existing hosted CI rules apply when local CI is absent.
+With `ci.local` configured, an ok CI gate needs a local receipt with exit 0, no signal, nonnegative duration, the resolved argv and timeout, and a matching successful command receipt. The receipt's `variant` is `default`, `kind:KIND` or `task:ID`, matching the selected default, kind mapping or task override. A different or missing variant fails even when argv and timeout are identical. A receipt carried across a base move (`narrows`, [base moves](ci.md#base-moves)) instead needs the receipt it narrows to pass these checks on its own tree, an audited exit-0 run of the configured `ci.overlap` argv on both bases and the head, and its `steps` to equal the hook's `shared`: none for `keep`, else a passing run of `rerun_cmd` with those steps. The full head SHA must match the submitted head. The tree hash and source digest must match the head merged with the selected base, or with the receipt's `base_sha` while the selected base still contains it: a receipt stays valid on its pinned merged tree while the base moves forward. A selected base that no longer contains `base_sha`, such as a force-pushed one, invalidates it with a reason that names the checked base. The latest audited evidence is checked by acceptance, merge and task gate reports. A different head fails even if the tree is identical. A changed merge result at an unchanged head fails acceptance and task gate reports only when the selected base no longer contains `base_sha`; merge and the merge queue also require the base to equal `base_sha`, or to be a later base the receipt still stands for, as below. A base move with the same merged tree and source digest preserves the receipt for acceptance and task gate reports too, including when a lower dependency lands with changes the checked head already contains. Reports keep each unmerged task's last pinned result in `local-ci-pin-cache.json` in the state directory, keyed by `base_sha`, the selected base and the head, all commit ids, so they run `merge-tree` and `ls-tree` for the pinned base once per base move; a cache that cannot be read or written, as in a sandbox, only means the next report computes it again. Changing the resolved variant, command or timeout, or switching CI modes, invalidates its earlier pass. Changing an unselected mapping has no effect. Invalid local policy or task overrides fail closed. Base selection follows dispatch using existing local and origin refs without fetching during `check ci`, acceptance or task reports; metadata queries each have a 60 s deadline. The origin/base pin is a separate merge precondition. Before merge validates a local receipt, it fetches origin's base with a 60 s timeout and requires that tip to equal the receipt's `base_sha`, or to be a later base the receipt still stands for: one that contains `base_sha`, onto which the head merges cleanly, and whose changes since `base_sha` touch no path the head changes or the command reads, by the rule the merge queue applies before a `local ci rerun` ([events.jsonl](storage.md#eventsjsonl)). That rule applies only while `ci.overlap` is unset: a project's hook judges every base move by its own steps. Those reads go through merge's own git commands, so its command receipts show them. Fetch failures refuse before GitHub merge. On any moved base with `ci.overlap` set, merge asks the hook once per task, as `check ci` would but running no local CI command ([base moves](ci.md#base-moves)): a `keep` verdict records the receipt carried to the fetched base, and the merge reads state again and goes on. Any other answer records nothing and refuses with the reason, naming the shared steps `check ci` will run or why it will rerun everything. Without the hook, such a base refuses with `local CI receipt base moved: BASE is TIP, checked base was BASE_SHA, and REASON`; either way it needs `tower-crane check ci ID` again. Without origin, the base the receipt checks select must satisfy the same rule, and merge reads it through its own git commands, so its command receipts show the read. Once the latest audited merge evidence for the current head and revision is successful, reports retain the recorded CI result without validating it against later base changes, and repeated merges skip the fetch. An unaudited merge marker cannot bypass validation. No hosted API is needed for local CI. The existing hosted CI rules apply when local CI is absent.
 
 Resubmitting replaces `sha` without deleting evidence. It preserves `revision` unless the probe list changes at the same commit, when the revision advances to retire the old declaration and its gate runs. Software evidence at the older head stays in the audit trail. Review, tests and CI have the [small fix round exception](review.md#docs-and-small-fix-rounds). Resubmitting the same sha preserves gates only within the same revision and, for tests, with the same declared probes; rework retains the small fix round exception; a changed brief requires fresh evidence. The task remains `submitted`, with no claim lease; omitted branch and PR values stay unchanged. When `--branch` or `--pr` is supplied and the task already has a PR, `submit` reads its state and head branch with `gh pr view`. An open PR blocks a different PR number or a different submitted branch. If the old PR is closed or merged and the PR number changes, `submit` reads the new PR's head branch, uses it when `--branch` is omitted, and checks a supplied branch against it. Failed or unreadable lookups refuse without changing state. Accepted tasks must go through `rework` and a new claim before submission, and that claimant becomes the new `submitted_by` agent.
 
@@ -200,7 +200,12 @@ it, and its PID identity releases it when the process dies. Leases from other
 hosts do not count against this host's cap. A reaction that finds the cap full,
 or an older waiter ahead of it, still runs its hosted CI read, so a CI failure
 sends the task back before its suite runs, then ends with `phase: "executor"`
-and stays owed. One such waiter keeps a task's place: a later notification for
+and stays owed. A CI completion or reconciliation for a task whose latest
+review failed with code findings reads no CI at all: the reaction reworks
+the task at once, so a failed review never waits behind a busy executor for
+local CI. After a review that failed only on the PR body, the task stays at its
+head, so a CI completion still records CI there and reconciliation still
+rechecks pending CI, and `accept` refuses a red or pending head. One such waiter keeps a task's place: a later notification for
 the same task that reaches the same CPU work ends `done`, since the waiting
 reaction advances the task from its current state. A waiter is retried only
 once a slot is free and no older waiter ranks ahead, so retries read nothing
@@ -430,12 +435,52 @@ infrastructure failure shared by the base stays blocked with its reason.
 Passing refreshes retain the independent review and acceptance and continue
 to the current-base check and merge. Local CI fetches the base ref before
 validating the merged result. A base move does not invalidate task reports
-or acceptance while the base still contains the receipt's `base_sha`; when the
-fetched base differs from `base_sha`, the queue runs the CI gate on it, which
-asks the project's `ci.overlap` hook first ([base moves](ci.md#base-moves)):
-it keeps the receipt when no step is shared, reruns only the shared steps, or
-reruns everything. Every step of what lands either ran on the merged tree it
-lands as or, by the hook's verdict, has inputs the base move did not change.
+or acceptance while the base still contains the receipt's `base_sha`. When the
+fetched base differs from `base_sha` and `ci.overlap` is unset, a passing receipt still lands, without a
+rerun, when the fetched tip contains `base_sha`, a trial `merge-tree` of the head onto
+the tip is clean, and no path changed between `base_sha` and the tip is one the
+head changes since `base_sha` or one the command reads: a repository path its
+argv names (a file, or any path under a directory it names) or a `ci.local.inputs` glob.
+Argv paths are read with `\` as `/` and `./` and `a/../` resolved; `.`, `./` and Go's
+`./...` name the whole repository, `pkg/...` names `pkg`, a glob such as
+`test/**/*.test.js` names what it matches and everything under it, and a flag's
+`=value` counts as a path. Bare flags, `-`, absolute and drive paths and paths
+above the repository are ignored. Renames count as both paths. The run then
+already saw every file it would see again only when the argv and `inputs` cover
+everything the command reads, including what its tests import: list such paths in
+`inputs`, or `**` for a suite that reads the whole repository. In the queue, a
+task with a tests gate still gets the head check's suite run on the real merge; a
+direct `merge ID` runs no suite and relies on this rule alone. Otherwise the
+queue runs the CI gate on the fetched base, which asks the project's
+`ci.overlap` hook first ([base moves](ci.md#base-moves)): it keeps the receipt
+when no step is shared, reruns only the shared steps, or reruns everything.
+Every step of what lands either ran on the merged tree it lands as or has
+inputs the base move did not change. A run as long as a few hours on a busy base would come
+back behind the tip on every lap if any base move voided it.
+
+Each such rerun records `local ci rerun` on the task, before the run starts,
+with `{sha, revision, base, from, tip, reason, lost}`: `from` is the receipt's
+`base_sha`, `tip` the fetched base it reruns on and `reason` why the receipt
+does not stand. `lost` counts the reruns in a row at this sha and revision that
+came back behind a moved base: it is one more than the previous rerun's when the
+receipt being replaced is that rerun's own, checked on its `tip`, and 0
+otherwise. At `lost` 2 the event also records `hold`, the reason in words, and
+the queue holds new merges to that base for the task. One loss can be a single
+merge that landed during the run; a second in a row shows the base moves faster
+than the command runs, and each further lap costs a full run. The hold stops
+merges rather than reordering the line: the task already heads the line when its
+rerun starts, and what leaves it behind is a merge that lands while it runs, by
+`merge ID` or by the queue after the task is passed over. While the hold stands,
+the queue passes over every other entry whose members merge to that base, and
+the merge gate refuses `merge ID` for any other task with an unmerged stack
+member merging to it (a stack merge lands its bottom member there while the
+task's own base is still a lower branch), both with
+`ID: merges to BASE are held for HOLDER until its local CI lands: REASON`;
+members of the holder's own stack are not held, and a confirmation of a PR that
+already landed is not refused. The hold ends when the holder merges, or leaves
+the accepted status, head or revision it was recorded at. Pushes from outside
+Tower Crane are not held; the disjoint-path rule above lands a rerun they
+leave behind when they touch nothing it depends on.
 An explicit `merge --accepted` requests a busy queue once and waits for
 its observable executor to release the reservation before taking its own
 pass. The wait uses `gates.tests_timeout_min` (20 minutes by default);
