@@ -19,7 +19,11 @@ function releasedBin(tag) {
   const dir = fs.mkdtempSync(path.join(tempRoot(), `released-${tag}-`));
   process.once('exit', () => fs.rmSync(dir, { recursive: true, force: true }));
   const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('GIT_')));
-  const archive = cp.execFileSync('git', ['-C', ROOT, 'archive', '--format=tar', tag, 'bin', 'lib', 'package.json'], { env, maxBuffer: 256 << 20 });
+  // What an install of that release holds that its commands read: a spawn
+  // renders the agent files and reads the standards and the built-in ladder.
+  const top = new Set(cp.execFileSync('git', ['-C', ROOT, 'ls-tree', '--name-only', tag], { env, encoding: 'utf8' }).split('\n'));
+  const parts = ['bin', 'lib', 'package.json', 'agents', 'standards', 'skills', 'hooks', 'commands', 'docs'].filter((p) => top.has(p));
+  const archive = cp.execFileSync('git', ['-C', ROOT, 'archive', '--format=tar', tag, ...parts], { env, maxBuffer: 256 << 20 });
   cp.execFileSync('tar', ['-x', '-f', '-', '-C', dir], { input: archive });
   const bin = path.join(dir, 'bin', 'tower-crane.js');
   tools.set(tag, bin);

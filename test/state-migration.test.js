@@ -6,12 +6,23 @@ const fs = require('node:fs');
 const path = require('node:path');
 const StateFiles = require('./state-files');
 const { makeRepo } = require('./helpers');
-const { runReleased } = require('./released-tool');
+const cp = require('node:child_process');
+const { runReleased, releasedBin } = require('./released-tool');
+const { waitUntil } = require('./signals');
+
+const processAlive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 
 // The last release before the database: its file layout is what real
 // installs migrate, and it must refuse a migrated state.
 const RELEASED = 'v0.1.3';
 const LAYOUT = ['tasks.json', 'decisions.json', 'events.jsonl'];
+
+// The file layout moved out of the state directory; an empty events.jsonl
+// stands in its place for a 0.1 supervisor's tick (lib/state.js finishMigration).
+function movedOut(h) {
+  for (const name of LAYOUT.filter((n) => n !== 'events.jsonl')) assert.equal(fs.existsSync(path.join(h.state, name)), false, `${name} moved out of the state directory`);
+  assert.equal(fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8'), '', 'an empty log stands in for the moved one');
+}
 
 function released(h, args, opts) {
   const r = runReleased(h, RELEASED, args, opts);
@@ -55,7 +66,7 @@ test('the first command moves a 0.1 file layout into state.db, keeps every event
   assert.deepEqual(shown.notes.map((n) => n.text), ['written by 0.1.3']);
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(h.state, 'project.json'), 'utf8')),
     { version: 1, schema_version: 2, storage: 'state.db', owner_config_dir: project.owner_config_dir });
-  for (const name of LAYOUT) assert.equal(fs.existsSync(path.join(h.state, name)), false, `${name} moved out of the state directory`);
+  movedOut(h);
   const legacy = legacyDir(h);
   assert.deepEqual(fs.readdirSync(legacy).sort(), ['decisions.json', 'events.jsonl', 'project.json', 'tasks.json']);
   assert.ok(fs.readFileSync(path.join(legacy, 'events.jsonl')).equals(log), 'the old log is kept as it was');
@@ -178,7 +189,7 @@ for (const [step, file] of [['before its marker', 'state.db'], ['after its marke
     assert.equal(JSON.parse(fs.readFileSync(path.join(h.state, 'project.json'), 'utf8')).storage, file === 'state.db' ? undefined : 'state.db');
     h.ok(['task', 'note', 'T1', 'after the crash']);
     assert.deepEqual(h.json(['task', 'show', 'T1']).notes.map((n) => n.text), ['written by 0.1.3', 'after the crash']);
-    for (const name of LAYOUT) assert.equal(fs.existsSync(path.join(h.state, name)), false, `${name} moved out`);
+    movedOut(h);
     assert.ok(fs.readFileSync(path.join(legacyDir(h), 'events.jsonl')).equals(log));
     assert.deepEqual(h.events({ offsets: true }).slice(0, lineEnds(log).length).map((e) => e.offset), lineEnds(log));
   });
@@ -213,5 +224,64 @@ test('a reader that cannot write the state directory reads the migrated database
     assert.match(h.ok(['status']), /T1/);
   } finally {
     open();
+  }
+});
+
+// A 0.1.7 supervisor whose agent runs while this tool migrates its state:
+// held stopped across the whole migration, its next tick finds the log moved.
+// It must meet the marker, refuse it and let its worker finish, not fail on
+// the missing log and stop the worker (docs/state/storage.md, Migration and
+// export).
+test('a 0.1 supervisor held across the migration lets its worker finish', { skip: process.platform === 'win32' && 'SIGSTOP holds the supervisor' }, async (t) => {
+  const tag = 'v0.1.7';
+  const h = makeRepo(t);
+  const old = (args) => {
+    const r = runReleased(h, tag, args);
+    assert.equal(r.code, 0, `${tag} ${args.join(' ')}: ${r.stderr}`);
+    return r.stdout;
+  };
+  old(['init', '--name', 'demo', '--goal', 'prove the engine']);
+  old(['task', 'add', '--title', 'Worker', '--tier', 'easy', '--acceptance', 'keeps working']);
+  fs.writeFileSync(path.join(h.base, 'brief.md'), 'Finish the edit.\n');
+  old(['brief', 'set', 'T1', '--file', path.join(h.base, 'brief.md')]);
+  const ready = path.join(h.base, 'ready');
+  const finish = path.join(h.base, 'finish');
+  const edited = path.join(h.base, 'edited');
+  const worker = `const fs = require('node:fs');
+fs.writeFileSync(${JSON.stringify(`${ready}.tmp`)}, String(process.pid));
+fs.renameSync(${JSON.stringify(`${ready}.tmp`)}, ${JSON.stringify(ready)});
+setInterval(() => { if (fs.existsSync(${JSON.stringify(finish)})) { fs.writeFileSync(${JSON.stringify(edited)}, 'done'); process.exit(0); } }, 25); // wait-allow: the worker polls for the test's finish file
+`;
+  old(['ladder', 'set', 'easy', '--harness', 'command', '--command', JSON.stringify([process.execPath, '-e', worker, '{prompt}']),
+    '--clear', 'profile', '--clear', 'model', '--clear', 'effort', '--supervision', JSON.stringify({ retries: 0, stall_ms: 600000 })]);
+  let out = '';
+  const child = cp.spawn(process.execPath, ['--require', path.join(__dirname, 'fixtures', 'hooks.js'), releasedBin(tag), 'spawn', '--task', 'T1', '--wait', '--json'],
+    { cwd: h.repo, env: { ...h.env, HOOK_STATE: h.state, HOOK_PROCESSES_DIR: path.join(h.base, 'detached') } });
+  child.stdout.on('data', (d) => { out += d; });
+  child.stderr.on('data', (d) => { out += d; });
+  const closed = new Promise((resolve) => child.on('close', resolve));
+  let monitor = null;
+  try {
+    await waitUntil(() => fs.existsSync(ready), { paths: [h.base], alive: child, what: 'the 0.1.7 worker starts' });
+    const workerPid = Number(fs.readFileSync(ready, 'utf8'));
+    monitor = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line))
+      .findLast((e) => e.cmd === 'spawn').detail.monitor_pid;
+    process.kill(monitor, 'SIGSTOP');
+    h.ok(['task', 'show', 'T1']);
+    assert.equal(fs.existsSync(StateFiles.dbFile(h.state)), true, 'the state migrated');
+    process.kill(monitor, 'SIGCONT');
+    monitor = null;
+    await waitUntil(() => /supervision stopped: state schema 2 is incompatible/.test(out) || /supervisor failed/.test(out),
+      { poll: true, what: 'the 0.1.7 supervisor meets the migrated state' });
+    assert.doesNotMatch(out, /supervisor failed/);
+    assert.match(out, /allowing worker worker-T1-1 to finish without termination/);
+    assert.ok(processAlive(workerPid), 'the worker still runs');
+    fs.writeFileSync(finish, '');
+    await closed;
+    assert.equal(fs.readFileSync(edited, 'utf8'), 'done', 'the worker finished its edit');
+  } finally {
+    if (monitor) try { process.kill(monitor, 'SIGCONT'); } catch { /* gone */ }
+    fs.writeFileSync(finish, '');
+    StateFiles.withDb(h.state, () => {});
   }
 });

@@ -641,3 +641,24 @@ test('a session receipt replaying the first attempt does not hide the retry exit
   const r = h.run(['claim', 'T2', '--agent', 'worker-T2-1'], hidden);
   assert.equal(r.code, 0, r.stderr);
 });
+
+// The indexed read folds each task's slots apart and orders them by their
+// first record, which must match one fold over the whole log: a slot an
+// interrupt sets again keeps the place its spawn gave it.
+test('slots read by task keep the order a fold over the whole log gives', () => {
+  const T = require('../lib/tasks');
+  const base = Date.now() - 60000;
+  const at = (s) => new Date(base + s * 1000).toISOString();
+  const detail = (agent) => ({ role: 'worker', agent, attempt: 1, reserved: true, pid: 1, host: 'h' });
+  const events = [
+    { at: at(0), cmd: 'spawn', task: 'T1', agent: 'orchestrator', detail: detail('worker-T1-1') },
+    { at: at(1), cmd: 'spawn', task: 'T2', agent: 'orchestrator', detail: detail('worker-T2-1') },
+    { at: at(2), cmd: 'interrupt', task: 'T1', agent: 'orchestrator', detail: { ...detail('worker-T1-1'), active: true } },
+  ];
+  const project = { limits: { lease_minutes: 60 } };
+  const whole = T.reservations({ project, events }, Date.now()).map((s) => s.task);
+  const log = { slotTasks: () => ['T2', 'T1'], forTask: (id, cmds) => events.filter((e) => e.task === id && (!cmds || cmds.includes(e.cmd))) };
+  const indexed = T.reservations({ project, log, events: null }, Date.now()).map((s) => s.task);
+  assert.deepEqual(whole, ['T1', 'T2']);
+  assert.deepEqual(indexed, whole);
+});
