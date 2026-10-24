@@ -460,6 +460,7 @@ test('merges', () => {
   const p = makeRepo(t);
   p.init(['--repo', 'acme/demo']);
   gateFixture(p);
+  p.git(['fetch', h.repo, head]);
   const declared = { '**/*.md': [], 'docs/cli.md': ['test/other.test.js'], 'lib/gone.js': ['test/old.test.js'] };
   p.ok(['project', 'set', '--tests-map', JSON.stringify(declared)]);
   const before = p.readState('project.json');
@@ -484,9 +485,12 @@ fs.copyFileSync(${JSON.stringify(file)}, path.join(args[args.indexOf('-D') + 1],
 `);
   const pinned = p.json(['tests', 'map', 'refresh', '--from-run', '4242', '--agent', 'orchestrator']);
   assert.deepEqual(JSON.parse(fs.readFileSync(calls, 'utf8').trim()).slice(0, 7), ['run', 'download', '4242', '-R', 'acme/demo', '-n', 'tests-coverage-map']);
-  assert.deepEqual({ run: pinned.run, sha: pinned.sha, measured: pinned.measured }, { run: 4242, sha: head, measured: 2 });
-  assert.equal(pinned.declared, undefined);
-  assert.deepEqual(p.readState('project.json').tests.map, artifact.map, 'refresh retains only measured entries');
+  assert.deepEqual({ run: pinned.run, sha: pinned.sha, declared: pinned.declared }, { run: 4242, sha: head, declared: 1 });
+  // Sources the run did not measure survive alongside declared globs, the only entries counted as declared.
+  assert.deepEqual(p.readState('project.json').tests.map, {
+    '**/*.md': [], 'docs/cli.md': ['test/other.test.js'],
+    'lib/merge.js': ['test/cli.test.js'], 'tool/runner.js': ['test/cli.test.js'],
+  });
   const events = fs.readFileSync(path.join(p.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   assert.equal(events.filter((e) => e.cmd === 'tests map refresh').at(-1).detail.authority, 'orchestrator');
 });
