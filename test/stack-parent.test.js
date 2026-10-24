@@ -105,6 +105,23 @@ function failReview(f, top, kind = 'code') {
     ])]);
 }
 
+// A review spawn sends a task with a current failed review to rework. accept does not
+// rework it or start another review at that head: it stays submitted and the
+// orchestrator's inbox offers the rework (docs/state/gates.md).
+function assertFailedReviewHandled(f, entry, task) {
+  if (entry === 'review spawn') {
+    assert.equal(task.status, 'rework');
+    const rework = events(f).findLast((e) => e.task === 'T2' && e.cmd === 'rework');
+    assert.equal(rework.detail.from_review, true);
+    assert.equal(rework.detail.previous_revision, 1);
+    return;
+  }
+  assert.deepEqual([task.status, task.revision], ['submitted', 1]);
+  assert.equal(events(f).some((e) => e.task === 'T2' && e.cmd === 'rework'), false);
+  const item = f.h.json(['inbox', '--agent', 'orchestrator']).items.find((i) => i.id === 'review_failed:T2');
+  assert.deepEqual(item?.action.argv, ['rework', '--from-review', 'T2']);
+}
+
 function reviewEntry(f, entry) {
   return f.h.run(entry === 'review spawn' ? ['spawn', '--task', 'T2', '--role', 'review', '--wait']
     : ['accept', 'T2', ...(entry === 'waived accept' ? ['--waive', 'review', '--reason', 'offline fixture'] : [])]);
@@ -125,11 +142,8 @@ for (const entry of ['accept', 'waived accept', 'review spawn']) {
       assert.equal(result.code, 1, result.stdout + result.stderr);
       assert.match(result.stdout + result.stderr, /current review FAIL/);
       const task = f.h.json(['task', 'show', 'T2']);
-      assert.equal(task.status, 'rework');
-      const rework = events(f).findLast((e) => e.task === 'T2' && e.cmd === 'rework');
-      assert.equal(rework.detail.from_review, true);
-      assert.equal(rework.detail.previous_revision, 1);
-      assert.equal(task.stack.parent_sha, f.sha, 'failed review is recovered before parent synchronization');
+      assertFailedReviewHandled(f, entry, task);
+      assert.equal(task.stack.parent_sha, f.sha, 'failed review is handled before parent synchronization');
       assert.equal(f.h.git(['rev-parse', 'HEAD'], top.wt.path), top.sha);
     });
   }
@@ -148,11 +162,9 @@ for (const entry of ['accept', 'review spawn']) {
       const task = f.h.json(['task', 'show', 'T2']);
       if (kind === 'missing') {
         assert.equal(task.status, 'submitted');
-        assert.match(result.stderr, /linked review comment/);
-      } else {
-        assert.equal(task.status, 'rework');
-        assert.equal(events(f).findLast((e) => e.task === 'T2' && e.cmd === 'rework').detail.from_review, true);
-      }
+        // Only the rework resolves the findings, so accept, which does not rework, cannot miss the comment.
+        assert.match(entry === 'accept' ? result.stdout : result.stderr, entry === 'accept' ? /current review FAIL/ : /linked review comment/);
+      } else assertFailedReviewHandled(f, entry, task);
       assert.equal(f.h.git(['rev-parse', 'HEAD'], top.wt.path), top.sha);
     });
   }
