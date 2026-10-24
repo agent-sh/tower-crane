@@ -43,7 +43,8 @@ not admission control across activities, sessions or projects.
 
 On Linux with cgroup v2, a reachable systemd user manager and safe placement, a launch uses a
 named transient user scope through `systemd-run --user --scope`
-in the caller's slice with `TasksMax`, `MemoryMax`,
+in its project's slice below the caller's slice ([CPU shares](#cpu-shares))
+with `TasksMax`, `MemoryMax`,
 `MemorySwapMax=0`, `OOMPolicy=continue` and delegated memory/pids controllers.
 The availability probe uses `systemctl --user show-environment`, and every
 outer scope uses `systemd-run --user --scope`. Both receive the same resolved
@@ -81,14 +82,14 @@ Crane launch creates a delegated child cgroup within the inherited scope. Its
 own cap and every ancestor's aggregate cap remain enforced by the kernel.
 Optional owner `scope` properties apply to the outer scope; mandatory resource
 properties take precedence, and `scope: {}` only clears optional properties.
-An optional `Slice` property cannot override the caller's slice. New user scopes
+An optional `Slice` property cannot override the project's slice. New user scopes
 are allowed only when the caller's cgroup is below its own `user@<uid>.service`,
 or `loginctl show-user <uid> -p Linger --value` succeeds and reports `yes`.
 A caller outside its user manager, such as a login session or hosted CI runner's
 system service, without confirmed linger uses the watchdog. A warning names
 the caller's placement, linger and the risk of the user manager stopping at
-logout. With linger, an outside caller's scope goes into the user manager's
-slice of the same name and keeps its own caps. Setting
+logout. With linger, an outside caller's scope goes into the project's slice
+below the user manager's slice of the same name and keeps its own caps. Setting
 `TasksMax`, `MemoryMax`, `MemorySwapMax`, `OOMPolicy`, `Delegate` or `Slice`
 through `init`, `project set` or `ladder set` prints a `warning:` line naming
 the replaced keys; each command's JSON reply includes the same `warnings`
@@ -182,6 +183,57 @@ environment markers, grant no retention.
 Containment metadata retains sampled `pids_peak`, `memory_peak_bytes` and
 `refused_forks` from the scope's peak and local event files. Refused forks
 count that scope's cap violations where local events are available.
+
+#### CPU shares
+
+Each project's Tower Crane scopes, its workers', reviewers', small agents' and
+orchestrator's as well as its gate and merge-queue suite commands', go in one
+slice of the caller's slice: `<caller>-towercrane_<digest>.slice`, where
+`<digest>` is the first 12 hex digits of the SHA-256 of the real state
+directory path, the same digest that names the project's task scratch
+(`agents-towercrane_9b27247cfd0b.slice` under `agents.slice`). systemd nests a
+slice one level per dash, so it sits directly below the caller's slice; a
+caller already inside a project's slice places its scope in its own project's
+slice beside that one. The slice has systemd's default weight, 100, the same as
+every other scope in the caller's slice, such as a terminal session. Under
+contention one project's scopes together get one such share, whatever their
+number, so one project's gates never take CPU from another project or from
+other sessions. Inside the slice, gate scopes get `CPUWeight=gates.cpu_weight`
+and agent scopes keep the default unless `agents.cpu_weight` is set
+([project.json](storage.md#projectjson)). A gate command run without a state
+directory has no project slice, so it stays in the caller's slice without the
+gate weight. An agents weight other than 100 replaces a
+`CPUWeight` in the owner's `scope` properties. A nested launch stays in the
+scope it inherits and so in that scope's slice; a gate there writes its weight
+to its delegated child cgroup's `cpu.weight`, enabling the inherited scope's
+`cpu` controller first, so it is weighed against that scope's other attempts.
+When the inherited scope has no delegated `cpu` controller the command runs
+under its caps without the weight. A launch without systemd scopes (macOS,
+Windows, Linux without cgroup v2 or a user manager, Linux outside the user
+manager without confirmed linger, a non-delegated fence)
+runs as before and records the weight as not applied, with no failure.
+
+Gate evidence and its event record `cpu`, the weight its contained commands ran
+at: `{weight, slice}` for a scope, `{weight, nested}` with the inherited group
+for a nested child, or `{weight, applied: false, reason}`. The merge queue's
+`head check` records the same `cpu` for its suite. While a gate or suite runs,
+its host governor unit keeps that `cpu`, and `status` prints
+`gate cpu weight: T3 tests gate 400 in agents-towercrane_9b27247cfd0b.slice`,
+or `400 nested in GROUP` or `not applied (REASON)`, for each of this project's running gates (JSON
+`governor.units[].cpu`).
+
+`node scripts/measure-cpu-weight.js fairness` and
+`node scripts/measure-cpu-weight.js gate WEIGHT [--run N] [--summary]` measure both on a
+host with a user manager. They start the scopes with `scopeArguments` in the
+slices `projectSlice` names and pin every busy process to the same four CPUs.
+`fairness` runs a Tower Crane project's gate and agent, another project's agent
+and a session scope outside Tower Crane side by side, flat in the caller's
+slice and then in project slices, and prints each group's CPU-seconds and
+share. `gate` runs the pinned tests command on `test/ladder.test.js`,
+`test/authority.test.js` and `test/state-compatibility.test.js` in a project's
+slice at WEIGHT next to three busy agent scopes of the same project, and prints
+its wall time and CPU-seconds; `--summary` adds the median of each weight's
+runs in the same gate run.
 
 On macOS, Windows, Linux without cgroup v2, Linux without a reachable
 user manager, Linux outside the user manager without confirmed linger,
