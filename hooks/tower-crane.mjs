@@ -1,14 +1,14 @@
 // Tower Crane for Claude Code: pushes orchestrator wake-ups into the session.
-// One child, tower-crane wait --follow, prints a line of ids per event; this
-// module turns those lines into prompts, so the session never polls. A push
-// names events only: the session reads current findings with tower-crane inbox.
+// One child, tower-crane wait --follow, prints one JSON line per event; this
+// module turns those lines into prompts, so the session never polls. Decision
+// answers include their notes; other findings come from tower-crane inbox.
 
 const TOOL = 'mcp__tower-crane__watch'
 const COMMAND = 'tower-crane-watch'
 
 // The same text lib/events.js notice() gives spawned harness homes.
 function notice(rows, agent) {
-  const lines = rows.map(w => `- ${w.id}: ${w.type}${w.decision ? ` ${w.decision}` : ''}${w.task ? ` ${w.task}` : ''} from ${w.agent}`)
+  const lines = rows.map(w => `- ${w.id}: ${w.type}${w.decision ? ` ${w.decision}` : ''}${w.task ? ` ${w.task}` : ''} from ${w.agent}${w.text ? `\n${w.text}` : ''}`)
   const last = rows.at(-1)
   return [
     `Tower Crane: ${rows.length} new event${rows.length === 1 ? '' : 's'} for ${agent}.`,
