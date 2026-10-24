@@ -1,0 +1,1 @@
+- The atomic-file lint passes again: the task landed tests read the gh call log through readPublished.
