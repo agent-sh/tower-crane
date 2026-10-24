@@ -286,6 +286,7 @@ test('merges', () => {
     'every profile was folded and removed');
 
   const p = makeRepo(t);
+  p.git(['fetch', h.repo, head]);
   p.init(['--repo', 'acme/demo']);
   gateFixture(p);
   const declared = { '**/*.md': [], 'docs/cli.md': ['test/other.test.js'], 'lib/gone.js': ['test/old.test.js'] };
@@ -315,7 +316,7 @@ fs.copyFileSync(${JSON.stringify(file)}, path.join(args[args.indexOf('-D') + 1],
   assert.deepEqual({ run: pinned.run, sha: pinned.sha, declared: pinned.declared }, { run: 4242, sha: head, declared: 2 });
   // Missing test coverage and files V8 cannot measure survive alongside declared globs.
   assert.deepEqual(p.readState('project.json').tests.map, {
-    '**/*.md': [], 'docs/cli.md': ['test/other.test.js'], 'lib/gone.js': ['test/old.test.js'],
+    '**/*.md': [], 'docs/cli.md': ['test/other.test.js'],
     'lib/merge.js': ['test/cli.test.js'], 'tool/runner.js': ['test/cli.test.js'],
   });
   const events = fs.readFileSync(path.join(p.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);

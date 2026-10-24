@@ -35,7 +35,90 @@ test('coverage replacement preserves missing suites and unmeasured declarations'
     ['absent sources', [A, B], {}, old],
     ['new source', [A], { 'new.js': [A] }, { ...old, 'new.js': [A] }],
   ]) {
-    assert.deepEqual(Refresh.mergeMap(old, { tests, map: measured }), expected, name);
+    assert.deepEqual(Refresh.mergeMap(old, { tests, map: measured }, new Set([A, B])), expected, name);
+  }
+});
+
+test('coverage preservation prunes removed and renamed suites in every source class', () => {
+  const renamed = 'test/renamed.test.js';
+  for (const [name, previous, tests, map, tracked, expected] of [
+    ['deleted suite on measured and absent sources', old, [A], { 'shared.js': [A] }, [A],
+      { 'shared.js': [A], 'manual.js': [A], '**/*.md': [] }],
+    ['renamed suite', old, [A, renamed], { 'shared.js': [renamed] }, [A, renamed],
+      { 'shared.js': [renamed], 'manual.js': [A], '**/*.md': [] }],
+    ['absent coverage keeps only existing suites', old, [], {}, [B],
+      { 'shared.js': [B], 'missing.js': [B], '**/*.md': [] }],
+    ['declared glob and unmeasured source', { '*.md': [A, B], 'manual.sh': [B] }, [], {}, [A],
+      { '*.md': [A] }],
+    ['explicit empty declarations survive', { 'manual.js': [], '*.md': [], 'gone.js': [B] }, [], {}, [],
+      { 'manual.js': [], '*.md': [] }],
+    ['missing shard still tracked', old, [A], { 'shared.js': [A] }, [A, B], old],
+  ]) {
+    assert.deepEqual(Refresh.mergeMap(previous, { tests, map }, new Set(tracked)), expected, name);
+  }
+});
+
+test('refresh inventories the artifact commit for deleted, renamed and missing-shard suites', async (t) => {
+  for (const mode of ['deleted', 'renamed', 'historical', 'unavailable']) {
+    await t.test(mode, (t) => {
+      const h = fixture(t);
+      const renamed = 'test/renamed.test.js';
+      h.git(mode === 'renamed' ? ['mv', B, renamed] : ['rm', B]);
+      h.git(['commit', '-qm', 'change test inventory']);
+      const sha = mode === 'historical' ? h.sha : mode === 'unavailable' ? 'f'.repeat(40) : h.git(['rev-parse', 'HEAD']);
+      const tests = mode === 'renamed' ? [A, renamed] : [A];
+      const file = path.join(h.base, 'map.json');
+      fs.writeFileSync(file, JSON.stringify({ sha, tests, map: { 'shared.js': tests } }));
+      if (mode === 'unavailable') {
+        const before = h.readState('project.json');
+        const result = h.run(['tests', 'map', 'refresh', '--file', file]);
+        assert.equal(result.code, 1);
+        assert.match(result.stderr, /cannot list tracked files/);
+        assert.deepEqual(h.readState('project.json'), before);
+      } else {
+        h.ok(['tests', 'map', 'refresh', '--file', file]);
+        const map = h.readState('project.json').tests.map;
+        assert.deepEqual(map['shared.js'], mode === 'historical' ? [A, B] : tests);
+        assert.deepEqual(map['manual.js'], [A]);
+        assert.equal(Object.hasOwn(map, 'missing.js'), mode === 'historical');
+      }
+    });
+  }
+});
+
+test('status and inbox use the newest local or origin base, including remote-only refs', async (t) => {
+  for (const mode of ['newer origin', 'origin only', 'newer local', 'local only', 'origin prefix', 'divergent', 'missing refs']) {
+    await t.test(mode, async (t) => {
+      const h = fixture(t);
+      const fresh = 'test/fresh.test.js';
+      h.git(['switch', '-qc', 'fresh-base']);
+      fs.writeFileSync(path.join(h.repo, fresh), 'console.log("fresh suite");\n');
+      h.git(['add', '.']);
+      h.git(['commit', '-qm', 'new base test']);
+      const sha = h.git(['rev-parse', 'HEAD']);
+      let remote = mode === 'newer local' ? h.sha : sha;
+      if (mode === 'divergent') {
+        h.git(['switch', '-qc', 'other-base', h.sha]);
+        fs.writeFileSync(path.join(h.repo, 'test/origin.test.js'), 'console.log("origin suite");\n');
+        h.git(['add', '.']);
+        h.git(['commit', '-qm', 'divergent base test']);
+        remote = h.git(['rev-parse', 'HEAD']);
+        h.git(['switch', 'fresh-base']);
+      }
+      if (['newer local', 'local only', 'divergent'].includes(mode)) h.git(['update-ref', 'refs/heads/main', sha]);
+      if (mode !== 'local only' && mode !== 'missing refs') {
+        h.git(['update-ref', 'refs/remotes/origin/main', remote]);
+      }
+      if (['origin only', 'origin prefix', 'missing refs'].includes(mode)) h.git(['branch', '-D', 'main']);
+      if (mode === 'origin prefix') h.ok(['project', 'set', '--base', 'origin/main']);
+      const expected = mode === 'missing refs' ? [] : [fresh, 'test/unselected.test.js'];
+      assert.deepEqual(h.json(['status']).tests_unselected, expected);
+      const ctx = { stateDir: h.state, cwd: h.repo, agent: 'orchestrator', agentExplicit: true, env: h.env };
+      const inbox = await require('../lib/inbox').snapshot(ctx);
+      const items = inbox.items.filter((entry) => entry.kind === 'tests_unselected');
+      assert.equal(items.length, expected.length ? 1 : 0);
+      if (expected.length) assert.deepEqual(items[0].files, expected);
+    });
   }
 });
 
@@ -89,7 +172,8 @@ test('automatic refresh selects the newest completed full base run with an artif
         { id: 40, event: 'schedule', status: 'completed', head_branch: 'main', conclusion: 'success' },
       ].map((run) => ({ ...fullRun, ...run, created_at: new Date(Date.now() - (100 - run.id) * 1000).toISOString() }));
       const calls = [];
-      const exec = async (cmd, args) => {
+      const exec = async (cmd, args, opts) => {
+        if (cmd === 'git') return require('../lib/commands').spawnSync(cmd, args, { ...opts, env: h.env });
         calls.push(args);
         let stdout = '';
         if (args[0] === 'api' && args[1].includes('/actions/runs?')) stdout = JSON.stringify({ workflow_runs: runs });
