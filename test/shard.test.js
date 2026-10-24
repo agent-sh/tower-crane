@@ -119,6 +119,37 @@ test('the long files that hit the shard deadline have timing entries on both CI 
   }
 });
 
+test('cgroup keeper guard cases run in the shard proof on host and non-Linux platforms', (t) => {
+  const h = makeRepo(t);
+  const hook = path.join(h.base, 'cgroup-platform.cjs');
+  fs.writeFileSync(hook, `
+if (process.env.T503_CGROUP_PLATFORM) {
+  Object.defineProperty(process, 'platform', { value: process.env.T503_CGROUP_PLATFORM });
+}
+`);
+  const titles = [
+    'cgroup keepers read only cgroup membership, including nested groups',
+    'cgroup keeper ticks use population without any host process scan',
+  ];
+  // A cheap platform guard must be checked even when its standalone file is queued last.
+  for (const platform of [process.platform, 'win32', 'darwin'].filter((value, index, values) => values.indexOf(value) === index)) {
+    const result = cp.spawnSync(process.execPath, [
+      '--require', hook, '--test', '--test-reporter=tap',
+      `--test-name-pattern=${titles.join('|')}`, path.join(ROOT, 'test', 'containment-sampling.test.js'),
+    ], {
+      cwd: ROOT, env: { ...h.env, T503_CGROUP_PLATFORM: platform },
+      encoding: 'utf8', timeout: HUNG_TEST_MS,
+    });
+    assert.equal(result.status, 0, `${platform}: ${result.stderr}${result.stdout}`);
+    for (const title of titles) {
+      const line = result.stdout.split('\n').find((value) => /^ok \d+ - /.test(value) && value.includes(title));
+      assert.ok(line, `${platform}: ${title} was reported`);
+      assert.equal(line.includes('# SKIP Linux cgroups'), platform !== 'linux', `${platform}: ${title}`);
+      t.diagnostic(`${platform}: ${line}`);
+    }
+  }
+});
+
 test('the checked-in durations split Linux into three CI shards and Windows into four within a tenth of each other', () => {
   const files = testFiles();
   for (const [platform, total] of [['linux', 3], ['win32', 4]]) {
