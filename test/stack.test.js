@@ -422,6 +422,9 @@ test('a spawned worker claims a task whose dependency merged while gh api is den
   assert.ok(claim, 'the worker claims the task after its dependency merged');
   assert.ok(submit, 'denied API access does not refuse the worker submission');
   assert.equal(submit.agent, claim.agent);
+  assert.equal(submit.detail.pushes_since_last_submit, null, 'denied history has no clean count');
+  assert.equal(submit.detail.push_history_error, undefined);
+  assert.match(submit.detail.push_history_note, /gh policy refuses PR head history/);
   // Both CI observations fail under this fixture's denied API, so rework follows the one retry.
   const rework = events.find((e) => e.task === 'T2' && e.cmd === 'rework');
   assert.ok(rework, 'the submitted task was sent back before refill could claim it');
@@ -434,22 +437,49 @@ test('a spawned worker claims a task whose dependency merged while gh api is den
   const inspections = apiCalls(f).slice(before);
   assert.equal(inspections.filter((c) => /\/pulls\/12\/comments\?/.test(c.args[1])).length, 1,
     'dispatch attempts the inline finding read once');
-  assert.ok(inspections.every((c) => /\/check-(runs|suites)\?|\/pulls\/12\/comments\?/.test(c.args[1])),
-    'only inline findings and CI inspections read gh api during dispatch');
+  const history = inspections.filter((c) => /\/actions\/runs\?branch=/.test(c.args[1]));
+  assert.equal(history.length, 1, 'submit attempts the head history read once');
+  const query = new URL(`https://github.test/${history[0].args[1]}`);
+  assert.equal(query.pathname, '/repos/acme/app/actions/runs');
+  assert.equal(query.searchParams.get('branch'), upperTask.branch);
+  assert.ok(history[0].args.includes('--paginate'));
+  for (const row of [
+    { name: 'inline findings', accepts: (endpoint) => /\/pulls\/12\/comments\?/.test(endpoint) },
+    { name: 'CI inspections', accepts: (endpoint) => /\/check-(runs|suites)\?/.test(endpoint) },
+    { name: 'head history', accepts: (endpoint) => endpoint === history[0].args[1] },
+  ]) {
+    assert.ok(inspections.some((c) => row.accepts(c.args[1])), `${row.name} is inspected`);
+  }
+  assert.ok(inspections.every((c) => /\/check-(runs|suites)\?|\/pulls\/12\/comments\?/.test(c.args[1])
+    || c.args[1] === history[0].args[1]), 'only inline findings, CI and this branch head history are inspected');
 });
 
-test('a spawned worker claim reads the recorded stack and makes no gh api call while its dependency is submitted', (t) => {
-  const f = setup(t);
-  upper(f);
-  f.h.ok(['rework', 'T2', '--reason', 'revise the stacked change']);
-  const before = apiCalls(f).length;
-  f.write((d) => { d.apiFailure = DENIED_API; });
-  const dispatch = { TOWER_CRANE_HOOK: path.join(f.h.base, 'hook.json'), TOWER_CRANE_TASK: 'T2', TOWER_CRANE_AGENT: 'worker-T2' };
-  const claim = f.h.run(['claim', 'T2', '--agent', 'worker-T2'], { env: dispatch });
-  assert.equal(claim.code, 0, claim.stderr);
-  assert.equal(f.h.json(['task', 'show', 'T2']).status, 'in_progress');
-  assert.equal(apiCalls(f).length, before);
-});
+for (const dependency of ['submitted', 'merged']) {
+  test(`a spawned worker claim reads the recorded stack and makes no gh api call while its dependency is ${dependency}`, (t) => {
+    const f = setup(t);
+    upper(f);
+    const previousStack = f.h.json(['task', 'show', 'T2']).stack;
+    if (dependency === 'merged') {
+      f.accept('T1');
+      f.h.ok(['merge', 'T1']);
+    }
+    f.h.ok(['rework', 'T2', '--reason', 'revise the stacked change']);
+    if (dependency === 'merged') {
+      const state = f.h.readState('tasks.json');
+      const task = state.tasks.find((item) => item.id === 'T2');
+      task.stack = { ...previousStack, linked: false };
+      task.stack_disabled = true;
+      f.h.writeState('tasks.json', state);
+    }
+    const before = apiCalls(f).length;
+    f.write((d) => { d.apiFailure = DENIED_API; });
+    const dispatch = { TOWER_CRANE_HOOK: path.join(f.h.base, 'hook.json'), TOWER_CRANE_TASK: 'T2', TOWER_CRANE_AGENT: 'worker-T2' };
+    const claim = f.h.run(['claim', 'T2', '--agent', 'worker-T2'], { env: dispatch });
+    assert.equal(claim.code, 0, claim.stderr);
+    assert.equal(f.h.json(['task', 'show', 'T2']).status, 'in_progress');
+    assert.equal(apiCalls(f).length, before);
+  });
+}
 
 test('a hooked claim on a task spawn did not dispatch reads GitHub and clears its stale stack record', (t) => {
   const f = setup(t);

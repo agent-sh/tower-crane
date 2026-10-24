@@ -63,7 +63,9 @@ fs.renameSync(process.argv[1] + '.ready.tmp', process.argv[1] + '.ready');
 setInterval(() => {}, 1000);
 \`, process.argv[2]], { stdio: 'ignore' });
 ` : ''}
-${index === 0 && ['stall', 'hold', 'orphan'].includes(trigger) ? 'setInterval(() => {}, 1000);'
+// Keep a stalled worker alive without a periodic callback producing CPU progress.
+${index === 0 && trigger === 'stall' ? "require('node:net').createServer().listen(0, '127.0.0.1');"
+    : index === 0 && ['hold', 'orphan'].includes(trigger) ? 'setInterval(() => {}, 1000);'
     : index === 0 && trigger === 'outage' ? "console.error('HTTP 503 service unavailable'); process.exit(1);"
       : index === 0 && trigger === 'refusal' ? "console.log(JSON.stringify({ type: 'refusal' })); process.exit(1);"
         : trigger === 'top' || index === 0 && ['exit', 'preclaim'].includes(trigger) ? 'process.exit(0);'

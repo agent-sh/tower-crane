@@ -3,6 +3,7 @@
 Tower Crane keeps a project's plan and progress in plain files. The CLI is the state writer.
 
 - [Tasks and lifecycle](state/tasks.md)
+- [Submission history](state/tasks.md#submission-history)
 - [Gates](state/gates.md)
 - [Review](state/review.md)
 - [CI](state/ci.md)
@@ -45,6 +46,8 @@ Existing links use these anchors. Follow the link to the contract in its area.
 <a id="ladder"></a>[ladder](state/tasks.md#ladder)
 
 <a id="resource-containment"></a>[resource-containment](state/containment.md#resource-containment)
+
+<a id="cpu-shares"></a>[cpu-shares](state/containment.md#cpu-shares)
 
 <a id="host-resource-governor"></a>[host-resource-governor](state/containment.md#host-resource-governor)
 
