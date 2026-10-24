@@ -181,6 +181,7 @@ for (const [name, receipt, correction, candidate, ignored] of [
       }
       h.ok(['project', 'set', '--tests-map', JSON.stringify(manual)]);
     }
+    const corrected = h.readState('project.json').tests.map;
     const run = h.runData(candidate);
     h.save({ ...h.github(), runs: [run], artifact: { sha: run.head_sha, tests: [SUITE], map: { 'new.js': [SUITE] } } });
     const refreshes = h.refreshes().length;
@@ -188,7 +189,7 @@ for (const [name, receipt, correction, candidate, ignored] of [
     h.advance(HOUR);
     h.pass();
     assert.deepEqual(h.readState('project.json').tests.map,
-      ignored ? manual : { 'new.js': [SUITE] });
+      ignored ? corrected : { 'new.js': [SUITE] });
     assert.equal(h.refreshes().length, refreshes + (ignored ? 0 : 1));
     assert.equal(h.github().calls.filter((a) => a[0] === 'run').length, downloads + (ignored ? 0 : 1));
     h.advance(HOUR);
