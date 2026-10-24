@@ -116,6 +116,13 @@ module.exports = function stub(harness) {
       }
       const status = cp.spawnSync('git', ['status', '--short', '--untracked-files=all'], { encoding: 'utf8' });
       report.placeholderGitStatus = { code: status.status, stdout: status.stdout || '', stderr: status.stderr || '' };
+      // A command in claude's sandbox: it marks the command and sets
+      // GIT_CONFIG_PARAMETERS to its proxy entries, whatever the harness had.
+      const env = { ...process.env, SANDBOX_RUNTIME: '1', GIT_CONFIG_PARAMETERS: '\'http.proxyAuthMethod=basic\'' };
+      const command = (args) => cp.spawnSync('git', args, { encoding: 'utf8', env });
+      const commandStatus = command(['status', '--short', '--untracked-files=all']);
+      report.commandGit = { status: commandStatus.stdout || '', code: commandStatus.status,
+        gc: command(['config', 'gc.auto']).stdout.trim(), maintenance: command(['config', 'maintenance.auto']).stdout.trim() };
     }
     // claude's Read, Grep and Glob tools answer to permission rules, not to
     // the sandbox: STUB_READ files are read the way those tools would, after

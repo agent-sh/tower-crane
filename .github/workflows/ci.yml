@@ -41,10 +41,11 @@ permissions:
 
 # GitHub keeps one running and one pending run per group; a newer run replaces the pending one.
 # Main pushes share one group: the newest pending head covers every earlier commit, and a running
-# main run is never cancelled. Tag, scheduled and manual runs keep unique groups so none is replaced.
+# main run is never cancelled. Tag and scheduled runs keep unique groups; a manual run replaces an older
+# manual run on its branch, with profile and hang runs in groups of their own so a routine dispatch never cancels them.
 concurrency:
-  group: ${{ github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || github.ref == 'refs/heads/main' && github.event_name == 'push' && 'ci-main-push' || format('ci-run-{0}', github.run_id) }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ${{ github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || github.ref == 'refs/heads/main' && github.event_name == 'push' && 'ci-main-push' || github.event_name == 'workflow_dispatch' && format('ci-dispatch-{0}{1}', github.ref, inputs.profile && '-profile' || inputs.hang && '-hang' || '') || format('ci-run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' }}
 
 jobs:
   # Tasks pass their tests gate (crucial and mapped suites) before submit, so same-repository PRs
@@ -148,12 +149,12 @@ jobs:
           path: ${{ runner.temp }}/coverage/tests-coverage-map.json
           if-no-files-found: error
 
-  # Joins the three shard maps into tests-coverage-map.json, which `tower-crane tests map refresh
+  # Joins the available shard maps into tests-coverage-map.json, which `tower-crane tests map refresh
   # --from-run RUN_ID` pins as tests.map after each daily run.
   coverage-map:
     name: coverage map
     needs: test
-    if: ${{ !cancelled() && !inputs.tests && !inputs.profile && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+    if: ${{ always() && !inputs.tests && !inputs.profile && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -169,7 +170,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh run download "$GITHUB_RUN_ID" -R "$GITHUB_REPOSITORY" -p 'coverage-map-shard-*' -D "$RUNNER_TEMP/coverage-shards"
-          node scripts/tests-coverage-map.js merge --expect 3 --out "$RUNNER_TEMP/tests-coverage-map.json" "$RUNNER_TEMP"/coverage-shards/*/tests-coverage-map.json
+          node scripts/tests-coverage-map.js merge --out "$RUNNER_TEMP/tests-coverage-map.json" "$RUNNER_TEMP"/coverage-shards/*/tests-coverage-map.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: tests-coverage-map

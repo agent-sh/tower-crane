@@ -33,8 +33,10 @@ test('startup receipt consumption cannot fail its publisher', async (t) => {
             if (path.basename(to) !== 'started.json' || ${Boolean(error)}) return result;
             const deadline = performance.now() + 10000; // wait-allow: the receipt barrier uses the production startup window.
             const pause = new Int32Array(new SharedArrayBuffer(4));
+            const parent = process.ppid;
             while (fs.existsSync(to)) {
               if (performance.now() >= deadline) throw new Error('dispatcher did not consume its receipt');
+              if (process.ppid !== parent) throw new Error('dispatcher exited before it consumed its receipt');
               Atomics.wait(pause, 0, 0, 10); // wait-allow: publish/consume barrier bounded by the startup window.
             }
             // The reader may remove this disposable directory as soon as it sees the receipt.
