@@ -178,6 +178,9 @@ test('the testing guide and worker skill document a focused command that agrees 
   const workflow = readWorkflow(root);
   const focused = jobBlock(workflow, 'focused');
   const matrix = /^ {8}os: \$\{\{ (.+) \}\}$/m.exec(focused)[1];
+  const agents = require('../lib/agents');
+  const { ghDenied } = require('../lib/shim');
+  const workerPolicy = agents.policy(agents.load('worker'));
   for (const [file, diagnostic] of [
     ['docs/testing.md', false],
     ['skills/tower-crane-work/SKILL.md', true],
@@ -195,6 +198,12 @@ test('the testing guide and worker skill document a focused command that agrees 
     const instructions = diagnostic ? text.split('\n').find((line) => line.includes(command[0]))
       : text.split('## Focused CI dispatch\n')[1]?.split(/\n## /)[0];
     assert.ok(instructions, `${file}: focused instructions`);
+    assert.equal(ghDenied(['workflow', 'run', 'ci.yml', '--ref', 'BRANCH',
+      '-f', `tests=${tests}`, '-f', `os=${os}`], workerPolicy), 'gh workflow run',
+      `${file}: the documented command requires execution outside the worker sandbox`);
+    assert.match(instructions, /orchestrator or owner/, `${file}: the worker requests an authorized actor`);
+    assert.match(instructions, /on the host/, `${file}: execution uses host GitHub access`);
+    assert.match(instructions, /worker sandbox refuses `gh workflow run`/, `${file}: the worker authority boundary`);
     assert.match(instructions, /space-separated/, `${file}: file-list syntax`);
     assert.match(instructions, /Node 26/, `${file}: focused Node version`);
     assert.match(instructions, /all other jobs are skipped|skips every other job/, `${file}: focused-only execution`);

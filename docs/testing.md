@@ -52,7 +52,7 @@ Proof scratch may be deep: socket paths use the runner's private runtime directo
 
 ## Focused CI dispatch
 
-To diagnose a platform failure, a worker dispatches named test files on its pushed branch:
+To diagnose a platform failure, a worker requests a focused dispatch from the orchestrator or owner. The worker sandbox refuses `gh workflow run` and has no GitHub credential. The orchestrator or owner runs this command on the host for the worker's pushed task branch:
 
 ```sh
 gh workflow run ci.yml --ref BRANCH -f tests='test/gates/ci.test.js' -f os=windows-latest
