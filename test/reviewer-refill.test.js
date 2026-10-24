@@ -18,7 +18,8 @@ function fixture(t) {
     configureHarness(h);
     h.submit();
     for (const gate of ['tests', 'clean', 'ci']) gateEvidence(h, gate, 'orchestrator');
-    h.ok(['task', 'add', '--title', 'Worker', '--acceptance', 'works', '--tier', 'easy']);
+    // Only the easy rung runs a worker here, so urgent T2 keeps it with a recorded reason.
+    h.ok(['task', 'add', '--title', 'Worker', '--acceptance', 'works', '--tier', 'easy', '--tier-reason', 'fixture worker rung']);
     h.ok(['brief', 'set', 'T2', '-'], { input: 'Implement T2.\n' });
     h.ok(['project', 'set', '--workers', '1']);
     const script = path.join(h.base, 'finish.js');
