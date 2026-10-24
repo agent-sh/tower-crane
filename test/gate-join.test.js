@@ -241,7 +241,7 @@ test('an unobservable tests holder expires at the deadline its planner recorded'
   const preload = path.join(h.base, 'deadline-clock.cjs');
   fs.writeFileSync(preload, 'Date.now = () => Number(process.env.TC_DEADLINE_NOW);\n');
   const source = 'gate:unobservable-tests';
-  fs.appendFileSync(path.join(h.state, 'events.jsonl'), `${JSON.stringify({
+  StateFiles.appendLog(h.state, `${JSON.stringify({
     ...first, detail: { ...first.detail, source, host: 'another-host' },
   })}\n`);
   const r = h.run(['check', 'tests', 'T1'], { env: {

@@ -296,7 +296,7 @@ test('CLI launches use the watchdog before registration for unsafe placement or 
     const files = fs.readdirSync(path.join(h.state, 'logs')).map(name => fs.readFileSync(path.join(h.state, 'logs', name), 'utf8'));
     const output = result.stdout + result.stderr + files.join('\n');
     assert.equal(result.code, 0, output);
-    const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+    const events = StateFiles.readEvents(h.state);
     const contained = events.find(e => e.detail?.containment)?.detail.containment;
     assert.equal(contained?.backend, 'watchdog', output);
     if (reason === 'logout') assert.match(output, /warning:.*outside user@.*linger.*logout.*watchdog/);
