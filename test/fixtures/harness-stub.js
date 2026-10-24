@@ -97,6 +97,7 @@ module.exports = function stub(harness) {
     report.settings = settings;
     // claude makes its proxy bridge sockets in the TMPDIR it starts with.
     report.tmpdir = process.env.TMPDIR || null;
+    report.ownTmpdir = process.env.CLAUDE_CODE_TMPDIR || null;
     // Names only: what claude would hand its commands, before its sandbox.
     report.envNames = Object.keys(process.env).sort();
     report.flagSettings = after('--settings') ? JSON.parse(after('--settings')) : null;

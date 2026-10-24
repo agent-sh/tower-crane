@@ -237,7 +237,12 @@ test('research Claude gets native or explicit web MCP tools with worker file and
     // And under /run, which it hides, the resolver (runReads).
     assert.ok(shared.allowWrite.includes(report.socketDir));
     shared.allowWrite = shared.allowWrite.filter((p) => p !== report.socketDir);
-    assert.deepEqual(allowRead.filter((p) => p !== report.socketDir && !p.startsWith(fs.realpathSync(u.home) + path.sep)), [ownHome, path.join(h.state, 'brokers', path.basename(ownHome)), ...A.runReads(u.env)]);
+    if (report.ownTmpdir) {
+      assert.ok(allowRead.includes(report.ownTmpdir) && shared.denyWrite.includes(report.ownTmpdir));
+      assert.ok(!shared.allowWrite.includes(report.ownTmpdir));
+      shared.denyWrite = shared.denyWrite.filter((p) => p !== report.ownTmpdir);
+    }
+    assert.deepEqual(allowRead.filter((p) => ![report.socketDir, report.tmpdir, report.ownTmpdir].includes(p) && !p.startsWith(fs.realpathSync(u.home) + path.sep)), [ownHome, path.join(h.state, 'brokers', path.basename(ownHome)), ...A.runReads(u.env)]);
     assert.ok(shared.denyWrite.includes(h.state));
     // A mask on a path the host lacks leaves a placeholder there, so only existing paths are masked.
     for (const p of [...shared.denyRead, ...shared.denyWrite]) assert.ok(fs.existsSync(p), `${p} is masked but missing`);
@@ -374,7 +379,11 @@ test('a spawned claude agent imports the user\'s global rules by path, loads non
   assert.ok(box.filesystem.denyRead.includes(path.join(h.state, 'brokers')), 'no agent reads another agent\'s broker token');
   assert.ok(box.filesystem.denyRead.includes(path.join(h.state, 'ci-artifacts')), 'no agent reads unredacted local CI artifacts');
   assert.ok(box.filesystem.denyRead.includes(path.join(path.dirname(h.userConfig), 'owner')), 'no agent reads the owner key');
-  assert.deepEqual(box.filesystem.allowRead.filter((p) => p !== seen.tmpdir && p !== seen.socketDir), [path.join(u.home, '.claude', 'CLAUDE.md'), home, path.join(h.state, 'brokers', started.agent), ...A.runReads(u.env)],
+  if (seen.ownTmpdir) {
+    assert.ok(box.filesystem.allowRead.includes(seen.ownTmpdir) && box.filesystem.denyWrite.includes(seen.ownTmpdir));
+    assert.ok(!box.filesystem.allowWrite.includes(seen.ownTmpdir));
+  }
+  assert.deepEqual(box.filesystem.allowRead.filter((p) => ![seen.tmpdir, seen.ownTmpdir, seen.socketDir].includes(p)), [path.join(u.home, '.claude', 'CLAUDE.md'), home, path.join(h.state, 'brokers', started.agent), ...A.runReads(u.env)],
     'only the user\'s global rules under the home, this dispatch home, its own broker directory, the resolver under /run and its own temp directory are readable');
   // /run is hidden whole, with docker's, the buses' and every other host socket in it.
   for (const p of A.runDirs()) assert.ok(box.filesystem.denyRead.includes(p), p);
@@ -392,65 +401,40 @@ test('a spawned claude agent imports the user\'s global rules by path, loads non
   noSecretsCopied(h);
 });
 
-// /tmp holds the X11 and session bus sockets, and claude lets a command
-// connect to any socket it sees, so its sandbox hides /tmp, as codex never
-// mounts it. claude's own Read tools cannot connect to a socket, and a deny
-// rule for them would take no exception for a worktree in /tmp. An agent left
-// with a TMPDIR of /tmp keeps it, and /tmp stays hidden: claude makes its
-// proxy sockets there, so https from its commands fails, and spawn says so.
-test('a sandboxed claude command cannot see /tmp, even when claude makes its proxy sockets there', { skip: (NO_STUBS || process.platform !== 'linux') && 'Linux only' }, (t) => {
-  const { h, u } = setup(t);
-  isolated(h, 'small', 'claude');
-  const tmp = fs.realpathSync('/tmp');
-  const caller = path.join(h.base, 'caller-tmp');
-  fs.mkdirSync(caller);
-  spawn(h, u, 'small', { TMPDIR: caller });
-  const seen = u.report();
-  assert.equal(seen.tmpdir, caller, 'the fixture\'s cache root is too deep for claude\'s own temp directory, so the agent keeps the caller\'s');
-  const box = seen.settings.sandbox.filesystem;
-  assert.ok(box.denyRead.includes(tmp), '/tmp is hidden whole');
-  for (const p of ['.X11-unix/X0', 'dbus-probe/socket']) assert.equal(commandsRead(seen, path.join(tmp, p)), false, p);
-  assert.ok(!box.allowRead.some((p) => p === tmp || p.startsWith(tmp + path.sep)), 'nothing in /tmp is allowed back: the agent needs nothing there');
-  assert.ok(!seen.settings.permissions.deny.some((rule) => rule.includes(`(/${tmp})`) || rule.includes(`(/${tmp}/**)`)), 'the Read tools keep /tmp');
-  const started = spawn(h, u, 'small', { TMPDIR: tmp });
-  const kept = u.report();
-  assert.equal(kept.tmpdir, tmp);
-  assert.ok(kept.settings.sandbox.filesystem.denyRead.includes(tmp), '/tmp stays hidden');
-  assert.equal(commandsRead(kept, path.join(tmp, 'planted')), false, 'a file planted in /tmp is out of reach');
-  assert.ok(!kept.settings.sandbox.filesystem.allowRead.some((p) => p === '/' || p === tmp), kept.settings.sandbox.filesystem.allowRead.join(' '));
-  assert.ok(started.notices.includes(`claude's sandbox keeps /tmp hidden: the caller's TMPDIR ${tmp} is /tmp itself, so it is not allowed back`), started.notices.join('\n'));
-});
-
-// The TMPDIR that decides is the one claude starts with, after the project's
-// env and env_file, not the dispatcher's.
-function claudeTmpRoute(t, project, dispatcher) {
-  const { h, u } = setup(t);
-  isolated(h, 'small', 'claude');
-  const tmp = fs.realpathSync('/tmp');
-  const caller = path.join(h.base, 'caller-tmp');
-  fs.mkdirSync(caller);
-  const pick = (which) => (which === 'tmp' ? tmp : caller);
-  if (project.file) {
-    const envFile = path.join(h.base, 'private.env');
-    fs.writeFileSync(envFile, `TMPDIR=${pick(project.file)}\n`, { mode: 0o600 });
-    h.ok(['project', 'set', '--env_file', envFile]);
-  } else {
-    h.ok(['project', 'set', '--env', JSON.stringify({ TMPDIR: pick(project.env) })]);
+// Claude's commands can connect to any socket they see. A private TMPDIR
+// keeps the host sockets hidden even when the cache path is deep.
+test('a sandboxed claude keeps private temp and hides host sockets across dispatcher and project temp settings', { skip: (NO_STUBS || process.platform !== 'linux') && 'Linux only' }, (t) => {
+  const hasHostTemp = fs.existsSync('/tmp');
+  for (const source of ['dispatcher', 'env', 'env_file']) {
+    for (const hostTemp of [false, true]) {
+      const { h, u } = setup(t);
+      isolated(h, 'small', 'claude');
+      const tmp = hasHostTemp ? fs.realpathSync('/tmp') : '/tmp';
+      const caller = path.join(h.base, 'caller-tmp');
+      fs.mkdirSync(caller);
+      const selected = hostTemp ? tmp : caller;
+      if (source === 'env_file') {
+        const envFile = path.join(h.base, 'private.env');
+        fs.writeFileSync(envFile, `TMPDIR=${selected}\n`, { mode: 0o600 });
+        h.ok(['project', 'set', '--env_file', envFile]);
+      } else if (source === 'env') {
+        h.ok(['project', 'set', '--env', JSON.stringify({ TMPDIR: selected })]);
+      }
+      spawn(h, u, 'small', { TMPDIR: source === 'dispatcher' ? selected : hostTemp ? caller : tmp });
+      const seen = u.report();
+      const label = `${source}, host temp ${hostTemp}`;
+      assert.ok(seen.tmpdir && seen.tmpdir !== tmp && seen.tmpdir !== caller, `${label}: private temp replaces inherited settings`);
+      assert.ok(seen.tmpdir.startsWith(u.home + path.sep), `${label}: private temp stays in the user cache`);
+      const box = seen.settings.sandbox.filesystem;
+      if (hasHostTemp) {
+        assert.ok(box.denyRead.includes(tmp), `${label}: host temp is hidden whole`);
+        for (const p of ['.X11-unix/X0', 'dbus-probe/socket']) assert.equal(commandsRead(seen, path.join(tmp, p)), false, `${label}: ${p}`);
+        assert.ok(!box.allowRead.some((p) => p === tmp || p.startsWith(tmp + path.sep)), `${label}: no host temp socket is allowed back`);
+        assert.ok(!seen.settings.permissions.deny.some((rule) => rule.includes(`(/${tmp})`) || rule.includes(`(/${tmp}/**)`)), `${label}: file tools keep host temp`);
+      }
+      assert.deepEqual(fs.readdirSync(caller), [], `${label}: caller sentinel stays empty`);
+    }
   }
-  spawn(h, u, 'small', { TMPDIR: pick(dispatcher) });
-  return { seen: u.report(), tmp, caller };
-}
-
-test('a sandboxed claude hides /tmp when env_file moves its TMPDIR there', { skip: (NO_STUBS || process.platform !== 'linux') && 'Linux only' }, (t) => {
-  const { seen, tmp } = claudeTmpRoute(t, { file: 'tmp' }, 'caller');
-  assert.equal(seen.tmpdir, tmp, 'env_file moves the agent to /tmp');
-  assert.ok(seen.settings.sandbox.filesystem.denyRead.includes(tmp), '/tmp is hidden, with claude\'s proxy sockets in it');
-});
-
-test('a sandboxed claude hides /tmp when the project\'s env moves its TMPDIR out of a dispatcher\'s /tmp', { skip: (NO_STUBS || process.platform !== 'linux') && 'Linux only' }, (t) => {
-  const { seen, tmp, caller } = claudeTmpRoute(t, { env: 'caller' }, 'tmp');
-  assert.equal(seen.tmpdir, caller, 'the project\'s env moves the agent out of /tmp');
-  assert.ok(seen.settings.sandbox.filesystem.denyRead.includes(tmp), '/tmp is hidden');
 });
 
 // The parent of a PATH entry of /tmp is /, which opened the whole

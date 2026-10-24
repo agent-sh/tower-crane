@@ -1,0 +1,1 @@
+- Timeout tests retain the deterministic deadline-ordering table and use a synchronous readiness observer for the eight real-child stdout, stderr, exit and idle variants.
