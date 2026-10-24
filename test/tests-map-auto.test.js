@@ -217,6 +217,32 @@ for (const [name, offset] of [['the current reservation', 0], ['a newer host res
   });
 }
 
+for (const [name, offset] of [['the current reservation', 0], ['a newer host reservation', HOUR]]) {
+  test(`a delayed failed poll publishes a complete clock and ${name}`, (t) => {
+    const h = setup(t);
+    const polledAt = h.now() + 2;
+    const receipt = { repo: 'acme/demo', base: 'main', read_at: new Date(polledAt + offset).toISOString() };
+    h.env.TC_MAP_POLL_DELAY = JSON.stringify({ now: polledAt });
+    h.env.NODE_OPTIONS += ` --require=${JSON.stringify(path.join(__dirname, 'fixtures', 'tests-map-poll-delay.js'))}`;
+    h.save({ ...h.github(), fail: true,
+      supersedingPoll: { file: path.join(h.state, 'tests-map-cache.json'), receipt } });
+
+    assert.match(h.pass().stderr, /GitHub unavailable/);
+    const cached = h.readState('tests-map-cache.json');
+    assert.deepEqual({ repo: cached.repo, base: cached.base, read_at: cached.read_at }, receipt);
+    assert.equal(Object.hasOwn(cached, 'error'), offset === 0);
+    assert.equal(h.now(), polledAt + offset, 'the clock published by both fixtures is complete');
+    const calls = h.github().calls;
+    assert.equal(calls.length, 1, 'the shared mock keeps the failed request');
+    assert.match(calls[0][1], /\/actions\/runs\?/);
+
+    delete h.env.TC_MAP_POLL_DELAY;
+    h.advance(HOUR - 1);
+    h.pass();
+    assert.deepEqual(h.github().calls, calls, 'the published receipt keeps the full hourly retry interval');
+  });
+}
+
 test('a coverage map past three days has one offline inbox item and one notification until refreshed', (t) => {
   const h = setup(t);
   h.save({ ...h.github(), runs: [] });

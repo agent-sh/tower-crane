@@ -1,0 +1,1 @@
+- Exercise both coverage-map fixtures in a changed CLI regression table, including delayed failed polls with current and newer reservations.
