@@ -422,7 +422,7 @@ jobs:
           const args = ['test/run.js', '--test-concurrency=3', ...files];
           const windows = process.platform === 'win32';
           const result = spawnSync(windows ? 'pwsh' : process.execPath,
-            windows ? ['-NoProfile', '-File', 'scripts/shard-guard.ps1', process.execPath, ...args] : args,
+            windows ? ['-NoProfile', '-File', 'scripts/shard-guard.ps1', 'node', ...args] : args,
             { stdio: 'inherit' });
           if (result.error) console.error(result.error);
           process.exit(result.status ?? 1);

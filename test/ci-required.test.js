@@ -172,7 +172,7 @@ test('focused dispatch selects its runners and skips every other job, including 
   }
 });
 
-test('focused dispatch validates every path before starting exactly the named files without a shell', () => {
+test('focused dispatch validates every path before starting exactly the named files as literal arguments', () => {
   const focused = jobBlock(readWorkflow(path.resolve(__dirname, '..')), 'focused');
   const script = /node <<'NODE'\n([\s\S]*?)\n {10}NODE/.exec(focused)?.[1]?.replace(/^ {10}/gm, '');
   assert.ok(script, 'the focused step runs its validator as node code');

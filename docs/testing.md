@@ -55,7 +55,7 @@ Proof scratch may be deep: socket paths use the runner's private runtime directo
 To diagnose a platform failure, a worker dispatches named test files on its pushed branch:
 
 ```sh
-gh workflow run ci.yml --ref BRANCH -f tests='test/a.test.js' -f os=windows-latest
+gh workflow run ci.yml --ref BRANCH -f tests='test/gates/ci.test.js' -f os=windows-latest
 ```
 
 `tests` accepts space-separated file paths under `test/` ending in `.test.js`, including `test/gates/`. The job refuses traversal, globs, flags and shell syntax before starting any test. `os` selects `ubuntu-latest`, `windows-latest` or `both` (the default). Each chosen OS runs exactly those files once on Node 26 with `node test/run.js --test-concurrency=3`. The files appear in the job name. Focused dispatch skips every other job, including shards, repeats, proofs, the coverage map, profiling and mutation sampling, even when `profile` is also set. Without `tests`, the existing full and profile dispatch modes apply.
