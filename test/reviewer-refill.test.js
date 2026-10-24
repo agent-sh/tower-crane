@@ -181,7 +181,7 @@ for (const [automatic, stage, pendingExplicit] of [
   [false, 'check', false], [false, 'admit', false],
   [true, 'check', true], [true, 'admit', true],
 ]) {
-    test(`a deferred ${automatic ? 'automatic' : 'explicit'} light review retains its identity at ${stage}${pendingExplicit ? ' over an explicit debt' : ''}`, async (t) => {
+    test(`${automatic ? 'verified metadata carry bypasses reviewer admission' : 'a deferred explicit light review retains its identity'} at ${stage}${pendingExplicit ? ' with an explicit debt' : ''}`, async (t) => {
       const h = fixture(t);
       h.ok(['task', 'update', 'T2', '--status', 'cancelled']);
       const sha = h.json(['task', 'show', 'T1']).sha;
@@ -219,6 +219,31 @@ for (const method of ['check', 'admit']) {
         fs.writeFileSync(held, '');
         assert.equal(h.run(['accept', 'T1', '--agent', 'orchestrator'], { pre: ['--require', preload] }).code, 3);
         assert.equal(h.json(['status']).deferred_reviewers[0].body_recheck, undefined);
+      }
+      if (automatic) {
+        const before = h.logs().length;
+        const task = h.json(['task', 'show', 'T1']);
+        const review = task.evidence.findLast((e) => e.type === 'review');
+        writeAtomic(input, JSON.stringify({ sha, revision: 1, pr: 7, branch: 'fixture-change',
+          review, body_hash: 'corrected' }));
+        fs.writeFileSync(held, '');
+        const accepted = h.run(['accept', 'T1', '--agent', 'orchestrator'], { pre: ['--require', preload] });
+        assert.equal(accepted.code, 0, accepted.stdout + accepted.stderr);
+        const current = h.json(['task', 'show', 'T1']);
+        assert.equal(current.status, 'accepted');
+        const carried = current.evidence.findLast((e) => e.type === 'review');
+        assert.equal(carried.source, 'review carry');
+        assert.equal(carried.carried_from.sha, sha);
+        assert.equal(carried.carried_from.agent, 'first-reviewer');
+        assert.equal(carried.receipt.reason, 'title or body only');
+        const software = (task) => task.evidence.filter((e) => ['tests', 'clean', 'ci'].includes(e.type));
+        assert.deepEqual(software(current), software(task), 'verified metadata reuses software evidence');
+        const added = h.logs().slice(before);
+        assert.equal(added.some((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer'), false);
+        assert.equal(added.some((e) => ['review dispatch deferred', 'review dispatch context'].includes(e.cmd)), false);
+        assert.deepEqual(h.json(['status']).deferred_reviewers, [], 'carried verdict settles any prior reviewer debt');
+        assert.equal(Body.failures(S.loadState(h.state), current), 0);
+        return;
       }
       for (let round = 1; round <= 2; round++) {
         const task = h.json(['task', 'show', 'T1']);
@@ -427,72 +452,106 @@ G.check = (ctx, unit) => { throw Object.assign(new TowerCraneError(3, 'fixture d
   });
 }
 
-for (const light of [false, true]) {
-  test(`concurrent ${light ? 'light' : 'ordinary'} reviewer preparation records one launch`, async (t) => {
-    const h = fixture(t);
-    h.ok(['task', 'update', 'T2', '--status', 'cancelled']);
-    const sha = h.json(['task', 'show', 'T1']).sha;
-    h.ok(['worktree', 'T1', '--agent', 'orchestrator']);
-    if (light) {
-      h.reviewer('T1', 'initial-reviewer', sha);
-      h.ok(['evidence', 'T1', '--agent', 'initial-reviewer', '--type', 'review', '--fail', '--sha', sha,
-        '--summary', 'A false claim.', '--findings', JSON.stringify([{ kind: 'false-claim', path: 'PR body', claim: 'A false claim.' }])]);
-    }
-    const arrived = path.join(h.base, 'review-arrivals');
-    const released = path.join(h.base, 'review-release');
-    fs.mkdirSync(arrived);
-    const harness = path.join(h.base, 'held-review.js');
-    fs.writeFileSync(harness, `const fs = require('node:fs');
+test('concurrent ordinary reviewer preparation records one launch', async (t) => {
+  const h = fixture(t);
+  h.ok(['task', 'update', 'T2', '--status', 'cancelled']);
+  h.ok(['worktree', 'T1', '--agent', 'orchestrator']);
+  const arrived = path.join(h.base, 'review-arrivals');
+  const released = path.join(h.base, 'review-release');
+  fs.mkdirSync(arrived);
+  const harness = path.join(h.base, 'held-review.js');
+  fs.writeFileSync(harness, `const fs = require('node:fs');
 const { HUNG_TEST_MS } = require(${JSON.stringify(path.join(__dirname, 'signals.js'))});
 const end = Date.now() + HUNG_TEST_MS;
 const done = () => {
-  if (fs.existsSync(${JSON.stringify(released)})) return process.exit(0);
-  if (Date.now() >= end) return process.exit(1);
-  setTimeout(done, 10); // wait-allow: hold the reviewer until the parent validates both concurrent dispatches
+if (fs.existsSync(${JSON.stringify(released)})) return process.exit(0);
+if (Date.now() >= end) return process.exit(1);
+setTimeout(done, 10); // wait-allow: hold the reviewer until the parent validates both concurrent dispatches
 };
 done();
 `);
-    for (const rung of ['easy', 'review']) h.ok(['ladder', 'set', rung, '--command', JSON.stringify([process.execPath, harness, '{prompt}'])]);
-    const preload = path.join(h.base, 'parallel-review.js');
-    fs.writeFileSync(preload, `const fs = require('node:fs'), path = require('node:path');
+  for (const rung of ['easy', 'review']) h.ok(['ladder', 'set', rung, '--command', JSON.stringify([process.execPath, harness, '{prompt}'])]);
+  const preload = path.join(h.base, 'parallel-review.js');
+  fs.writeFileSync(preload, `const fs = require('node:fs'), path = require('node:path');
 const R = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'reviewer.js'))});
-const T = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'tasks.js'))});
 const { HUNG_TEST_MS } = require(${JSON.stringify(path.join(__dirname, 'signals.js'))});
-if (${light}) {
-  const accept = T.accept;
-  T.accept = (ctx) => accept({ ...ctx, automatic: true, bodyRecheck: { sha: ${JSON.stringify(sha)}, revision: 1 } });
-}
 const revuto = R.revuto;
 R.revuto = async (...args) => {
-  const result = await revuto(...args);
+const result = await revuto(...args);
+fs.writeFileSync(path.join(${JSON.stringify(arrived)}, String(process.pid)), '');
+const end = Date.now() + HUNG_TEST_MS;
+await new Promise((resolve, reject) => {
+  const ready = () => {
+    if (fs.readdirSync(${JSON.stringify(arrived)}).length === 2) return resolve();
+    if (Date.now() >= end) return reject(new Error('the peer dispatch did not finish preparation'));
+    setTimeout(ready, 10); // wait-allow: synchronize two CLI callers before the state-lock dispatch check
+  };
+  ready();
+});
+return result;
+};
+`);
+  const before = h.logs().filter((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer').length;
+  try {
+    const results = await Promise.all([
+      h.runAsync(['accept', 'T1', '--agent', 'orchestrator'], { pre: ['--require', preload] }),
+      h.runAsync(['spawn', '--task', 'T1', '--role', 'review', '--agent', 'orchestrator'], { pre: ['--require', preload] }),
+    ]);
+    assert.deepEqual(results.map((r) => r.code).sort(), [0, 1], results.map((r) => r.stderr).join('\n'));
+    assert.match(results.find((r) => r.code).stderr, /a reviewer is still running/);
+    assert.equal(fs.readdirSync(arrived).length, 2, 'both callers completed asynchronous preparation');
+    assert.equal(h.logs().filter((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer').length, before + 1);
+  } finally {
+    if (fs.existsSync(h.base)) fs.writeFileSync(released, '');
+  }
+});
+test('concurrent verified metadata acceptance records one carry and launches no reviewer', async (t) => {
+  const h = fixture(t);
+  h.ok(['task', 'update', 'T2', '--status', 'cancelled']);
+  const sha = h.json(['task', 'show', 'T1']).sha;
+  h.reviewer('T1', 'initial-reviewer', sha);
+  h.ok(['evidence', 'T1', '--agent', 'initial-reviewer', '--type', 'review', '--fail', '--sha', sha,
+    '--summary', 'A false claim.', '--findings',
+    JSON.stringify([{ kind: 'false-claim', path: 'PR body', claim: 'A false claim.' }])]);
+  const arrived = path.join(h.base, 'metadata-arrivals');
+  fs.mkdirSync(arrived);
+  const preload = path.join(h.base, 'parallel-metadata.js');
+  fs.writeFileSync(preload, `const fs = require('node:fs'), path = require('node:path');
+const T = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'tasks.js'))});
+const { HUNG_TEST_MS } = require(${JSON.stringify(path.join(__dirname, 'signals.js'))});
+const accept = T.accept;
+T.accept = async (ctx) => {
   fs.writeFileSync(path.join(${JSON.stringify(arrived)}, String(process.pid)), '');
   const end = Date.now() + HUNG_TEST_MS;
   await new Promise((resolve, reject) => {
     const ready = () => {
       if (fs.readdirSync(${JSON.stringify(arrived)}).length === 2) return resolve();
-      if (Date.now() >= end) return reject(new Error('the peer dispatch did not finish preparation'));
-      setTimeout(ready, 10); // wait-allow: synchronize two CLI callers before the state-lock dispatch check
+      if (Date.now() >= end) return reject(new Error('the peer metadata accept did not start'));
+      setTimeout(ready, 10); // wait-allow: synchronize two verified metadata accepts before either applies carryover
     };
     ready();
   });
-  return result;
+  return accept({ ...ctx, automatic: true, bodyRecheck: { sha: ${JSON.stringify(sha)}, revision: 1 } });
 };
 `);
-    const before = h.logs().filter((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer').length;
-    try {
-      const results = await Promise.all([
-        h.runAsync(['accept', 'T1', '--agent', 'orchestrator'], { pre: ['--require', preload] }),
-        h.runAsync(['spawn', '--task', 'T1', '--role', 'review', '--agent', 'orchestrator'], { pre: ['--require', preload] }),
-      ]);
-      assert.deepEqual(results.map((r) => r.code).sort(), [0, 1], results.map((r) => r.stderr).join('\n'));
-      assert.match(results.find((r) => r.code).stderr, /a reviewer is still running/);
-      assert.equal(fs.readdirSync(arrived).length, 2, 'both callers completed asynchronous preparation');
-      assert.equal(h.logs().filter((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer').length, before + 1);
-    } finally {
-      if (fs.existsSync(h.base)) fs.writeFileSync(released, '');
-    }
-  });
-}
+  const before = h.logs().length;
+  const results = await Promise.all([
+    h.runAsync(['accept', 'T1', '--agent', 'orchestrator'], { pre: ['--require', preload] }),
+    h.runAsync(['accept', 'T1', '--agent', 'orchestrator'], { pre: ['--require', preload] }),
+  ]);
+  assert.ok(results.some((r) => r.code === 0), results.map((r) => r.stdout + r.stderr).join('\n'));
+  for (const result of results.filter((r) => r.code)) {
+    assert.equal(result.code, 1, result.stderr);
+    assert.match(result.stderr, /requires a submitted task|only submitted tasks|changed while preparing carryover|changed while accepting/);
+  }
+  assert.equal(fs.readdirSync(arrived).length, 2);
+  const added = h.logs().slice(before);
+  assert.equal(added.filter((e) => e.cmd === 'review carry').length, 1);
+  assert.equal(added.some((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer'), false);
+  const current = h.json(['task', 'show', 'T1']);
+  assert.equal(current.status, 'accepted');
+  assert.equal(current.evidence.filter((e) => e.source === 'review carry').length, 1);
+});
 
 test('deferred review evidence is read only for current outstanding debt', (t) => {
   const R = require('../lib/reviewer');
