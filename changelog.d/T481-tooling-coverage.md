@@ -1,0 +1,1 @@
+- Integration tests execute the coverage and options tools through their scratch allocation and cleanup paths, covering cache defaults, explicit overrides and sandbox temp aliases.
