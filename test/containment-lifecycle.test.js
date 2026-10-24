@@ -14,6 +14,10 @@ const fixture = path.join(__dirname, 'fixtures', 'containment-lifecycle.js');
 process.env.TOWER_CRANE_TEST_CONTAINMENT = '1';
 // The fixture's times stretch on Windows, where a CIM snapshot and a stop take about a second each.
 const scale = process.platform === 'win32' ? 5 : 1;
+// The lifecycle fixture's work writes its marker once it sees go, which the test
+// creates after awaiting containmentDone. Work left running polls go every 25 ms, so it
+// has written by the end of this window; a stopped process never does.
+const stoppedWindow = () => new Promise(resolve => setTimeout(resolve, 500 * scale)); // wait-allow: bound for a marker from work containment failed to stop
 
 for (const [mode, retained, cli] of [
   ['cooperative', false, false], ['delayed', false, false], ['ignore', false, false],
@@ -232,8 +236,18 @@ for (const [kind, ending, owner, late, survives] of cases) {
     let metadata;
     let reason;
     if (owner === 'gate-owner') {
+      // On Windows treeExec returns before containment's stop of the leftovers ends, so wait for it as the other rows do.
+      const launched = [];
+      const spawn = C.spawn;
+      t.mock.method(C, 'spawn', function (...rest) {
+        const child = spawn.apply(this, rest);
+        launched.push(child);
+        return child;
+      });
       const result = await G.treeExec(process.execPath, args, { resources: limits, env: h.env, timeout: 10000 });
       assert.equal(result.status, 0, result.stderr);
+      assert.equal(launched.length, 1);
+      await launched[0].containmentDone;
       metadata = result.containment;
     } else {
       // A keeper that took over the scope reads its Result first, so only the keeper settles it.
@@ -299,17 +313,17 @@ if(process.env.TC_KEEPER_HOLD){
       await waitOnRepo(h, () => reason, 'late limit reported');
       await waitOnRepo(h, () => !detachedAlive(work), 'late limit stopped the dispatched work');
     }
-    await new Promise(resolve => setTimeout(resolve, 2200 * scale)); // wait-allow: all finite fixture children and the keeper end
+    fs.writeFileSync(path.join(dir, 'go'), '');
     if (survives) {
-      assert.equal(fs.existsSync(path.join(dir, 'managed.done')), true);
-      assert.equal(fs.existsSync(path.join(dir, 'grandchild.done')), true);
+      await waitOnRepo(h, () => ['managed.done', 'grandchild.done'].every(name => fs.existsSync(path.join(dir, name))),
+        'retained work finished after its owner');
       assert.ok(metadata.retained?.length, JSON.stringify(metadata));
     } else if (late !== 'none') {
       assert.equal(reason, late === 'tasks' ? 'resource-tasks-max' : 'resource-memory-max', JSON.stringify(metadata));
-      assert.equal(fs.existsSync(path.join(dir, 'managed.done')), false);
     } else {
       assert.equal(metadata.retained, undefined);
     }
+    await stoppedWindow();
     assert.equal(fs.existsSync(path.join(dir, 'ordinary.done')), false);
     if (!survives) assert.equal(fs.existsSync(path.join(dir, 'managed.done')), false);
   });
@@ -391,7 +405,8 @@ test('a CLI worker fixture named like a supervisor ends with its worker', async 
   h.env.TC_UNRECORDED_FIXTURE = '1';
   const result = h.run(['spawn', '--task', 'T1', '--wait']);
   assert.equal(result.code, 0, result.stdout + result.stderr);
-  await new Promise(resolve => setTimeout(resolve, 2200 * scale)); // wait-allow: bounded dispatched fixture lifetime
+  fs.writeFileSync(path.join(dir, 'go'), '');
+  await stoppedWindow();
   assert.equal(fs.existsSync(path.join(dir, 'managed.done')), false);
   assert.equal(fs.existsSync(path.join(dir, 'grandchild.done')), false);
   assert.equal(fs.existsSync(path.join(dir, 'ordinary.done')), false);
