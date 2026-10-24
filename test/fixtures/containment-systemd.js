@@ -9,7 +9,9 @@ const group = process.env.TC_FAKE_CGROUP;
 const log = process.env.TC_FAKE_SYSTEMD_LOG;
 const version = Number(process.env.TC_FAKE_SYSTEMD_VERSION || 259);
 const types = { PIDs: 'au', Slice: 's', TasksMax: 't', MemoryMax: 't', MemorySwapMax: 't',
-  OOMPolicy: 's', Delegate: 'b' };
+  OOMPolicy: 's', Delegate: 'b', CPUWeight: 't' };
+// The fence's slice, or a project's slice directly below it.
+const FENCE = /^test-fence(?:-towercrane_[0-9a-f]{12})?\.slice$/;
 
 function apply(properties) {
   if (properties.OOMPolicy !== 'continue') throw new Error('OOMPolicy must be continue');
@@ -56,8 +58,8 @@ if (require.main !== module) {
       properties[name] = assignment.slice(equal + 1);
     }
     const slice = properties.Slice || args.find((arg) => arg.startsWith('--slice='))?.slice('--slice='.length);
-    if (slice !== 'test-fence.slice') throw new Error('wrong scope slice');
-    apply(properties);
+    if (!FENCE.test(slice)) throw new Error('wrong scope slice');
+    apply({ ...properties, Slice: slice });
     let command = args.slice(separator + 1);
     if (version >= 254 && !literal) {
       command = command.map((arg) => arg.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (_, name) => process.env[name] || ''));

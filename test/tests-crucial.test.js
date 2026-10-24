@@ -79,6 +79,12 @@ test('with tests.crucial and a map pinned, a change runs crucial plus the suites
   assert.deepEqual(runs.map((c) => c.status === 0), [true, true, false], 'head and scoped proof pass; the reverted proof fails');
   assert.ok(runs.every((c) => c.command !== fullCommand && !c.command.includes('other.test.js')));
   assert.match(result.summary, /Head suite mode crucial: tests\.crucial plus the changed tests and the tests\.map suites covering the change/);
+  // The evidence and its audit event time each step, so the gate's time can be read from receipts.
+  assert.deepEqual(Object.keys(result.receipt.phases).sort(), ['head', 'proof', 'reverted', 'total']);
+  // read-published: the check above has ended, so nothing appends to the event log.
+  const audited = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)
+    .findLast((e) => e.cmd === 'check tests').detail.receipt.phases;
+  assert.deepEqual(audited, result.receipt.phases);
   assert.equal(counts(h), true);
   // The map changes after every daily run; the receipt names what it ran, so it still counts.
   h.ok(['project', 'set', '--tests-map', JSON.stringify({ ...map, 'value.js': ['test/other.test.js'] })]);
@@ -93,6 +99,17 @@ test('with tests.crucial and a map pinned, a change runs crucial plus the suites
   assert.match(today.receipt.head_reason, /no PR/);
   assert.equal(today.commands.find((c) => c.command !== 'git').command, fullCommand);
   assert.equal(counts(h), true);
+});
+
+// Every task of a project in crucial mode takes this path: a changed test that also passes at the
+// base still fails the gate.
+test('in crucial mode a changed test that passes without the change does not prove it', (t) => {
+  const h = fixture(t, map, "console.log('asserts nothing');\n");
+  const result = check(h, 1);
+  assert.equal(result.ok, false);
+  assert.match(result.summary, /tests pass without the change; they do not prove it\./);
+  assert.match(result.summary, /2\. `.*test\/value\.test\.js` with 2 non-test files reverted to \w+ .*: exit 0/);
+  assert.equal(counts(h), false);
 });
 
 for (const baseRef of ['main', 'origin/main']) for (const signed of [false, true]) for (const showSignature of [false, true]) test(`a crucial file added on ${baseRef} after the submitted head is skipped with a receipt (signed=${signed}, log.showSignature=${showSignature})`, (t) => {
@@ -173,18 +190,19 @@ for (const baseRef of ['main', 'origin/main']) for (const removal of ['missing o
 });
 
 for (const [keep, kind, mode] of [[true, 'code', 'run-only (test-only diff)'], [false, 'docs', 'prove']]) test(`skipping every crucial file in ${mode} does not invoke an empty selector or the full suite`, (t) => {
-  const h = fixture(t, map, undefined, kind);
+  const h = fixture(t, { ...map, '**/*.txt': [] }, undefined, kind);
   h.git(['switch', 'main']);
-  h.git(['switch', '-c', 'docs-change']);
-  fs.appendFileSync(path.join(h.repo, 'README.md'), 'Documentation only.\n');
+  h.git(['switch', '-c', 'notes-change']);
+  // A docs path would take the docs-only pass before crucial selection.
+  fs.writeFileSync(path.join(h.repo, 'notes.txt'), 'Notes only.\n');
   h.git(['add', '.']);
-  h.git(['commit', '-qm', 'documentation change']);
+  h.git(['commit', '-qm', 'notes change']);
   const head = h.git(['rev-parse', 'HEAD']);
   h.git(['switch', 'main']);
   fs.writeFileSync(path.join(h.repo, 'test/new.test.js'), "console.log('new suite');\n");
   h.git(['add', '.']);
   h.git(['commit', '-qm', 'new crucial suite']);
-  h.ok(['project', 'set', '--tests-crucial', '["test/new.test.js"]', '--tests-keep', keep ? '["*.md"]' : 'null']);
+  h.ok(['project', 'set', '--tests-crucial', '["test/new.test.js"]', '--tests-keep', keep ? '["*.txt"]' : 'null']);
   h.ok(['submit', 'T1', '--sha', head, '--agent', 'worker']);
   const result = check(h);
   assert.equal(result.receipt.mode, mode);
@@ -204,7 +222,7 @@ for (const [name, settings, valueTest, ok, pattern] of [
   ['the task\'s test does not run the file no entry covers', { '**/*.md': [] }, "console.log('value is not loaded');\n", false,
     /coverage gap: no tests\.map entry covers value\.js, and the task's changed tests \(test\/value\.test\.js\) do not run it\./],
   ['a documentation file has no entry', { 'value.js': ['test/mapped.test.js'] }, undefined, false,
-    /coverage gap: no tests\.map entry covers README\.md, .*needs a declared entry instead: the orchestrator adds it with tower-crane project set --tests-map\./],
+    /coverage gap: no tests\.map entry covers README\.md, .*tests-map\.declared\.json/],
 ]) {
   test(`a changed file without a map entry: ${name}`, (t) => {
     const h = fixture(t, settings, valueTest);
@@ -224,23 +242,178 @@ for (const [name, settings, valueTest, ok, pattern] of [
   });
 }
 
+test('a task declares its new data file at submitted head without changing project settings', (t) => {
+  const h = fixture(t);
+  const before = h.readState('project.json');
+  fs.writeFileSync(path.join(h.repo, 'payload.json'), '{"value":1}\n');
+  fs.writeFileSync(path.join(h.repo, 'tests-map.declared.json'), JSON.stringify({
+    'payload.json': ['test/value.test.js'],
+    'value.js': ['test/value.test.js'],
+  }));
+  fs.appendFileSync(path.join(h.repo, 'test/value.test.js'),
+    "require('node:assert/strict').equal(JSON.parse(require('node:fs').readFileSync('payload.json', 'utf8')).value, 1);\n");
+  h.git(['add', '.']);
+  h.git(['commit', '-qm', 'declare data coverage']);
+  const sha = h.git(['rev-parse', 'HEAD']);
+  h.ok(['submit', 'T1', '--sha', sha, '--agent', 'worker']);
+  // Neither the base declaration nor an uncommitted edit is the submitted declaration.
+  fs.writeFileSync(path.join(h.repo, 'tests-map.declared.json'), '{"payload.json":["test/missing.test.js"]}');
+  const result = check(h);
+  assert.equal(result.ok, true, result.summary);
+  assert.equal(result.receipt.coverage_gaps, undefined);
+  assert.ok(!result.receipt.head_tests.includes('test/mapped.test.js'), 'the declaration overrides the measured entry');
+  assert.deepEqual(h.readState('project.json'), before, 'the worker changes no project setting');
+  assert.equal(counts(h), true);
+  const selection = cp.spawnSync(process.execPath, ['-e', `
+    require(${JSON.stringify(path.join(ROOT, 'lib/gates/tests'))}).queueSelection({}, ${JSON.stringify(h.repo)},
+      ${JSON.stringify(before)}, 'main', ${JSON.stringify(sha)}, 'code').then(s => console.log(JSON.stringify(s)));
+  `], { cwd: h.repo, env: h.env, encoding: 'utf8' });
+  assert.equal(selection.status, 0, selection.stderr);
+  assert.deepEqual(JSON.parse(selection.stdout).tests, result.receipt.head_tests, 'the merge queue reads the same head declaration');
+});
+
+for (const present of [false, true]) test(`declared coverage works with a crucial test ${present ? 'at head' : 'added only on base'}`, (t) => {
+  const h = fixture(t);
+  fs.writeFileSync(path.join(h.repo, 'tests-map.declared.json'), '{"value.js":["test/value.test.js"]}\n');
+  if (present) fs.writeFileSync(path.join(h.repo, 'test/new.test.js'), "console.log('new suite');\n");
+  h.git(['add', '.']);
+  h.git(['commit', '-qm', 'declared selection fixture']);
+  h.ok(['submit', 'T1', '--sha', h.git(['rev-parse', 'HEAD']), '--agent', 'worker']);
+  let added;
+  if (!present) {
+    h.git(['switch', 'main']);
+    fs.writeFileSync(path.join(h.repo, 'test/new.test.js'), "console.log('new suite');\n");
+    h.git(['add', '.']);
+    h.git(['commit', '-qm', 'new base suite']);
+    added = h.git(['rev-parse', 'HEAD']);
+    h.git(['switch', 'fixture-change']);
+  }
+  h.ok(['project', 'set', '--tests-crucial', '["test/crucial.test.js","test/new.test.js"]']);
+  const result = check(h);
+  assert.deepEqual(result.receipt.head_tests, present
+    ? ['test/crucial.test.js', 'test/new.test.js', 'test/value.test.js']
+    : ['test/crucial.test.js', 'test/value.test.js']);
+  assert.deepEqual(result.receipt.crucial_skipped, present ? undefined : [{
+    path: 'test/new.test.js', added_on_base: added,
+    note: `crucial path not at head: test/new.test.js, added on base at ${added}`,
+  }]);
+  assert.equal(counts(h), true);
+});
+
+test('queue declarations follow the selected merge commit', async (t) => {
+  const h = fixture(t);
+  const file = path.join(h.repo, 'tests-map.declared.json');
+  fs.writeFileSync(file, '{"value.js":["test/value.test.js"]}\n');
+  h.git(['add', '.']);
+  h.git(['commit', '-qm', 'task declaration']);
+  const head = h.git(['rev-parse', 'HEAD']);
+  fs.writeFileSync(path.join(h.repo, 'test/queue.test.js'), "require('node:assert/strict').equal(require('../value'), 1);\n");
+  fs.writeFileSync(file, '{"value.js":["test/queue.test.js"]}\n');
+  h.git(['add', '.']);
+  h.git(['commit', '-qm', 'queue declaration']);
+  const merged = h.git(['rev-parse', 'HEAD']);
+  fs.writeFileSync(file, '{');
+  h.git(['add', '.']);
+  h.git(['commit', '-qm', 'invalid queue declaration']);
+  const invalid = h.git(['rev-parse', 'HEAD']);
+  fs.writeFileSync(file, '{"value.js":["test/missing.test.js"]}\n');
+  h.git(['add', '.']);
+  h.git(['commit', '-qm', 'missing queue suite']);
+  const missing = h.git(['rev-parse', 'HEAD']);
+  const rows = [
+    ['default task head', null, ['test/crucial.test.js', 'test/value.test.js']],
+    ['selected merge head', merged, ['test/crucial.test.js', 'test/queue.test.js', 'test/value.test.js']],
+    ['invalid JSON at merge head', invalid, null],
+    ['missing suite at merge head', missing, null],
+  ];
+  const r = cp.spawnSync(process.execPath, ['-e', `
+    (async () => {
+      const gate = require(${JSON.stringify(path.join(ROOT, 'lib/gates/tests'))});
+      const results = [];
+      for (const [, merged] of ${JSON.stringify(rows)}) results.push(await gate.queueSelection({},
+        ${JSON.stringify(h.repo)}, ${JSON.stringify(h.readState('project.json'))}, 'main',
+        ${JSON.stringify(head)}, 'code', merged || undefined));
+      console.log(JSON.stringify(results));
+    })().catch(e => { console.error(e); process.exitCode = 1; });
+  `], { cwd: h.repo, env: h.env, encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  const results = JSON.parse(r.stdout);
+  for (const [index, [name, , expected]] of rows.entries()) {
+    await t.test(name, () => {
+      if (expected) {
+        assert.equal(results[index].error, undefined);
+        assert.deepEqual(results[index].tests, expected);
+        assert.deepEqual(results[index].gaps, []);
+      } else {
+        assert.match(results[index].error, /tests-map\.declared\.json/);
+        assert.equal(results[index].worker_failure, true);
+      }
+    });
+  }
+});
+
+for (const [name, text] of [
+  ['invalid JSON', '{'],
+  ['null', 'null'],
+  ['escaping source', '{"../payload.json":["test/value.test.js"]}'],
+  ['missing suite', '{"payload.json":["test/missing.test.js"]}'],
+  ['support file', '{"payload.json":["test/helpers.js"]}'],
+]) {
+  test(`a bad declaration belongs to the task: ${name}`, (t) => {
+    const h = fixture(t);
+    fs.writeFileSync(path.join(h.repo, 'tests-map.declared.json'), text);
+    fs.writeFileSync(path.join(h.repo, 'test/helpers.js'), 'module.exports = 1;\n');
+    h.git(['add', '.']);
+    h.git(['commit', '-qm', 'bad declaration']);
+    h.ok(['submit', 'T1', '--sha', h.git(['rev-parse', 'HEAD']), '--agent', 'worker']);
+    const result = check(h, 1);
+    assert.match(result.summary, /tests-map\.declared\.json/);
+    assert.equal(result.worker_failure, true);
+    assert.equal(result.config_failure, undefined);
+    assert.equal(result.commands.filter((c) => c.command !== 'git').length, 0);
+  });
+}
+
+test('the coverage gap run measures a new JSON file read by the changed test', (t) => {
+  const h = fixture(t);
+  fs.writeFileSync(path.join(h.repo, 'payload.json'), '{"value":1}\n');
+  fs.appendFileSync(path.join(h.repo, 'test/value.test.js'),
+    "require('node:assert/strict').equal(JSON.parse(require('node:fs').readFileSync('payload.json', 'utf8')).value, 1);\n");
+  h.git(['add', '.']);
+  h.git(['commit', '-qm', 'test data read']);
+  h.ok(['submit', 'T1', '--sha', h.git(['rev-parse', 'HEAD']), '--agent', 'worker']);
+  const result = check(h);
+  assert.equal(result.ok, true, result.summary);
+  assert.deepEqual(result.receipt.coverage_gaps, ['payload.json']);
+  assert.match(result.summary, /Coverage: the changed tests ran payload\.json/);
+});
+
 // Shard coverage also reaches the head command; only the gate's own coverage directory should
 // trigger the proof crash.
-for (const inherited of [false, true]) {
-  test(`a native crash in the coverage run is rerun as the proof step (${inherited ? 'inherited coverage' : 'no inherited coverage'})`, { skip: process.platform === 'win32' && 'POSIX signals' }, (t) => {
+for (const [source, load, settings] of [
+  ['value.js', "require('../value')", { '**/*.md': [] }],
+  ['payload.json', "JSON.parse(require('node:fs').readFileSync('payload.json', 'utf8')).value", map],
+]) for (const inherited of [false, true]) {
+  test(`a native crash in the coverage run is rerun as the proof step (${source}, ${inherited ? 'inherited coverage' : 'no inherited coverage'})`, { skip: process.platform === 'win32' && 'POSIX signals' }, (t) => {
     const marker = path.join(fs.mkdtempSync(path.join(process.env.TOWER_CRANE_TEST_TMP || require('node:os').tmpdir(), 'crucial-crash-')), 'runs');
     t.after(() => fs.rmSync(path.dirname(marker), { recursive: true, force: true }));
     const inheritedCoverage = path.join(path.dirname(marker), 'inherited');
-    const crashOnce = `require('node:assert/strict').equal(require('../value'), 1);
+    const crashOnce = `require('node:assert/strict').equal(${load}, 1);
 if (process.env.NODE_V8_COVERAGE && process.env.NODE_V8_COVERAGE !== ${JSON.stringify(inheritedCoverage)}) {
 ${nativeCrashTest({ marker })}}
 `;
-    const h = fixture(t, { '**/*.md': [] }, crashOnce);
+    const h = fixture(t, settings, crashOnce);
+    if (source === 'payload.json') {
+      fs.writeFileSync(path.join(h.repo, source), '{"value":1}\n');
+      h.git(['add', '.']);
+      h.git(['commit', '-qm', 'data coverage crash fixture']);
+      h.ok(['submit', 'T1', '--sha', h.git(['rev-parse', 'HEAD']), '--agent', 'worker']);
+    }
     // Node copies the parent's coverage setting when the child environment omits it.
     h.env.NODE_V8_COVERAGE = inherited ? inheritedCoverage : '';
     const result = check(h);
     assert.equal(result.ok, true, result.summary);
-    assert.deepEqual(result.receipt.coverage_gaps, ['value.js']);
+    assert.deepEqual(result.receipt.coverage_gaps, [source]);
     assert.deepEqual(result.receipt.reruns, [{ step: 'proof', files: ['test/value.test.js'], ok: true }]);
     assert.equal(fs.readFileSync(marker, 'utf8'), 'xx', 'only the coverage run and its rerun reach the crash');
     assert.equal(counts(h), true);
@@ -288,6 +461,7 @@ test('merges', () => {
   const p = makeRepo(t);
   p.init(['--repo', 'acme/demo']);
   gateFixture(p);
+  p.git(['fetch', h.repo, head]);
   const declared = { '**/*.md': [], 'docs/cli.md': ['test/other.test.js'], 'lib/gone.js': ['test/old.test.js'] };
   p.ok(['project', 'set', '--tests-map', JSON.stringify(declared)]);
   const before = p.readState('project.json');
@@ -312,13 +486,73 @@ fs.copyFileSync(${JSON.stringify(file)}, path.join(args[args.indexOf('-D') + 1],
 `);
   const pinned = p.json(['tests', 'map', 'refresh', '--from-run', '4242', '--agent', 'orchestrator']);
   assert.deepEqual(JSON.parse(fs.readFileSync(calls, 'utf8').trim()).slice(0, 7), ['run', 'download', '4242', '-R', 'acme/demo', '-n', 'tests-coverage-map']);
-  assert.deepEqual({ run: pinned.run, sha: pinned.sha, declared: pinned.declared }, { run: 4242, sha: head, declared: 2 });
-  // Measured entries replace the pinned ones; the globs and files coverage cannot see stay as declared.
+  assert.deepEqual({ run: pinned.run, sha: pinned.sha, declared: pinned.declared }, { run: 4242, sha: head, declared: 1 });
+  // Sources the run did not measure survive alongside declared globs, the only entries counted as declared.
   assert.deepEqual(p.readState('project.json').tests.map, {
-    '**/*.md': [], 'docs/cli.md': ['test/other.test.js'], 'lib/merge.js': ['test/cli.test.js'], 'tool/runner.js': ['test/cli.test.js'],
+    '**/*.md': [], 'docs/cli.md': ['test/other.test.js'],
+    'lib/merge.js': ['test/cli.test.js'], 'tool/runner.js': ['test/cli.test.js'],
   });
   const events = fs.readFileSync(path.join(p.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   assert.equal(events.filter((e) => e.cmd === 'tests map refresh').at(-1).detail.authority, 'orchestrator');
+});
+
+test('coverage maps successful repository data reads to their test, including children and fs API variants', (t) => {
+  const h = makeRepo(t);
+  fs.mkdirSync(path.join(h.repo, 'test'), { recursive: true });
+  const cases = ['sync', 'callback', 'promise', 'open-sync', 'open-callback', 'open-promise', 'open-numeric', 'child', 'child-esm', '..inside'];
+  for (const name of cases) fs.writeFileSync(path.join(h.repo, `${name}.json`), '{"value":1}\n');
+  fs.mkdirSync(path.join(h.repo, 'node_modules'), { recursive: true });
+  fs.writeFileSync(path.join(h.repo, 'node_modules/ignored.json'), '{}');
+  const outside = path.join(h.base, 'outside.json');
+  fs.writeFileSync(outside, '{}');
+  if (process.platform !== 'win32') fs.symlinkSync(outside, path.join(h.repo, 'external-link.json'));
+  fs.writeFileSync(path.join(h.repo, 'test/data.test.js'), `
+const test = require('node:test'), assert = require('node:assert/strict'), fs = require('node:fs');
+test('reads data', async () => {
+  assert.equal(JSON.parse(fs.readFileSync(require('node:url').pathToFileURL(require('node:path').resolve('sync.json')), 'utf8')).value, 1);
+  await new Promise((resolve, reject) => fs.readFile(Buffer.from('callback.json'), (err, data) => {
+    if (err) return reject(err); assert.equal(JSON.parse(data).value, 1); resolve();
+  }));
+  assert.equal(JSON.parse(await fs.promises.readFile('promise.json', 'utf8')).value, 1);
+  fs.closeSync(fs.openSync('open-sync.json', 'r'));
+  await new Promise((resolve, reject) => fs.open('open-callback.json', 'r', (err, fd) => {
+    if (err) return reject(err); fs.closeSync(fd); resolve();
+  }));
+  await (await fs.promises.open('open-promise.json', 'r')).close();
+  fs.closeSync(fs.openSync('open-numeric.json', fs.constants.O_RDONLY));
+  require('node:child_process').execFileSync(process.execPath, ['-e',
+    "require('node:assert/strict').equal(JSON.parse(require('node:fs').readFileSync('child.json', 'utf8')).value, 1)"]);
+  require('node:child_process').execFileSync(process.execPath, ['--input-type=module', '-e',
+    "import { readFileSync } from 'node:fs'; import assert from 'node:assert/strict'; assert.equal(JSON.parse(readFileSync('child-esm.json', 'utf8')).value, 1)"]);
+  fs.readFileSync('..inside.json');
+  assert.throws(() => fs.readFileSync('missing.json'));
+  await assert.rejects(fs.promises.readFile('missing-promise.json'));
+  fs.writeFileSync('write-only.json', '{}'); fs.closeSync(fs.openSync('write-only.json', 'w'));
+  fs.closeSync(fs.openSync('numeric-write-only.json', fs.constants.O_WRONLY | fs.constants.O_CREAT));
+  fs.readFileSync('node_modules/ignored.json');
+  fs.readFileSync(${JSON.stringify(outside)});
+  if (process.platform !== 'win32') {
+    fs.readFileSync('external-link.json');
+    fs.closeSync(fs.openSync('test', 'r'));
+  }
+});
+`);
+  fs.writeFileSync(path.join(h.repo, 'test/other.test.js'),
+    "require('node:test')('other', () => { require('node:fs').readFileSync('sync.json'); });\n");
+  h.git(['add', '.']);
+  h.git(['commit', '-qm', 'data read fixture']);
+  const dir = path.join(h.base, 'coverage');
+  const built = cp.spawnSync(process.execPath, [path.join(ROOT, 'scripts/tests-coverage-map.js'), 'run', '--dir', dir, '--',
+    process.execPath, '--test', 'test/data.test.js', 'test/other.test.js'], { cwd: h.repo, env: h.env, encoding: 'utf8' });
+  assert.equal(built.status, 0, built.stderr + built.stdout);
+  const artifact = JSON.parse(fs.readFileSync(path.join(dir, 'tests-coverage-map.json'), 'utf8'));
+  for (const name of cases) assert.deepEqual(artifact.map[`${name}.json`],
+    name === 'sync' ? ['test/data.test.js', 'test/other.test.js'] : ['test/data.test.js'], name);
+  for (const name of ['missing.json', 'missing-promise.json', 'write-only.json', 'numeric-write-only.json',
+    'node_modules/ignored.json', '../outside.json', 'external-link.json', 'test']) {
+    assert.equal(artifact.map[name], undefined, name);
+  }
+  assert.deepEqual(fs.readdirSync(path.join(dir, 'raw')).flatMap((slug) => fs.readdirSync(path.join(dir, 'raw', slug))), []);
 });
 
 test('test/run.js with TC_TEST_COVERAGE_DIR writes the coverage map of the files it ran', (t) => {
@@ -333,4 +567,123 @@ test('test/run.js with TC_TEST_COVERAGE_DIR writes the coverage map of the files
   assert.deepEqual(artifact.map['lib/commands.js'], ['test/commands.test.js']);
   // The CLI the test starts counts: bin/tower-crane.js only runs in those processes.
   assert.deepEqual(artifact.map['bin/tower-crane.js'], ['test/commands.test.js']);
+});
+
+test('coverage preloads follow child launch variants through both map runners', async (t) => {
+  const h = makeRepo(t);
+  for (const file of ['test/run.js', 'test/signals.js', 'test/atomic-file.js', 'test/tmp-root.js',
+    'test/global-setup.js', 'test/repo-seed.js', 'test/host.js',
+    'test/fixtures/user-config-guard.js', 'test/fixtures/report-guard.js', 'test/fixtures/no-fsync.js', 'scripts/tests-coverage-map.js',
+    'lib/tests-coverage.js', 'lib/tests-coverage-scope.js', 'lib/tests-coverage-reads.js']) {
+    fs.mkdirSync(path.dirname(path.join(h.repo, file)), { recursive: true });
+    fs.copyFileSync(path.join(ROOT, file), path.join(h.repo, file));
+  }
+  fs.mkdirSync(path.join(h.repo, 'test/gates'), { recursive: true });
+  const launches = {
+    'spawn-sync': "const r = cp.spawnSync(process.execPath, [file]); assert.equal(r.status, 0, String(r.stderr));",
+    'exec-file-sync': "cp.execFileSync(process.execPath, [file]);",
+    spawn: "await new Promise((resolve, reject) => { const child = cp.spawn(process.execPath, [file], { stdio: 'inherit' }); child.on('error', reject); child.on('exit', (code) => { assert.equal(code, 0); resolve(); }); });",
+    'exec-file': "await new Promise((resolve, reject) => cp.execFile(process.execPath, [file], (err) => err ? reject(err) : resolve()));",
+    fork: "await new Promise((resolve, reject) => { const child = cp.fork(file, [], { stdio: 'inherit' }); child.on('error', reject); child.on('exit', (code) => { assert.equal(code, 0); resolve(); }); });",
+    esm: "cp.execFileSync(process.execPath, [file]);",
+    grandchild: "cp.execFileSync(process.execPath, ['-e', \"require('node:child_process').execFileSync(process.execPath, ['./child-grandchild.js'])\"]);",
+  };
+  const suites = [];
+  for (const [name, launch] of Object.entries(launches)) {
+    const file = `child-${name}.${name === 'esm' ? 'mjs' : 'js'}`;
+    const imports = name === 'esm'
+      ? "import { readFileSync } from 'node:fs'; import assert from 'node:assert/strict';"
+      : "const { readFileSync } = require('node:fs'), assert = require('node:assert/strict');";
+    fs.writeFileSync(path.join(h.repo, file), `${imports}
+assert.ok(process.env.NODE_OPTIONS.includes('--no-warnings'));
+assert.equal(JSON.parse(readFileSync('${name}.json', 'utf8')).value, 1);
+`);
+    fs.writeFileSync(path.join(h.repo, `${name}.json`), '{"value":1}\n');
+    const suite = `test/${name}.test.js`;
+    suites.push(suite);
+    fs.writeFileSync(path.join(h.repo, suite), `
+const cp = require('node:child_process'), assert = require('node:assert/strict');
+require('node:test')('${name}', async () => { const file = './${file}'; ${launch} });
+`);
+  }
+  h.git(['add', '.']);
+  h.git(['commit', '-qm', 'child launch fixture']);
+  for (const mode of ['ci', 'script']) {
+    const dir = path.join(h.base, mode);
+    const args = mode === 'ci'
+      ? ['test/run.js', '--test-concurrency=2', ...suites]
+      : ['scripts/tests-coverage-map.js', 'run', '--dir', dir, '--', process.execPath, '--test', '--test-concurrency=2', ...suites];
+    const r = cp.spawnSync(process.execPath, args, { cwd: h.repo,
+      env: { ...h.env, NODE_OPTIONS: '--no-warnings', TC_TEST_COVERAGE_DIR: mode === 'ci' ? dir : '' }, encoding: 'utf8' });
+    assert.equal(r.status, 0, `${mode}: ${r.stderr}${r.stdout}`);
+    const artifact = JSON.parse(fs.readFileSync(path.join(dir, 'tests-coverage-map.json'), 'utf8'));
+    for (const name of Object.keys(launches)) {
+      await t.test(`${mode}: ${name}`, () => {
+        assert.deepEqual(artifact.map[`${name}.json`], [`test/${name}.test.js`]);
+      });
+    }
+  }
+});
+
+test('coverage open flag variants count default reads and exclude failed or write-only opens', async (t) => {
+  const h = makeRepo(t);
+  fs.mkdirSync(path.join(h.repo, 'test'), { recursive: true });
+  const rows = [
+    ['sync-default', "fs.openSync(file)", true],
+    ['sync-undefined', "fs.openSync(file, undefined)", true],
+    ['sync-read', "fs.openSync(file, 'r')", true],
+    ['sync-read-write', "fs.openSync(file, 'r+')", true],
+    ['sync-numeric-read', 'fs.openSync(file, fs.constants.O_RDONLY)', true],
+    ['sync-write', "fs.openSync(file, 'w')", false],
+    ['sync-numeric-write', 'fs.openSync(file, fs.constants.O_WRONLY)', false],
+    ['callback-default', 'await open(file)', true],
+    ['callback-undefined', 'await open(file, undefined)', true],
+    ['callback-read', "await open(file, 'r')", true],
+    ['callback-write', "await open(file, 'w')", false],
+    ['promise-default', 'await fs.promises.open(file)', true],
+    ['promise-undefined', 'await fs.promises.open(file, undefined)', true],
+    ['promise-read', "await fs.promises.open(file, 'r')", true],
+    ['promise-write', "await fs.promises.open(file, 'w')", false],
+    ['sync-missing', 'fs.openSync(file)', false, true],
+    ['callback-missing', 'await open(file)', false, true],
+    ['promise-missing', 'await fs.promises.open(file)', false, true],
+  ];
+  const code = [];
+  for (const [name, call, measured, missing] of rows) {
+    if (!missing) fs.writeFileSync(path.join(h.repo, `${name}.json`), '{"value":1}\n');
+    const body = missing ? `await assert.rejects(async () => { ${call}; });` : `
+const handle = ${call};
+const fd = typeof handle === 'number' ? handle : handle.fd;
+try { ${measured ? "assert.equal(JSON.parse(fs.readFileSync(fd, 'utf8')).value, 1);" : ''} }
+finally { if (typeof handle === 'number') fs.closeSync(handle); else await handle.close(); }`;
+    code.push(`test('${name}', async () => { const file = '${name}.json'; ${body} });`);
+  }
+  fs.writeFileSync(path.join(h.repo, 'test/open.test.js'), `
+const test = require('node:test'), fs = require('node:fs'), assert = require('node:assert/strict');
+const open = (...args) => new Promise((resolve, reject) => fs.open(...args, (err, fd) => err ? reject(err) : resolve(fd)));
+${code.join('\n')}
+`);
+  h.git(['add', '.']);
+  h.git(['commit', '-qm', 'open flags fixture']);
+  for (const mode of ['map', 'inherited']) {
+    const dir = path.join(h.base, `coverage-${mode}`);
+    // The map runner redirects profiles. Direct installation also exercises the
+    // recorder under the caller's coverage, as a scoped proof sees it.
+    const args = mode === 'map'
+      ? [path.join(ROOT, 'scripts/tests-coverage-map.js'), 'run', '--dir', dir, '--',
+        process.execPath, '--test', 'test/open.test.js']
+      : ['-e', `require(${JSON.stringify(path.join(ROOT, 'lib/tests-coverage-reads.js'))})
+        .install(${JSON.stringify(dir)}, ${JSON.stringify(h.repo)});
+        require(${JSON.stringify(path.join(h.repo, 'test/open.test.js'))});`];
+    const r = cp.spawnSync(process.execPath, args, { cwd: h.repo, env: h.env, encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+    const artifact = mode === 'map' ? JSON.parse(fs.readFileSync(path.join(dir, 'tests-coverage-map.json'), 'utf8')) : null;
+    const reads = mode === 'inherited' ? require('../lib/tests-coverage').ranIn(dir, h.repo) : null;
+    for (const [name, , measured] of rows) {
+      await t.test(`${mode}: ${name}`, () => {
+        if (artifact) assert.deepEqual(artifact.map[`${name}.json`], measured ? ['test/open.test.js'] : undefined);
+        else assert.equal(reads.has(`${name}.json`), measured);
+      });
+    }
+  }
 });

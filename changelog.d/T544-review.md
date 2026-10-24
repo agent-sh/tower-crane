@@ -1,0 +1,1 @@
+- Keep compiler and import/file diagnostics locally retryable, and ignore known runner timing metadata when counting repeated presubmit failures. Missing or inaccessible hook executables still escalate immediately.
