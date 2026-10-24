@@ -1,0 +1,1 @@
+- Main is green again: the regenerated test coverage map names the Claude probe cache test, which the model-literal lint now allows, and the stored seed matches the tree.

@@ -15,7 +15,8 @@ if (root) {
     }
     return spawn(command, args, options);
   };
-  if (path.basename(process.argv[1]) === 'spawn-monitor.js') {
+  // The supervisor runs its gate drain in a child (lib/supervisor-ops.js).
+  if (path.basename(process.argv[1]) === 'supervisor-ops.js') {
     const automation = require(path.join(root, 'lib', 'automation.js'));
     const consume = automation.consume;
     automation.consume = async (...args) => {

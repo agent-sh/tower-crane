@@ -1,0 +1,1 @@
+- Extend offline submit and CI regression coverage to base-run metadata and raw job logs. Missing or unreadable base evidence preserves failure diagnostics, redaction and refusal behavior; matching base evidence passes with its recorded run.

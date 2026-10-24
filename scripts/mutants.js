@@ -16,8 +16,8 @@
 
 const cp = require('node:child_process');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
+const { commandRoot } = require('../lib/scratch-root');
 const { readText } = require('./text');
 
 // from must occur exactly once in file. tests are the files expected to catch it.
@@ -41,7 +41,7 @@ const MUTANTS = [
     from: 'e.type === type && e.revision === task.revision\n', to: 'e.type === type\n', tests: ['test/accept.test.js'] },
   // authority
   { id: 'spawned-agent-is-orchestrator', area: 'authority', file: 'lib/authority.js',
-    from: "if (jobs.length) return jobs.every((role) => role === 'orchestrator');", to: 'if (jobs.length) return true;', tests: ['test/authority.test.js'] },
+    from: "roles.set(e.detail?.agent, (roles.get(e.detail?.agent) ?? true) && e.detail?.role === 'orchestrator');", to: 'roles.set(e.detail?.agent, true);', tests: ['test/authority.test.js'] },
   { id: 'brokered-command-has-authority', area: 'authority', file: 'lib/authority.js',
     from: 'if (broker && isOrchestrator(identity, events)) return null;', to: '', tests: ['test/authority.test.js', 'test/broker.test.js'] },
   { id: 'orchestrator-makes-owner-changes', area: 'authority', file: 'lib/authority.js',
@@ -174,8 +174,8 @@ const MUTANTS = [
     from: 'if (awaitingLease && !exit) {\n              awaitingLease = false;\n              terminateGroup(child);', to: 'if (false) {', tests: ['test/supervision.test.js'] },
   { id: 'supervisor-stop-trusts-exit-code', area: 'spawn/supervisor', file: 'lib/spawn-monitor.js',
     from: 'const stopped = !!stopReason || !!budgetStop || stalled || contextOverflow || harnessRefusal || loginFailed || exit.code !== 0;', to: 'const stopped = harnessRefusal || loginFailed || exit.code !== 0;', tests: ['test/supervision.test.js'] },
-  { id: 'clean-exit-clears-any-pause', area: 'spawn/supervisor', file: 'lib/spawn-monitor.js',
-    from: 'if (!stopped && spawn.probe && Health.probed(currentState, spawn.harness, spawn.probe)) Health.cleared', to: 'if (!stopped && Health.paused(currentState, spawn.harness)) Health.cleared', tests: ['test/harness-auth.test.js'] },
+  { id: 'clean-exit-clears-any-pause', area: 'spawn/supervisor', file: 'lib/supervisor-ops.js',
+    from: 'if (!stopped && probe && Health.probed(st, harness, probe)) Health.cleared', to: 'if (!stopped && Health.paused(st, harness)) Health.cleared', tests: ['test/harness-auth.test.js'] },
   { id: 'login-check-clears-superseded-pause', area: 'spawn/supervisor', file: 'lib/harness-health.js',
     from: 'if (!probed(current, harness, token)) return;', to: '', tests: ['test/harness-auth.test.js'] },
   { id: 'group-probe-clears-live-group', area: 'spawn/supervisor', file: 'lib/processes.js',
@@ -187,6 +187,10 @@ const MUTANTS = [
   { id: 'claim-hook-skips-undispatched-refresh', area: 'spawn/supervisor', file: 'lib/tasks.js',
     from: 'const dispatched = !!ctx.env.TOWER_CRANE_HOOK && ctx.env.TOWER_CRANE_TASK === ctx.pos[0] && ctx.env.TOWER_CRANE_AGENT === ctx.agent;',
     to: 'const dispatched = !!ctx.env.TOWER_CRANE_HOOK;', tests: ['test/stack.test.js'] },
+  { id: 'task-view-keeps-cut-events', area: 'spawn/supervisor', file: 'lib/state.js',
+    from: 'this.rows = this.rows.filter((r) => r.offset <= batch.cut);', to: 'this.rows = this.rows.slice();', tests: ['test/events-tail.test.js'] },
+  { id: 'task-view-keeps-replaced-log', area: 'spawn/supervisor', file: 'lib/state.js',
+    from: '    if (batch.reset) this.rows = [];', to: '    if (batch.reset) this.rows = this.rows.slice();', tests: ['test/events-tail.test.js'] },
   // state lock
   { id: 'lock-breaks-live-holder', area: 'state lock', file: 'lib/state.js',
     from: '    if (!releasedMarkers.has(file) && !lockIsStale(marker, keepLive)) {', to: '    if (false) {', tests: ['test/lock.test.js'] },
@@ -878,9 +882,9 @@ async function main() {
     return;
   }
 
-  const scratchRoot = process.env.TOWER_CRANE_TEST_TMP || os.tmpdir();
-  fs.mkdirSync(scratchRoot, { recursive: true });
-  const copy = fs.mkdtempSync(path.join(scratchRoot, 'tower-crane-mutants-'));
+  const scratch = process.env.TOWER_CRANE_TEST_TMP || commandRoot();
+  fs.mkdirSync(scratch, { recursive: true });
+  const copy = fs.mkdtempSync(path.join(scratch, 'tower-crane-mutants-'));
   const scope = scopeAvailable();
   console.log(`Containment: ${scope ? 'systemd scope (MemoryMax=4G) and watchdog' : 'process watchdog'}; process limit ${processLimit}`);
   const timings = new Map();

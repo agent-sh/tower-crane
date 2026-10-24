@@ -14,7 +14,7 @@ if (barrier && path.basename(process.argv[1] || '') === 'spawn-monitor.js') {
       writeAtomic(barrier, 'paused');
       // A failed test must not strand the collector indefinitely.
       const deadline = performance.now() + 300000;
-      while (!fs.existsSync(`${barrier}.go`)) {
+      while (!fs.existsSync(`${barrier}.go`)) { // spin-allow: preloaded into the CLI under test, which can be a detached supervisor whose dispatcher exits by design; the deadline bounds it
         if (performance.now() >= deadline) throw new Error('usage collection barrier timed out');
         Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
       }

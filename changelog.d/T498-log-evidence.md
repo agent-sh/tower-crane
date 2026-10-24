@@ -1,0 +1,1 @@
+- Hosted CI base-failure exclusions handle timestamped and escaped nested test logs. Head and base log errors are redacted before they enter gate evidence, submit reports or fix-task notes and briefs. CLI gate contracts now describe recorded base-failure and known-flake exclusions.

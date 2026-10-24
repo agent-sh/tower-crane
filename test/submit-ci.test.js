@@ -182,6 +182,83 @@ test('--json carries the CI report as ci_report, findings included', (t) => {
   assert.match(data.ci_report, /lib\/x\.js:12 \(comment 11\)\n {4}\*\*\[P3\]\*\* Quoted paths break on Windows\./);
 });
 
+test('submit records pushed PR heads, warns above one and resets at the next submission', (t) => {
+  const h = fixture(t);
+  const branch = 'task/change';
+  const data = { ...PENDING, heads: [
+    { head_sha: 'b'.repeat(40), head_branch: branch, event: 'pull_request',
+      created_at: '2026-10-01T10:00:00Z', pull_requests: [{ number: 7 }] },
+    { head_sha: h.sha, head_branch: branch, event: 'push',
+      created_at: '2026-10-01T10:00:01Z', pull_requests: [] },
+  ] };
+  const first = submitPr(h, data, ['--branch', branch, '--json']);
+  assert.equal(first.status, 0, first.stderr);
+  const submitted = JSON.parse(first.stdout);
+  assert.equal(submitted.pushes_since_last_submit, 2);
+  assert.match(submitted.push_warning, /2 observed pushed heads since the last submit/);
+  const receipts = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim()
+    .split('\n').map(JSON.parse).filter((e) => e.cmd === 'submit');
+  assert.equal(receipts().at(-1).detail.pushes_since_last_submit, 2);
+  assert.ok(h.readState('tasks.json').tasks[0].notes.some((n) => n.text === submitted.push_warning));
+  assert.match(h.ok(['status']), /pushes since last submit: T1 2/);
+  assert.deepEqual(h.json(['status']).pushes_since_last_submit, [{ id: 'T1', pushes_since_last_submit: 2 }]);
+
+  const second = submitPr(h, data, ['--json']);
+  assert.equal(second.status, 0, second.stderr);
+  assert.equal(JSON.parse(second.stdout).pushes_since_last_submit, 0);
+  assert.equal(receipts().at(-1).detail.pushes_since_last_submit, 0);
+  assert.doesNotMatch(h.ok(['status']), /pushes since last submit:/);
+  assert.deepEqual(h.json(['status']).pushes_since_last_submit, []);
+
+  fs.appendFileSync(path.join(h.repo, 'README.md'), 'Revision.\n');
+  h.git(['add', 'README.md']);
+  h.git(['commit', '-q', '-m', 'revision']);
+  const sha = h.git(['rev-parse', 'HEAD']);
+  const at = receipts().at(-1).at;
+  const third = withGithub(h, { ...PENDING, sha, heads: [
+    ...data.heads,
+    { head_sha: 'd'.repeat(40), head_branch: branch, event: 'pull_request', created_at: at },
+    { head_sha: sha, head_branch: branch, event: 'pull_request', created_at: at },
+    { head_sha: sha, head_branch: branch, event: 'pull_request', created_at: at },
+  ] }, ['submit', 'T1', '--agent', 'worker', '--sha', sha, '--json']);
+  assert.equal(third.status, 0, third.stderr);
+  assert.equal(JSON.parse(third.stdout).pushes_since_last_submit, 2);
+  assert.equal(receipts().at(-1).detail.previous_sha, h.sha);
+  assert.match(h.ok(['status']), /pushes since last submit: T1 2/);
+});
+
+test('submit records unavailable PR head history without refusing or reporting a clean count', (t) => {
+  const h = fixture(t);
+  for (const extra of [{ historyError: 'history fetch failed' }, { historyInvalid: true }]) {
+    const r = submitPr(h, { ...PENDING, ...extra }, ['--json']);
+    assert.equal(r.status, 0, r.stderr);
+    const data = JSON.parse(r.stdout);
+    assert.equal(data.pushes_since_last_submit, null);
+    assert.match(data.push_warning, /pushes_since_last_submit unavailable:/);
+    const receipt = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim()
+      .split('\n').map(JSON.parse).findLast((e) => e.cmd === 'submit');
+    assert.equal(receipt.detail.pushes_since_last_submit, null);
+    assert.ok(receipt.detail.push_history_error);
+  }
+});
+
+test('status lists multiple observed heads only for open tasks', (t) => {
+  const h = fixture(t);
+  for (const row of [
+    { status: 'submitted', visible: true },
+    { status: 'rework', visible: true },
+    { status: 'accepted', visible: false },
+    { status: 'cancelled', visible: false },
+  ]) {
+    const tasks = h.readState('tasks.json');
+    Object.assign(tasks.tasks[0], { status: row.status, pushes_since_last_submit: 2 });
+    h.writeState('tasks.json', tasks);
+    assert.deepEqual(h.json(['status']).pushes_since_last_submit,
+      row.visible ? [{ id: 'T1', pushes_since_last_submit: 2 }] : [], row.status);
+    assert.equal(/pushes since last submit:/.test(h.ok(['status'])), row.visible, row.status);
+  }
+});
+
 test('a PR that conflicts with its base refuses the submit, even with a failing required check', (t) => {
   const h = fixture(t);
   const r = submitPr(h, {
@@ -201,6 +278,14 @@ test('a shimmed agent whose gh policy refuses gh api submits with a notice that 
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /CI at \w+ in acme\/app was not checked: this agent's gh policy refuses gh api/);
   assert.equal(status(h), 'submitted');
+  assert.match(r.stdout, /gh policy refuses PR head history/);
+  assert.doesNotMatch(r.stdout, /warning: pushes_since_last_submit/);
+  const receipt = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim()
+    .split('\n').map(JSON.parse).findLast((e) => e.cmd === 'submit');
+  assert.equal(receipt.detail.pushes_since_last_submit, null);
+  assert.equal(receipt.detail.push_history_error, undefined);
+  assert.match(receipt.detail.push_history_note, /gh policy refuses PR head history/);
+  assert.ok(!h.readState('tasks.json').tasks[0].notes.some((n) => /warning: pushes_since_last_submit/.test(n.text)));
 });
 
 test('a [P1]/[P2] revuto finding with no change at its path and no [resolved] reply refuses the submit, as review ok would', (t) => {
@@ -320,4 +405,111 @@ test('a failing refusal prints the logs of the first three failing jobs and the 
   assert.doesNotMatch(r.stderr, /test \(d\) log:|d fails/);
   assert.match(r.stderr, /test \(d\) log not shown; read it with gh run view --job 459 --log-failed -R acme\/app/);
   assert.equal(status(h), 'in_progress');
+});
+
+test('submit and CI compare base evidence without losing new-failure diagnostics', (t) => {
+  const name = 'checkout fails';
+  const error = 'Error: repository unavailable';
+  const rawLog = (testName = name, firstError = error) => `✖ ${testName} (1ms)\n  ${firstError}\n`;
+  const cases = [
+    ['no recorded base', { baseRuns: [] }, false],
+    ['base listing unavailable', { baseRuns: null }, false],
+    ['matching base failure', {}, true],
+    ['matching daily failure', { event: 'schedule' }, true],
+    ['stale daily failure', { event: 'schedule', stale: true }, false],
+    ['different test', { testName: 'another test' }, false],
+    ['different error', { firstError: 'Error: new cause' }, false],
+    ['another workflow', { workflow_id: 6 }, false],
+    ['another matrix', { jobName: 'test (ubuntu-latest)' }, false],
+    ['unfinished base run', { runStatus: 'in_progress' }, false],
+    ['unfinished base job', { jobStatus: 'in_progress' }, false],
+    ['green base run', { conclusion: 'success' }, false],
+    ['base jobs unavailable', { baseJobs: null }, false],
+    ['base log unavailable', { baseLog: null }, false],
+    ['head log unavailable', { headLog: null }, false],
+  ];
+  for (const [label, variant, explained] of cases) {
+    const h = fixture(t);
+    const created = new Date(Date.parse(h.git(['show', '-s', '--format=%cI', h.sha])) + 1000).toISOString();
+    const jobName = 'test (windows-latest)';
+    const logs = rawLog().trimEnd().split('\n')
+      .map((line) => `${jobName}\tRun tests\t2026-10-09T10:00:00Z ${line}`).join('\n');
+    const data = {
+      runs: [checkRun(jobName, { id: 456, conclusion: 'failure', url: JOB_LOG })],
+      suites: [suite(1, { runs: 1, conclusion: 'failure' })],
+      workflows: [{ id: 9, workflow_id: 5, name: 'CI', path: '.github/workflows/ci.yml',
+        event: 'pull_request', head_sha: h.sha, check_suite_id: 1, created_at: created,
+        status: 'completed', conclusion: 'failure' }],
+      logs: { 456: logs },
+      baseRuns: [{ id: 200, workflow_id: variant.workflow_id ?? 5, head_branch: 'main', head_sha: h.sha,
+        event: variant.event || 'push', status: variant.runStatus || 'completed', conclusion: variant.conclusion || 'failure',
+        created_at: variant.stale ? new Date(Date.parse(created) - 2000).toISOString() : created }],
+      baseJobs: { 200: [{ id: 201, name: variant.jobName || jobName,
+        status: variant.jobStatus || 'completed', conclusion: variant.conclusion || 'failure' }] },
+      apiLogs: { 201: rawLog(variant.testName, variant.firstError), 456: rawLog() },
+    };
+    if ('baseRuns' in variant) data.baseRuns = variant.baseRuns;
+    if ('baseJobs' in variant) data.baseJobs[200] = variant.baseJobs;
+    if ('baseLog' in variant) data.apiLogs[201] = variant.baseLog;
+    if ('headLog' in variant) data.apiLogs[456] = variant.headLog;
+    const submitted = submitPr(h, data);
+    assert.equal(submitted.status, explained ? 0 : 1, `${label}: ${submitted.stderr}`);
+    assert.doesNotMatch(submitted.stderr, /unexpected gh call/, label);
+    if (explained) {
+      assert.match(submitted.stdout, /checkout fails: base_failure in run 200/, label);
+    } else {
+      assert.match(submitted.stderr, /test \(windows-latest\) log:\n {2}✖ checkout fails/, label);
+      // Submit while pending to test the same failure through the actual CI gate.
+      assert.equal(submitPr(h, PENDING).status, 0, label);
+    }
+    const checked = checkCi(h, data);
+    assert.equal(checked.status, explained ? 0 : 1, `${label}: ${checked.stderr}`);
+    const entry = ciEvidence(h).at(-1);
+    if (explained) {
+      assert.equal(entry.base_failure[0].base_run.id, 200, label);
+      assert.equal(entry.base_failure[0].error, error, label);
+      assert.ok(entry.base_failure[0].fix_task, label);
+    } else {
+      assert.equal(entry.confirmed_failure, true, label);
+      assert.match(entry.summary, /test \(windows-latest\) log:\n {2}✖ checkout fails/, label);
+    }
+  }
+});
+
+test('submit reports redact explained base errors with or without another failing job', (t) => {
+  const token = 'ghp_' + 'A1b2C3d4E5'.repeat(3) + 'zZyYxX';
+  const literal = 't498-private-submit-diagnostic';
+  for (const mixed of [false, true]) {
+    for (const [label, value, shown, marker] of [
+      ['shaped token', token, token, '[redacted:GITHUB_TOKEN]'],
+      ['escaped token', token, token.slice(0, 12) + '\x1b[31m' + token.slice(12) + '\x1b[0m', '[redacted:GITHUB_TOKEN]'],
+      ['configured literal', literal, literal, '[redacted:T498_TEST_SECRET]'],
+    ]) {
+      const h = fixture(t);
+      h.env.T498_TEST_SECRET = literal;
+      const created = new Date(Date.parse(h.git(['show', '-s', '--format=%cI', h.sha])) + 1000).toISOString();
+      const raw = `2026-10-22T08:00:00.1234567Z ✖ base test (1ms)\n2026-10-22T08:00:00.1234567Z   Error: auth failed with ${shown}\n`;
+      const data = {
+        runs: [checkRun('test (windows-latest)', { id: 456, conclusion: 'failure', url: JOB_LOG }),
+          ...(mixed ? [checkRun('build', { conclusion: 'failure', url: 'https://github.com/acme/app/actions/runs/9/job/457' })] : [])],
+        suites: [suite(1, { runs: mixed ? 2 : 1, conclusion: 'failure' })],
+        workflows: [{ id: 9, workflow_id: 5, event: 'pull_request', head_sha: h.sha, check_suite_id: 1,
+          created_at: created, status: 'completed', conclusion: 'failure' }],
+        logs: { 456: raw, 457: 'Error: build failed' },
+        baseRuns: [{ id: 200, workflow_id: 5, head_branch: 'main', head_sha: h.sha,
+          event: 'push', status: 'completed', conclusion: 'failure', created_at: created }],
+        baseJobs: { 200: [{ id: 201, name: 'test (windows-latest)', status: 'completed', conclusion: 'failure' }] },
+        apiLogs: { 201: raw, 456: raw, 457: 'Error: build failed' },
+      };
+      const result = submitPr(h, data);
+      const context = `${label}, mixed=${mixed}`;
+      assert.equal(result.status, mixed ? 1 : 0, `${context}: ${result.stderr}`);
+      if (!mixed) assert.ok(result.stdout.includes(`Error: auth failed with ${marker}`), context);
+      for (const text of [result.stdout, result.stderr, JSON.stringify(h.readState('tasks.json')),
+        fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8')]) {
+        assert.equal(text.includes(value), false, context);
+        assert.equal(text.includes(shown), false, context);
+      }
+    }
+  }
 });

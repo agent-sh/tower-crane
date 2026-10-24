@@ -215,7 +215,9 @@ async function main(argv) {
     if (resolved.version) {
       const fs = require('node:fs');
       const file = require('node:path').join(__dirname, '..', 'tool.json');
-      const pinned = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : null;
+      let pinned = null;
+      // Only a pinned snapshot has tool.json; an unreadable one still leaves the version.
+      try { pinned = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : null; } catch { pinned = { sha: null }; }
       out(`${require('../package.json').version}${pinned ? ` (commit ${pinned.sha || 'unknown'})` : ''}`);
       return 0;
     }
@@ -256,8 +258,10 @@ async function main(argv) {
     }
     // The machine's credential store is no project's state: these commands
     // need no state directory and no identity, and refuse a task process.
-    if (cmd.stateless) {
-      const res = await cmd.run({ cwd: process.cwd(), env: process.env, json: !!globals.json, flags: own, pos: parsed.pos });
+    // A log-only view reads the event log itself, without identity, lease or lock.
+    if (cmd.stateless || cmd.logOnly) {
+      const res = await cmd.run({ cwd: process.cwd(), env: process.env, json: !!globals.json, flags: own, pos: parsed.pos,
+        ...(cmd.logOnly ? { stateDir: S.locateStateDir(globals.state, process.env, process.cwd()) } : {}) });
       if (globals.json) out(JSON.stringify(res.data, null, 2));
       else out(res.text);
       return res.code || 0;
@@ -289,15 +293,18 @@ async function main(argv) {
     if (process.env.TOWER_CRANE_BROKER && !require('../lib/broker').READS.has(cmd.name)) {
       const input = argv.includes('-') ? readStdin() : undefined;
       let forwarded = argv;
-      if (cmd.name === 'submit') {
-        const sha = T.resolveSubmitSha({ cwd: process.cwd(), env: process.env, stateDir: locate(),
-          pos: parsed.pos, flags: own }, own.sha);
+      let presubmit;
+      if (cmd.name === 'submit' && require('../lib/broker').serves(process.env.TOWER_CRANE_BROKER, locate())) {
+        const workerCtx = { cwd: process.cwd(), env: process.env, stateDir: locate(),
+          pos: parsed.pos, flags: own, agent: identity };
+        const sha = T.resolveSubmitSha(workerCtx, own.sha);
+        presubmit = await require('../lib/presubmit').prepare(workerCtx, sha);
         const tokens = [...resolved.lead, ...resolved.rest];
         const span = parsed.spans.find((s) => s.name === 'sha');
         tokens.splice(span.from, span.to - span.from + 1, '--sha', sha);
         forwarded = ['submit', ...tokens];
       }
-      const res = await require('../lib/broker').forward(process.env.TOWER_CRANE_BROKER, forwarded, locate(), input);
+      const res = await require('../lib/broker').forward(process.env.TOWER_CRANE_BROKER, forwarded, locate(), input, presubmit);
       if (res) {
         process.stdout.write(res.stdout || '');
         process.stderr.write(res.stderr || '');

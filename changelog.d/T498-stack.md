@@ -1,0 +1,1 @@
+- Base-failure and known-flake evidence preserves interrupted-gate markers when recorded alongside rerun receipts.

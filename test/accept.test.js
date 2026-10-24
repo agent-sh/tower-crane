@@ -1,12 +1,12 @@
 'use strict';
 
-const { waitOnRepo } = require('./signals');
+const { waitOnRepo, waitUntil } = require('./signals');
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { makeRepo, cachedFixture, BIN, ROOT } = require('./helpers');
+const { makeRepo, cachedFixture, detachedAlive, BIN, ROOT } = require('./helpers');
 const { gateFixture, gateEvidence } = require('./gate-helpers');
 const Actions = require('../lib/actions');
 const Reviewer = require('../lib/reviewer');
@@ -46,9 +46,21 @@ const events = (h) => {
 const reviewerSpawns = (h) => events(h).filter((e) => e.cmd === 'spawn' && e.task === 'T1' && e.detail.role === 'reviewer');
 
 // The dispatched reviewer runs detached; the test must outlive it and its monitor.
+// The monitor reacts to the exit after recording it, so evidence written
+// before the monitor ends is for those reactions to act on.
 async function reviewerExited(h) {
-  const agents = reviewerSpawns(h).map((e) => e.detail.agent);
+  const spawns = reviewerSpawns(h);
+  const agents = spawns.map((e) => e.detail.agent);
   await waitOnRepo(h, () => agents.every((a) => events(h).some((e) => e.cmd === 'spawn exit' && e.detail.agent === a)));
+  // The exit receipt precedes automation, which must not consume the next verdict.
+  await waitOnRepo(h, () => {
+    const log = events(h);
+    return agents.every((a) => {
+      const exit = log.findLast((e) => e.cmd === 'spawn exit' && e.detail.agent === a);
+      return log.some((e) => e.cmd === 'automation' && e.detail.source === exit.id && e.detail.phase === 'done');
+    });
+  });
+  await waitUntil(() => spawns.every((s) => !detachedAlive({ pid: s.detail.monitor_pid })), { what: 'the reviewer monitors exit' });
 }
 
 // After a reviewer exits its monitor advances the task too, so either accept may win.
@@ -60,7 +72,8 @@ function acceptAfterReview(h, ...args) {
 
 test('accept refuses a code task without gates, and a review by the submitter does not count', async (t) => {
   const h = submitted(t);
-  h.ok(['project', 'set', '--tests-cmd', 'null']);
+  // Tests first, so accept stops at the missing tests gate and lists every missing gate.
+  h.ok(['project', 'set', '--tests-cmd', 'null', '--review-policy', '{"tests_first":true}']);
   const none = h.run(['accept', 'T1']);
   assert.equal(none.code, 1);
   assert.match(none.stderr, /tests: no tests evidence/);
@@ -81,6 +94,20 @@ test('accept refuses a code task without gates, and a review by the submitter do
 
   ev(h, 'review', 'r-1');
   acceptAfterReview(h);
+});
+
+test('accept dispatches review before the tests gate and runs tests once review passes', async (t) => {
+  const h = submitted(t);
+  silentReviewer(h);
+  const pending = h.run(['accept', 'T1']);
+  assert.equal(pending.code, 0, pending.stderr);
+  assert.match(pending.stdout, /review pending with \S+; tests run after the review passes/);
+  const types = () => h.readState('tasks.json').tasks[0].evidence.map((e) => e.type);
+  assert.deepEqual(types(), ['clean'], 'no suite runs before the review');
+  await reviewerExited(h);
+  ev(h, 'review', 'r-1');
+  acceptAfterReview(h);
+  assert.deepEqual(types().filter((type) => type !== 'review'), ['clean', 'tests']);
 });
 
 test('the latest evidence at the submitted sha decides, and other shas do not count', (t) => {
@@ -120,7 +147,7 @@ test('a revision bump invalidates earlier evidence', (t) => {
   ev(h, 'clean', 'w-1');
   ev(h, 'review', 'r-1');
   h.ok(['task', 'update', 'T1', '--acceptance', 'it works', '--acceptance', 'and logs it']);
-  h.ok(['project', 'set', '--tests-cmd', 'null']);
+  h.ok(['project', 'set', '--tests-cmd', 'null', '--review-policy', '{"tests_first":true}']);
   const r = h.run(['accept', 'T1']);
   assert.equal(r.code, 1);
   assert.ok(r.stderr.includes(`no tests evidence at ${h.sha.slice(0, 7)} for revision 2`));
@@ -177,18 +204,34 @@ test('other kinds need only a review from another agent', async (t) => {
   acceptAfterReview(h);
 });
 
-for (const retry of ['unchanged', 'override', 'head', 'revision']) {
-  test(`accept does not repeat a failed review without a new input: ${retry}`, async (t) => {
+for (const [retry, delayed] of [['unchanged', false], ['override', false], ['head', false], ['revision', false], ['unchanged', true]]) {
+  test(`accept does not repeat a failed review without a new input: ${retry}${delayed ? ', delayed exit reaction' : ''}`, async (t) => {
     const h = submitted(t, [], 'docs');
     silentReviewer(h);
-    assert.equal(h.json(['accept', 'T1', '--agent', 'orchestrator']).review_pending, true);
+    const preload = path.join(h.base, 'delayed-review-exit.js');
+    if (delayed) fs.writeFileSync(preload, `const path = require('node:path');
+if (path.basename(process.argv[1] || '') === 'spawn-monitor.js') {
+  const automation = require(path.join(path.dirname(process.argv[1]), 'automation.js'));
+  const consume = automation.consume;
+  automation.consume = async (...args) => {
+    await new Promise(resolve => setTimeout(resolve, 500)); // wait-allow: widen the gap between the exit receipt and its reaction
+    return consume(...args);
+  };
+}
+`);
+    assert.equal(h.json(['accept', 'T1', '--agent', 'orchestrator'],
+      delayed ? { pre: ['--require', preload] } : {}).review_pending, true);
     await reviewerExited(h);
+    const exit = events(h).findLast((e) => e.cmd === 'spawn exit' && e.detail.agent === reviewerSpawns(h)[0].detail.agent);
+    assert.ok(events(h).some((e) => e.cmd === 'automation' && e.detail.source === exit.id && e.detail.phase === 'done'),
+      'the reviewer exit reaction finishes before the next verdict is recorded');
     const reviewer = reviewerSpawns(h)[0].detail.agent;
     h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', h.sha, '--agent', reviewer,
       '--summary', '1 blocker: value.md:1 - missing behavior',
       '--findings', JSON.stringify([{ kind: 'defect', path: 'value.md', claim: 'missing behavior' }])]);
     const failed = h.run(['accept', 'T1', '--agent', 'orchestrator', '--json']);
     assert.equal(failed.code, 1, failed.stderr);
+    assert.ok(failed.stdout.trim(), JSON.stringify(failed));
     const result = JSON.parse(failed.stdout);
     assert.equal(result.review_failed, true);
     assert.equal(result.status, 'submitted');
@@ -465,9 +508,9 @@ archive.onAccept = async (...args) => {
       fs.writeFileSync(script, `
 const fs = require('node:fs');
 fs.writeFileSync(process.argv[2], '');
-const end = Date.now() + 60000; // wait-allow: bounded fixture wait for the explicit gate release signal
+const end = Date.now() + 60000, parent = process.ppid; // wait-allow: bounded fixture wait for the explicit gate release signal
 while (!fs.existsSync(process.argv[3])) {
-  if (Date.now() >= end) process.exit(1);
+  if (Date.now() >= end || process.ppid !== parent) process.exit(1);
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20); // wait-allow: release signal with a 60-second deadline
 }
 `);

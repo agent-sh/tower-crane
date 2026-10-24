@@ -1,0 +1,2 @@
+- A natively landed task stays `accepted (native)` and counts in `accepted_native` after a merge gate run confirms the same merge, such as a merge reaction queued before the landing. Before, only the tasks with no such confirmation showed as native.
+- `metrics` counts a `merge` event at a native landing's head and revision as that landing, not as a Tower Crane merge, so a confirmed landing no longer counts twice or enters the Tower Crane scorecard.

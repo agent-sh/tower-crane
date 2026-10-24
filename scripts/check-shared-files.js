@@ -7,7 +7,7 @@ const { check } = require('./cli-docs');
 const { check: checkDocLinks } = require('./doc-links');
 const { fragments, released } = require('./changelog');
 const { normalizeText, readText } = require('./text');
-const { checkTestWaits } = require('./test-waits');
+const { checkTestWaits, checkSpins, tokenize } = require('./test-waits');
 const { checkSuiteDeadline } = require('./suite-time');
 const { checkFakeAgentEnvs } = require('./fake-agent-env');
 const { checkMutants } = require('./mutants');
@@ -26,6 +26,39 @@ function checkStdinReads(root) {
       for (const match of text.matchAll(BARE_STDIN)) {
         const line = text.slice(0, match.index).split('\n').length;
         found.push(`${file}:${line} reads stdin with readFileSync(0); use readStdin() from lib/util.js`);
+      }
+    }
+  }
+  if (found.length) throw new Error(found.join('\n'));
+}
+
+function scratchFindings(text) {
+  // Construct forbidden spellings so this script also obeys the rule.
+  const name = 'tmp' + 'dir';
+  const systemTemp = new RegExp('\\b' + name + '\\s*\\(', 'g');
+  const literalTemp = new RegExp('[\\x27"`]/' + 'tmp(?:/|[\\x27"`])', 'g');
+  const found = [systemTemp, literalTemp].flatMap((pattern) =>
+    [...text.matchAll(pattern)].map((match) => match.index));
+  const tokens = tokenize(text).filter((token) => token.type !== 'comment');
+  for (const [i, token] of tokens.entries()) {
+    // Reject bindings as well as calls, so renamed imports and extracted members cannot hide one.
+    if (token.type === 'identifier' && token.value === name) found.push(token.start);
+    else if (['string', 'template'].includes(token.type) && token.value.slice(1, -1) === name
+      && (tokens[i - 1]?.value === '[' || tokens[i + 1]?.value === ':')) found.push(token.start);
+  }
+  return [...new Set(found)].sort((a, b) => a - b);
+}
+
+function checkScratchRoots(root) {
+  const found = [];
+  for (const dir of ['lib', 'bin', 'scripts']) {
+    for (const name of fs.readdirSync(path.join(root, dir), { recursive: true })) {
+      const file = `${dir}/${name.replace(/\\/g, '/')}`;
+      if (!fs.statSync(path.join(root, file)).isFile()) continue;
+      const text = readText(path.join(root, file));
+      for (const index of scratchFindings(text)) {
+        const line = text.slice(0, index).split('\n').length;
+        found.push(`${file}:${line} uses the system temp directory; use lib/scratch-root.js`);
       }
     }
   }
@@ -108,7 +141,9 @@ function main(args) {
   check(root);
   checkDocLinks(root);
   checkStdinReads(root);
+  checkScratchRoots(root);
   checkTestWaits(root);
+  checkSpins(root);
   checkFakeAgentEnvs(root);
   checkSuiteDeadline(root);
   // Mutation scoring runs shared checks on deliberately changed code.
@@ -125,4 +160,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { checkChanges };
+module.exports = { checkChanges, scratchFindings };

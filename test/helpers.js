@@ -477,6 +477,16 @@ function cachedFixture(t, key, build) {
     }
   };
   walk(h.base);
+  // The template's orchestrator lease names the process tree that built it. A
+  // copy made minutes later can run under another tree, as when the tests
+  // gate outlives a restarted wait host, so each copy takes its own lease.
+  if (fs.existsSync(path.join(h.state, 'tasks.json'))) {
+    const doc = h.readState('tasks.json');
+    if (doc.orchestrator_lease) {
+      delete doc.orchestrator_lease;
+      h.writeState('tasks.json', doc);
+    }
+  }
   for (const [k, v] of Object.entries(from.env)) if (typeof v === 'string') h.env[k] = rewrite(v);
   h.env.HOME = path.join(h.base, 'home');
   h.env.GIT_CONFIG_GLOBAL = path.join(h.base, 'gitconfig');
@@ -639,7 +649,9 @@ function cliFailure(args, result) {
     result.signal && `signal ${result.signal}`,
     result.error && `error ${result.error.code}: ${result.error.message}`,
   ].filter(Boolean).join('; ');
-  return new Error(`tower-crane ${args.join(' ')} exited ${result.code}${details ? ` (${details})` : ''}: ${result.stderr}`);
+  // A command can fail with its outcome on stdout alone, as an aborted stack sync did.
+  const output = result.stderr || (result.stdout && `(stderr empty; stdout) ${result.stdout}`) || '';
+  return new Error(`tower-crane ${args.join(' ')} exited ${result.code}${details ? ` (${details})` : ''}: ${output}`);
 }
 
 const PTY_AVAILABLE = process.platform === 'linux'

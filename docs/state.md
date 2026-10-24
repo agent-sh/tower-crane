@@ -3,6 +3,7 @@
 Tower Crane keeps a project's plan and progress in plain files. The CLI is the state writer.
 
 - [Tasks and lifecycle](state/tasks.md)
+- [Submission history](state/tasks.md#submission-history)
 - [Gates](state/gates.md)
 - [Review](state/review.md)
 - [CI](state/ci.md)
@@ -40,11 +41,15 @@ Existing links use these anchors. Follow the link to the contract in its area.
 
 <a id="projectjson"></a>[projectjson](state/storage.md#projectjson)
 
+<a id="presubmit"></a>[presubmit](state/storage.md#presubmit)
+
 <a id="local-ci-output"></a>[local-ci-output](state/ci.md#local-ci-output)
 
 <a id="ladder"></a>[ladder](state/tasks.md#ladder)
 
 <a id="resource-containment"></a>[resource-containment](state/containment.md#resource-containment)
+
+<a id="cpu-shares"></a>[cpu-shares](state/containment.md#cpu-shares)
 
 <a id="host-resource-governor"></a>[host-resource-governor](state/containment.md#host-resource-governor)
 
@@ -72,6 +77,8 @@ Existing links use these anchors. Follow the link to the contract in its area.
 
 <a id="already-merged-hotfixes"></a>[already-merged-hotfixes](state/tasks.md#already-merged-hotfixes)
 
+<a id="native-landings"></a>[native-landings](state/tasks.md#native-landings)
+
 <a id="research-sources"></a>[research-sources](state/tasks.md#research-sources)
 
 <a id="ready-and-blocked"></a>[ready-and-blocked](state/tasks.md#ready-and-blocked)
@@ -98,6 +105,8 @@ Existing links use these anchors. Follow the link to the contract in its area.
 
 <a id="publish-policy"></a>[publish-policy](state/decisions.md#publish-policy)
 
+<a id="sandbox-policy"></a>[sandbox-policy](state/decisions.md#sandbox-policy)
+
 <a id="fallback-route-grants"></a>[fallback-route-grants](state/decisions.md#fallback-route-grants)
 
 <a id="native-crashes"></a>[native-crashes](state/tasks.md#native-crashes)
@@ -122,4 +131,16 @@ Existing links use these anchors. Follow the link to the contract in its area.
 
 <a id="flake-ledger"></a>[flake-ledger](state/gates.md#flake-ledger)
 
+<a id="base-failures"></a>[base-failures](state/gates.md#base-failures)
+
 <a id="scratch-archive"></a>[scratch-archive](state/storage.md#scratch-archive)
+
+<a id="docs-and-small-fix-rounds"></a>[docs and small fix rounds](state/review.md#docs-and-small-fix-rounds)
+
+<a id="runaway-cost"></a>[runaway-cost](state/review.md#runaway-cost)
+
+<a id="conflict-hotspots"></a>[conflict-hotspots](state/review.md#conflict-hotspots)
+
+<a id="merge-pause"></a>[merge-pause](state/gates.md#merge-pause)
+
+<a id="base-only-heads"></a>[base-only-heads](state/gates.md#base-only-heads)

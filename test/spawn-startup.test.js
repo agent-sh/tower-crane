@@ -302,7 +302,7 @@ test('a harness the supervisor cannot find is reported as a PATH problem, with n
 const cp = require('node:child_process');
 const spawn = cp.spawn;
 cp.spawn = function (file, args, opts) {
-  return spawn.call(this, ${JSON.stringify(path.join(h.base, 'missing-harness'))}, args, opts);
+  return spawn.call(this, file === process.execPath ? ${JSON.stringify(path.join(h.base, 'missing-harness'))} : file, args, opts);
 };`);
   const failed = h.run(['spawn', '--role', 'small', '--task', 'T1'], { env });
   assert.equal(failed.code, 1, failed.stderr);

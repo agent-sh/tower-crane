@@ -1,0 +1,1 @@
+- Gate worktrees, masked Git moves and test tooling default to Tower Crane's user cache. Agent spawns get private temp directories, which sandboxed Git moves and tooling reuse after explicit scratch overrides. Deep cache paths keep private scratch instead of falling back to the system temp directory. Shared checks reject system temp fallbacks in runtime code and scripts.

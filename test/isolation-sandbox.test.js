@@ -268,10 +268,10 @@ test('a codex agent\'s temp directory fits a browser\'s singleton socket when it
   // ran 98 to 104 bytes under a fixture's root.
   const { h, u } = setup(t);
   isolated(h, 'review', 'codex');
-  // A cache root of 46 bytes or less, as /home/<user>/.cache is for a user name of up to 34 letters.
+  // The private path under tower-crane adds 28 bytes to the cache root.
   // Made after the fixture, so it is removed after the fixture's agents stop.
-  const root = shortCacheRoot(t, 46);
-  if (!root) return t.skip('no writable cache root of at most 46 bytes');
+  const root = shortCacheRoot(t, 34);
+  if (!root) return t.skip('no writable cache root of at most 34 bytes');
   spawn(h, u, 'review', { XDG_CACHE_HOME: root });
   const tmp = u.report().tmpdir;
   assert.ok(Buffer.byteLength(tmp) <= 62, `${tmp} is ${Buffer.byteLength(tmp)} bytes`);

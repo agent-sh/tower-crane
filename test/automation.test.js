@@ -4,13 +4,13 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { waitOnRepo, waitUntil, HUNG_TEST_MS } = require('./signals');
-const { BIN, ROOT, cachedFixture } = require('./helpers');
-const { readPublished } = require('./atomic-file');
+const { waitOnRepo, waitUntil } = require('./signals');
+const { BIN, cachedFixture } = require('./helpers');
+const { readPublished, readJsonLines } = require('./atomic-file');
 const { gateEvidence } = require('./gate-helpers');
 const { waitFor } = require('./canary');
 const { shellQuote } = require('../lib/gates/common');
-const { setup, holdSuite, configureHarness } = require('./automation-helpers');
+const { setup, holdSuite, configureHarness, refillFixture } = require('./automation-helpers');
 
 const OWNER = path.join(__dirname, 'fixtures', 'pr-owner.js');
 
@@ -70,16 +70,10 @@ fs.writeFileSync('generated.txt', rows + '\\n');
   });
   h.github = () => JSON.parse(fs.readFileSync(h.env.AUTOMATION_GITHUB, 'utf8'));
   h.saveGithub = (state) => fs.writeFileSync(h.env.AUTOMATION_GITHUB, JSON.stringify(state));
-  h.logs = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
-  h.consume = (options = {}) => {
+  h.logs = () => readJsonLines(path.join(h.state, 'events.jsonl'));
+  h.consume = () => {
     h.ok(['project', 'set', '--paused', 'manual generated conflict probe']);
-    // A zero deadline can leave the first reaction pending. Observe a fresh
-    // reconciliation after its drain instead of asserting on unfinished work.
-    const result = h.run(['wait', '--after', 'now', '--types', 'automation reconcile',
-      '--timeout', String(HUNG_TEST_MS / 1000), '--agent', 'orchestrator'], options);
-    assert.equal(result.code, 0, JSON.stringify(result));
-    assert.equal(JSON.parse(result.stdout).type, 'automation reconcile');
-    return result;
+    return h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
   };
   h.submit = () => {
     h.ok(['claim', 'T1', '--agent', 'worker']);
@@ -98,6 +92,36 @@ fs.writeFileSync('generated.txt', rows + '\\n');
   };
   return h;
 }
+
+test('automation fixture event readers keep complete records during an append', (t) => {
+  for (const [name, build] of [['generated', generatedSetup], ['setup', setup], ['refill', refillFixture]]) {
+    const h = build(t);
+    const file = path.join(h.state, 'events.jsonl');
+    const published = readPublished(file, 'utf8');
+    const expected = h.logs();
+    const event = { cmd: 'msg', detail: { text: 'brace } שלום 🌍' } };
+    const record = JSON.stringify(event);
+    const bytes = Buffer.from(record);
+    let snapshot = published;
+    const read = fs.readFileSync;
+    t.mock.method(fs, 'readFileSync', (target, ...args) => target === file ? snapshot : read(target, ...args));
+    try {
+      for (const suffix of [
+        '', record.slice(0, 11), record.slice(0, record.indexOf('}') + 1),
+        bytes.subarray(0, bytes.indexOf(Buffer.from('🌍')) + 2).toString('utf8'), record,
+      ]) {
+        snapshot = published + suffix;
+        assert.deepEqual(h.logs(), expected, `${name}: ${JSON.stringify(suffix)}`);
+      }
+      snapshot = published + record + '\n';
+      assert.deepEqual(h.logs(), [...expected, event], `${name}: the newline publishes the record`);
+      snapshot = published + '{"cmd":\n';
+      assert.throws(() => h.logs(), SyntaxError, `${name}: malformed complete records remain failures`);
+    } finally {
+      t.mock.restoreAll();
+    }
+  }
+});
 
 test('generated mappings recognize only declared paths, including names shared with object properties', async () => {
   const G = require('../lib/generated-conflicts');
@@ -132,6 +156,29 @@ test('generated-only conflicts merge, regenerate and push without rework or a wo
   assert.ok(task.evidence.some((e) => e.type === 'tests' && e.ok && e.sha === h.sha), 'old evidence remains historical');
   assert.ok(task.evidence.some((e) => e.type === 'tests' && e.ok && e.sha === task.sha), 'gates rerun on the repaired head');
   assert.ok(h.logs().some((e) => e.cmd === 'generated merge' && e.detail.phase === 'pushed'));
+});
+
+test('the generated-file repair runs its script in the project\'s slice at the project\'s gate weight', {
+  skip: process.platform !== 'linux' && 'systemd scopes are Linux only',
+}, (t) => {
+  const h = generatedSetup(t);
+  const pre = ['--require', path.join(__dirname, 'fixtures', 'project-slices.js')];
+  Object.assign(h.env, { TOWER_CRANE_TEST_CONTAINMENT: '1', TC_FAKE_MANAGER_LOG: path.join(h.base, 'manager.jsonl'),
+    TC_FAKE_SCOPE_LOG: path.join(h.base, 'scopes.jsonl') });
+  h.ok(['project', 'set', '--gates-cpu-weight', '700', '--agent', 'orchestrator']);
+  h.submit();
+  h.ok(['check', 'tests', 'T1', '--agent', 'orchestrator'], { pre });
+  h.ok(['project', 'set', '--paused', 'manual generated conflict probe']);
+  h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator'], { pre });
+  assert.ok(h.logs().some((e) => e.cmd === 'generated merge' && e.detail.phase === 'pushed'));
+  const digest = require('node:crypto').createHash('sha256').update(fs.realpathSync(h.state)).digest('hex').slice(0, 12);
+  const launches = fs.readFileSync(h.env.TC_FAKE_SCOPE_LOG, 'utf8').trim().split('\n').map(JSON.parse);
+  const repair = launches.filter((l) => l.argv.join(' ').includes('docs:generate'));
+  assert.ok(repair.length, JSON.stringify(launches.map((l) => l.argv)));
+  for (const launch of launches) {
+    assert.equal(launch.slice, `agents-towercrane_${digest}.slice`, launch.argv.join(' '));
+    assert.equal(launch.cpu_weight, 700, launch.argv.join(' '));
+  }
 });
 
 // A worker can write .git/config. pushInsteadOf rewrites a URL named on the
@@ -278,63 +325,39 @@ test('an accepted generated-only conflict returns to submitted with old review k
   assert.equal(h.logs().some((e) => e.cmd === 'rework'), false);
 });
 
-for (const [initial, confirmed, deferred] of [
-  [['MERGEABLE', 'CLEAN'], ['CONFLICTING', 'DIRTY'], false],
-  [['MERGEABLE', 'CLEAN'], ['CONFLICTING', 'DIRTY'], true],
-  [['UNKNOWN', 'UNKNOWN'], ['CONFLICTING', 'CLEAN'], true],
-  [['MERGEABLE', 'CLEAN'], ['MERGEABLE', 'DIRTY'], true],
-]) {
-  test(`the queue defers real generated conflicts until GitHub confirms ${confirmed.join('/')} after ${initial.join('/')} (${deferred ? 'deferred' : 'immediate'} startup pass)`, (t) => {
-    const h = generatedSetup(t);
-    const github = h.github();
-    Object.assign(github.prs['7'], { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' });
-    github.ci[h.sha] = 'success';
-    h.saveGithub(github);
-    h.submit();
-    for (const type of ['tests', 'clean', 'ci']) gateEvidence(h, type, 'orchestrator');
-    h.reviewer('T1', 'reviewer');
-    h.ok(['evidence', 'T1', '--type', 'review', '--sha', h.sha, '--ok', '--agent', 'reviewer']);
-    h.ok(['accept', 'T1', '--agent', 'orchestrator']);
-    const initialView = h.github();
-    Object.assign(initialView.prs['7'], { mergeable: initial[0], mergeStateStatus: initial[1] });
-    h.saveGithub(initialView);
-    h.consume();
-    const waiting = h.readState('tasks.json').tasks[0];
-    assert.equal(waiting.status, 'accepted');
-    assert.equal(waiting.sha, h.sha);
-    assert.equal(h.git(['rev-parse', 'HEAD']), h.sha);
-    assert.equal(h.git(['status', '--porcelain']), '');
-    assert.equal(h.logs().some((e) => e.cmd === 'rework' || e.cmd === 'generated merge' || e.cmd === 'head check'), false);
-    assert.equal(h.github().calls.some((args) => args[0] === 'pr' && args[1] === 'merge'), false);
-    const remote = h.github();
-    Object.assign(remote.prs['7'], { mergeable: confirmed[0], mergeStateStatus: confirmed[1] });
-    h.saveGithub(remote);
-    const marker = path.join(h.base, 'reconcile-deferred');
-    const preload = path.join(h.base, 'reconcile-deferral.cjs');
-    if (deferred) fs.writeFileSync(preload, `
-const fs = require('node:fs');
-const automation = require(${JSON.stringify(path.join(ROOT, 'lib', 'automation.js'))});
-const consume = automation.consume;
-automation.consume = async function(ctx, events, ...args) {
-  if (!fs.existsSync(${JSON.stringify(marker)})) {
-    fs.writeFileSync(${JSON.stringify(marker)}, 'deferred');
-    await new Promise(setImmediate);
-    return events;
-  }
-  return consume.call(this, ctx, events, ...args);
-};
-`);
-    const result = h.consume(deferred ? { pre: ['--require', preload] } : {});
-    if (deferred) assert.equal(fs.existsSync(marker), true, 'the first startup pass deferred its work');
-    const repaired = h.readState('tasks.json').tasks[0];
-    assert.equal(repaired.status, 'submitted', JSON.stringify({
-      result, reactions: h.logs().filter(e => e.cmd === 'automation').slice(-5).map(e => e.detail),
-    }));
-    assert.notEqual(repaired.sha, h.sha);
-    assert.equal(h.git(['--git-dir', h.remote, 'rev-parse', 'fixture-change']), repaired.sha);
-    assert.equal(h.logs().some((e) => e.cmd === 'rework'), false);
-  });
-}
+test('the queue defers real generated conflicts while GitHub still reports the accepted head clean', (t) => {
+  const h = generatedSetup(t);
+  const github = h.github();
+  Object.assign(github.prs['7'], { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' });
+  github.ci[h.sha] = 'success';
+  h.saveGithub(github);
+  h.submit();
+  for (const type of ['tests', 'clean', 'ci']) gateEvidence(h, type, 'orchestrator');
+  h.reviewer('T1', 'reviewer');
+  h.ok(['evidence', 'T1', '--type', 'review', '--sha', h.sha, '--ok', '--agent', 'reviewer']);
+  h.ok(['accept', 'T1', '--agent', 'orchestrator']);
+  h.consume();
+  const deferred = h.readState('tasks.json').tasks[0];
+  assert.equal(deferred.status, 'accepted');
+  assert.equal(deferred.sha, h.sha);
+  assert.equal(h.git(['rev-parse', 'HEAD']), h.sha);
+  assert.equal(h.git(['status', '--porcelain']), '');
+  assert.equal(h.logs().some((e) => e.cmd === 'rework' || e.cmd === 'generated merge' || e.cmd === 'head check'), false);
+  assert.equal(h.github().calls.some((args) => args[0] === 'pr' && args[1] === 'merge'), false);
+  const confirmed = h.github();
+  Object.assign(confirmed.prs['7'], { mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY' });
+  h.saveGithub(confirmed);
+  const run = h.consume();
+  const repaired = h.readState('tasks.json').tasks[0];
+  // A repair that did not land is named by what the wait printed, its reactions' receipts and the
+  // PR the offline GitHub held, since a host gate keeps only the failure's output.
+  const { mergeable, mergeStateStatus } = h.github().prs['7'];
+  assert.equal(repaired.status, 'submitted', [`wait exit ${run.code}: ${run.stderr.trim()}`, `PR ${mergeable}/${mergeStateStatus}`,
+    ...h.logs().filter((e) => ['automation', 'merge queue', 'queue skipped'].includes(e.cmd)).slice(-6).map((e) => `${e.cmd} ${JSON.stringify(e.detail)}`)].join('\n'));
+  assert.notEqual(repaired.sha, h.sha);
+  assert.equal(h.git(['--git-dir', h.remote, 'rev-parse', 'fixture-change']), repaired.sha);
+  assert.equal(h.logs().some((e) => e.cmd === 'rework'), false);
+});
 
 for (const mergeable of ['MERGEABLE', 'UNKNOWN']) {
   test(`a post-merge sweep defers mixed generated conflicts with ${mergeable} mergeability until GitHub confirms them`, (t) => {
@@ -425,7 +448,7 @@ for (const mixed of [false, true]) {
     for (const rung of ['easy', 'review']) h.ok(['ladder', 'set', rung, '--command', JSON.stringify([process.execPath, OWNER, BIN, '{prompt}'])]);
     Object.assign(h.env, { OWNER_HEADS: JSON.stringify([h.sha]), OWNER_LOG: path.join(h.base, 'owner.jsonl'), OWNER_CRASH_ON_FIX: '1' });
     // The owner appends while the test reads: only complete lines count.
-    const outcomes = () => (fs.existsSync(h.env.OWNER_LOG) ? readPublished(h.env.OWNER_LOG, 'utf8') : '').split('\n').filter((l) => l.endsWith('}')).map(JSON.parse);
+    const outcomes = () => fs.existsSync(h.env.OWNER_LOG) ? readJsonLines(h.env.OWNER_LOG) : [];
     const github = h.github();
     Object.assign(github.prs['7'], { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' });
     h.saveGithub(github);
@@ -677,12 +700,12 @@ for (const waiting of ['runs', 'mergeability']) {
     const waiter = h.runAsync(['wait', '--types', 'never', '--timeout', '10', '--agent', 'orchestrator'], // wait-allow: the engine run ends at its own timeout
       { hooks: { HOOK_CLOCK_FILE: clock } });
     t.after(() => waiter);
-    let ended = false;
-    waiter.then(() => { ended = true; });
+    let ended = null;
+    waiter.then((r) => { ended = r; });
     // Readiness is the record; a waiter that ended first fails at once.
     const until = (probe) => waitOnRepo(h, () => {
       if (probe()) return true;
-      if (ended) throw new Error('the waiter ended before the CI check completed');
+      if (ended) throw new Error(`the waiter ended before the CI check completed: exit ${ended.code}\n${ended.stdout}${ended.stderr}`);
       return false;
     }, 'CI check completed');
     await until(() => reconciled() > before);

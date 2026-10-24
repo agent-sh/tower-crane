@@ -8,7 +8,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { BIN } = require('./helpers');
-const { waitUntil } = require('./signals');
+const { fileWritten, waitUntil } = require('./signals');
 const { shellQuote } = require('../lib/gates/common');
 const { setup, configureHarness } = require('./automation-helpers');
 
@@ -109,6 +109,23 @@ test('a failed review reaches the owner with its findings, and the owner submits
   assert.deepEqual(h.logs().filter((e) => e.cmd === 'rework').map((e) => e.detail.from_review), [true]);
 });
 
+test('a failure that climbs the task goes to a new worker on the next rung, not back to its owner', async (t) => {
+  const h = ownerFixture(t);
+  h.env.OWNER_HEADS = JSON.stringify([h.sha]);
+  // An earlier review FAIL at easy, so the owner's failing tests are the second rework there.
+  h.ok(['claim', 'T1', '--agent', 'worker']);
+  h.ok(['submit', 'T1', '--sha', h.sha, '--agent', 'worker']);
+  h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', h.sha, '--revision', '1',
+    '--summary', 'lib/other.js:3 - wrong branch']);
+  h.ok(['rework', '--from-review', 'T1', '--agent', 'orchestrator']);
+  await runEngine(h);
+  const climb = h.logs().filter((e) => e.cmd === 'climb');
+  assert.deepEqual(climb.map((e) => [e.detail.from, e.detail.to]), [['easy', 'medium']]);
+  assert.equal(h.task().tier, 'medium');
+  assert.equal(h.logs().filter((e) => e.cmd === 'claim' && e.detail.handover).length, 0, 'nothing went back to the easy owner');
+  assert.deepEqual(h.outcomes().map((o) => [o.outcome, o.reason]), [['exit', 'sent back to rework for a new worker']]);
+});
+
 test('a review that fails only on PR-body claims gets its body fixer while the owner waits, with no rework', async (t) => {
   const h = ownerFixture(t, { OWNER_REVIEW_BODY: '1' });
   h.env.OWNER_REVIEW_FAIL_ONCE = path.join(h.base, 'review-failed');
@@ -127,7 +144,13 @@ test('a review that fails only on PR-body claims gets its body fixer while the o
   assert.equal(h.logs().filter((e) => e.cmd === 'rework' || e.cmd === 'claim' && e.detail.handover).length, 0);
 });
 
-test('an owner idle past its limit exits, and the next failure dispatches a new worker as before', async (t) => {
+// The new worker owns its head under the same idle limit, so it may exit
+// idle too before that head merges: the fixed suite that outlasts the limit
+// makes that happen every time. The merge does not wait for its owner.
+for (const row of [
+  { name: 'merges', fixed: 0 },
+  { name: 'merges after its own owner idles out', fixed: 4000 },
+]) test(`an owner idle past its limit exits, and the next failure dispatches a new worker as before, whose head ${row.name}`, async (t) => {
   const h = ownerFixture(t);
   // The first head's tests wait for the release, so the owner idles meanwhile.
   const release = path.join(h.base, 'release');
@@ -140,6 +163,7 @@ const finish = () => {
     console.log('not ok 1 - the value is fixed');
     process.exit(1);
   }
+  setTimeout(() => {}, ${row.fixed}); // wait-allow: the fixed head's suite outlasts the owner idle limit, which no event can signal
 };
 poll();
 `);
@@ -150,11 +174,12 @@ poll();
   const closed = new Promise((resolve) => engine.on('close', resolve));
   const until = (check, what) => waitUntil(check, { paths: [h.base], alive: engine, what: () => `${what}; engine output: ${output}` });
   const exited = (n) => h.workers().length >= n && h.logs().some((e) => e.cmd === 'spawn exit' && e.detail.agent === h.workers()[n - 1].detail.agent);
+  const merged = () => h.task().evidence.some((e) => e.type === 'merge' && e.ok);
   try {
     await until(() => exited(1), 'the idle owner exits');
     assert.deepEqual(h.outcomes().map((o) => [o.outcome, o.reason]), [['exit', 'idle']]);
     fs.writeFileSync(release, '');
-    await until(() => exited(2), 'a new worker fixes the failure');
+    await until(() => exited(2) && merged(), 'a new worker fixes the failure and its head merges');
   } finally {
     engine.kill('SIGINT');
     await closed;
@@ -169,6 +194,23 @@ poll();
 function ownerSpawn(h, id) {
   const started = h.json(['spawn', '--task', id]);
   return started.agent;
+}
+
+for (const steer of [false, true]) {
+  test(`ownership wait keeps waiting after a direct ${steer ? 'steer' : 'message'}`, async (t) => {
+    const h = ownerFixture(t, { OWNER_NO_PR: '1' });
+    const agent = ownerSpawn(h, 'T1');
+    await waitUntil(() => h.task().status === 'submitted', { paths: [h.base], what: 'the owner submitted' });
+    const signal = path.join(h.base, 'own-watch-ready');
+    const ready = fileWritten(signal);
+    const waiting = h.runAsync(['wait', '--own', '--task', 'T1', '--agent', agent, '--timeout', '2'], { hooks: { HOOK_WATCH_READY: signal } }); // wait-allow: ordinary messages must leave an ownership wait running until its deadline
+    await Promise.race([ready, waiting.then((r) => { throw new Error(`ownership wait exited before watch setup: ${r.stdout} ${r.stderr}`); })]);
+    h.ok(['msg', '--agent', 'orchestrator', '--to', agent, '--task', 'T1', ...(steer ? ['--steer'] : []), 'direct instruction']);
+    const result = await waiting;
+    assert.equal(result.code, 2, result.stderr || result.stdout);
+    assert.deepEqual(JSON.parse(result.stdout), { type: 'timeout', outcome: 'wait', task: 'T1' });
+    h.ok(['interrupt', 'T1', '--agent', 'orchestrator']);
+  });
 }
 
 test('waiting owners hold no worker slot and have their own limit; a handback takes its claim past the worker limit; a crashed owner is a dead claim', async (t) => {
@@ -259,9 +301,13 @@ for (const row of [
     await until(() => h.task().status === 'submitted' && h.json(['status']).governor.units.some((u) => u.agent === agent && u.waiting), 'T1 owner waits');
     if (row.manual) h.ok(['rework', 'T1', '--reason', 'value.js must be 2', '--agent', 'orchestrator']);
     else {
-      h.consume();
+      const consumed = h.consume();
       const rework = h.logs().findLast((e) => e.cmd === 'rework');
-      assert.deepEqual([rework.detail.gate, rework.detail.owner_held], ['tests', agent], 'the gate rework names the owner it is held for');
+      // The engine's output and the task's events since its submit say why an owner was not held.
+      const since = h.logs().slice(h.logs().findLastIndex((e) => e.cmd === 'submit')).filter((e) => e.task === 'T1')
+        .map((e) => `${e.at} ${e.agent} ${e.cmd} ${JSON.stringify(e.detail)}`.slice(0, 400));
+      assert.deepEqual([rework?.detail?.gate, rework?.detail?.owner_held], ['tests', agent],
+        `the gate rework names the owner it is held for\n${consumed.stdout}${consumed.stderr}\n${since.join('\n')}`);
       assert.deepEqual([h.task().status, h.task().claim], ['rework', null], 'the hold keeps the task unclaimed');
       const item = h.json(['inbox', '--agent', 'orchestrator']).items.find((i) => i.kind === 'rework_ready');
       assert.deepEqual([item?.restore, item?.owner, item?.action.argv], ['gates retry T1 --from-rework', agent, ['gates', 'retry', 'T1', '--from-rework']],

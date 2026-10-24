@@ -9,8 +9,8 @@ const vm = require('node:vm');
 const { createRequire } = require('node:module');
 const { EventEmitter } = require('node:events');
 const { makeRepo, ROOT } = require('./helpers');
-const { HUNG_TEST_MS } = require('./signals');
 const { shellQuote } = require('../lib/gates/common');
+const { HUNG_TEST_MS } = require('./signals');
 
 test('timeout validation and runner interruption formats', () => {
   const timeouts = require('../lib/gate-timeouts');
@@ -43,8 +43,11 @@ test('timeout validation and runner interruption formats', () => {
 test('gate timeouts are operational settings and record infrastructure failure through the CLI', (t) => {
   const h = makeRepo(t);
   const script = path.join(h.base, 'suite.js');
-  // A scripted TAP runner starts one file and never completes it before the gate deadline.
+  // A scripted TAP runner starts one file and never completes it before the gate deadline. Its
+  // fixture goes under TOWER_CRANE_TMP, as test/tmp-root.js puts this suite's, and the stop
+  // leaves it there.
   fs.writeFileSync(script, `
+require('node:fs').mkdtempSync(require('node:path').join(process.env.TOWER_CRANE_TMP, 'tower-crane-'));
 console.log('TAP version 13\\n# Subtest: test/slow.test.js');
 process.on('SIGTERM', () => {
   console.log("not ok 1 - test/slow.test.js\\n  ---\\n  error: 'Promise resolution is still pending but the event loop has already resolved'\\n  ...");
@@ -161,43 +164,49 @@ test('late gate deadlines preserve newly delivered output in either callback ord
 // inbox reads PRs with synchronous gh calls while its base CI read runs in the background, so a
 // timer can come due while the event loop is blocked, before the child's exit or output is seen.
 test('a timeout that comes due during a blocked event loop stops only a child with nothing to show', async (t) => {
-  const h = makeRepo(t);
   const C = require('../lib/gates/common');
-  let next = 0;
-  const run = (script) => {
-    const ready = path.join(h.base, `child-${next++}.ready`);
-    const prefix = "const fs = require('node:fs'); const ready = () => fs.writeFileSync(process.argv[1], 'ready'); ";
-    const pending = C.exec({ exec: C.treeExec }, process.execPath, ['-e', prefix + script, ready], { timeout: 300 }); // wait-allow: the gate timeout itself is under test
-    // A synchronous observer keeps the parent from draining the child's pipe
-    // until the child has reached the state this row needs.
-    const observed = cp.spawnSync(process.execPath, ['-e',
-      "require('./test/signals').fileWritten(process.argv[1]).catch(e => { console.error(e); process.exitCode = 1; });", ready],
-    { cwd: ROOT, env: h.env, encoding: 'utf8', timeout: HUNG_TEST_MS });
-    assert.equal(observed.status, 0, observed.stderr);
-    return pending;
-  };
+  const h = makeRepo(t);
   const block = () => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1500); // wait-allow: blocks the event loop past the gate timeout, the condition under test
   const cases = [
-    ['exited', "fs.writeSync(1, 'done'); ready();", (r) => assert.equal(r.stdout, 'done')],
-    ['delayed startup', "Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2000); fs.writeSync(1, 'done'); ready();", (r) => assert.equal(r.stdout, 'done')], // wait-allow: startup exceeds the old immediate block, so the readiness signal must be observed
+    ['exited', 1, 4],
     // More than a pipe buffer: the child cannot exit until the parent reads.
-    ['waiting on its pipe', "fs.writeSync(1, 'x'); ready(); process.stdout.write('x'.repeat((1 << 20) - 1));", (r) => assert.equal(r.stdout.length, 1 << 20)],
+    ['waiting on its stdout pipe', 1, 1 << 20],
+    ['waiting on its stderr pipe', 2, 1 << 20],
+    ['idle', null, 0],
   ];
-  for (const [what, script, check] of cases) {
-    const pending = run(script);
-    block();
-    const r = await pending;
-    assert.equal(r.timedOut, false, what);
-    assert.equal(r.ok, true, `${what}: ${r.stderr}`);
-    check(r);
+  for (const startup of [0, 1800]) {
+    for (const [what, fd, size] of cases) {
+      const ready = path.join(h.base, `ready-${startup}-${fd}-${size}`);
+      const script = `
+const fs = require('node:fs');
+Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ${startup}); // wait-allow: models a child not scheduled before the old fixed block ended
+${fd ? `fs.writeSync(${fd}, 'x'.repeat(${Math.min(size, 4096)}));` : ''}
+// write-atomic: existence signals that output is in the pipe, or the idle child has started.
+fs.writeFileSync(${JSON.stringify(ready)}, '');
+${fd ? `process.${fd === 1 ? 'stdout' : 'stderr'}.write('x'.repeat(${Math.max(0, size - 4096)}));`
+    : 'setTimeout(() => {}, 30000);'} // wait-allow: idle child outlives the gate timeout under test
+`;
+      const pending = C.exec({ exec: C.treeExec }, process.execPath, ['-e', script], { timeout: 300 }); // wait-allow: the gate timeout itself is under test
+      // A synchronous observer leaves the parent blocked until actual pipe output or
+      // idle startup is ready; the readiness wait uses the suite's hung-test backstop.
+      const observed = cp.spawnSync(process.execPath, ['-e',
+        "require('./test/signals').fileWritten(process.argv[1]).catch(e => { console.error(e); process.exitCode = 1; });", ready],
+      { cwd: ROOT, env: h.env, encoding: 'utf8', timeout: HUNG_TEST_MS });
+      if (observed.status === 0) block();
+      const r = await pending;
+      assert.equal(observed.status, 0, `${what}, startup=${startup}: ${observed.stderr}`);
+      assert.equal(r.timedOut, fd === null, `${what}, startup=${startup}`);
+      if (fd !== null) {
+        assert.equal(r.ok, true, `${what}: ${r.stderr}`);
+        assert.equal(r.stdout.length, fd === 1 ? size : 0, what);
+        assert.equal(r.stderr.length, fd === 2 ? size : 0, what);
+      } else {
+        const failure = C.ghFailure({ ...r, stdout: '{"id":1}' }, 'gh api runs');
+        assert.match(failure, /^gh api runs failed: timed out after 300 ms \(status=/);
+        assert.doesNotMatch(failure, /"id"/);
+      }
+    }
   }
-  const pending = run('ready(); setTimeout(() => {}, 30000)'); // wait-allow: a child that outlives the gate timeout under test
-  block();
-  const r = await pending;
-  assert.equal(r.timedOut, true);
-  const failure = C.ghFailure({ ...r, stdout: '{"id":1}' }, 'gh api runs');
-  assert.match(failure, /^gh api runs failed: timed out after 300 ms \(status=/);
-  assert.doesNotMatch(failure, /"id"/);
 });
 
 // A runner killed at its deadline often stops mid-line, and both streams can end that way.

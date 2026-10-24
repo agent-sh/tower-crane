@@ -27,6 +27,7 @@ cp.spawnSync = function github(file, args, ...rest) {
         ...(filter.includes('output') ? { output: c.output } : {}),
         ...(filter.includes('suite:') ? { suite: c.check_suite.id } : {}),
         ...(filter.includes('started_at') ? { id: c.id, started_at: c.started_at } : {}),
+        ...(filter.includes('completed_at') ? { completed_at: c.completed_at } : {}),
       }));
     } else if (args[1].endsWith(`/commits/${data.sha}/check-suites?per_page=100`)) {
       items = data.suites.map((s) => ({

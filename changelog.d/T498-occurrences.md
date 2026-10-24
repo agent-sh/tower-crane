@@ -1,0 +1,1 @@
+- Base-failure exclusions compare failures per occurrence, keyed by file and test name where the log gives a file. A new failure that shares a name with a base failure in another file reworks, and same-name failures with different errors and no file are not explained. Each excluded command's receipt names only the tests it excused.

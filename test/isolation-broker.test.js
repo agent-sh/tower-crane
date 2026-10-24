@@ -109,7 +109,7 @@ if (process.env.TOWER_CRANE_VIA === 'broker' && process.argv.includes('late')) {
     // broker is running it.
     const background = `
 const { fakeAgentEnv } = require(${JSON.stringify(path.join(__dirname, 'agent-env.js'))});
-const cp=require("child_process"),f=require("fs");cp.spawn(process.execPath,${JSON.stringify([BIN, 'task', 'note', 'T1', 'late'])},{ env: fakeAgentEnv(process.env),detached:true,stdio:"ignore"}).unref();const end=Date.now()+300000;while(!f.existsSync(${JSON.stringify(pidFile)})&&Date.now()<end)Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,50)`;
+const cp=require("child_process"),f=require("fs");cp.spawn(process.execPath,${JSON.stringify([BIN, 'task', 'note', 'T1', 'late'])},{ env: fakeAgentEnv(process.env),detached:true,stdio:"ignore"}).unref();const end=Date.now()+300000,parent=process.ppid;while(!f.existsSync(${JSON.stringify(pidFile)})&&Date.now()<end&&process.ppid===parent)Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,50)`;
     let pid = null;
     t.after(() => {
       if (pid && detachedAlive({ pid })) killPid(pid, 'SIGKILL');
@@ -443,7 +443,8 @@ test('TOML strings and keys escape every control character TOML forbids raw, DEL
 
 // readAround lists the entries of the directories on the way to a runtime
 // directory, and codex binds each again for every command, following a link.
-// An entry stays listed only when nobody but root and the user can swap it.
+// An entry stays listed only when nobody but root and the user can swap or
+// remove it.
 test('the codex profile lists an entry beside the runtime directory only when nobody else can turn it into a link', () => {
   const me = 1000;
   const st = (uid, mode, link = false) => ({ uid, mode, isSymbolicLink: () => link });
@@ -451,8 +452,11 @@ test('the codex profile lists an entry beside the runtime directory only when no
   const cases = [
     ['root directory, root entry', st(0, dir), st(0, file), true],
     ['root directory, own entry', st(0, dir), st(me, file), true],
-    ['sticky world-writable directory, own entry', st(0, sticky), st(me, dir), true],
-    ['sticky world-writable directory, root entry', st(0, sticky), st(0, dir), true],
+    // Its owner removes it at any time: a service restart, its
+    // systemd-private-* directory in /var/tmp.
+    ['sticky world-writable directory, own entry', st(0, sticky), st(me, dir), false],
+    ['sticky world-writable directory, root entry', st(0, sticky), st(0, dir), false],
+    ['sticky directory writable by its owner alone', st(0, 0o41755), st(0, dir), true],
     ['sticky world-writable directory, another user\'s entry', st(0, sticky), st(1001, dir), false],
     ['root directory, another user\'s entry', st(0, dir), st(1001, file), false],
     ['world-writable directory without the sticky bit', st(0, open), st(0, file), false],
