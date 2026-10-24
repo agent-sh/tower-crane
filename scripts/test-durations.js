@@ -8,10 +8,10 @@
 //
 // It reads the `npm test` step of every `test (<os>, node <n>, shard <i>/<n>)` job,
 // sums each top-level test's reported duration into the file that defines the test
-// title, and averages a file over the jobs that ran it. Files the runs did not measure,
-// such as those of a failed shard, keep their old time. Titles come from the test
-// files in this checkout, so the table follows files that were split or renamed
-// since the run. Each platform gets its own table: Windows and Linux differ in
+// title, and averages a file over the jobs that ran it, failed shards included. Files
+// the runs did not measure, such as those a shard deadline stopped, keep their old
+// time. Titles come from the test files in this checkout, so the table follows files
+// that were split or renamed since the run. Each platform gets its own table: Windows and Linux differ in
 // which files are slow. Needs `gh` signed in with read access to the repository.
 
 const cp = require('node:child_process');
@@ -80,12 +80,15 @@ function titles(root = ROOT) {
   return testFiles().flatMap((file) => declarations(file, fs.readFileSync(path.join(root, file), 'utf8')));
 }
 
-// The top-level results of the `npm test` step in a job log, up to Node's repeated list of failures.
+// The top-level results of the `npm test` step in a job log, without Node's repeated lists of
+// failures. Each file's runner repeats its own failures before the shard's `file ended:` line,
+// and the run repeats them all at its end.
 // Windows runs that step under its shard guard (`pwsh -NoProfile -File scripts/shard-guard.ps1 npm test`).
 const TEST_STEP = /^##\[group\]Run (?:pwsh -NoProfile -File scripts\/shard-guard\.ps1 )?npm test$/;
 function results(log) {
   const out = [];
   let inStep = false;
+  let repeated = false;
   for (const line of log.split(/\r?\n/)) {
     const text = line.replace(/^\S+Z /, '');
     if (text.startsWith('##[group]Run ')) {
@@ -93,7 +96,9 @@ function results(log) {
       continue;
     }
     if (!inStep) continue;
-    if (/^✖ failing tests:/.test(text)) break;
+    if (/^✖ failing tests:/.test(text)) repeated = true;
+    else if (/^file (?:started|ended): /.test(text)) repeated = false;
+    if (repeated) continue;
     const m = /^[✔✖﹣] (.*?) \(([\d.]+)ms\)(?: # .*)?$/.exec(text);
     if (m) out.push({ title: m[1].replace(/ # (?:SKIP|TODO).*$/, ''), ms: Number(m[2]) });
   }
@@ -143,7 +148,10 @@ function main(runs) {
   for (const run of runs) {
     for (const job of JSON.parse(gh(['run', 'view', run, '-R', repo, '--json', 'jobs'])).jobs) {
       const m = /^test \(([^,]+), node \d+, shard \d+\/\d+\)$/.exec(job.name);
-      if (!m || !PLATFORMS[m[1]] || job.conclusion !== 'success') continue;
+      // A failed shard's files that ended are measured; one its deadline stopped printed no
+      // results and keeps its old time. Skipping failed shards would keep a table that made a
+      // shard miss its deadline from ever being corrected.
+      if (!m || !PLATFORMS[m[1]] || !['success', 'failure'].includes(job.conclusion)) continue;
       const log = gh(['api', '--allow-escape-sequences', `repos/${repo}/actions/jobs/${job.databaseId}/logs`]);
       const { times, unmatched } = fileTimes(log, declared);
       console.error(`${job.name} (run ${run}): ${Object.keys(times).length} files, ${unmatched.toFixed(0)} s unmatched`);
@@ -152,7 +160,7 @@ function main(runs) {
     }
   }
   if (!Object.keys(samples).length) {
-    console.error('no successful test jobs in those runs');
+    console.error('no finished test jobs in those runs');
     process.exit(1);
   }
   let before = {};

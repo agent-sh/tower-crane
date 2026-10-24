@@ -177,7 +177,7 @@ test('the durations refresh maps each logged title to the file that declares it'
     ...declarations('test/a.test.js', "test('plain title', () => {});\nfor (const n of [1, 2]) test(`case ${n} of a`, () => {});\n"
       + "describe('suite of a', () => { test('inner', () => {}); });\n"),
     ...declarations('test/b.test.js', "test(failing ? 'b fails' : `b passes on ${platform}`, { skip: false }, () => {});\n"
-      + "test(`case ${n} of ${'a'}`, () => {});\n"),
+      + "test(`case ${n} of ${'a'}`, () => {});\ntest('b after a failing file', () => {});\n"),
   ];
   // Linux and macOS run the step bare; Windows runs it under its shard guard.
   for (const step of ['npm test', 'pwsh -NoProfile -File scripts/shard-guard.ps1 npm test']) {
@@ -193,6 +193,12 @@ test('the durations refresh maps each logged title to the file that declares it'
       '2026-10-15T09:41:55.0000000Z ✔ b passes on win32 (5000ms)',
       '2026-10-15T09:41:55.0000000Z ﹣ b fails (1ms) # SKIP',
       '2026-10-15T09:41:55.0000000Z ✔ a title no file declares (7000ms)',
+      // A shard file's runner repeats its failures before the file ends; the shard goes on.
+      '2026-10-15T09:41:55.0000000Z ✖ failing tests:',
+      '2026-10-15T09:41:55.0000000Z ✖ case 2 of a (3000ms)',
+      '2026-10-15T09:41:55.0000000Z file ended: test/a.test.js',
+      '2026-10-15T09:41:55.0000000Z file started: test/c.test.js',
+      '2026-10-15T09:41:55.0000000Z ✔ b after a failing file (2000ms)',
       '2026-10-15T09:41:56.0000000Z ✖ failing tests:',
       '2026-10-15T09:41:56.0000000Z ✖ case 2 of a (3000ms)',
       '2026-10-15T09:41:57.0000000Z ##[group]Run foreach ($attempt in 1..10) {',
@@ -200,7 +206,7 @@ test('the durations refresh maps each logged title to the file that declares it'
     ].join('\r\n');
     const { times, unmatched } = fileTimes(log, declared);
     // `case ${n} of a` in a.test.js has more literal text than b.test.js's `case ${n} of ${'a'}`.
-    assert.deepEqual(times, { 'test/a.test.js': 10, 'test/b.test.js': 5.001 }, step);
+    assert.deepEqual(times, { 'test/a.test.js': 10, 'test/b.test.js': 7.001 }, step);
     assert.equal(unmatched, 7, step);
   }
 });

@@ -17,10 +17,11 @@ const REQUIRED = [
   'test (ubuntu-latest, node 24, shard 1/3)',
   'test (ubuntu-latest, node 24, shard 2/3)',
   'test (ubuntu-latest, node 24, shard 3/3)',
-  'test (windows-latest, node 26, shard 1/4)',
-  'test (windows-latest, node 26, shard 2/4)',
-  'test (windows-latest, node 26, shard 3/4)',
-  'test (windows-latest, node 26, shard 4/4)',
+  'test (windows-latest, node 26, shard 1/5)',
+  'test (windows-latest, node 26, shard 2/5)',
+  'test (windows-latest, node 26, shard 3/5)',
+  'test (windows-latest, node 26, shard 4/5)',
+  'test (windows-latest, node 26, shard 5/5)',
 ];
 const CAP_POLICY = [{ app: 'revuto-review', pattern: 'reached the \\d+-round review limit' }];
 const github = path.join(__dirname, 'fixtures', 'github.js');
@@ -308,7 +309,7 @@ test('the focused step logs every named file for one or several files and refuse
   }
 });
 
-test('the matrix is all ten shards, beside the proofs and the repeat job', () => {
+test('the matrix is all eleven shards, beside the proofs and the repeat job', () => {
   const workflow = readWorkflow(path.resolve(__dirname, '..'));
   assert.deepEqual(jobNames(workflowMatrix(workflow)), REQUIRED);
   assert.equal([...workflow.matchAll(/^ {2}test:\n/gm)].length, 1, 'one test job owns the matrix');

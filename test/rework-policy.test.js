@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const path = require('node:path');
 const { cachedFixture, makeRepo } = require('./helpers');
 const Reviews = require('../lib/review-findings');
+const { shellQuote } = require('../lib/gates/common');
 
 function setup(t) {
   return cachedFixture(t, 'repeated-review', (h) => {
@@ -70,10 +71,12 @@ test('a held task is an orchestrator inbox item and a status line until a ruling
     ['a'.repeat(40), '1 blocking finding: lib/retry.js:12 - Duplicate delivery'],
     ['b'.repeat(40), '1 blocking finding: lib/retry.js:12 - Duplicate delivery'],
   ]);
+  // The commands are quoted for this platform's shell: double quotes on Windows.
   assert.deepEqual(item.commands, [
-    "tower-crane task update T1 --acceptance '<closed item>' --closed-acceptance",
-    "tower-crane task note T1 '<design change>' --kind scope-ruling",
-  ]);
+    ['tower-crane', 'task', 'update', 'T1', '--acceptance', '<closed item>', '--closed-acceptance'],
+    ['tower-crane', 'task', 'note', 'T1', '<design change>', '--kind', 'scope-ruling'],
+  ].map((argv) => argv.map(shellQuote).join(' ')));
+  if (process.platform !== 'win32') assert.equal(item.commands[1], "tower-crane task note T1 '<design change>' --kind scope-ruling");
   assert.deepEqual(item.dependents, ['T2']);
   assert.equal(item.since, item.reviews[1].at);
   assert.deepEqual(held().find((i) => i.task === 'T3').reviews.map((r) => r.finding), ['lib/store.js: lost key c', 'lib/store.js: lost key d']);
