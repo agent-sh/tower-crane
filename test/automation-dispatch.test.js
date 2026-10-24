@@ -261,7 +261,9 @@ test('automation dispatches rework-ready work with the failed review findings', 
 for (const dispatch of ['spawn --ready', 'automation refill']) {
   test(`${dispatch} takes urgent work before tasks unblocking more work`, async (t) => {
     const h = refillFixture(t);
-    h.ok(['task', 'update', 'T2', '--priority', 'urgent', '--agent', 'orchestrator']);
+    // The fixture's worker runs on the easy rung; a recorded reason keeps urgent work there.
+    h.ok(['task', 'update', 'T2', '--priority', 'urgent', '--tier', 'easy', '--tier-reason', 'fixture worker rung',
+      '--agent', 'orchestrator']);
     if (dispatch === 'spawn --ready') {
       const result = h.json(['spawn', '--ready', '--agent', 'orchestrator']);
       assert.deepEqual(result.results.map((r) => [r.task, r.ok]), [['T2', true]]);
