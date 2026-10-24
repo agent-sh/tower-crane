@@ -152,7 +152,14 @@ test('a sandboxed agent runs with the user\'s git settings but none of their cre
     const get = (key) => cp.spawnSync(git, ['config', '--global', '--get', key], { env: gitEnv, encoding: 'utf8' }).stdout.trim();
     assert.equal(get('user.name'), 'Planted User');
     assert.equal(get('alias.st'), 'status', 'included files are flattened in');
-    assert.equal(get('core.excludesfile'), ignore);
+    // claude's sandbox replaces its commands' command scope, so the file
+    // names the placeholders' exclude file, which holds the user's excludes.
+    const all = cp.spawnSync(git, ['config', '--global', '--get-all', 'core.excludesfile'], { env: gitEnv, encoding: 'utf8' }).stdout.trim().split('\n');
+    const excludes = path.join(h.state, 'homes', started.agent, 'sandbox-git-exclude');
+    assert.deepEqual(all, harness === 'claude' ? [ignore, excludes] : [ignore], `${harness}: core.excludesFile`);
+    if (harness === 'claude') assert.match(fs.readFileSync(excludes, 'utf8'), /^\*\.planted$/m, 'the user\'s excludes stay');
+    assert.equal(get('gc.auto'), '0', `${harness}: background gc is off`);
+    assert.equal(get('maintenance.auto'), 'false', `${harness}: background maintenance is off`);
     assert.equal(get('url.ssh://git@example.com/.insteadof'), 'https://example.com/', 'a user name in an ssh URL stays');
     assert.equal(get('http.proxy'), 'http://proxy.example:8080');
     assert.equal(commandsRead(seen, ignore), true, `${harness}: the excludes file it names stays readable`);
