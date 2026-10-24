@@ -3,6 +3,8 @@
 // Runs scripts/probe-containment-transport.js against a fake private manager:
 // the caller sits under user@UID.service and the default /run/user/UID runtime
 // resolves to TOWER_CRANE_TEST_PEER_RUNTIME, so real systemctl dials the peer.
+// Each systemctl call prints a dial line before the probe's case line, so the
+// test can tell which case reached the manager.
 const cp = require('node:child_process');
 const fs = require('node:fs');
 
@@ -17,6 +19,8 @@ fs.readFileSync = (file, ...args) => {
   return read(file, ...args);
 };
 const spawnSync = cp.spawnSync;
-cp.spawnSync = (file, args, opts) => opts?.env?.XDG_RUNTIME_DIR === `/run/user/${uid}`
-  ? spawnSync(file, args, { ...opts, env: { ...opts.env, XDG_RUNTIME_DIR: peer } })
-  : spawnSync(file, args, opts);
+cp.spawnSync = (file, args, opts) => {
+  if (opts?.env?.XDG_RUNTIME_DIR === `/run/user/${uid}`) opts = { ...opts, env: { ...opts.env, XDG_RUNTIME_DIR: peer } };
+  if (file === 'systemctl') console.log(`dial: XDG_RUNTIME_DIR=${opts.env.XDG_RUNTIME_DIR}, DBUS_SESSION_BUS_ADDRESS=${opts.env.DBUS_SESSION_BUS_ADDRESS ?? '<unset>'}`);
+  return spawnSync(file, args, opts);
+};
