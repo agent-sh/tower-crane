@@ -77,6 +77,8 @@ Existing links use these anchors. Follow the link to the contract in its area.
 
 <a id="already-merged-hotfixes"></a>[already-merged-hotfixes](state/tasks.md#already-merged-hotfixes)
 
+<a id="native-landings"></a>[native-landings](state/tasks.md#native-landings)
+
 <a id="research-sources"></a>[research-sources](state/tasks.md#research-sources)
 
 <a id="ready-and-blocked"></a>[ready-and-blocked](state/tasks.md#ready-and-blocked)

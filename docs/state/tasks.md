@@ -535,6 +535,7 @@ The format is additive within schema 1. A pinned older tool reads and preserves 
 - `archive_grants`: optional task ids whose archives this task's worker may copy into its scratch with `task archive ID --into`; `task archive ID --grant` adds one.
 - `worktree`: optional path, branch, base, creation time and last observed head record; retirement adds `state` (`stale` or `removed`), a failure `reason` and any recovery `saved` path.
 - `superseded_by`: optional replacement task id; superseding stores status `cancelled`.
+- `landed`: optional, present on a task accepted by `task landed`: `{ "pr", "merge_sha", "head_sha", "base", "branch", "url", "merged_at", "merged_by", "checks", "reason", "recorded_at", "recorded_by" }`. See [Native landings](#native-landings).
 - `retiring`: null, or `{ "since": "...", "pid": 4242, "host": "...", "start_ticks": "...", "pidns": "pid:[4026531836]", "path": "...", "branch": "..." }` while the process that wrote it removes the task's worktree after a merge or cancel. `start_ticks` and `pidns` are set where the platform reports them. Claim, rework, submit and worktree preparation refuse the reserved task, path or branch while that process runs; a marker whose process has exited holds nothing, so a crash cannot strand the task. The removal clears the marker when it ends, whether or not it removed the worktree.
 - `submitted_by`: the agent that submitted the current `sha`. Submission clears `claim`; while the task is `submitted`, only this agent can replace the submitted head. A spawned worker whose submit took ownership goes on waiting on the task ([PR owners](#pr-owners)).
 - `carry` (optional): the link a [base-only or resolved head](gates.md#base-only-heads) keeps to the earlier head whose results it keeps or narrows from. Absent for any other head.
@@ -604,6 +605,55 @@ Tests and clean evidence and their audit events carry `gate_policy`: `{tests_cmd
 The CLI refuses manual software verdicts, and software receipts require matching records in tasks.json and events.jsonl. Plain files cannot stop a writer running as the same user from forging those records or an owner waiver. Command receipts show what ran; acceptance checks them and their recorded policy against the pinned commands. The reviewer checks that the configured runners verify the change.
 
 Research Claude fallback routes in the user file inherit the primary `web_mcp` unless they specify their own. The same `{name, command, args}` validation applies to an explicit fallback server. Other harnesses do not inherit it. A route combining an inherited or explicit web MCP with `mcp` is reported and skipped so only the web server loads.
+
+### Native landings
+
+`task landed ID --pr N [--sha MERGE_SHA] --reason R` records a PR the
+orchestrator merged on GitHub outside Tower Crane's merge path, after its own
+clean-context review and green PR checks. It is an orchestrator or owner
+command. It reads the PR once with `gh pr view` (state, merge commit, base,
+head branch and commit, `mergedAt`, `mergedBy` and `statusCheckRollup`) and
+runs no gate, no review dispatch and no merge.
+
+The PR must be `MERGED` into the project base. It must be the task's recorded
+`pr`, or its head branch must be the task's `branch` or `worktree.branch`; a
+PR or branch that another task not cancelled records is refused. `--sha`, when
+given, must equal the PR's merge commit. A task that is accepted, cancelled,
+a recorded hotfix, waiting on an owner ask (`needs_owner`), being retired, or
+with a running worker (stop it with `interrupt` first) is refused. Repeating
+the same record on the task it accepted changes nothing and exits 0. A PR or
+merge commit that an earlier `task landed` event of the task already
+recorded is refused once the task has moved on, for example after `rework`:
+the rework asked for a change that PR does not hold, so it needs a new PR.
+
+The task, from `todo`, `in_progress`, `submitted` or `rework`, becomes
+`accepted` at its current revision and displays `accepted (native)`. Its
+`sha` becomes the PR head, `pr` the PR number, and `branch` the PR branch when
+it had none. A claim is released. `landed` records `pr`, `merge_sha`,
+`head_sha`, `base`, `branch`, `url`, `merged_at`, `merged_by`, `checks` and
+`reason`, plus `recorded_at` and `recorded_by`. `checks` lists the PR's check
+conclusions at its head as read once: check runs as `{name, workflow?,
+conclusion}` and commit statuses as `{name, conclusion}`, with a pending
+run's status in place of a conclusion. A `task landed` event carries the same
+fields with `sha`, `revision`, `previous_status` and, for a released claim,
+`released: {agent, until}`. A note records the PR, merge commit and reason.
+
+The task gets `merge` evidence at its head and revision with
+`source: "task landed"`, `pr`, `merge_sha`, `ref` (the PR URL) and empty
+`commands`. It counts only with a `task landed` event by the orchestrator or
+owner for the same head, revision, PR and merge commit. With it, readers that
+ask whether a task merged see this one as merged: dependents unblock as for
+any accepted task, the merge queue skips it, and nothing redispatches it. The
+worktree is then retired as for a cancelled task, saving uncommitted and
+unmerged work. A landing is current only while the task is accepted and its
+latest merge evidence at its head and revision is that landing's. A rework
+bumps the revision, so the old `landed` record stays as history (`task show`
+names it an earlier landing) and the task no longer shows `accepted (native)`,
+also after a later acceptance through the gates. Status counts include
+`accepted_native`, the tasks with a current landing, as a separate subset
+of `accepted`. Acceptance through a landing also retires the task's gate
+priority. `metrics` counts a landing as a merge and reports it apart; see
+[metrics](../cli.md#metrics).
 
 ### Research sources
 
