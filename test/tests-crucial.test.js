@@ -173,18 +173,19 @@ for (const baseRef of ['main', 'origin/main']) for (const removal of ['missing o
 });
 
 for (const [keep, kind, mode] of [[true, 'code', 'run-only (test-only diff)'], [false, 'docs', 'prove']]) test(`skipping every crucial file in ${mode} does not invoke an empty selector or the full suite`, (t) => {
-  const h = fixture(t, map, undefined, kind);
+  const h = fixture(t, { ...map, '**/*.txt': [] }, undefined, kind);
   h.git(['switch', 'main']);
-  h.git(['switch', '-c', 'docs-change']);
-  fs.appendFileSync(path.join(h.repo, 'README.md'), 'Documentation only.\n');
+  h.git(['switch', '-c', 'notes-change']);
+  // A docs path would take the docs-only pass before crucial selection.
+  fs.writeFileSync(path.join(h.repo, 'notes.txt'), 'Notes only.\n');
   h.git(['add', '.']);
-  h.git(['commit', '-qm', 'documentation change']);
+  h.git(['commit', '-qm', 'notes change']);
   const head = h.git(['rev-parse', 'HEAD']);
   h.git(['switch', 'main']);
   fs.writeFileSync(path.join(h.repo, 'test/new.test.js'), "console.log('new suite');\n");
   h.git(['add', '.']);
   h.git(['commit', '-qm', 'new crucial suite']);
-  h.ok(['project', 'set', '--tests-crucial', '["test/new.test.js"]', '--tests-keep', keep ? '["*.md"]' : 'null']);
+  h.ok(['project', 'set', '--tests-crucial', '["test/new.test.js"]', '--tests-keep', keep ? '["*.txt"]' : 'null']);
   h.ok(['submit', 'T1', '--sha', head, '--agent', 'worker']);
   const result = check(h);
   assert.equal(result.receipt.mode, mode);
