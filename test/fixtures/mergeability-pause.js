@@ -18,7 +18,7 @@ if (pause !== null || poll !== null) {
   const load = Module._load;
   Module._load = function loadAutomation(request, parent, isMain) {
     const exported = load.apply(this, arguments);
-    // Only lib/automation.js exports these settings.
+    // The facade and area modules share these settings.
     if (exported?.MERGEABILITY && pause !== null) exported.MERGEABILITY.retry_ms = pause;
     if (exported?.CI_POLL && poll !== null) exported.CI_POLL.ms = poll;
     return exported;
