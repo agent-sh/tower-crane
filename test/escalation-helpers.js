@@ -5,6 +5,7 @@
 // reports the exit of each detached worker and supervisor. Each suite file runs
 // in its own process.
 
+const assert = require('node:assert/strict');
 const cp = require('node:child_process');
 const fs = require('node:fs');
 const net = require('node:net');
@@ -158,6 +159,14 @@ if (process.execArgv.includes('-e') && process.env.TOWER_CRANE_SESSION
     // Teardown must still observe exits after an expected ceiling decision.
     await until(t, [h.base], () => exits.has(child.pid) || !detachedAlive(child));
     return { exited: exits.get(child.pid) || Promise.resolve() };
+  };
+  // A submit or reviewer reaction can finish before this worker's monitor
+  // drains its own exit reactions. Its socket closure observes completion.
+  h.settled = async (agent) => {
+    const worker = events(h).findLast((e) => e.cmd === 'spawn' && e.detail.agent === agent);
+    assert.ok(worker, `no dispatch for ${agent}`);
+    const { exited } = await h.exitSignal({ pid: worker.detail.monitor_pid });
+    await exited;
   };
   t.after(async () => {
     try {

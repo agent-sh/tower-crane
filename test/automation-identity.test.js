@@ -2,7 +2,7 @@
 
 // Who may run reactions, the environment of gates and merges a supervisor runs,
 // review dispatch with revuto findings, reviewer replacement, supervised
-// submissions, refill holds and revisions a restore retired.
+// submissions, the review and tests order, refill holds and revisions a restore retired.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -527,6 +527,56 @@ test('a supervised worker submission runs gates and dispatches the offline revie
   assert.equal(events.filter((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer').length, 1);
   assert.equal(h.readState('tasks.json').tasks[0].status, 'accepted');
 });
+
+test('review.tests_first must be a boolean', () => {
+  const { errors } = require('../lib/reviewer');
+  for (const value of [1, 'true', null]) assert.match(errors({ tests_first: value }).join('; '), /review\.tests_first must be a boolean/, String(value));
+  for (const value of [true, false]) assert.deepEqual(errors({ tests_first: value }), []);
+});
+
+// The review runs before the suite by default; review.tests_first restores the old order.
+for (const [order, verdict] of [['review first', 'fail'], ['review first', 'ok'], ['tests first', 'fail'], ['tests first', 'ok']]) {
+  test(`${order}: a ${verdict} review ${verdict === 'fail' ? 'goes to rework' : 'is accepted'} with the suite run ${order === 'tests first' ? 'before' : verdict === 'ok' ? 'after' : 'never'}`, async (t) => {
+    const h = setup(t, { testsFirst: order === 'tests first' });
+    configureHarness(h);
+    const runs = path.join(h.base, 'suite-runs');
+    const suite = path.join(h.base, 'suite.js');
+    fs.writeFileSync(suite, `require('node:fs').appendFileSync(${JSON.stringify(runs)}, 'run\\n');\n`);
+    h.ok(['project', 'set', '--tests-cmd', `${shellQuote(process.execPath)} ${shellQuote(suite)}`, '--tests-mode', 'run-only']);
+    const env = verdict === 'fail' ? { AUTOMATION_REVIEW_FAIL: 'lib/change.js:1 - the input is not checked' } : {};
+    assert.equal(h.run(['spawn', '--task', 'T1', '--wait', '--agent', 'orchestrator'], { env }).code, 0);
+    const done = verdict === 'fail'
+      // The event log is written before tasks.json, so wait for both.
+      ? () => h.logs().some((e) => e.cmd === 'rework' && e.detail.from_review) && h.readState('tasks.json').tasks[0].status === 'rework'
+      : () => h.readState('tasks.json').tasks[0].evidence.some((e) => e.type === 'merge' && e.ok);
+    await waitOnRepo(h, done);
+    const events = h.logs();
+    const tests = events.filter((e) => e.cmd === 'check tests' || e.cmd === 'gate run' && e.detail.type === 'tests');
+    const suiteRuns = fs.existsSync(runs) ? readPublished(runs, 'utf8').split('\n').filter(Boolean).length : 0;
+    const review = events.findIndex((e) => e.cmd === 'evidence' && e.detail.type === 'review');
+    const dispatch = events.findIndex((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer');
+    const check = events.findIndex((e) => e.cmd === 'check tests');
+    assert.ok(events.some((e) => e.cmd === 'check clean' && e.detail.ok), 'cleanup runs before review either way');
+    if (order === 'review first' && verdict === 'fail') {
+      assert.deepEqual([tests.length, suiteRuns], [0, 0], 'no suite starts for a head its review sends back');
+    } else {
+      assert.equal(suiteRuns, 1);
+      assert.ok(order === 'tests first' ? check < dispatch : check > review, `${order}: tests at ${check}, review at ${dispatch}/${review}`);
+    }
+    const task = h.readState('tasks.json').tasks[0];
+    assert.equal(task.status, verdict === 'fail' ? 'rework' : 'accepted',
+      JSON.stringify(h.logs().map((e) => [e.agent, e.cmd, e.detail?.role || e.detail?.type || ''])));
+    if (order === 'review first') {
+      const packet = fs.readFileSync(path.join(h.state, 'reviews', `${task.id}-${h.sha}.md`), 'utf8');
+      assert.match(packet, /The tests gate runs after this review passes/);
+      // The gate results leave the deferred tests gate out instead of showing it failed.
+      const gates = JSON.parse(packet.split('## Gate results\n\n')[1].split('\n\n')[0]);
+      assert.deepEqual(gates.map((g) => g.type).filter((type) => type === 'tests'), []);
+      assert.ok(gates.length > 0 && gates.every((g) => g.ok), JSON.stringify(gates));
+    }
+  });
+}
+
 
 test('a submit the wait host reads before its files are renamed still runs the gates', async (t) => {
   const h = setup(t);

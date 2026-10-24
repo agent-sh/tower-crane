@@ -197,7 +197,11 @@ function project(t) {
     fs.writeFileSync(hold, `const fs = require('node:fs');
 const path = require('node:path');
 const release = process.env.TC_HOLD_RELEASE;
-const done = () => { console.log(JSON.stringify({ scope: 'diff', items: [] })); process.exit(0); };
+const done = () => {
+  if (process.env.TC_PRIORITY_FILE) fs.writeFileSync(process.env.TC_PRIORITY_FILE, String(require('node:os').getPriority()));
+  console.log(JSON.stringify({ scope: 'diff', items: [] }));
+  process.exit(0);
+};
 if (!release) done();
 fs.writeFileSync(release + '.started', '');
 fs.watch(path.dirname(release), () => { if (fs.existsSync(release)) done(); });
@@ -263,7 +267,20 @@ test('the CLI starts each project\'s gates and agents in its own slice, gates at
   assert.deepEqual(evidence().cpu, { weight: 700, slice: sliceOf(a) });
 
   // Without systemd scopes the gate still runs, and its receipt says the weight was not applied.
-  const plain = a.run(['check', 'clean', 'T1', '--json'], { pre, env: { TC_FAKE_NO_MANAGER: '1' } });
+  // It yields through nice instead: weight 700 is about 9 nice steps over the agents' 100 at nice 10,
+  // so nice 1 unless the launch already runs at a higher one, at the lowest best-effort I/O priority.
+  const priority = path.join(a.base, 'priority');
+  const plain = a.run(['check', 'clean', 'T1', '--json'], { pre, env: { TC_FAKE_NO_MANAGER: '1', TC_PRIORITY_FILE: priority } });
   assert.equal(plain.code, 0, plain.stderr);
-  assert.deepEqual(evidence().cpu, { weight: 700, applied: false, reason: 'no cgroup v2 or systemd user manager' });
+  const nice = Math.max(require('node:os').getPriority(), 1);
+  assert.deepEqual(evidence().cpu, { weight: 700, applied: false, reason: 'no cgroup v2 or systemd user manager', nice, ionice: 'best-effort 7' });
+  assert.equal(Number(fs.readFileSync(priority, 'utf8')), nice, 'the gate command runs at that nice value');
+  assert.equal(C.describeCpu(evidence().cpu), `not applied (no cgroup v2 or systemd user manager); nice ${nice}, I/O best-effort 7`);
+  assert.deepEqual([C.niceFor(C.AGENT_WEIGHT), C.niceFor(C.GATE_WEIGHT), C.niceFor(1), C.niceFor(10000)], [10, 4, 19, 0]);
+  // The lowest weight lands past any nice a test runner starts at, so the command shows the wrapper took effect.
+  a.ok(['project', 'set', '--gates-cpu-weight', '1', '--agent', 'orchestrator']);
+  const lowest = a.run(['check', 'clean', 'T1', '--json'], { pre, env: { TC_FAKE_NO_MANAGER: '1', TC_PRIORITY_FILE: priority } });
+  assert.equal(lowest.code, 0, lowest.stderr);
+  assert.equal(Number(fs.readFileSync(priority, 'utf8')), 19);
+  assert.equal(evidence().cpu.nice, 19);
 });

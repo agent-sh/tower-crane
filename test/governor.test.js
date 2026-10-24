@@ -7,6 +7,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
+const os = require('node:os');
 const G = require('../lib/governor');
 const Processes = require('../lib/processes');
 const { makeRepo, cachedFixture, BIN, TMP_ROOT } = require('./helpers');
@@ -17,9 +18,9 @@ const events = (h) => StateFiles.readEvents(h.state);
 const linuxOnly = process.platform !== 'linux' && 'the governor measures and signals by Linux process start times';
 
 // Readings and registries in memory: the budget arithmetic alone.
-function reading({ limit = 10, used = 2, some = 0, full = 0, cpu = 0, load = 0, cores = 8 } = {}) {
+function reading({ limit = 10, used = 2, some = 0, full = 0, cpu = 0, load = 0, cores = 8, weights = false } = {}) {
   return { levels: [{ name: '/tests.slice', used: used * GiB, limit: limit * GiB }], binding: '/tests.slice',
-    pressure: { memory: { some: { avg10: some }, full: { avg10: full } }, cpu: { some: { avg10: cpu } } }, load, cores };
+    pressure: { memory: { some: { avg10: some }, full: { avg10: full } }, cpu: cpu == null ? null : { some: { avg10: cpu } } }, load, cores, weights };
 }
 const unit = (kind, started, extra = {}) => ({ id: `${kind}-${started}`, kind, started_at: new Date(Date.UTC(2026, 9, 17, 12, started)).toISOString(), expected: 0, measured: 0, ...extra });
 const registry = (units = [], others = [], history = []) => ({ units, others, history });
@@ -55,7 +56,7 @@ test('the budget admits work only under every defer line, counting growth, other
     ['a unit admitted in this scope grows here', scoped, registry([unit('worker', 1, { expected: 4 * GiB, admitted_in: '/agents.slice/orch.scope/runner' })]), false, /orch\.scope .*may grow 4\.0 GiB/],
     ['memory stall', reading({ some: 10 }), registry(), false, /memory pressure: some avg10 10% is at or over 10%/],
     ['cpu stall', reading({ cpu: 60 }), registry(), false, /cpu pressure: some avg10 60% is at or over 60%/],
-    ['load', reading({ load: 16, cores: 8 }), registry(), false, /load: 16 on 8 cores is at or over 16/],
+    ['load', reading({ load: 16, cores: 8 }), registry(), false, /saturated load: 16 on 8 cores is at or over 16/],
   ];
   for (const [name, r, reg, ok, reason] of cases) {
     const verdict = G.assess(r, reg, s, need, 'worker', now);
@@ -70,25 +71,104 @@ test('the budget admits work only under every defer line, counting growth, other
     others: 3 * GiB, others_room: 2 * GiB * (1 - 1 / 30), need: 0, units: 1, projects: 1 }));
 });
 
-test('one merge-queue suite passes the CPU lines while gate runs hold places; new gate runs and memory still wait', () => {
+test('one merge-queue suite passes the CPU lines while gate runs hold places; new gate runs, memory and a saturated host still wait', () => {
   const now = Date.now();
   const gates = [unit('tests', 1), unit('clean', 2)];
+  // This project's own lines: load defers at the cores without CPU weights, and saturates at twice them.
+  const lines = G.settings({ governor: { load_defer: 1 } });
   const cases = [
-    ['a suite past the load line while gate runs hold places', 'suite', reading({ load: 40, cores: 8 }), registry(gates), true],
+    ['a suite past the load line while gate runs hold places', 'suite', reading({ load: 12, cores: 8 }), registry(gates), true],
     ['a suite past the cpu stall line while gate runs hold places', 'suite', reading({ cpu: 90 }), registry(gates), true],
-    ['a new tests gate past the load line', 'tests', reading({ load: 40, cores: 8 }), registry(gates), false, /load: 40 on 8 cores/],
+    ['a suite at saturated load while gate runs hold places', 'suite', reading({ load: 16, cores: 8 }), registry(gates), false, /saturated load: 16 on 8 cores/],
+    ['a new tests gate past the load line', 'tests', reading({ load: 12, cores: 8 }), registry(gates), false, /load: 12 on 8 cores/],
     ['a new clean gate past the cpu stall line', 'clean', reading({ cpu: 90 }), registry(gates), false, /cpu pressure/],
-    ['a worker past the load line', 'worker', reading({ load: 40, cores: 8 }), registry(gates), false, /load: 40/],
-    ['a suite past the load line with no gate run holding a place', 'suite', reading({ load: 40, cores: 8 }), registry([unit('worker', 1)]), false, /load: 40/],
-    ['a second suite past the load line', 'suite', reading({ load: 40, cores: 8 }), registry([...gates, unit('suite', 3)]), false, /load: 40/],
-    ['a suite past the memory line while gate runs hold places', 'suite', reading({ used: 7.1, load: 40, cores: 8 }), registry(gates), false, /memory: tests\.slice/],
+    ['a worker past the load line', 'worker', reading({ load: 12, cores: 8 }), registry(gates), false, /load: 12/],
+    ['a suite past the load line with no gate run holding a place', 'suite', reading({ load: 12, cores: 8 }), registry([unit('worker', 1)]), false, /load: 12/],
+    ['a second suite past the load line', 'suite', reading({ load: 12, cores: 8 }), registry([...gates, unit('suite', 3)]), false, /load: 12/],
+    ['a suite past the memory line while gate runs hold places', 'suite', reading({ used: 7.1, load: 12, cores: 8 }), registry(gates), false, /memory: tests\.slice/],
     ['a suite under memory stall while gate runs hold places', 'suite', reading({ some: 20 }), registry(gates), false, /memory pressure/],
   ];
   for (const [name, kind, r, reg, ok, reason] of cases) {
-    const verdict = G.assess(r, reg, s, need, kind, now);
+    const verdict = G.assess(r, reg, lines, need, kind, now);
     assert.equal(verdict.ok, ok, `${name}: ${verdict.reasons.join('; ')}`);
     if (reason) assert.match(verdict.reasons.join('; '), reason, name);
   }
+});
+
+test('under CPU weights pressure defers, not load, until load saturates the host; without weights or pressure load still defers', () => {
+  const now = Date.now();
+  // Load at 1.5 times the cores: past this project's load_defer of 1, under the saturated line at 2.
+  const lines = G.settings({ governor: { load_defer: 1 } });
+  const cases = [
+    ['high load and low pressure under weights', reading({ load: 12, cores: 8, cpu: 5, weights: true }), true, []],
+    ['high cpu pressure under weights', reading({ load: 4, cores: 8, cpu: 60, weights: true }), false, ['cpu pressure'], /^cpu pressure: some avg10 60% is at or over 60%$/],
+    ['saturated load and low pressure under weights', reading({ load: 16, cores: 8, cpu: 5, weights: true }), false, ['saturated load'], /^saturated load: 16 on 8 cores is at or over 16$/],
+    ['saturated load and high pressure under weights', reading({ load: 20, cores: 8, cpu: 70, weights: true }), false, ['cpu pressure', 'saturated load']],
+    ['high load without weights', reading({ load: 12, cores: 8, cpu: 5 }), false, ['load'], /^load: 12 on 8 cores is at or over 8 \(no CPU weights\)$/],
+    ['high load under weights with no cpu pressure reading', reading({ load: 12, cores: 8, cpu: null, weights: true }), false, ['load'], /^load: 12 on 8 cores is at or over 8 \(no CPU pressure reading\)$/],
+    ['memory with high load under weights', reading({ used: 7.1, load: 12, cores: 8, cpu: 5, weights: true }), false, ['memory']],
+  ];
+  for (const [name, r, ok, signals, reason] of cases) {
+    const verdict = G.assess(r, registry(), lines, need, 'tests', now);
+    assert.equal(verdict.ok, ok, `${name}: ${verdict.reasons.join('; ')}`);
+    assert.deepEqual(verdict.signals, signals, name);
+    if (reason) assert.match(verdict.reasons.join('; '), reason, name);
+  }
+  // The test-thread budget follows the same lines: high load under weights takes no threads back.
+  const reg = { tests: [{ id: 't1', requested: 6, granted: 6, started_at: new Date(now).toISOString() }] };
+  const budget = (r) => G.testBudget({ ...reg, tests: reg.tests.map((l) => ({ ...l })) }, { stat: null, fake: true, cores: 8, ...r }, lines, now);
+  assert.deepEqual(budget({ load: 12, cpu_some: 5, weights: true }).reasons, []);
+  assert.match(budget({ load: 12, cpu_some: 5, weights: false }).reasons.join('; '), /^load: 12 on 8 cores is at or over 8 \(no CPU weights\)$/);
+  assert.match(budget({ load: 20, cpu_some: 5, weights: true }).reasons.join('; '), /^saturated load: 20 on 8 cores is at or over 16$/);
+});
+
+test('a test-thread lease resolves CPU weights before it takes the registry lock', { skip: process.platform !== 'linux' && 'CPU weights are probed on Linux' }, (t) => {
+  // A real host: the first answer spawns loginctl, systemctl and systemd-run, seconds that must not hold the lock.
+  const C = require('../lib/containment');
+  const cache = fs.mkdtempSync(path.join(TMP_ROOT, 'weights-lock-'));
+  t.after(() => fs.rmSync(cache, { recursive: true, force: true }));
+  // A PATH of its own keeps a weights answer an earlier test resolved in this process out of it.
+  const env = { ...process.env, XDG_CACHE_HOME: cache, PATH: `${process.env.PATH}${path.delimiter}${cache}` };
+  delete env.TOWER_CRANE_HOST_ROOT;
+  const lock = G.registryLock(env);
+  const probes = [];
+  t.mock.method(C, 'cpuWeighted', () => {
+    probes.push(fs.existsSync(lock));
+    return false;
+  });
+  const lease = G.testLease({ env }, { requested: 2 });
+  lease.refresh();
+  lease.release();
+  assert.deepEqual(probes, [false], 'one probe per process, outside the lock');
+});
+
+test('status says which signal defers: cpu pressure under weights, load without them, and saturated load either way', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['project', 'set', '--governor', '{"load_defer":1}']);
+  const host = h.env.TOWER_CRANE_HOST_ROOT;
+  const cores = os.availableParallelism();
+  const at = (times) => Math.round(times * cores * 100) / 100;
+  const show = (options) => {
+    writeHost(host, { limit: 10, used: 2, ...options });
+    return { json: h.json(['status']).governor, text: h.ok(['status']) };
+  };
+  let v = show({ weights: true, load: at(1.5), cpuSome: 5 });
+  assert.deepEqual([v.json.state, v.json.signals, v.json.reading.weights], ['open', [], true]);
+  assert.match(v.text, new RegExp(`load ${at(1.5)} on ${cores} cores \\(CPU weights: cpu pressure defers at 60%, load only when saturated at ${2 * cores}\\)`));
+  v = show({ weights: true, load: at(0.5), cpuSome: 75 });
+  assert.deepEqual([v.json.state, v.json.signals], ['deferring', ['cpu pressure']]);
+  assert.match(v.text, /^host governor defers work on cpu pressure: cpu pressure: some avg10 75% is at or over 60%$/m);
+  v = show({ weights: false, load: at(1.5), cpuSome: 5 });
+  assert.deepEqual([v.json.state, v.json.signals, v.json.reading.weights], ['deferring', ['load'], false]);
+  assert.match(v.text, new RegExp(`\\(no CPU weights: load defers at ${cores}\\)`));
+  assert.match(v.text, new RegExp(`^host governor defers work on load: load: ${at(1.5)} on ${cores} cores is at or over ${cores} \\(no CPU weights\\)$`, 'm'));
+  v = show({ weights: true, load: at(2.5), cpuSome: 5 });
+  assert.deepEqual([v.json.state, v.json.signals], ['deferring', ['saturated load']]);
+  assert.match(v.text, new RegExp(`^host governor defers work on saturated load: saturated load: ${at(2.5)} on ${cores} cores is at or over ${2 * cores}$`, 'm'));
+  v = show({ weights: true, load: at(1.5), cpuSome: 5, used: 9 });
+  assert.deepEqual(v.json.signals, ['memory']);
+  assert.match(v.text, /^host governor defers work on memory: memory: tests\.slice has 9\.0 GiB/m);
 });
 
 test('running units reserve their summed room until enough windows exist, then the share of it sets grew into together', () => {
@@ -450,7 +530,9 @@ const timer = setInterval(() => { if (fs.existsSync(process.argv[3])) { clearInt
   h.git(['commit', '-qm', 'head change']);
   h.sha = h.git(['rev-parse', 'HEAD']);
   h.git(['switch', '-q', 'main']);
-  h.init(['--tests-cmd', `node hold.js ${JSON.stringify(h.started)} ${JSON.stringify(h.release)}`, '--tests-mode', 'run-only']);
+  // Tests first, so a submission's reaction starts the held suite without a review.
+  h.init(['--tests-cmd', `node hold.js ${JSON.stringify(h.started)} ${JSON.stringify(h.release)}`, '--tests-mode', 'run-only',
+    '--review-policy', '{"tests_first":true}']);
   h.ok(['task', 'add', '--title', 'held suite', '--acceptance', 'checked', ...(tier ? ['--tier', tier] : [])]);
   if (claim) h.ok(['claim', 'T1', '--agent', 'worker']);
   if (submit) h.ok(['submit', 'T1', '--agent', 'worker', '--sha', h.sha, '--branch', 'change']);

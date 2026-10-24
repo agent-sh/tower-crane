@@ -13,12 +13,13 @@ const Body = require('../lib/review-body');
 const { readPublished, writeAtomic, updateJson } = require('./atomic-file');
 const StateFiles = require('./state-files');
 
-function fixture(t) {
-  const h = cachedFixture(t, 'reviewer-refill', (repo) => {
-    const h = setup(null, { repo });
+// Review first, the tests gate waits for the review, so the fixture records no tests evidence.
+function fixture(t, { testsFirst = true } = {}) {
+  const h = cachedFixture(t, testsFirst ? 'reviewer-refill' : 'reviewer-refill-review-first', (repo) => {
+    const h = setup(null, { repo, testsFirst });
     configureHarness(h);
     h.submit();
-    for (const gate of ['tests', 'clean', 'ci']) gateEvidence(h, gate, 'orchestrator');
+    for (const gate of testsFirst ? ['tests', 'clean', 'ci'] : ['clean', 'ci']) gateEvidence(h, gate, 'orchestrator');
     // Only the easy rung runs a worker here, so urgent T2 keeps it with a recorded reason.
     h.ok(['task', 'add', '--title', 'Worker', '--acceptance', 'works', '--tier', 'easy', '--tier-reason', 'fixture worker rung']);
     h.ok(['brief', 'set', 'T2', '-'], { input: 'Implement T2.\n' });
@@ -453,6 +454,35 @@ G.check = (ctx, unit) => { throw Object.assign(new TowerCraneError(3, 'fixture d
     assert.ok(h.ok(['status']).includes(`; ${debt.waiting}`), 'text status includes the same blocker');
   });
 }
+
+test('refill retries a deferred reviewer whose tests gate waits for the review', (t) => {
+  const h = fixture(t, { testsFirst: false });
+  h.ok(['task', 'update', 'T2', '--status', 'cancelled']);
+  const held = path.join(h.base, 'governor-held');
+  fs.writeFileSync(held, '');
+  const preload = path.join(h.base, 'review-first-defer.js');
+  fs.writeFileSync(preload, `const fs = require('node:fs');
+const G = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'governor.js'))});
+const { TowerCraneError } = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'util.js'))});
+const check = G.check;
+G.check = (ctx, unit) => {
+  if (fs.existsSync(${JSON.stringify(held)})) throw Object.assign(new TowerCraneError(3, 'fixture deferral'),
+    { governorDeferred: true, task: unit.task, kind: unit.kind, reason: 'review-first pressure' });
+  return check(ctx, unit);
+};
+`);
+  const defer = h.run(['accept', 'T1', '--agent', 'orchestrator'], { pre: ['--require', preload] });
+  assert.equal(defer.code, 3, defer.stderr);
+  const [debt] = h.json(['status']).deferred_reviewers;
+  assert.equal(debt?.id, 'T1');
+  assert.equal(debt.waiting, undefined, 'a tests gate deferred to the review is not a retry blocker');
+  fs.unlinkSync(held);
+  const pass = h.run(['wait', '--after', String(StateFiles.logEnd(h.state)),
+    '--types', 'never', '--timeout', '0.01', '--agent', 'orchestrator'], { pre: ['--require', preload] }); // wait-allow: one bounded wait drives one refill pass
+  assert.equal(pass.code, 2, pass.stderr);
+  assert.equal(h.logs().filter((e) => e.task === 'T1' && e.cmd === 'spawn' && e.detail.role === 'reviewer').length, 1);
+  assert.equal(h.json(['task', 'show', 'T1']).evidence.some((e) => e.type === 'tests'), false, 'no suite runs before the review');
+});
 
 test('concurrent ordinary reviewer preparation records one launch', async (t) => {
   const h = fixture(t);
