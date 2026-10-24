@@ -18,9 +18,10 @@ const events = (h) => StateFiles.readEvents(h.state);
 const linuxOnly = process.platform !== 'linux' && 'the governor measures and signals by Linux process start times';
 
 // Readings and registries in memory: the budget arithmetic alone.
-function reading({ limit = 10, used = 2, some = 0, full = 0, cpu = 0, load = 0, cores = 8, weights = false } = {}) {
+function reading({ limit = 10, used = 2, some = 0, full = 0, cpu = 0, load = 0, cores = 8, weights = false, idle } = {}) {
   return { levels: [{ name: '/tests.slice', used: used * GiB, limit: limit * GiB }], binding: '/tests.slice',
-    pressure: { memory: { some: { avg10: some }, full: { avg10: full } }, cpu: cpu == null ? null : { some: { avg10: cpu } } }, load, cores, weights };
+    pressure: { memory: { some: { avg10: some }, full: { avg10: full } }, cpu: cpu == null ? null : { some: { avg10: cpu } } }, load, cores, weights,
+    ...(idle === undefined ? {} : { idle: idle == null ? null : { share: idle, seconds: 10 } }) };
 }
 const unit = (kind, started, extra = {}) => ({ id: `${kind}-${started}`, kind, started_at: new Date(Date.UTC(2026, 9, 17, 12, started)).toISOString(), expected: 0, measured: 0, ...extra });
 const registry = (units = [], others = [], history = []) => ({ units, others, history });
@@ -122,6 +123,80 @@ test('under CPU weights pressure defers, not load, until load saturates the host
   assert.match(budget({ load: 20, cpu_some: 5, weights: true }).reasons.join('; '), /^saturated load: 20 on 8 cores is at or over 16$/);
 });
 
+test('the CPU lines count only while under a fifth of the CPU sat idle: pinned or capped work cannot defer or stop admissions', () => {
+  const now = Date.now();
+  const lines = G.settings({ governor: { load_defer: 1 } });
+  // 2026-10-24: 12 spinners pinned to 4 of 24 CPUs read as some avg10 88% and load 44 while 65% of the CPU sat idle.
+  const cases = [
+    ['high pressure, high idle', reading({ cpu: 88, load: 4, weights: true, idle: 0.65 }), true, []],
+    ['high pressure, low idle', reading({ cpu: 88, load: 4, weights: true, idle: 0.05 }), false, ['cpu pressure'], /^cpu pressure: some avg10 88% is at or over 60%, with 5% of the CPU idle over 10 s$/],
+    ['saturated load, high idle', reading({ cpu: 5, load: 20, weights: true, idle: 0.65 }), true, []],
+    ['saturated load, low idle', reading({ cpu: 5, load: 20, weights: true, idle: 0.05 }), false, ['saturated load'], /^saturated load: 20 on 8 cores is at or over 16, with 5% of the CPU idle over 10 s$/],
+    ['both, at the idle line', reading({ cpu: 88, load: 20, weights: true, idle: 0.2 }), true, []],
+    ['both, just under it', reading({ cpu: 88, load: 20, weights: true, idle: 0.19 }), false, ['cpu pressure', 'saturated load']],
+    ['load without weights, high idle', reading({ cpu: 5, load: 12, idle: 0.65 }), true, []],
+    ['load without weights, low idle', reading({ cpu: 5, load: 12, idle: 0.05 }), false, ['load'], /^load: 12 on 8 cores is at or over 8 \(no CPU weights\), with 5% of the CPU idle over 10 s$/],
+    ['high pressure, no idle reading', reading({ cpu: 88, load: 4, weights: true, idle: null }), false, ['cpu pressure'], /^cpu pressure: some avg10 88% is at or over 60%$/],
+    ['memory, high idle', reading({ used: 7.1, cpu: 88, weights: true, idle: 0.65 }), false, ['memory']],
+  ];
+  for (const [name, r, ok, signals, reason] of cases) {
+    const verdict = G.assess(r, registry(), lines, need, 'tests', now);
+    assert.equal(verdict.ok, ok, `${name}: ${verdict.reasons.join('; ')}`);
+    assert.deepEqual(verdict.signals, signals, name);
+    if (reason) assert.match(verdict.reasons.join('; '), reason, name);
+  }
+  // The test-thread budget reads the same lines.
+  const reg = { tests: [{ id: 't1', requested: 6, granted: 6, started_at: new Date(now).toISOString() }] };
+  const budget = (r) => G.testBudget({ ...reg, tests: reg.tests.map((l) => ({ ...l })) }, { stat: null, fake: true, cores: 8, weights: true, ...r }, lines, now);
+  assert.deepEqual(budget({ load: 20, cpu_some: 88, idle: { share: 0.65, seconds: 10 } }).reasons, []);
+  assert.deepEqual(budget({ load: 20, cpu_some: 88, idle: { share: 0.05, seconds: 10 } }).reasons.map((x) => x.split(':')[0]), ['cpu pressure', 'saturated load']);
+});
+
+test('idle is measured from the registry\'s CPU samples over the newest one ten seconds old, and a reading without one measures its own', (t) => {
+  const T = Date.UTC(2026, 9, 24, 18, 0);
+  const iso = (ms) => new Date(T + ms).toISOString();
+  // Four CPUs, each 100 ticks a second; idle ticks per CPU so far.
+  const per = (s, idle) => Object.fromEntries(['0', '1', '2', '3'].map((id, i) => [id, [100 * s, Array.isArray(idle) ? idle[i] : idle]]));
+  const now = { at: iso(0), stat: { per: per(100, [5000, 5000, 1200, 1200]), cpus: 4 }, allowed: null };
+  const samples = [
+    { at: iso(-70000), per: per(30, 0) },
+    { at: iso(-12000), per: per(88, [4000, 4000, 1000, 1000]) },
+    { at: iso(-10000), per: per(90, [4100, 4100, 1000, 1000]) },
+    { at: iso(-4000), per: per(96, [4700, 4700, 1100, 1100]) },
+    { at: iso(-500), per: per(99.5, [4950, 4950, 1150, 1150]) },
+  ];
+  // Over the last 10 s two CPUs sat idle 900 of 1000 ticks and two 200: 55%.
+  assert.deepEqual(G.idleOf(now, samples), { share: 0.55, seconds: 10 });
+  assert.deepEqual(G.idleOf({ ...now, allowed: ['2', '3'] }, samples), { share: 0.2, seconds: 10 }, 'only the CPUs this process may use');
+  assert.deepEqual(G.idleOf(now, samples.slice(3)), { share: 0.5, seconds: 4 }, 'no sample ten seconds old: the oldest one a second old');
+  assert.equal(G.idleOf(now, [samples[0], samples[4]]), null, 'a stale sample and one under a second old measure nothing');
+  const reg = { stat: samples.map((x) => ({ ...x })) };
+  G.recordStat(reg, now.stat, T);
+  assert.deepEqual(reg.stat.map((x) => x.at), [iso(-10000), iso(-4000), iso(-500)], 'kept back to the newest sample ten seconds old, and one a second at most');
+  G.recordStat(reg, now.stat, T + 600);
+  assert.deepEqual(reg.stat.map((x) => x.at), [iso(-10000), iso(-4000), iso(-500), iso(600)]);
+  G.recordStat(reg, now.stat, T - 2000);
+  assert.deepEqual(reg.stat.map((x) => x.at), [iso(-10000), iso(-4000), iso(-500), iso(600)], 'a reading older than the newest sample adds none and drops none');
+
+  // A reading with nothing to measure from waits for a second /proc/stat read.
+  const host = fs.mkdtempSync(path.join(TMP_ROOT, 'idle-'));
+  t.after(() => fs.rmSync(host, { recursive: true, force: true }));
+  const writeStat = (p) => {
+    fs.mkdirSync(path.join(host, 'proc'), { recursive: true });
+    fs.writeFileSync(path.join(host, 'proc', 'stat'), `cpu  0 0 0 0 0 0 0 0 0 0\n${Object.entries(p).map(([id, [total, idle]]) => `cpu${id} ${total - idle} 0 0 ${idle} 0 0 0 0 0 0\n`).join('')}`);
+  };
+  writeStat(per(10, 500));
+  const probed = (cpu) => ({ at: iso(0), root: host, stat: G.cpuStat(host), allowed: null, pressure: { cpu: { some: { avg10: cpu } } }, load: 1, cores: 4, weights: true });
+  const waits = [];
+  const wait = (ms) => { waits.push(ms); writeStat(per(10.5, [540, 540, 505, 505])); };
+  assert.deepEqual(G.settleIdle(probed(88), { stat: [] }, s, wait).idle, { share: 0.45, seconds: 0.5 });
+  assert.deepEqual(waits, [500]);
+  writeStat(per(10, 500));
+  assert.equal(G.settleIdle(probed(5), { stat: [] }, s, wait).idle, undefined, 'no CPU line crossed: no wait');
+  assert.equal(G.settleIdle(probed(88), { stat: [{ at: iso(-10000), per: per(0, 0) }] }, s, wait).idle, undefined, 'a registry sample: no wait');
+  assert.deepEqual(waits, [500]);
+});
+
 test('a test-thread lease resolves CPU weights before it takes the registry lock', { skip: process.platform !== 'linux' && 'CPU weights are probed on Linux' }, (t) => {
   // A real host: the first answer spawns loginctl, systemctl and systemd-run, seconds that must not hold the lock.
   const C = require('../lib/containment');
@@ -142,7 +217,7 @@ test('a test-thread lease resolves CPU weights before it takes the registry lock
   assert.deepEqual(probes, [false], 'one probe per process, outside the lock');
 });
 
-test('status says which signal defers: cpu pressure under weights, load without them, and saturated load either way', (t) => {
+test('status says which signal defers and the idle CPU it read: cpu pressure under weights, load without them, and saturated load either way', (t) => {
   const h = makeRepo(t);
   h.init();
   h.ok(['project', 'set', '--governor', '{"load_defer":1}']);
@@ -155,13 +230,13 @@ test('status says which signal defers: cpu pressure under weights, load without 
   };
   let v = show({ weights: true, load: at(1.5), cpuSome: 5 });
   assert.deepEqual([v.json.state, v.json.signals, v.json.reading.weights], ['open', [], true]);
-  assert.match(v.text, new RegExp(`load ${at(1.5)} on ${cores} cores \\(CPU weights: cpu pressure defers at 60%, load only when saturated at ${2 * cores}\\)`));
+  assert.match(v.text, new RegExp(`cpu 5%, idle n/a, load ${at(1.5)} on ${cores} cores \\(CPU weights: cpu pressure defers at 60%, load only when saturated at ${2 * cores}; no CPU line counts at 20% idle or more\\)`));
   v = show({ weights: true, load: at(0.5), cpuSome: 75 });
   assert.deepEqual([v.json.state, v.json.signals], ['deferring', ['cpu pressure']]);
   assert.match(v.text, /^host governor defers work on cpu pressure: cpu pressure: some avg10 75% is at or over 60%$/m);
   v = show({ weights: false, load: at(1.5), cpuSome: 5 });
   assert.deepEqual([v.json.state, v.json.signals, v.json.reading.weights], ['deferring', ['load'], false]);
-  assert.match(v.text, new RegExp(`\\(no CPU weights: load defers at ${cores}\\)`));
+  assert.match(v.text, new RegExp(`\\(no CPU weights: load defers at ${cores}; no CPU line counts at 20% idle or more\\)`));
   assert.match(v.text, new RegExp(`^host governor defers work on load: load: ${at(1.5)} on ${cores} cores is at or over ${cores} \\(no CPU weights\\)$`, 'm'));
   v = show({ weights: true, load: at(2.5), cpuSome: 5 });
   assert.deepEqual([v.json.state, v.json.signals], ['deferring', ['saturated load']]);
@@ -169,6 +244,21 @@ test('status says which signal defers: cpu pressure under weights, load without 
   v = show({ weights: true, load: at(1.5), cpuSome: 5, used: 9 });
   assert.deepEqual(v.json.signals, ['memory']);
   assert.match(v.text, /^host governor defers work on memory: memory: tests\.slice has 9\.0 GiB/m);
+  // The registry's CPU sample from 12 s ago and /proc/stat now: 4 CPUs, each 1200 ticks since, `idle` of them idle.
+  const sampled = (idle, options) => {
+    const per = (ticks, idleTicks) => Object.fromEntries(['0', '1', '2', '3'].map((id) => [id, [ticks, idleTicks]]));
+    fs.mkdirSync(G.dir(h.env), { recursive: true });
+    fs.writeFileSync(G.registryFile(h.env), JSON.stringify({ version: 1, units: [], stat: [{ at: new Date(Date.now() - 12000).toISOString(), per: per(1000, 500) }] }));
+    writeHost(host, { limit: 10, used: 2, ...options });
+    fs.writeFileSync(path.join(host, 'proc', 'stat'), `cpu  0 0 0 0 0 0 0 0 0 0\n${Object.entries(per(2200, 500 + 1200 * idle)).map(([id, [total, i]]) => `cpu${id} ${total - i} 0 0 ${i} 0 0 0 0 0 0\n`).join('')}`);
+    return { json: h.json(['status']).governor, text: h.ok(['status']) };
+  };
+  v = sampled(0.65, { weights: true, load: at(2.5), cpuSome: 88 });
+  assert.deepEqual([v.json.state, v.json.signals, Math.round(v.json.reading.idle.share * 100)], ['open', [], 65]);
+  assert.match(v.text, new RegExp(`cpu 88%, idle 65% over 1\\d s, load ${at(2.5)} on ${cores} cores`));
+  v = sampled(0.05, { weights: true, load: at(2.5), cpuSome: 88 });
+  assert.deepEqual([v.json.state, v.json.signals], ['deferring', ['cpu pressure', 'saturated load']]);
+  assert.match(v.text, /^host governor defers work on cpu pressure, saturated load: cpu pressure: some avg10 88% is at or over 60%, with 5% of the CPU idle over 1\d s; saturated load: /m);
 });
 
 test('running units reserve their summed room until enough windows exist, then the share of it sets grew into together', () => {
