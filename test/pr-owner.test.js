@@ -127,7 +127,13 @@ test('a review that fails only on PR-body claims gets its body fixer while the o
   assert.equal(h.logs().filter((e) => e.cmd === 'rework' || e.cmd === 'claim' && e.detail.handover).length, 0);
 });
 
-test('an owner idle past its limit exits, and the next failure dispatches a new worker as before', async (t) => {
+// The new worker owns its head under the same idle limit, so it may exit
+// idle too before that head merges: the fixed suite that outlasts the limit
+// makes that happen every time. The merge does not wait for its owner.
+for (const row of [
+  { name: 'merges', fixed: 0 },
+  { name: 'merges after its own owner idles out', fixed: 4000 },
+]) test(`an owner idle past its limit exits, and the next failure dispatches a new worker as before, whose head ${row.name}`, async (t) => {
   const h = ownerFixture(t);
   // The first head's tests wait for the release, so the owner idles meanwhile.
   const release = path.join(h.base, 'release');
@@ -140,6 +146,7 @@ const finish = () => {
     console.log('not ok 1 - the value is fixed');
     process.exit(1);
   }
+  setTimeout(() => {}, ${row.fixed}); // wait-allow: the fixed head's suite outlasts the owner idle limit, which no event can signal
 };
 poll();
 `);
@@ -150,11 +157,12 @@ poll();
   const closed = new Promise((resolve) => engine.on('close', resolve));
   const until = (check, what) => waitUntil(check, { paths: [h.base], alive: engine, what: () => `${what}; engine output: ${output}` });
   const exited = (n) => h.workers().length >= n && h.logs().some((e) => e.cmd === 'spawn exit' && e.detail.agent === h.workers()[n - 1].detail.agent);
+  const merged = () => h.task().evidence.some((e) => e.type === 'merge' && e.ok);
   try {
     await until(() => exited(1), 'the idle owner exits');
     assert.deepEqual(h.outcomes().map((o) => [o.outcome, o.reason]), [['exit', 'idle']]);
     fs.writeFileSync(release, '');
-    await until(() => exited(2), 'a new worker fixes the failure');
+    await until(() => exited(2) && merged(), 'a new worker fixes the failure and its head merges');
   } finally {
     engine.kill('SIGINT');
     await closed;
